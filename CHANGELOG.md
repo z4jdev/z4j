@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.19] - 2026-04-27
 
 > **The last fully-stable v1.0.x patch.** Coordinated wave with
-> `z4j-brain` 1.0.19 and `z4j-core` 1.0.5. From 1.0.19 forward every
+> `z4j-brain` 1.0.19 and `z4j-core` 1.0.6. From 1.0.19 forward every
 > v1.0.x version upgrades AND downgrades cleanly to / from every
 > other v1.0.x version per `docs/MIGRATIONS.md`. Operators wanting
 > a known-good fallback target on the v1.0.x line should pin
@@ -23,16 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Bumps `z4j-brain` pin to `>=1.0.19,<1.1` and `z4j-core` pin to
-  `>=1.0.5`. Operators who hit the v1.0.18 → v1.0.17 alembic flap
-  loop can now downgrade safely; operators who saw agents flapping
-  to "offline" after 1.0.18 will find the three always-on scheduler
-  workers gated behind the existing `Z4J_SCHEDULER_GRPC_ENABLED`
-  setting. SDK consumers calling `GET /api/v1/projects/{slug}/schedules`
-  against a v1.0.19 brain get the new `catch_up` / `source` /
-  `source_hash` fields, and `z4j-core` 1.0.5 is the version that
-  knows how to deserialize them. See z4j-brain 1.0.19 + z4j-core
-  1.0.5 CHANGELOGs and `docs/MIGRATIONS.md` for the additive-only
-  contract that backs the bidirectional-compat guarantee.
+  `>=1.0.6,<1.1`. Operators who hit the v1.0.18 → v1.0.17 alembic
+  flap loop can now downgrade safely; operators who saw agents
+  flapping to "offline" after 1.0.18 will find the three always-on
+  scheduler workers gated behind the existing
+  `Z4J_SCHEDULER_GRPC_ENABLED` setting. SDK consumers calling
+  `GET /api/v1/projects/{slug}/schedules` against a v1.0.19 brain
+  get the new `catch_up` / `source` / `source_hash` fields, and
+  `z4j-core` 1.0.6 is the version that knows how to deserialize
+  them. **Note: an earlier `z4j-core` 1.0.5 was published to PyPI
+  as a version-only bump without the Schedule field additions —
+  yanked. Use 1.0.6.** See z4j-brain 1.0.19 + z4j-core 1.0.6
+  CHANGELOGs and `docs/MIGRATIONS.md` for the additive-only contract
+  that backs the bidirectional-compat guarantee.
 
 ## [1.0.18] - 2026-04-27
 

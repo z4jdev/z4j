@@ -57,7 +57,7 @@ dependencies = [
     # per event batch instead of N+1 round-trips), the SPA
     # catch-all hardening (typo'd /api/ returns clean 404 JSON
     # instead of HTML), and the SQLite-safe migration downgrade.
-    "z4j-core>=1.0.5",
+    "z4j-core>=1.0.6",
     "z4j-brain>=1.0.19,<1.1",
 ]
 
