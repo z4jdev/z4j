@@ -1,0 +1,128 @@
+[project]
+name = "z4j"
+version = "1.0.19"
+description = "z4j - open-source control plane for Python task infrastructure"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "z4j contributors" }]
+keywords = [
+    "z4j", "celery", "task", "monitoring", "control-plane",
+    "flower", "dashboard", "django", "worker", "queue",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Framework :: Celery",
+    "Framework :: Django",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
+
+# The z4j meta-package. ``pip install z4j`` gives you the flagship
+# experience: z4j-brain (dashboard + API + migrations) with SQLite
+# out of the box. Just like ``docker run z4jdev/z4j``.
+#
+# Pick adapter engines via extras:
+#
+#   pip install z4j[celery]           # Celery + beat scheduler
+#   pip install z4j[django]           # Django telemetry adapter
+#   pip install z4j[django,celery]    # Full Django + Celery stack
+#   pip install z4j[postgres]         # Switch brain to PostgreSQL
+#   pip install z4j[agents]           # Every adapter at once
+#   pip install z4j[all]              # Everything: agents + postgres
+#
+# Agent-only installs (no AGPL brain in your venv) - use the
+# standalone packages directly, they are all Apache 2.0:
+#
+#   pip install z4j-core z4j-django   # SDK + Django adapter only
+#   pip install z4j-celery            # SDK + Celery adapter only
+#
+dependencies = [
+    # Bumped to match the v1.0.15 enterprise-hardening wave.
+    # ``z4j-core`` gained the ``Config.model_validator`` for
+    # longpoll agent_id in 1.0.5; ``z4j-brain`` 1.0.15 ships the
+    # P-1 batched-heartbeat upsert (single INSERT...ON CONFLICT
+    # per event batch instead of N+1 round-trips), the SPA
+    # catch-all hardening (typo'd /api/ returns clean 404 JSON
+    # instead of HTML), and the SQLite-safe migration downgrade.
+    "z4j-core>=1.0.5",
+    "z4j-brain>=1.0.19,<1.1",
+]
+
+[project.optional-dependencies]
+# ------------------------------------------------------------------
+# Engine adapter extras. Each pulls the engine adapter and its
+# companion scheduler (if any) in one shot - the 95% case.
+# ------------------------------------------------------------------
+celery = ["z4j-celery>=1.0.1", "z4j-celerybeat>=1.0.1"]
+django = ["z4j-django>=1.0.7"]
+flask = ["z4j-flask>=1.0.4"]
+fastapi = ["z4j-fastapi>=1.0.4"]
+rq = ["z4j-rq>=1.0.1", "z4j-rqscheduler>=1.0.1"]
+dramatiq = ["z4j-dramatiq>=1.0.1"]
+huey = ["z4j-huey>=1.0.1", "z4j-hueyperiodic>=1.0.1"]
+arq = ["z4j-arq>=1.0.1", "z4j-arqcron>=1.0.1"]
+taskiq = ["z4j-taskiq>=1.0.1", "z4j-taskiqscheduler>=1.0.1"]
+apscheduler = ["z4j-apscheduler>=1.0.1"]
+bare = ["z4j-bare>=1.0.7"]
+
+# ------------------------------------------------------------------
+# Infra pass-through extra. Delegates to the brain's own
+# [postgres] extra so asyncpg's version floor stays owned by
+# z4j-brain rather than being duplicated here.
+# ------------------------------------------------------------------
+postgres = ["z4j-brain[postgres]>=1.0.19,<1.1"]
+
+# ------------------------------------------------------------------
+# Convenience bundles.
+#   [agents] = every adapter engine, useful for CI / dev rigs
+#              that test against all engines at once.
+#   [all]    = agents + postgres, the kitchen sink.
+# ------------------------------------------------------------------
+agents = ["z4j[celery,django,flask,fastapi,rq,dramatiq,huey,arq,taskiq,apscheduler,bare]"]
+all = ["z4j[agents,postgres]"]
+
+[project.urls]
+Homepage = "https://z4j.com"
+Source = "https://github.com/z4jdev/z4j"
+Documentation = "https://z4j.dev"
+Issues = "https://github.com/z4jdev/z4j/issues"
+Changelog = "https://github.com/z4jdev/z4j/blob/main/CHANGELOG.md"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/z4j"]
+
+# Include Docker Compose recipes + ``.env.example`` in the sdist so
+# ``pip install z4j`` + ``pip download --no-deps z4j`` + unpacking the
+# sdist gives operators a full docker-compose kit. These files are
+# NOT in the wheel (wheel is pure-python distribution), they live in
+# the sdist and in the z4jdev/z4j GitHub repo.
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/z4j",
+  "README.md",
+  "CHANGELOG.md",
+  "LICENSE",
+  "SECURITY.md",
+  "pyproject.toml",
+  "docker-compose.yml",
+  "docker-compose.postgres.yml",
+  "docker-compose.caddy.yml",
+  ".env.example",
+]

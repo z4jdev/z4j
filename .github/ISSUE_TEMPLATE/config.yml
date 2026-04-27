@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: mailto:security@z4j.com
+    about: Report a security issue privately
+  - name: Question or discussion
+    url: https://github.com/z4jdev/z4j/discussions
+    about: General questions about z4j go to the project-wide Discussions

@@ -1,0 +1,214 @@
+# z4j - Postgres-backed production stack.
+#
+# Use this compose file when you need:
+#   - more than one concurrent admin (SQLite is single-writer)
+#   - more than ~5k events / minute sustained throughput
+#   - audit-grade Postgres (range-partitioned events, LISTEN/NOTIFY,
+#     tsvector full-text search)
+#   - horizontal brain replicas behind a load balancer
+#   - compliance regimes (SOC 2, HIPAA, ISO 27001) that mandate Postgres
+#
+# For simpler deployments (homelab, small team, evaluation), use the
+# default `docker-compose.yml` instead - same image, SQLite mode.
+#
+# Bring this stack up with:
+#
+#   docker compose -f docker-compose.postgres.yml up -d --build
+#
+# Two services:
+#
+#   z4j-postgres   PostgreSQL 18 Trixie     persistent volume only,
+#                  no exposed port
+#   z4j-brain      backend + dashboard,     single image, port 8080
+#                  built from this repo's   (put behind a TLS reverse
+#                  Dockerfile by default    proxy in production)
+#
+# Quickstart:
+#
+#   1. Create a `.env` file at the repo root with at least:
+#
+#         POSTGRES_PASSWORD=<a long random string>
+#         Z4J_SECRET=<openssl rand -hex 48>
+#         Z4J_SESSION_SECRET=<openssl rand -hex 48>
+#         Z4J_PUBLIC_URL=https://z4j.example.com
+#         Z4J_ALLOWED_HOSTS=["z4j.example.com"]
+#
+#   2. Build + start:
+#
+#         docker compose up -d --build
+#
+#   3. Tail the brain logs to find the first-boot setup token:
+#
+#         docker compose logs -f z4j-brain
+#
+#   4. Open the printed URL, create the admin user, and paste the
+#      bearer token from the dashboard "Agents" page into your
+#      Celery worker's z4j configuration.
+#
+# For contributor development with hot-reload + dashboard HMR,
+# use docker-compose.dev.yml instead.
+#
+# See docs/DEPLOYMENT.md §3 for the full self-host quickstart.
+
+name: z4j
+
+services:
+  # ====================================================================
+  # PostgreSQL 18 - brain database
+  # ====================================================================
+  z4j-postgres:
+    image: postgres:18-trixie
+    container_name: z4j-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-z4j}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-z4j}
+      # Tune Postgres settings via the standard env-var hooks.
+      # Override in your .env if you have a beefier host.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - wal_compression=on
+    volumes:
+      # Postgres 18+ stores data under a major-version subdir
+      # (/var/lib/postgresql/18/...) so the recommended mount is
+      # /var/lib/postgresql, NOT the legacy /var/lib/postgresql/data.
+      # This makes future pg_upgrade --link work without mount-point
+      # boundary issues. See docker-library/postgres#1259.
+      - z4j_pg_data:/var/lib/postgresql
+    networks:
+      - z4j_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-z4j} -d ${POSTGRES_DB:-z4j}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    # Resource limits - sized for a typical mid-VPS self-host
+    # (4 GB RAM / 2 vCPU). Bump in your .env via override if you
+    # have a beefier host or expect heavy ingestion. Without these
+    # limits a runaway query or batch ingest can OOM the host and
+    # cascade-kill the brain alongside Postgres.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+        reservations:
+          memory: 256m
+          cpus: "0.25"
+    # IMPORTANT: do NOT expose the postgres port publicly.
+    # The brain connects over the internal docker network only.
+
+  # ====================================================================
+  # z4j brain - backend + dashboard, single image
+  # ====================================================================
+  z4j-brain:
+    build:
+      context: .
+      dockerfile: packages/z4j-brain/backend/Dockerfile
+      target: runtime
+    image: ${Z4J_BRAIN_IMAGE:-z4jdev/z4j:latest}
+    container_name: z4j-brain
+    depends_on:
+      z4j-postgres:
+        condition: service_healthy
+    environment:
+      # ----- required -----
+      # NOTE: asyncpg does NOT accept the libpq-style ?sslmode=...
+      # query param. SQLAlchemy's asyncpg dialect uses connect_args
+      # for ssl config. For brain↔postgres traffic over the private
+      # docker bridge we don't need TLS, so we leave it off entirely
+      # and gate it via Z4J_REQUIRE_DB_SSL=false below.
+      Z4J_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-z4j}:${POSTGRES_PASSWORD}@z4j-postgres:5432/${POSTGRES_DB:-z4j}
+      Z4J_SECRET: ${Z4J_SECRET:?Z4J_SECRET is required (48+ bytes of random data)}
+      Z4J_SESSION_SECRET: ${Z4J_SESSION_SECRET:?Z4J_SESSION_SECRET is required (48+ bytes of random data)}
+      Z4J_PUBLIC_URL: ${Z4J_PUBLIC_URL:?Z4J_PUBLIC_URL is required (e.g. https://z4j.example.com)}
+      Z4J_ALLOWED_HOSTS: ${Z4J_ALLOWED_HOSTS:?Z4J_ALLOWED_HOSTS is required (e.g. ["z4j.example.com"])}
+
+      # ----- safety / hardening -----
+      #
+      # !!!  REMOTE / MANAGED DB WARNING - READ THIS  !!!
+      #
+      # The line below disables Postgres TLS verification because
+      # this compose talks brain↔z4j-postgres over a PRIVATE docker
+      # bridge with no outside access. If you point
+      # Z4J_DATABASE_URL at a remote / managed database (RDS, Neon,
+      # Supabase, Cloud SQL, ...) you MUST:
+      #   1. Add ?sslmode=require (or stricter) to the URL above
+      #   2. Set Z4J_REQUIRE_DB_SSL via the environment file to "true"
+      #      (or just delete the line below - true is the default).
+      # The brain refuses to start in production with sslmode=disable
+      # unless this flag is explicitly set to false (R3 release-
+      # blocker - quiet credentials-on-the-wire was the failure
+      # mode otherwise). Set ``Z4J_REQUIRE_DB_SSL=false`` only when
+      # you're 100% sure your DB lives on a trusted private network.
+      Z4J_REQUIRE_DB_SSL: ${Z4J_REQUIRE_DB_SSL:-false}
+
+      # ----- operational -----
+      Z4J_LOG_LEVEL: ${Z4J_LOG_LEVEL:-INFO}
+      Z4J_LOG_JSON: ${Z4J_LOG_JSON:-true}
+      Z4J_ENVIRONMENT: ${Z4J_ENVIRONMENT:-production}
+
+      # ----- retention -----
+      Z4J_EVENT_RETENTION_DAYS: ${Z4J_EVENT_RETENTION_DAYS:-30}
+      Z4J_AUDIT_RETENTION_DAYS: ${Z4J_AUDIT_RETENTION_DAYS:-90}
+
+      # ----- registry (multi-worker safe by default) -----
+      Z4J_REGISTRY_BACKEND: postgres_notify
+    ports:
+      - "${Z4J_BRAIN_PORT:-8080}:7700"
+      # IMPORTANT: put this behind a TLS-terminating reverse proxy
+      # (Caddy, nginx, Traefik) in production. Do NOT expose port
+      # 8080 directly to the public internet.
+    networks:
+      - z4j_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7700/api/v1/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    # Resource limits - sized for a small/mid-VPS. The brain is a
+    # FastAPI process; 1 GB is generous for this workload but
+    # leaves headroom for in-memory event batching. Without a
+    # limit a misbehaving consumer or accidentally-massive payload
+    # can OOM the host and take Postgres with it.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "2.0"
+        reservations:
+          memory: 256m
+          cpus: "0.5"
+    # tini is the entrypoint inside the image; we get clean PID 1
+    # signal handling for free.
+
+networks:
+  # Private network for brain ↔ postgres traffic. Both services
+  # join this network explicitly so the only host-exposed surface
+  # is the brain's port 8080. Postgres has no port mapping and is
+  # unreachable from the host or any other compose project.
+  z4j_net:
+    name: z4j_net
+    driver: bridge
+
+volumes:
+  z4j_pg_data:
+    name: z4j_pg_data

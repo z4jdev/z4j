@@ -1,0 +1,60 @@
+name: Release
+
+# On ``git push origin v1.0.X``: build the z4j umbrella wheel + sdist
+# and attach both to a GitHub Release. PyPI uploads stay manual via
+# twine (under the maintainer's direct control) so this workflow is
+# strictly a secondary-distribution channel - a fallback for operators
+# in air-gapped envs or during PyPI incidents.
+#
+# Deliberately does NOT run tests or lint: the z4j umbrella is a
+# meta-package (src/z4j/ has one __init__.py + py.typed). There's
+# nothing to test here. Actual tests live in z4j-brain and the
+# adapter repos.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write  # needed to create the Release
+
+jobs:
+  build-and-release:
+    name: Build and attach to GitHub Release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches pyproject version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(grep -E '^version = ' pyproject.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match pyproject version ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches pyproject version ${PKG_VERSION}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build wheel + sdist
+        run: uv build
+
+      - name: Validate metadata
+        run: |
+          uv tool install twine
+          uv tool run twine check dist/*
+
+      - name: Create GitHub Release with artefacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

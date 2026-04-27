@@ -1,0 +1,22 @@
+# Build output
+dist/
+build/
+*.egg-info/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Virtualenvs
+.venv/
+venv/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+.DS_Store

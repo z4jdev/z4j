@@ -1,0 +1,144 @@
+# =============================================================================
+# z4j release-docker.yml
+#
+# Builds + pushes the z4jdev/z4j Docker image to Docker Hub on every
+# release tag. Native multi-arch via GitHub's amd64 + arm64 runners
+# (no QEMU emulation - much faster + more reliable than buildx with
+# --platform=linux/arm64 on an amd64 host).
+#
+# Triggers:
+#   - Tag push matching ``v*.*.*`` -> auto-build that version
+#   - Manual workflow_dispatch with ``version`` input -> rebuild any
+#     prior version (used to backfill arm64 for v1.0.1)
+#
+# Strategy: matrix builds one image per arch, pushes by digest,
+# then a final job stitches them into a multi-arch manifest tag.
+# This is the canonical pattern from docker/build-push-action docs:
+# https://docs.docker.com/build/ci/github-actions/multi-platform/
+# =============================================================================
+
+name: release-docker
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'z4j-brain version to build (e.g. 1.0.1). Leave blank to use the git tag.'
+        required: false
+        type: string
+
+env:
+  IMAGE: z4jdev/z4j
+  # Allow manual dispatch to override the version (handy for backfilling
+  # arm64 onto an existing release). Otherwise derive from the tag.
+  Z4J_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+
+jobs:
+  # -----------------------------------------------------------------
+  # Per-arch build. Each job runs on a NATIVE runner for its arch.
+  # Pushes by digest only (no human-readable tag yet) so the merge
+  # job can stitch them into a multi-arch manifest.
+  # -----------------------------------------------------------------
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Normalize version (strip leading v if present)
+        id: version
+        run: |
+          v="${Z4J_VERSION#v}"
+          echo "z4j_version=${v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push (${{ matrix.arch }}, by digest)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ github.workspace }}
+          file: ${{ github.workspace }}/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          build-args: |
+            Z4J_BRAIN_VERSION=${{ steps.version.outputs.z4j_version }}
+          outputs: |
+            type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -----------------------------------------------------------------
+  # Stitch the per-arch images into a multi-arch manifest under the
+  # human-readable tag (e.g. z4jdev/z4j:1.0.1) plus :latest.
+  # -----------------------------------------------------------------
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Normalize version
+        id: version
+        run: |
+          v="${Z4J_VERSION#v}"
+          echo "z4j_version=${v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t "${IMAGE}:${{ steps.version.outputs.z4j_version }}" \
+            -t "${IMAGE}:latest" \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Inspect resulting manifest
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:${{ steps.version.outputs.z4j_version }}"

@@ -1,0 +1,107 @@
+# z4j - optional Caddy reverse proxy overlay.
+#
+# Adds auto-HTTPS via Let's Encrypt in front of z4j-brain. Use this
+# overlay when you self-host on a single VM / homelab box and want
+# TLS without standing up nginx, Traefik, or a cloud load balancer.
+#
+# When NOT to use this:
+#   - You already run an ingress layer (Traefik, nginx, K8s ingress,
+#     AWS ALB, Cloudflare, Fly.io, Render, etc.). TLS terminates
+#     there; this overlay would be a redundant second hop.
+#   - You terminate TLS via a Cloudflare Tunnel; Cloudflared already
+#     handles the public edge.
+#
+# Quickstart:
+#
+#   1. Add to your existing .env:
+#
+#         Z4J_DOMAIN=z4j.example.com
+#         Z4J_ACME_EMAIL=you@example.com
+#         Z4J_PUBLIC_URL=https://z4j.example.com
+#
+#   2. Point the A/AAAA record for Z4J_DOMAIN at this host's public IP.
+#      Make sure ports 80 and 443 are reachable from the internet
+#      (Let's Encrypt HTTP-01 challenge + HTTPS traffic).
+#
+#   3. Bring the stack up by layering this overlay on whichever base
+#      compose file you use:
+#
+#      Default SQLite mode:
+#         docker compose \
+#            -f docker-compose.yml \
+#            -f docker-compose.caddy.yml \
+#            up -d
+#
+#      Postgres mode:
+#         docker compose \
+#            -f docker-compose.postgres.yml \
+#            -f docker-compose.caddy.yml \
+#            up -d
+#
+# Caddy auto-provisions + auto-renews the certificate for Z4J_DOMAIN.
+# Persisted cert state lives in the z4j_caddy_data volume; back it up
+# to avoid re-running the ACME challenge on every rebuild.
+#
+# See docs/DEPLOYMENT.md Â§6.1 for the full reverse-proxy matrix
+# (Caddy / nginx / Traefik / Cloudflare Tunnel).
+
+services:
+  # ====================================================================
+  # Override: drop the brain's public port binding.
+  # Caddy owns 80/443 and proxies internally over z4j_net.
+  # ====================================================================
+  z4j-brain:
+    ports: !reset []
+
+  # ====================================================================
+  # Caddy - auto-HTTPS reverse proxy
+  # ====================================================================
+  z4j-caddy:
+    image: caddy:2-alpine
+    container_name: z4j-caddy
+    restart: unless-stopped
+    depends_on:
+      z4j-brain:
+        condition: service_healthy
+    environment:
+      Z4J_DOMAIN: ${Z4J_DOMAIN:?Z4J_DOMAIN is required (e.g. z4j.example.com)}
+      Z4J_ACME_EMAIL: ${Z4J_ACME_EMAIL:?Z4J_ACME_EMAIL is required (Let's Encrypt contact address)}
+    ports:
+      # HTTP-01 ACME challenge + HTTP-to-HTTPS redirect.
+      - "80:80"
+      # TLS.
+      - "443:443"
+      # HTTP/3.
+      - "443:443/udp"
+    volumes:
+      # Inline Caddyfile. Edit deploy/Caddyfile to customize
+      # headers, rate limits, or add additional sites. The file is
+      # mounted read-only; Caddy reloads on SIGUSR1 (docker kill -s USR1 z4j-caddy).
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persisted ACME state (private keys, issued certs, OCSP cache).
+      # Back this up. Without it a rebuild re-runs the ACME challenge.
+      - z4j_caddy_data:/data
+      # Config + logs.
+      - z4j_caddy_config:/config
+    networks:
+      - z4j_net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+        reservations:
+          memory: 32m
+          cpus: "0.05"
+
+volumes:
+  z4j_caddy_data:
+    name: z4j_caddy_data
+  z4j_caddy_config:
+    name: z4j_caddy_config

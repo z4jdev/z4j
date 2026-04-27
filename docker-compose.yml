@@ -1,0 +1,107 @@
+# z4j - default self-host deployment.
+#
+# One container. Bundled SQLite. Zero required env vars. The simplest
+# way to run z4j: clone the repo and:
+#
+#   docker compose up -d
+#
+# On first boot the brain container:
+#   - auto-detects SQLite (no Z4J_DATABASE_URL set) and initializes
+#     /data/z4j.db
+#   - auto-generates Z4J_SECRET + Z4J_SESSION_SECRET on first boot
+#     and persists them to /data/secret.env so subsequent restarts
+#     keep the same session keys (tokens survive `docker compose restart`)
+#   - runs Alembic migrations to head
+#   - boots FastAPI on :7700 serving both the REST API and the
+#     compiled React dashboard
+#
+# Tail logs to find the first-boot admin setup URL:
+#
+#   docker compose logs -f z4j-brain
+#
+# Ship-safe defaults:
+#   - writes SQLite + persisted secrets to the z4j_data named volume
+#   - binds only localhost port 7700 on the host; put a reverse proxy
+#     in front for public access (see docker-compose.caddy.yml)
+#
+# When to graduate to the Postgres stack:
+#   - more than one concurrent admin
+#   - more than ~5k events / minute sustained
+#   - compliance / audit regimes that mandate Postgres
+#   - horizontal brain replicas behind a load balancer
+#
+# To graduate:
+#
+#   docker compose -f docker-compose.postgres.yml up -d
+#
+# Your users, audit chain, projects, and schedules all migrate over:
+# point Z4J_DATABASE_URL at Postgres, restart, let migrations run.
+#
+# Full deployment matrix: docs/DEPLOYMENT.md
+
+name: z4j
+
+services:
+  # ====================================================================
+  # z4j brain - backend + dashboard + SQLite, single image
+  # ====================================================================
+  z4j-brain:
+    build:
+      context: .
+      dockerfile: packages/z4j-brain/backend/Dockerfile
+      target: runtime
+    image: ${Z4J_IMAGE:-z4jdev/z4j:latest}
+    container_name: z4j-brain
+    environment:
+      # --- optional: skip interactive first-boot by seeding an admin ---
+      # When both are set and the users table is empty, the brain
+      # provisions the admin user without printing a setup URL.
+      Z4J_BOOTSTRAP_ADMIN_EMAIL: ${Z4J_BOOTSTRAP_ADMIN_EMAIL:-}
+      Z4J_BOOTSTRAP_ADMIN_PASSWORD: ${Z4J_BOOTSTRAP_ADMIN_PASSWORD:-}
+      Z4J_BOOTSTRAP_ADMIN_DISPLAY_NAME: ${Z4J_BOOTSTRAP_ADMIN_DISPLAY_NAME:-}
+
+      # --- optional: public URL override ---
+      # Leave unset for local-only use; set when behind a reverse proxy
+      # (see docker-compose.caddy.yml or docs/DEPLOYMENT.md §6).
+      Z4J_PUBLIC_URL: ${Z4J_PUBLIC_URL:-http://localhost:7700}
+
+      # --- optional: operational overrides ---
+      Z4J_LOG_LEVEL: ${Z4J_LOG_LEVEL:-INFO}
+      Z4J_LOG_JSON: ${Z4J_LOG_JSON:-true}
+      Z4J_EVENT_RETENTION_DAYS: ${Z4J_EVENT_RETENTION_DAYS:-30}
+      Z4J_AUDIT_RETENTION_DAYS: ${Z4J_AUDIT_RETENTION_DAYS:-90}
+    ports:
+      # Bind to localhost only by default. Use a reverse proxy for
+      # public HTTPS; see docker-compose.caddy.yml for Caddy auto-TLS.
+      - "${Z4J_BIND:-127.0.0.1}:${Z4J_PORT:-7700}:7700"
+    volumes:
+      # SQLite DB, persisted secrets, access logs. Back this up.
+      - z4j_data:/data
+    networks:
+      - z4j_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7700/api/v1/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "2.0"
+        reservations:
+          memory: 256m
+          cpus: "0.25"
+
+networks:
+  # Private network. The Caddy overlay joins this network to proxy
+  # to z4j-brain over the internal bridge.
+  z4j_net:
+    name: z4j_net
+    driver: bridge
+
+volumes:
+  z4j_data:
+    name: z4j_data
