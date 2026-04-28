@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.1.0"
+version = "1.1.1"
 description = "z4j - open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -58,7 +58,14 @@ dependencies = [
     # catch-all hardening (typo'd /api/ returns clean 404 JSON
     # instead of HTML), and the SQLite-safe migration downgrade.
     "z4j-core>=1.1.0,<1.2",
-    "z4j-brain>=1.1.0,<1.2",
+    # 1.1.1 floor: the 1.1.0 brain shipped a migration that crashed
+    # mid-flight on populated DBs with pre-existing audit-chain
+    # forks (``2026_04_28_0012_audit_unique`` -> IntegrityError).
+    # 1.1.1 adds a pre-flight check + ``z4j audit fork-cleanup`` CLI
+    # so the upgrade refuses cleanly with a precise remediation
+    # instead of crashing. Refusing 1.1.0 here means a fresh
+    # ``pip install -U z4j`` always pulls the fixed brain.
+    "z4j-brain>=1.1.1,<1.2",
 ]
 
 [project.optional-dependencies]
@@ -83,7 +90,7 @@ bare = ["z4j-bare>=1.0.7"]
 # [postgres] extra so asyncpg's version floor stays owned by
 # z4j-brain rather than being duplicated here.
 # ------------------------------------------------------------------
-postgres = ["z4j-brain[postgres]>=1.1.0,<1.2"]
+postgres = ["z4j-brain[postgres]>=1.1.1,<1.2"]
 
 # ------------------------------------------------------------------
 # Convenience bundles.

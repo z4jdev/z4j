@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-04-28
+
+### Changed
+
+- **Floor bumped to `z4j-brain>=1.1.1`** (was `>=1.1.0`).
+  `z4j-brain` 1.1.0 shipped a migration that crashed mid-flight on
+  populated DBs with pre-existing audit-chain forks (sqlite3
+  IntegrityError from `2026_04_28_0012_audit_unique`). 1.1.1 adds a
+  pre-flight check that refuses cleanly with a precise remediation
+  message pointing at the new `z4j audit fork-cleanup` CLI. This
+  umbrella bump means `pip install -U z4j` always pulls the fixed
+  brain; operators can no longer accidentally land on the broken
+  wheel via the umbrella.
+
 ## [1.1.0] - 2026-04-27
 
 > **The always-works baseline.** Coordinated ecosystem release: the
