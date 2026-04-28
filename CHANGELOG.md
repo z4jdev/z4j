@@ -7,35 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.19] - 2026-04-27
+## [1.1.0] - 2026-04-27
 
-> **The last fully-stable v1.0.x patch.** Coordinated wave with
-> `z4j-brain` 1.0.19 and `z4j-core` 1.0.6. From 1.0.19 forward every
-> v1.0.x version upgrades AND downgrades cleanly to / from every
-> other v1.0.x version per `docs/MIGRATIONS.md`. Operators wanting
-> a known-good fallback target on the v1.0.x line should pin
-> `z4j>=1.0.19,<1.1`.
+> **The always-works baseline.** Coordinated ecosystem release: the
+> four anchor packages (`z4j-core`, `z4j-brain`, `z4j-scheduler`, and
+> this umbrella) all ship at 1.1.0 simultaneously. From v1.1.0 forward
+> every patch within the v1.1.x line is bidirectionally compatible
+> per `docs/MIGRATIONS.md` — operators can pin `z4j>=1.1.0,<1.2` and
+> never worry about which patch they're upgrading from or to.
 >
-> The bigger v1.1.0 baseline (embedded scheduler sidecar,
-> `z4j-scheduler` first PyPI publish, reconciliation `:diff` UI,
-> ecosystem-wide adapter rebumps) ships after 1.0.19 has soaked.
+> Adapter packages (`z4j-celery`, `z4j-django`, `z4j-flask`,
+> `z4j-fastapi`, `z4j-rq`, `z4j-dramatiq`, `z4j-bare`, etc.) stay at
+> their current versions — none have changes worth shipping in this
+> wave. The umbrella's adapter extras pin compatible floors.
 
 ### Changed
 
-- Bumps `z4j-brain` pin to `>=1.0.19,<1.1` and `z4j-core` pin to
-  `>=1.0.6,<1.1`. Operators who hit the v1.0.18 → v1.0.17 alembic
-  flap loop can now downgrade safely; operators who saw agents
-  flapping to "offline" after 1.0.18 will find the three always-on
-  scheduler workers gated behind the existing
-  `Z4J_SCHEDULER_GRPC_ENABLED` setting. SDK consumers calling
-  `GET /api/v1/projects/{slug}/schedules` against a v1.0.19 brain
-  get the new `catch_up` / `source` / `source_hash` fields, and
-  `z4j-core` 1.0.6 is the version that knows how to deserialize
-  them. **Note: an earlier `z4j-core` 1.0.5 was published to PyPI
-  as a version-only bump without the Schedule field additions —
-  yanked. Use 1.0.6.** See z4j-brain 1.0.19 + z4j-core 1.0.6
+- Bumps `z4j-brain` pin to `>=1.1.0,<1.2` and `z4j-core` pin to
+  `>=1.1.0,<1.2`. v1.1.0 brain ships the five v1.0.x compat fixes
+  (alembic-flap-loop on downgrade, scheduler-worker connection-pool
+  starvation, `extra="forbid"` rolling-upgrade traps, stale SPA
+  `index.html` after upgrade) plus the embedded scheduler sidecar
+  feature, the `:diff` reconciliation preview endpoint, the gRPC
+  `too_many_pings` keepalive fix, and the mTLS AuthContext
+  bytes/str shape fix. v1.1.0 core surfaces the new
+  `Schedule.catch_up` / `source` / `source_hash` fields and the
+  `CatchUpPolicy` enum so external SDK consumers can deserialize
+  brain responses cleanly. See z4j-brain 1.1.0 + z4j-core 1.1.0
   CHANGELOGs and `docs/MIGRATIONS.md` for the additive-only contract
   that backs the bidirectional-compat guarantee.
+
+### Added
+
+- **`z4j-scheduler` joins the ecosystem at 1.1.0.** First PyPI
+  release of the engine-agnostic dynamic scheduler companion
+  process. Operators who want the embedded single-container deploy
+  set `Z4J_EMBEDDED_SCHEDULER=true` on the brain (the brain auto-
+  mints loopback mTLS certs and supervises the scheduler subprocess);
+  operators who want a separate scheduler process install
+  `pip install z4j-scheduler` and connect via gRPC. Either way the
+  brain's `SchedulerService` is gated behind
+  `Z4J_SCHEDULER_GRPC_ENABLED` so default installs pay nothing.
 
 ## [1.0.18] - 2026-04-27
 
