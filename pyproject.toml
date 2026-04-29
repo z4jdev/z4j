@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.1.2"
+version = "1.2.0"
 description = "z4j - open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -57,15 +57,14 @@ dependencies = [
     # per event batch instead of N+1 round-trips), the SPA
     # catch-all hardening (typo'd /api/ returns clean 404 JSON
     # instead of HTML), and the SQLite-safe migration downgrade.
-    "z4j-core>=1.1.0,<1.2",
-    # 1.1.1 floor: the 1.1.0 brain shipped a migration that crashed
-    # mid-flight on populated DBs with pre-existing audit-chain
-    # forks (``2026_04_28_0012_audit_unique`` -> IntegrityError).
-    # 1.1.1 adds a pre-flight check + ``z4j audit fork-cleanup`` CLI
-    # so the upgrade refuses cleanly with a precise remediation
-    # instead of crashing. Refusing 1.1.0 here means a fresh
-    # ``pip install -U z4j`` always pulls the fixed brain.
-    "z4j-brain>=1.1.1,<1.2",
+    # 1.2.0 floor: worker-first protocol added optional
+    # worker_id/role/pid/started_at fields to HelloPayload, and the
+    # brain registry now accepts multiple concurrent connections per
+    # agent_id (one per worker). Backward-compatible with 1.1.x
+    # agents but the floor here forces a known-good baseline so
+    # ``pip install -U z4j`` always pulls the multi-worker fix.
+    "z4j-core>=1.2.0,<1.3",
+    "z4j-brain>=1.2.0,<1.3",
 ]
 
 [project.optional-dependencies]
@@ -87,23 +86,23 @@ dependencies = [
 # the fixes through any of these extras.
 # ------------------------------------------------------------------
 celery = ["z4j-celery>=1.1.2", "z4j-celerybeat>=1.0.1"]
-django = ["z4j-django>=1.1.2"]
-flask = ["z4j-flask>=1.1.2"]
-fastapi = ["z4j-fastapi>=1.1.2"]
+django = ["z4j-django>=1.2.0"]
+flask = ["z4j-flask>=1.2.0"]
+fastapi = ["z4j-fastapi>=1.2.0"]
 rq = ["z4j-rq>=1.1.2", "z4j-rqscheduler>=1.0.1"]
 dramatiq = ["z4j-dramatiq>=1.1.2"]
 huey = ["z4j-huey>=1.1.2", "z4j-hueyperiodic>=1.0.1"]
 arq = ["z4j-arq>=1.1.2", "z4j-arqcron>=1.0.1"]
 taskiq = ["z4j-taskiq>=1.1.2", "z4j-taskiqscheduler>=1.0.1"]
 apscheduler = ["z4j-apscheduler>=1.0.1"]
-bare = ["z4j-bare>=1.1.2"]
+bare = ["z4j-bare>=1.2.0"]
 
 # ------------------------------------------------------------------
 # Infra pass-through extra. Delegates to the brain's own
 # [postgres] extra so asyncpg's version floor stays owned by
 # z4j-brain rather than being duplicated here.
 # ------------------------------------------------------------------
-postgres = ["z4j-brain[postgres]>=1.1.1,<1.2"]
+postgres = ["z4j-brain[postgres]>=1.2.0,<1.3"]
 
 # ------------------------------------------------------------------
 # Convenience bundles.

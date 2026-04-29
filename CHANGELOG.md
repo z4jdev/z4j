@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-04-29
+
+### Changed
+
+- **Floor bumps for the worker-first wave:**
+  `z4j-core>=1.2.0,<1.3`, `z4j-brain>=1.2.0,<1.3`,
+  `z4j-bare>=1.2.0`, `z4j-django>=1.2.0`, `z4j-flask>=1.2.0`,
+  `z4j-fastapi>=1.2.0`. Operators pinning `z4j>=1.2.0` get the
+  multi-worker fix end-to-end - their gunicorn / Celery worker
+  fleet shows up as N discrete workers on the brain instead of
+  fighting for the single agent slot.
+
+### Worker-first protocol summary
+
+1.2.0 fixes the multi-worker flap that bit operators running
+gunicorn with `--workers 4` (or any Celery / RQ / Dramatiq
+worker pool with concurrency > 1). The brain's WebSocket
+registry now accepts multiple concurrent connections per
+agent_id, keyed by a worker_id the agent generates at startup.
+
+The dashboard's workers page enrichment (filter by role,
+per-worker pid / role / status columns) lands in 1.2.1; brain
+1.2.0 already accepts the data, but the UI still shows the
+1.1.x view. Operators can confirm the fix by watching brain
+logs for the absence of `4002` close codes after upgrading.
+
+Backward-compatible: old agents (1.1.x) stay on the single-
+slot legacy path, and new brains accept them transparently.
+Old brains accept new agents but ignore the new fields - same
+behavior as 1.1.x.
+
+
 ## [1.1.2] - 2026-04-28
 
 ### Fixed
