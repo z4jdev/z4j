@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-04-29
+
+### Changed
+
+- **Floor bumped to `z4j-brain>=1.2.1`** (was `>=1.2.0`).
+  `z4j-brain` 1.2.1 ships the dashboard SPA rebuild that fixes
+  two JavaScript crashes in the bundled UI:
+  - `/settings/notifications/subscriptions` was throwing
+    `(e ?? []) is not iterable`
+  - `/projects/{slug}/schedules` was throwing `t.filter is not
+    a function`
+  Both stemmed from the same root cause: the cursor-walking
+  hooks (`useUserSubscriptions`, `useSchedules`) were updated in
+  the source to walk the new `{items, next_cursor}` envelope,
+  but the SPA was bundled before that change landed. 1.2.1
+  rebuilds the SPA and re-bundles it into the wheel. Plus the
+  3 audit findings (F1 legacy slot collision, F2 per-agent
+  worker cap, F3 atomic mark_offline) and the new
+  `agent_workers` durable persistence layer + REST endpoint.
+  This umbrella bump means `pip install -U z4j` always pulls
+  the fixed brain.
+
 ## [1.2.0] - 2026-04-29
 
 ### Changed

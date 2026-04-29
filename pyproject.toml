@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.2.0"
+version = "1.2.1"
 description = "z4j - open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -57,14 +57,19 @@ dependencies = [
     # per event batch instead of N+1 round-trips), the SPA
     # catch-all hardening (typo'd /api/ returns clean 404 JSON
     # instead of HTML), and the SQLite-safe migration downgrade.
-    # 1.2.0 floor: worker-first protocol added optional
-    # worker_id/role/pid/started_at fields to HelloPayload, and the
-    # brain registry now accepts multiple concurrent connections per
-    # agent_id (one per worker). Backward-compatible with 1.1.x
-    # agents but the floor here forces a known-good baseline so
-    # ``pip install -U z4j`` always pulls the multi-worker fix.
+    # 1.2.1 floor: brain 1.2.1 ships the dashboard SPA rebuild that
+    # fixes the JavaScript crashes on /settings/notifications/subscriptions
+    # and /projects/{slug}/schedules introduced when the cursor-walking
+    # hooks landed in source but the bundled SPA wasn't rebuilt. Pinning
+    # >=1.2.1 here means ``pip install -U z4j`` always pulls the fixed
+    # bundle. (Plus the 3 audit findings F1+F2+F3 fixes.)
+    #
+    # 1.2.0 was the worker-first protocol baseline (multi-connection
+    # per agent_id, additive HelloPayload fields). Floors stayed at
+    # 1.2.0 for z4j-core / z4j-bare / framework adapters because none
+    # of those packages re-shipped in the 1.2.1 wave.
     "z4j-core>=1.2.0,<1.3",
-    "z4j-brain>=1.2.0,<1.3",
+    "z4j-brain>=1.2.1,<1.3",
 ]
 
 [project.optional-dependencies]
@@ -102,7 +107,7 @@ bare = ["z4j-bare>=1.2.0"]
 # [postgres] extra so asyncpg's version floor stays owned by
 # z4j-brain rather than being duplicated here.
 # ------------------------------------------------------------------
-postgres = ["z4j-brain[postgres]>=1.2.0,<1.3"]
+postgres = ["z4j-brain[postgres]>=1.2.1,<1.3"]
 
 # ------------------------------------------------------------------
 # Convenience bundles.
