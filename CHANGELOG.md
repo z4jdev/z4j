@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-04-28
+
+### Fixed
+
+- **Agent stuck-offline failure mode resolved across the family.**
+  Before 1.1.2, framework agents (Django, Flask, FastAPI, bare)
+  treated `AuthenticationError` and `ProtocolError` as fatal and
+  stopped reconnecting forever - leaving the agent process alive
+  but offline until the host process was restarted. The 1.1.2
+  wave bumps every framework + engine adapter to a wheel that
+  picks up the supervisor forever-retry fix in `z4j-bare 1.1.2`.
+
+### Added
+
+- **Unified resilience CLI** across every framework, engine, and
+  the scheduler. Both invocation forms work for every package:
+  - `z4j-django doctor | check | status | restart`
+  - `python -m z4j_django doctor | check | status | restart`
+  - same for `z4j-flask`, `z4j-fastapi`, `z4j-bare`,
+    `z4j-celery`, `z4j-rq`, `z4j-dramatiq`, `z4j-huey`,
+    `z4j-arq`, `z4j-taskiq`, `z4j-scheduler`
+  Engines (libraries, not runtimes) get doctor / check / status /
+  version; frameworks (and bare) also get restart (SIGHUP via
+  pidfile, skipping the supervisor's exponential backoff).
+- **Pidfile + SIGHUP control surface.** Every framework agent
+  writes a pidfile under `$Z4J_RUNTIME_DIR` (default `~/.z4j/`)
+  on startup; `restart` reads it and signals the running process.
+- **`Z4J_BUFFER_DIR`** env var for explicit buffer-directory
+  override.
+
+### Changed
+
+- **Floor bumps:** every framework + engine adapter raised to
+  `>=1.1.2` in the umbrella's extras. Operators pinning
+  `z4j>=1.1.2` are guaranteed the resilience wave end-to-end.
+
 ## [1.1.1] - 2026-04-28
 
 ### Changed

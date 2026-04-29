@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.1.1"
+version = "1.1.2"
 description = "z4j - open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -72,18 +72,31 @@ dependencies = [
 # ------------------------------------------------------------------
 # Engine adapter extras. Each pulls the engine adapter and its
 # companion scheduler (if any) in one shot - the 95% case.
+#
+# 1.1.2 floor wave (2026-04-28): every framework + engine adapter
+# bumped to >=1.1.2 to land:
+#   1) supervisor forever-retry fix (z4j-bare 1.1.2) - resolves the
+#      "agent stuck offline forever after a brain crash" failure
+#      mode that bit tasks.jfk.work earlier today
+#   2) unified ``z4j-<adapter> doctor | check | status | restart``
+#      CLI surface across every package
+#   3) pidfile + SIGHUP-driven ``restart`` for in-process agents
+#   4) ``Z4J_BUFFER_DIR`` env var for explicit persistent buffer
+#      directory (Kubernetes PV / dedicated tmpfs / etc.)
+# Operators who pin ``z4j>=1.1.2`` cannot land on a wheel without
+# the fixes through any of these extras.
 # ------------------------------------------------------------------
-celery = ["z4j-celery>=1.0.1", "z4j-celerybeat>=1.0.1"]
-django = ["z4j-django>=1.0.7"]
-flask = ["z4j-flask>=1.0.4"]
-fastapi = ["z4j-fastapi>=1.0.4"]
-rq = ["z4j-rq>=1.0.1", "z4j-rqscheduler>=1.0.1"]
-dramatiq = ["z4j-dramatiq>=1.0.1"]
-huey = ["z4j-huey>=1.0.1", "z4j-hueyperiodic>=1.0.1"]
-arq = ["z4j-arq>=1.0.1", "z4j-arqcron>=1.0.1"]
-taskiq = ["z4j-taskiq>=1.0.1", "z4j-taskiqscheduler>=1.0.1"]
+celery = ["z4j-celery>=1.1.2", "z4j-celerybeat>=1.0.1"]
+django = ["z4j-django>=1.1.2"]
+flask = ["z4j-flask>=1.1.2"]
+fastapi = ["z4j-fastapi>=1.1.2"]
+rq = ["z4j-rq>=1.1.2", "z4j-rqscheduler>=1.0.1"]
+dramatiq = ["z4j-dramatiq>=1.1.2"]
+huey = ["z4j-huey>=1.1.2", "z4j-hueyperiodic>=1.0.1"]
+arq = ["z4j-arq>=1.1.2", "z4j-arqcron>=1.0.1"]
+taskiq = ["z4j-taskiq>=1.1.2", "z4j-taskiqscheduler>=1.0.1"]
 apscheduler = ["z4j-apscheduler>=1.0.1"]
-bare = ["z4j-bare>=1.0.7"]
+bare = ["z4j-bare>=1.1.2"]
 
 # ------------------------------------------------------------------
 # Infra pass-through extra. Delegates to the brain's own
