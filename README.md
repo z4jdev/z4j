@@ -61,6 +61,21 @@ pip install "z4j[agents]"
 pip install "z4j[all]"
 ```
 
+### Install with [uv](https://docs.astral.sh/uv/)
+
+The same shapes work verbatim under `uv`:
+
+```bash
+uv pip install z4j                  # brain-only
+uv pip install "z4j[celery]"        # + celery adapter
+uv pip install "z4j[django,celery]" # + django + celery
+uv add z4j                          # add as a project dep
+```
+
+`uv` resolves the same dependency tree as `pip` (we run a uv smoke
+test before every release), and gives you reproducible lockfiles
+plus ~10x faster installs. Either tool ships the same wheel.
+
 ## Which adapter extras exist
 
 | Extra | Installs | For |
