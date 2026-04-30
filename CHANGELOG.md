@@ -5,6 +5,29 @@ All notable changes to this package are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-04-30
+
+**Floor bump: pin `z4j-brain>=1.3.2`.**
+
+z4j-brain 1.3.1 shipped a regression where global admins
+(`user.is_admin=True`) couldn't create per-user notification
+subscriptions through the dashboard — the POST endpoint queried
+the `Membership` table directly and 403'd with *you are not a
+member of this project* even though `/auth/me` synthesises an
+admin membership on every project. z4j-brain 1.3.2 fixes the
+contradiction by switching the create endpoint to the canonical
+`PolicyEngine.require_member` helper.
+
+### Changed
+
+- Floor: `z4j-brain>=1.3.2,<2` (from `>=1.3.1,<2`).
+- `[postgres]` extra likewise pinned to `z4j-brain[postgres]>=1.3.2,<2`.
+
+### Compatibility
+
+Drop-in `pip install --upgrade z4j` from any 1.3.x. No migration.
+Restart the brain.
+
 ## [1.3.1] - 2026-04-30
 
 **Hotfix wave: bump `z4j-brain` floor to >=1.3.1.**
