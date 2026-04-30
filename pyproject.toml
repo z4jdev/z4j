@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.3.3"
+version = "1.3.4"
 description = "z4j - open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -68,12 +68,15 @@ dependencies = [
     # per agent_id, additive HelloPayload fields). Floors stayed at
     # 1.2.0 for z4j-core / z4j-bare / framework adapters because none
     # of those packages re-shipped in the 1.2.1 wave.
-    # 1.3.3 wave: schedule snapshot reconciliation feature.
-    # - z4j-core 1.3.1 added EventKind.SCHEDULE_SNAPSHOT
-    # - z4j-bare 1.3.1 emits the snapshot (boot + periodic + command)
-    # - z4j-brain 1.3.3 reconciles it server-side + Sync now button
+    # 1.3.4 wave: per-agent VERSION column + Settings -> System
+    # *Check for updates* button on the dashboard. z4j-brain 1.3.4
+    # ships a bundled versions.json snapshot so comparisons work
+    # without phoning home; the operator can refresh on demand
+    # from GitHub via Z4J_VERSION_CHECK_URL (default
+    # raw.githubusercontent.com/z4jdev/z4j/main/versions.json).
+    # No core / bare / adapter changes in this wave.
     "z4j-core>=1.3.1,<2",
-    "z4j-brain>=1.3.3,<2",
+    "z4j-brain>=1.3.4,<2",
 ]
 
 [project.optional-dependencies]
@@ -111,7 +114,7 @@ bare = ["z4j-bare>=1.3.0,<2"]
 # [postgres] extra so asyncpg's version floor stays owned by
 # z4j-brain rather than being duplicated here.
 # ------------------------------------------------------------------
-postgres = ["z4j-brain[postgres]>=1.3.3,<2"]
+postgres = ["z4j-brain[postgres]>=1.3.4,<2"]
 
 # ------------------------------------------------------------------
 # Convenience bundles.

@@ -5,6 +5,28 @@ All notable changes to this package are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] - 2026-04-30
+
+**Floor bump for the per-agent version visibility feature.**
+
+z4j-brain 1.3.4 ships per-agent version display + an
+operator-initiated *Check for updates* button on the dashboard.
+Privacy posture is unchanged: no automatic phone-home, the
+brain ships with a bundled snapshot of all package versions,
+and the *Check for updates* button is the only way the brain
+ever reaches out (configurable, can be disabled entirely).
+
+### Changed
+
+- Floor: `z4j-brain>=1.3.4,<2` (was `>=1.3.3`)
+- `[postgres]` extra: `z4j-brain[postgres]>=1.3.4,<2`
+- No changes to z4j-core, z4j-bare, or any adapter package.
+
+### Compatibility
+
+Drop-in `pip install --upgrade z4j` from any 1.3.x. No DB
+migration. Restart the brain.
+
 ## [1.3.3] - 2026-04-30
 
 **Schedule snapshot feature wave: floors bumped to pick up the
