@@ -5,6 +5,30 @@ All notable changes to this package are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-04-30
+
+**Hotfix wave: bump `z4j-brain` floor to >=1.3.1.**
+
+z4j-brain 1.3.0 shipped a worker-heartbeat upsert bug that left
+the dashboard's Workers tab empty on every install (the agent
+showed online but no worker rows ever materialised). z4j-brain
+1.3.1 fixes both the bulk-upsert path and a Postgres-only raw-SQL
+mismatch on the agent connect path.
+
+### Changed
+
+- Floor bumped: `z4j-brain>=1.3.1,<2` (from `>=1.3.0,<2`).
+- `[postgres]` extra likewise pinned to `z4j-brain[postgres]>=1.3.1,<2`.
+- Engine adapters (z4j-core, z4j-bare, z4j-celery, z4j-django, …)
+  unchanged — the bug was brain-only.
+
+### Compatibility
+
+Drop-in `pip install --upgrade z4j` from any 1.3.x. No DB
+migration. Restart the brain after upgrade. See z4j-brain 1.3.1
+CHANGELOG for the bug detail and the regression coverage added
+to prevent recurrence.
+
 ## [1.3.0] - 2026-05-15
 
 **Initial release of the 1.3.x line.**

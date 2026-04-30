@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.3.0"
+version = "1.3.1"
 description = "z4j - open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -69,7 +69,11 @@ dependencies = [
     # 1.2.0 for z4j-core / z4j-bare / framework adapters because none
     # of those packages re-shipped in the 1.2.1 wave.
     "z4j-core>=1.3.0,<2",
-    "z4j-brain>=1.3.0,<2",
+    # z4j-brain >=1.3.1: 1.3.0 shipped a worker-heartbeat upsert bug
+    # that left the dashboard's Workers tab empty on every install.
+    # 1.3.1 fixes it. Pin forward so a fresh ``pip install z4j``
+    # never lands on the broken brain.
+    "z4j-brain>=1.3.1,<2",
 ]
 
 [project.optional-dependencies]
@@ -107,7 +111,7 @@ bare = ["z4j-bare>=1.3.0,<2"]
 # [postgres] extra so asyncpg's version floor stays owned by
 # z4j-brain rather than being duplicated here.
 # ------------------------------------------------------------------
-postgres = ["z4j-brain[postgres]>=1.3.0,<2"]
+postgres = ["z4j-brain[postgres]>=1.3.1,<2"]
 
 # ------------------------------------------------------------------
 # Convenience bundles.
