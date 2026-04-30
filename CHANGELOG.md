@@ -5,6 +5,52 @@ All notable changes to this package are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-04-30
+
+**Schedule snapshot feature wave: floors bumped to pick up the
+new automatic schedule reconciliation across z4j-core, z4j-bare,
+z4j-brain.**
+
+The 1.3.3 wave ships a unified end-to-end flow that closes the
+"existing celery-beat schedules don't show up in the dashboard"
+onboarding gap. Three coordinated changes:
+
+- **z4j-core 1.3.1**: new `EventKind.SCHEDULE_SNAPSHOT` carrying
+  the full inventory of an agent's scheduler adapter.
+- **z4j-bare 1.3.1**: agent emits the snapshot at boot, on a
+  configurable periodic timer (default 15 min), and on the new
+  `schedule.resync` command.
+- **z4j-brain 1.3.3**: ingestor reconciles the snapshot
+  (insert / update / delete-missing per `(project, scheduler)`),
+  REST endpoint `POST /projects/{slug}/schedules:resync`,
+  dashboard *Sync now* button on the Schedules page.
+
+After upgrading: the operator clicks *Sync now* once and every
+existing schedule from celery-beat / rq-scheduler / apscheduler /
+arqcron / hueyperiodic / taskiqscheduler appears immediately. The
+periodic timer keeps state in sync going forward. No declarative
+config, no CLI runs, no JSON pasting.
+
+### Changed
+
+- Floors:
+  - `z4j-core>=1.3.1,<2` (was `>=1.3.0`)
+  - `z4j-brain>=1.3.3,<2` (was `>=1.3.2`)
+  - `z4j-bare`: family adapters (z4j-django / z4j-flask /
+    z4j-fastapi / z4j-celery / z4j-bare) keep their existing
+    floors. Operators who want the snapshot feature on the agent
+    side install/upgrade `z4j-bare>=1.3.1` directly in their app
+    process; agents at 1.3.0 keep working without the new
+    behaviour.
+- `[postgres]` extra pinned to `z4j-brain[postgres]>=1.3.3,<2`.
+
+### Compatibility
+
+Drop-in `pip install --upgrade z4j` from any 1.3.x. No DB
+migration. Restart the brain after upgrade. Existing schedules
+surface within ~10 seconds of the next agent reconnect (or
+immediately when *Sync now* is clicked).
+
 ## [1.3.2] - 2026-04-30
 
 **Floor bump: pin `z4j-brain>=1.3.2`.**

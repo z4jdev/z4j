@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.3.2"
+version = "1.3.3"
 description = "z4j - open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -68,15 +68,12 @@ dependencies = [
     # per agent_id, additive HelloPayload fields). Floors stayed at
     # 1.2.0 for z4j-core / z4j-bare / framework adapters because none
     # of those packages re-shipped in the 1.2.1 wave.
-    "z4j-core>=1.3.0,<2",
-    # z4j-brain >=1.3.2: 1.3.0 shipped a worker-heartbeat upsert bug
-    # (Workers tab empty), fixed in 1.3.1. 1.3.1 in turn shipped a
-    # global-admin subscription-create regression (POST
-    # /user/subscriptions 403'd for global admins even though the
-    # dashboard rendered them as admin), fixed in 1.3.2. Pin forward
-    # so a fresh ``pip install z4j`` only ever lands on a brain that
-    # has both fixes.
-    "z4j-brain>=1.3.2,<2",
+    # 1.3.3 wave: schedule snapshot reconciliation feature.
+    # - z4j-core 1.3.1 added EventKind.SCHEDULE_SNAPSHOT
+    # - z4j-bare 1.3.1 emits the snapshot (boot + periodic + command)
+    # - z4j-brain 1.3.3 reconciles it server-side + Sync now button
+    "z4j-core>=1.3.1,<2",
+    "z4j-brain>=1.3.3,<2",
 ]
 
 [project.optional-dependencies]
@@ -114,7 +111,7 @@ bare = ["z4j-bare>=1.3.0,<2"]
 # [postgres] extra so asyncpg's version floor stays owned by
 # z4j-brain rather than being duplicated here.
 # ------------------------------------------------------------------
-postgres = ["z4j-brain[postgres]>=1.3.2,<2"]
+postgres = ["z4j-brain[postgres]>=1.3.3,<2"]
 
 # ------------------------------------------------------------------
 # Convenience bundles.
