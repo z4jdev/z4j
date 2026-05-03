@@ -17,7 +17,7 @@
 #
 # Tail logs to find the first-boot admin setup URL:
 #
-#   docker compose logs -f z4j-brain
+#   docker compose logs -f z4j
 #
 # Ship-safe defaults:
 #   - writes SQLite + persisted secrets to the z4j_data named volume
@@ -45,13 +45,13 @@ services:
   # ====================================================================
   # z4j brain - backend + dashboard + SQLite, single image
   # ====================================================================
-  z4j-brain:
+  z4j:
     build:
       context: .
-      dockerfile: packages/z4j-brain/backend/Dockerfile
+      dockerfile: packages/z4j/backend/Dockerfile
       target: runtime
     image: ${Z4J_IMAGE:-z4jdev/z4j:latest}
-    container_name: z4j-brain
+    container_name: z4j
     environment:
       # --- optional: skip interactive first-boot by seeding an admin ---
       # When both are set and the users table is empty, the brain
@@ -97,7 +97,7 @@ services:
 
 networks:
   # Private network. The Caddy overlay joins this network to proxy
-  # to z4j-brain over the internal bridge.
+  # to z4j over the internal bridge.
   z4j_net:
     name: z4j_net
     driver: bridge

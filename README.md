@@ -7,7 +7,7 @@
 The all-in-one z4j umbrella package. Open-source control plane for
 Python task queues.
 
-One `pip install z4j` brings the brain server (dashboard + API)
+One `pip install z4j` brings z4j (dashboard + API)
 into your environment. Use extras to pull the agent packages your
 workers need: framework adapters (Django, Flask, FastAPI), engine
 adapters (Celery, RQ, Dramatiq, Huey, arq, TaskIQ), and their
@@ -32,13 +32,13 @@ The architecture is straightforward:
 - **Operator actions flow back the same channel.** Retry, cancel,
   bulk retry, purge, restart, schedule CRUD, manual trigger.
 
-The brain is AGPL v3 and isolated in its own process. The agent
+z4j is AGPL v3 and isolated in its own process. The agent
 packages your application imports are Apache-2.0 each, so your
 application code is never AGPL-tainted.
 
 ## What's in the box
 
-- **Brain** ([`z4j-brain`](https://github.com/z4jdev/z4j-brain)).
+- **Brain** ([`z4j`](https://github.com/z4jdev/z4j)).
   Server, dashboard, API, RBAC, HMAC-chained audit log,
   notifications, reconciliation worker.
 - **Engine-agnostic dynamic scheduler**
@@ -66,7 +66,7 @@ application code is never AGPL-tainted.
 
 ## Install
 
-The minimum useful install is the brain plus the framework + engine
+The minimum useful install is z4j plus the framework + engine
 your stack actually uses. Use the extras instead of pinning each
 package by hand:
 
@@ -83,7 +83,7 @@ companion (e.g. `[celery]` pulls `z4j-celery` + `z4j-celerybeat`).
 The `[scheduler]` extra adds `z4j-scheduler` for operators who want
 the engine-agnostic dynamic scheduler.
 
-Then start the brain:
+Then start z4j:
 
 ```bash
 z4j serve
@@ -107,7 +107,7 @@ has none) and they all stop at viewer-grade. None of them give you:
 - A real audit log that an auditor can walk linearly.
 - Live schedule editing across engines without per-daemon
   restarts.
-- Self-hosted with no telemetry. The brain phones home only when
+- Self-hosted with no telemetry. z4j phones home only when
   an admin clicks *Check for updates* in Settings, and that URL is
   configurable.
 
@@ -124,7 +124,7 @@ covers all three paths (pip-SQLite, Docker-SQLite, Docker-Postgres).
 
 ## License
 
-AGPL-3.0-or-later, see [LICENSE](LICENSE). Note: only the brain is
+AGPL-3.0-or-later, see [LICENSE](LICENSE). Note: only z4j is
 AGPL. Every agent package your application imports is Apache-2.0,
 so your application code is never AGPL-tainted. Commercial licenses
 available; contact licensing@z4j.com.

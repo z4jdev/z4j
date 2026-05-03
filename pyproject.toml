@@ -1,7 +1,7 @@
 [project]
 name = "z4j"
-version = "1.3.4"
-description = "z4j - open-source control plane for Python task infrastructure"
+version = "1.4.0"
+description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }
@@ -30,100 +30,133 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# The z4j meta-package. ``pip install z4j`` gives you the flagship
-# experience: z4j-brain (dashboard + API + migrations) with SQLite
-# out of the box. Just like ``docker run z4jdev/z4j``.
+# z4j 1.4.0 (the consolidation cut): the ``z4j`` distribution now
+# ships the brain server (dashboard + REST API + migrations + audit
+# log + reconciliation) directly. ``pip install z4j`` is the only
+# install path operators need to learn.
+#
+# Pre-1.4.0, the brain server lived in a separate ``z4j-brain``
+# distribution that this umbrella pulled in transitively. That
+# split was a packaging accident that leaked into the user mental
+# model. 1.4.0 collapses the two distributions into one. The
+# ``z4j-brain`` PyPI name continues to exist as a metadata-only
+# compatibility shim that depends on ``z4j``, so any operator on
+# the ``pip install z4j-brain`` install path keeps working.
+#
+# The Python import path stays ``import z4j_brain`` (parallels
+# ``z4j_core``, ``z4j_celery``, etc. -- the namespace is the
+# scope marker for "this is the dashboard/server, not the SDK or
+# an adapter"). Adapter packages keep importing from
+# ``z4j_brain.*`` unchanged.
 #
 # Pick adapter engines via extras:
 #
 #   pip install z4j[celery]           # Celery + beat scheduler
 #   pip install z4j[django]           # Django telemetry adapter
 #   pip install z4j[django,celery]    # Full Django + Celery stack
-#   pip install z4j[postgres]         # Switch brain to PostgreSQL
+#   pip install z4j[postgres]         # Postgres backend
 #   pip install z4j[agents]           # Every adapter at once
 #   pip install z4j[all]              # Everything: agents + postgres
 #
-# Agent-only installs (no AGPL brain in your venv) - use the
+# Agent-only installs (no AGPL brain in your venv) -- use the
 # standalone packages directly, they are all Apache 2.0:
 #
 #   pip install z4j-core z4j-django   # SDK + Django adapter only
 #   pip install z4j-celery            # SDK + Celery adapter only
 #
 dependencies = [
-    # Bumped to match the v1.0.15 enterprise-hardening wave.
-    # ``z4j-core`` gained the ``Config.model_validator`` for
-    # longpoll agent_id in 1.0.5; ``z4j-brain`` 1.0.15 ships the
-    # P-1 batched-heartbeat upsert (single INSERT...ON CONFLICT
-    # per event batch instead of N+1 round-trips), the SPA
-    # catch-all hardening (typo'd /api/ returns clean 404 JSON
-    # instead of HTML), and the SQLite-safe migration downgrade.
-    # 1.2.1 floor: brain 1.2.1 ships the dashboard SPA rebuild that
-    # fixes the JavaScript crashes on /settings/notifications/subscriptions
-    # and /projects/{slug}/schedules introduced when the cursor-walking
-    # hooks landed in source but the bundled SPA wasn't rebuilt. Pinning
-    # >=1.2.1 here means ``pip install -U z4j`` always pulls the fixed
-    # bundle. (Plus the 3 audit findings F1+F2+F3 fixes.)
-    #
-    # 1.2.0 was the worker-first protocol baseline (multi-connection
-    # per agent_id, additive HelloPayload fields). Floors stayed at
-    # 1.2.0 for z4j-core / z4j-bare / framework adapters because none
-    # of those packages re-shipped in the 1.2.1 wave.
-    # 1.3.4 wave: per-agent VERSION column + Settings -> System
-    # *Check for updates* button on the dashboard. z4j-brain 1.3.4
-    # ships a bundled versions.json snapshot so comparisons work
-    # without phoning home; the operator can refresh on demand
-    # from GitHub via Z4J_VERSION_CHECK_URL (default
-    # raw.githubusercontent.com/z4jdev/z4j/main/versions.json).
-    # No core / bare / adapter changes in this wave.
-    "z4j-core>=1.3.1,<2",
-    "z4j-brain>=1.3.4,<2",
+    "z4j-core>=1.4.0,<2",
+    # Server runtime (was in z4j-brain pre-1.4.0).
+    "fastapi>=0.136",
+    "uvicorn[standard]>=0.45",
+    "pydantic[email]>=2.13.3",
+    "pydantic-settings>=2.14",
+    "sqlalchemy[asyncio]>=2.0.49",
+    "alembic>=1.18.4",
+    "websockets>=16",
+    "httpx>=0.28.1",
+    "argon2-cffi>=25.1",
+    "structlog>=25.5",
+    "prometheus-client>=0.25",
+    "python-multipart>=0.0.26",
+    "itsdangerous>=2.2",
+    "aiosqlite>=0.22.1",
+    # Async SMTP client for the email notification channel. Supports
+    # STARTTLS (587, the Gmail app-password path) and implicit TLS
+    # (465). v3.0+ exposes the ``tls_hostname`` kwarg the channel
+    # dispatcher uses so DNS-pinned delivery still verifies the
+    # original hostname against the server cert.
+    "aiosmtplib>=3.0",
+    # Tasks-page xlsx export. Pure Python, write-only, ~1 MB, no
+    # native deps.
+    "xlsxwriter>=3.2.9",
 ]
 
 [project.optional-dependencies]
 # ------------------------------------------------------------------
 # Engine adapter extras. Each pulls the engine adapter and its
-# companion scheduler (if any) in one shot - the 95% case.
-#
-# 1.1.2 floor wave (2026-04-28): every framework + engine adapter
-# bumped to >=1.1.2 to land:
-#   1) supervisor forever-retry fix (z4j-bare 1.1.2) - resolves the
-#      "agent stuck offline forever after a brain crash" failure
-#      mode that bit tasks.jfk.work earlier today
-#   2) unified ``z4j-<adapter> doctor | check | status | restart``
-#      CLI surface across every package
-#   3) pidfile + SIGHUP-driven ``restart`` for in-process agents
-#   4) ``Z4J_BUFFER_DIR`` env var for explicit persistent buffer
-#      directory (Kubernetes PV / dedicated tmpfs / etc.)
-# Operators who pin ``z4j>=1.1.2`` cannot land on a wheel without
-# the fixes through any of these extras.
+# companion scheduler (if any) in one shot -- the 95% case.
 # ------------------------------------------------------------------
-celery = ["z4j-celery>=1.3.0,<2", "z4j-celerybeat>=1.3.0,<2"]
-django = ["z4j-django>=1.3.0,<2"]
-flask = ["z4j-flask>=1.3.0,<2"]
-fastapi = ["z4j-fastapi>=1.3.0,<2"]
-rq = ["z4j-rq>=1.3.0,<2", "z4j-rqscheduler>=1.3.0,<2"]
-dramatiq = ["z4j-dramatiq>=1.3.0,<2"]
-huey = ["z4j-huey>=1.3.0,<2", "z4j-hueyperiodic>=1.3.0,<2"]
-arq = ["z4j-arq>=1.3.0,<2", "z4j-arqcron>=1.3.0,<2"]
-taskiq = ["z4j-taskiq>=1.3.0,<2", "z4j-taskiqscheduler>=1.3.0,<2"]
-apscheduler = ["z4j-apscheduler>=1.3.0,<2"]
-bare = ["z4j-bare>=1.3.0,<2"]
+celery = ["z4j-celery>=1.4.0,<2", "z4j-celerybeat>=1.4.0,<2"]
+django = ["z4j-django>=1.4.0,<2"]
+flask = ["z4j-flask>=1.4.0,<2"]
+fastapi = ["z4j-fastapi>=1.4.0,<2"]
+rq = ["z4j-rq>=1.4.0,<2", "z4j-rqscheduler>=1.4.0,<2"]
+dramatiq = ["z4j-dramatiq>=1.4.0,<2"]
+huey = ["z4j-huey>=1.4.0,<2", "z4j-hueyperiodic>=1.4.0,<2"]
+arq = ["z4j-arq>=1.4.0,<2", "z4j-arqcron>=1.4.0,<2"]
+taskiq = ["z4j-taskiq>=1.4.0,<2", "z4j-taskiqscheduler>=1.4.0,<2"]
+apscheduler = ["z4j-apscheduler>=1.4.0,<2"]
+bare = ["z4j-bare>=1.4.0,<2"]
 
 # ------------------------------------------------------------------
-# Infra pass-through extra. Delegates to the brain's own
-# [postgres] extra so asyncpg's version floor stays owned by
-# z4j-brain rather than being duplicated here.
+# Postgres backend (asyncpg). Was z4j-brain[postgres] pre-1.4.0;
+# now lives directly here since z4j IS the brain.
 # ------------------------------------------------------------------
-postgres = ["z4j-brain[postgres]>=1.3.4,<2"]
+postgres = ["asyncpg>=0.31"]
+
+# ------------------------------------------------------------------
+# z4j-scheduler companion process. Operators install when they
+# want one canonical scheduler driving every engine via gRPC.
+# ------------------------------------------------------------------
+scheduler-grpc = [
+    "grpcio>=1.71",
+    "grpcio-tools>=1.71",
+    "cryptography>=44",
+]
+
+# ------------------------------------------------------------------
+# Test extras (was z4j-brain[test] / [test-integration]).
+# ------------------------------------------------------------------
+test = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.1.0",
+    "httpx>=0.28.1",
+    "aiosqlite>=0.22.1",
+    "freezegun>=1.5.5",
+    "hypothesis>=6.152.1",
+]
+test-integration = [
+    "testcontainers[postgres]>=4.14.2",
+    "psycopg[binary]>=3.3.3",
+]
 
 # ------------------------------------------------------------------
 # Convenience bundles.
-#   [agents] = every adapter engine, useful for CI / dev rigs
-#              that test against all engines at once.
+#   [agents] = every adapter engine, useful for CI / dev rigs that
+#              test against all engines at once.
 #   [all]    = agents + postgres, the kitchen sink.
 # ------------------------------------------------------------------
 agents = ["z4j[celery,django,flask,fastapi,rq,dramatiq,huey,arq,taskiq,apscheduler,bare]"]
 all = ["z4j[agents,postgres]"]
+
+[project.scripts]
+# 1.4.0: only ``z4j`` survives. The pre-1.4.0 ``z4j-brain`` console
+# script alias was dropped (Level 3 in RELEASE-1.4.0-PLAN.md). Both
+# scripts called the same entry point pre-cut, so removing the alias
+# is purely a name cleanup.
+z4j = "z4j_brain.cli:main"
 
 [project.urls]
 Homepage = "https://z4j.com"
@@ -136,17 +169,37 @@ Changelog = "https://github.com/z4jdev/z4j/blob/main/CHANGELOG.md"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Bundle the built dashboard SPA, docs, and data files into BOTH
+# the sdist and the wheel. Lifted from packages/z4j-brain/pyproject
+# pre-1.4.0; same build-time recipe, just lives here now.
+[tool.hatch.build]
+artifacts = [
+  "backend/src/z4j_brain/dashboard/**",
+  "backend/src/z4j_brain/docs/**",
+  "backend/src/z4j_brain/data/**",
+]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/z4j"]
+# Ship two top-level packages: the brain server (the code that does
+# the work) and the umbrella marker (so ``import z4j`` is a no-op
+# but resolves cleanly for any caller that probes for it).
+packages = ["src/z4j", "backend/src/z4j_brain"]
+
+[tool.hatch.build.targets.wheel.sources]
+# Strip the layout prefixes so the wheel content is flat:
+#   src/z4j/...                  -> z4j/...
+#   backend/src/z4j_brain/...    -> z4j_brain/...
+"src" = ""
+"backend/src" = ""
 
 # Include Docker Compose recipes + ``.env.example`` in the sdist so
-# ``pip install z4j`` + ``pip download --no-deps z4j`` + unpacking the
-# sdist gives operators a full docker-compose kit. These files are
-# NOT in the wheel (wheel is pure-python distribution), they live in
-# the sdist and in the z4jdev/z4j GitHub repo.
+# ``pip install z4j`` + ``pip download --no-deps z4j`` + unpacking
+# the sdist gives operators a full docker-compose kit. These files
+# are NOT in the wheel (wheel is pure-python distribution).
 [tool.hatch.build.targets.sdist]
 include = [
   "src/z4j",
+  "backend",
   "README.md",
   "CHANGELOG.md",
   "LICENSE",

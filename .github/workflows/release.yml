@@ -1,15 +1,9 @@
 name: Release
 
-# On ``git push origin v1.0.X``: build the z4j umbrella wheel + sdist
-# and attach both to a GitHub Release. PyPI uploads stay manual via
-# twine (under the maintainer's direct control) so this workflow is
-# strictly a secondary-distribution channel - a fallback for operators
-# in air-gapped envs or during PyPI incidents.
-#
-# Deliberately does NOT run tests or lint: the z4j umbrella is a
-# meta-package (src/z4j/ has one __init__.py + py.typed). There's
-# nothing to test here. Actual tests live in z4j-brain and the
-# adapter repos.
+# Manual-publish phase: this workflow builds the package and attaches
+# the wheel + sdist to a GitHub Release. It does NOT upload to PyPI.
+# PyPI uploads are hand-picked from a local staging folder via twine,
+# under the maintainer's direct control. See docs/RELEASE.md.
 
 on:
   push:
@@ -17,7 +11,11 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write  # needed to create the Release
+  contents: write
+  id-token: read
+
+env:
+  UV_VERSION: "0.5.11"
 
 jobs:
   build-and-release:
@@ -31,10 +29,9 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PKG_VERSION=$(grep -E '^version = ' pyproject.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match pyproject version ${PKG_VERSION}"
+            echo "::error::Tag $GITHUB_REF_NAME does not match pyproject version $PKG_VERSION"
             exit 1
           fi
-          echo "tag ${GITHUB_REF_NAME} matches pyproject version ${PKG_VERSION}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -43,6 +40,14 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run tests
+        run: uv run pytest -xvs tests/
 
       - name: Build wheel + sdist
         run: uv build

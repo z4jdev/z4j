@@ -39,7 +39,7 @@
 #
 #   3. Tail the brain logs to find the first-boot setup token:
 #
-#         docker compose logs -f z4j-brain
+#         docker compose logs -f z4j
 #
 #   4. Open the printed URL, create the admin user, and paste the
 #      bearer token from the dashboard "Agents" page into your
@@ -117,13 +117,13 @@ services:
   # ====================================================================
   # z4j brain - backend + dashboard, single image
   # ====================================================================
-  z4j-brain:
+  z4j:
     build:
       context: .
-      dockerfile: packages/z4j-brain/backend/Dockerfile
+      dockerfile: packages/z4j/backend/Dockerfile
       target: runtime
     image: ${Z4J_BRAIN_IMAGE:-z4jdev/z4j:latest}
-    container_name: z4j-brain
+    container_name: z4j
     depends_on:
       z4j-postgres:
         condition: service_healthy

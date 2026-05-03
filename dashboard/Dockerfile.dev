@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1.7
+#
+# Dashboard dev container - Vite + HMR.
+#
+# Used only by docker-compose.dev.yml. Production builds the
+# dashboard inside the unified brain image (see
+# packages/z4j-brain/backend/Dockerfile stage 1).
+#
+# Build context: monorepo root.
+
+FROM node:24-bookworm-slim
+
+ENV CI=true \
+    PNPM_HOME=/root/.local/share/pnpm \
+    PATH=/root/.local/share/pnpm:$PATH \
+    HOST=0.0.0.0
+
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+
+WORKDIR /dashboard
+
+# Cache install layer.
+COPY packages/z4j-brain/dashboard/package.json packages/z4j-brain/dashboard/pnpm-lock.yaml* ./
+
+# Audit H22: dev-only image; tolerate a missing lockfile (fresh
+# clone) but still surface other failures. No double-fallback.
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install
+
+# Copy initial source - at runtime this is overlaid by a bind mount
+# from the host so edits hot-reload.
+COPY packages/z4j-brain/dashboard/ ./
+
+# Drop root for parity with the production brain image. The
+# official node image ships a non-root ``node`` user (UID 1000).
+# We chown the workdir so the bind-mount overlay doesn't end up
+# with root-owned files on the host.
+RUN chown -R node:node /dashboard
+USER node
+
+EXPOSE 5173
+
+CMD ["pnpm", "dev", "--host", "0.0.0.0", "--port", "5173"]

@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.5.11"
+  FORCE_COLOR: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy src
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run tests
+        run: uv run pytest -xvs tests/
+
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-24.04
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Build
+        run: uv build
+
+      - name: Validate metadata
+        run: |
+          uv tool install twine
+          uv tool run twine check dist/*
+
+      # ---------------------------------------------------------------
+      # Wheel-content assertion (defense against the v1.0.11 / v1.0.15
+      # SPA-bundle regression). twine check above only validates
+      # METADATA - it cannot detect that the wheel is missing the
+      # bundled dashboard. We unzip the built wheel and assert the
+      # SPA index.html plus a minimum number of asset files actually
+      # ship inside. If a future change to packaging or the build
+      # toolchain accidentally strips dashboard/dist/, this step
+      # fails the build BEFORE the artefact is uploaded - the same
+      # regression cannot reach a release tag again.
+      # Mirrors scripts/release-split.sh's [4b/6] check in the
+      # monorepo.
+      # ---------------------------------------------------------------
+      - name: Verify dashboard SPA bundled in wheel
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls dist/z4j_brain-*.whl | head -1)
+          echo "Inspecting wheel: ${WHEEL}"
+          ASSET_COUNT=$(unzip -l "${WHEEL}" | grep -c 'z4j_brain/dashboard/dist/' || true)
+          HAS_INDEX=$(unzip -l "${WHEEL}" | grep -c 'z4j_brain/dashboard/dist/index.html' || true)
+          echo "  dashboard/dist/ entries: ${ASSET_COUNT}"
+          echo "  dashboard/dist/index.html: ${HAS_INDEX}"
+          if [ "${HAS_INDEX}" -lt 1 ] || [ "${ASSET_COUNT}" -lt 100 ]; then
+            echo ""
+            echo "::error::z4j-brain wheel is MISSING the bundled dashboard SPA."
+            echo "  Expected: index.html + 100+ asset files under z4j_brain/dashboard/dist/"
+            echo "  Got:      ${HAS_INDEX} index.html, ${ASSET_COUNT} total entries."
+            echo ""
+            echo "  Likely cause: the dashboard build step did not run, or a"
+            echo "  recursive directory exclusion stripped dashboard/dist/ before"
+            echo "  build. Same defect as v1.0.11 + v1.0.15."
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
+      # End-to-end install + boot smoke. Even with the wheel-content
+      # check above, we want to PROVE the wheel actually serves the
+      # dashboard once installed. Spin up the brain in a fresh venv
+      # on a random port, curl GET /, assert 200 + text/html. Catches
+      # any failure mode where the file is in the wheel but the boot
+      # path doesn't find it (path resolution bug, lifecycle bug,
+      # missing runtime dep, etc.).
+      # ---------------------------------------------------------------
+      - name: Install + boot smoke (GET / must return 200 HTML)
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls dist/z4j_brain-*.whl | head -1)
+          python -m venv /tmp/smoke-venv
+          /tmp/smoke-venv/bin/pip install --quiet "${WHEEL}"
+          INSTALLED_VERSION=$(/tmp/smoke-venv/bin/python -c \
+            "from z4j_brain import __version__; print(__version__)")
+          echo "Installed z4j-brain ${INSTALLED_VERSION}"
+          # Random port to avoid collisions in shared CI runners.
+          PORT=$(/tmp/smoke-venv/bin/python -c \
+            "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")
+          export Z4J_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          export Z4J_SESSION_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          export Z4J_DATABASE_URL="sqlite+aiosqlite:////tmp/smoke.db"
+          export Z4J_ENVIRONMENT="dev"
+          export Z4J_BIND_HOST="127.0.0.1"
+          export Z4J_BIND_PORT="${PORT}"
+          export Z4J_LOG_JSON="false"
+          /tmp/smoke-venv/bin/z4j-brain serve > /tmp/smoke.log 2>&1 &
+          BRAIN_PID=$!
+          # Wait up to 30s for boot.
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null "http://127.0.0.1:${PORT}/"; then
+              break
+            fi
+            sleep 1
+          done
+          # GET / must serve the dashboard SPA (200 text/html).
+          STATUS=$(curl -s -o /tmp/smoke.body -w "%{http_code} %{content_type}" \
+            "http://127.0.0.1:${PORT}/" || echo "curl-failed")
+          echo "GET / -> ${STATUS}"
+          # Also assert the SPA hardening: backend prefix returns 404
+          API_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "http://127.0.0.1:${PORT}/api/v1/typo")
+          echo "GET /api/v1/typo -> ${API_STATUS}"
+          # /metrics must be fail-secure (401 without bearer).
+          METRICS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "http://127.0.0.1:${PORT}/metrics")
+          echo "GET /metrics -> ${METRICS_STATUS}"
+          # Tear down the brain so the runner doesn't hang.
+          kill "${BRAIN_PID}" 2>/dev/null || true
+          wait "${BRAIN_PID}" 2>/dev/null || true
+          # Assertions
+          if ! echo "${STATUS}" | grep -q "^200 text/html"; then
+            echo "::error::GET / did not return 200 text/html (got ${STATUS})."
+            echo "::error::Brain boot log:"
+            tail -50 /tmp/smoke.log >&2
+            exit 1
+          fi
+          if [ "${API_STATUS}" != "404" ]; then
+            echo "::error::SPA hardening regressed: /api/v1/typo returned ${API_STATUS} (expected 404)."
+            exit 1
+          fi
+          if [ "${METRICS_STATUS}" != "401" ]; then
+            echo "::error::/metrics fail-secure regressed: returned ${METRICS_STATUS} (expected 401)."
+            exit 1
+          fi
+          echo "Smoke OK: dashboard serves, SPA hardening + /metrics fail-secure both intact."
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7

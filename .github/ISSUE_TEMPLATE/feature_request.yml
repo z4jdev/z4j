@@ -1,12 +1,12 @@
 name: Feature request
-description: Suggest a capability for z4j
+description: Suggest a capability for z4j-brain
 title: "[feature] "
 labels: ["enhancement", "triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for suggesting a feature for `z4j`. Please describe
+        Thanks for suggesting a feature for `z4j-brain`. Please describe
         the problem you're trying to solve, not just the solution you
         have in mind.
 
@@ -14,7 +14,7 @@ body:
     id: problem
     attributes:
       label: Problem
-      description: What are you trying to do that z4j does not currently support?
+      description: What are you trying to do that z4j-brain does not currently support?
     validations:
       required: true
 

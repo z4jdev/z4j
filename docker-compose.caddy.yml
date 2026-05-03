@@ -50,7 +50,7 @@ services:
   # Override: drop the brain's public port binding.
   # Caddy owns 80/443 and proxies internally over z4j_net.
   # ====================================================================
-  z4j-brain:
+  z4j:
     ports: !reset []
 
   # ====================================================================
@@ -61,7 +61,7 @@ services:
     container_name: z4j-caddy
     restart: unless-stopped
     depends_on:
-      z4j-brain:
+      z4j:
         condition: service_healthy
     environment:
       Z4J_DOMAIN: ${Z4J_DOMAIN:?Z4J_DOMAIN is required (e.g. z4j.example.com)}

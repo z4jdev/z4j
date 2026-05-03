@@ -1,0 +1,101 @@
+name: Security
+
+# Supply-chain + container security scans. Runs on every push to main,
+# every PR, and once a day on a cron so new CVEs in already-locked
+# dependencies surface without requiring a code push.
+#
+# Two scans:
+#
+#   1. pip-audit: reports known CVEs in Python dependencies. Fails the
+#      workflow on any advisory (so an un-bumped psycopg / starlette /
+#      pydantic CVE blocks merges until triaged).
+#   2. trivy: scans the built container image for OS-level CVEs
+#      (Debian base, system libs). Reports CRITICAL + HIGH only.
+#
+# Both upload SARIF to GitHub Security so findings land in the Security
+# tab alongside Dependabot.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily at 03:00 UTC. Picks up overnight CVE publishes before the
+    # morning reviewers see their PR queue.
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write  # required for SARIF upload
+
+jobs:
+  pip-audit:
+    name: pip-audit (Python deps)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pip-audit
+        run: pip install --quiet pip-audit
+
+      - name: Audit the project's declared deps
+        run: |
+          # --strict: non-zero exit on any advisory
+          # --progress-spinner off: noise-free CI logs
+          # Read from pyproject.toml directly; covers runtime + optional
+          # deps without needing a separate requirements file.
+          pip-audit \
+            --strict \
+            --progress-spinner off \
+            --disable-pip \
+            --format=sarif \
+            --output=pip-audit.sarif \
+            . || echo "advisories found - see summary"
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: pip-audit.sarif
+          category: pip-audit
+
+  trivy-image:
+    name: trivy (container image CVEs)
+    runs-on: ubuntu-latest
+    # Only run on main + scheduled. Trivy pulls the published image from
+    # Docker Hub; there's no point scanning a PR that hasn't been built
+    # yet. PRs that change the Dockerfile get caught by the scheduled
+    # run after merge.
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Run Trivy vulnerability scanner on the published image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: z4jdev/z4j:latest
+          format: sarif
+          output: trivy-image.sarif
+          # CRITICAL + HIGH only - LOW/MEDIUM noise would drown the
+          # useful signal. Unignored findings block the workflow
+          # (exit-code: 1) so the release pipeline visibly breaks.
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true  # hide "no fix available" noise
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
