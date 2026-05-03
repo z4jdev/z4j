@@ -76,10 +76,64 @@ jobs:
       - name: Run tests
         run: uv run pytest -xvs tests/
 
+  integration:
+    name: Integration tests (Postgres 18)
+    runs-on: ubuntu-24.04
+    needs: [lint]
+    services:
+      postgres:
+        image: postgres:18-trixie
+        env:
+          POSTGRES_USER: z4j
+          POSTGRES_PASSWORD: z4j
+          POSTGRES_DB: z4j
+        ports:
+          - 5432:5432
+        # Wait until Postgres is accepting connections before pytest
+        # tries to CREATE DATABASE. The conftest fixture connects via
+        # asyncpg to the admin DB, so a slow-start Postgres would
+        # surface as a confusing fixture-level connection error.
+        options: >-
+          --health-cmd="pg_isready -U z4j"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      # The integration conftest reads Z4J_TEST_POSTGRES_URL and uses
+      # the shared-Postgres path (one container per session, per-test
+      # CREATE DATABASE for isolation). This is much faster than the
+      # testcontainers fallback - testcontainers would still try to
+      # spin its own Postgres on every test session.
+      Z4J_TEST_POSTGRES_URL: "postgresql://z4j:z4j@localhost:5432/z4j"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Sync dependencies (with test-integration extras)
+        run: uv sync --all-extras --dev
+
+      - name: Run integration tests
+        # The migration round-trip test (TestMigrationRoundTrip) is
+        # the load-bearing check for the 1.4.x bidirectional schema
+        # promise. If this job is failing the public docs claim about
+        # bidirectional upgrade/downgrade is no longer true; do not
+        # tag a release until it is green again.
+        run: uv run pytest -xvs tests/integration/
+
   build:
     name: Build wheel + sdist
     runs-on: ubuntu-24.04
-    needs: [test]
+    needs: [test, integration]
     steps:
       - uses: actions/checkout@v4
 
