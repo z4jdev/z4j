@@ -10,7 +10,7 @@ One dashboard for every Python task engine: Celery, RQ, Dramatiq, Huey, arq, Tas
 
 ## Quick start
 
-Run the brain with SQLite (bundled, zero-config):
+Run with SQLite (bundled, zero-config):
 
 ```bash
 docker run -d --name z4j -p 7700:7700 -v z4j-data:/data z4jdev/z4j
@@ -38,7 +38,7 @@ docker run -d --name z4j \
   -e Z4J_SESSION_SECRET=$(openssl rand -hex 48) \
   -e Z4J_PUBLIC_URL=https://z4j.example.com \
   -e Z4J_ALLOWED_HOSTS='["z4j.example.com"]' \
-  z4jdev/z4j:1.0.1
+  z4jdev/z4j:1.4.0
 ```
 
 PostgreSQL unlocks horizontal scale-out (`LISTEN/NOTIFY`-based registry fan-out), range-partitioned events, and `tsvector` full-text search.
@@ -96,24 +96,20 @@ Image size: **~234 MB uncompressed / ~52 MB compressed on-wire**.
 
 ## Platform support
 
-- **linux/amd64**: v1.0.1 (current)
-- **linux/arm64**: not yet in 1.0.1. Adding in 1.0.2 via CI-driven multi-arch builds.
-
-If you're on an M-series Mac or arm64 Linux host right now, install via pip instead: `pip install z4j`.
+Native multi-arch: `linux/amd64` + `linux/arm64`. The same image manifest serves both, built on native GitHub runners (no QEMU emulation).
 
 ## Tags
 
-- `z4jdev/z4j:1.0.1` - version-pinned, recommended for production
+- `z4jdev/z4j:1.4.0` - version-pinned, recommended for production
 - `z4jdev/z4j:latest` - always-current, convenient for evaluation
 
 ## License
 
 AGPL-3.0-or-later. Commercial license available (`licensing@z4j.com`).
 
-The **brain** image is AGPL. All **agent packages** (`z4j-core`, `z4j-celery`, `z4j-django`, `z4j-rq`, etc. - the client libraries your application embeds) are Apache 2.0 and do **not** subject your application to the AGPL.
+The **z4j** image (this control plane) is AGPL. All **agent packages** (`z4j-core`, `z4j-celery`, `z4j-django`, `z4j-rq`, etc. - the client libraries your application embeds) are Apache 2.0 and do **not** subject your application to the AGPL.
 
 ## Related
 
-- [`pip install z4j`](https://pypi.org/project/z4j/) - PyPI umbrella (same content, for Python-native installs)
-- [`pip install z4j`](https://pypi.org/project/z4j/) - PyPI brain package (AGPL)
-- [github.com/z4jdev](https://github.com/z4jdev) - all 20 public repos (brain + 17 agent packages + umbrella + org profile)
+- [`pip install z4j`](https://pypi.org/project/z4j/) - PyPI distribution (same content, for Python-native installs; AGPL)
+- [github.com/z4jdev](https://github.com/z4jdev) - all public repos (z4j + agent packages + sites)
