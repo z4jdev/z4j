@@ -1,1 +1,44 @@
-{"items": [], "next_cursor": null}
+{
+  "items": [
+    {
+      "id": "20000000-0000-4002-b000-000000000001",
+      "occurred_at_offset_s": -480,
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "project_slug": "django.example.com",
+      "project_name": "django.example.com",
+      "engine": "celery",
+      "task_id": "celery-task-d4f2a91c",
+      "task_name": "emails.send_scheduled_campaigns",
+      "worker": "worker-emails-1",
+      "exception": "ConnectionError: smtp.example.com:587 connection refused",
+      "priority": "high"
+    },
+    {
+      "id": "20000000-0000-4002-b000-00000000000a",
+      "occurred_at_offset_s": -780,
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "project_slug": "django.example.com",
+      "project_name": "django.example.com",
+      "engine": "celery",
+      "task_id": "celery-task-7a3e1c9b",
+      "task_name": "emails.send_scheduled_campaigns",
+      "worker": "worker-emails-1",
+      "exception": "ConnectionError: smtp.example.com:587 connection refused",
+      "priority": "high"
+    },
+    {
+      "id": "20000000-0000-4000-b000-000000000004",
+      "occurred_at_offset_s": -3569,
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "project_slug": "example.com",
+      "project_name": "example.com",
+      "engine": "celery",
+      "task_id": "celery-task-4e8c0b22",
+      "task_name": "exports.generate_csv",
+      "worker": "worker-1",
+      "exception": "TimeoutError: query exceeded statement_timeout (30s)",
+      "priority": "normal"
+    }
+  ],
+  "next_cursor": null
+}

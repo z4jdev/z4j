@@ -1,1 +1,26 @@
-[]
+[
+  {
+    "id": "f0000000-0000-4000-3000-000000000001",
+    "name": "personal-pager",
+    "type": "pagerduty",
+    "config": {
+      "routing_key": "PD-USER-XXXX"
+    },
+    "is_verified": true,
+    "is_active": true,
+    "created_at_offset_s": -5184000,
+    "updated_at_offset_s": -5184000
+  },
+  {
+    "id": "f0000000-0000-4000-3000-000000000002",
+    "name": "personal-email",
+    "type": "email",
+    "config": {
+      "to_addr": "demo@example.com"
+    },
+    "is_verified": true,
+    "is_active": true,
+    "created_at_offset_s": -7776000,
+    "updated_at_offset_s": -7776000
+  }
+]

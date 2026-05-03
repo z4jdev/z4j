@@ -3,30 +3,40 @@
     "id": "50000000-0000-4002-e000-000000000001",
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "platform-oncall",
-    "kind": "pagerduty",
     "is_active": true,
-    "config": {"routing_key": "PD-XXXXXXXXXXXXXX", "severity_default": "critical"},
+    "config": {
+      "routing_key": "PD-XXXXXXXXXXXXXX",
+      "severity_default": "critical"
+    },
     "created_at_offset_s": -25920000,
-    "updated_at_offset_s": -25920000
+    "updated_at_offset_s": -25920000,
+    "type": "pagerduty"
   },
   {
     "id": "50000000-0000-4002-e000-000000000002",
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "engineering-slack",
-    "kind": "slack",
     "is_active": true,
-    "config": {"webhook_url": "https://hooks.slack.com/services/T0XXXXX/B0XXXXX/zzzzzz"},
+    "config": {
+      "webhook_url": "https://hooks.slack.com/services/T0XXXXX/B0XXXXX/zzzzzz"
+    },
     "created_at_offset_s": -23328000,
-    "updated_at_offset_s": -23328000
+    "updated_at_offset_s": -23328000,
+    "type": "slack"
   },
   {
     "id": "50000000-0000-4002-e000-000000000003",
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "billing-team-email",
-    "kind": "email",
     "is_active": true,
-    "config": {"to_addrs": ["billing@example.com"], "from_addr": "alerts@example.com"},
+    "config": {
+      "to_addrs": [
+        "billing@example.com"
+      ],
+      "from_addr": "alerts@example.com"
+    },
     "created_at_offset_s": -20736000,
-    "updated_at_offset_s": -20736000
+    "updated_at_offset_s": -20736000,
+    "type": "email"
   }
 ]

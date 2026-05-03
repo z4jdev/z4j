@@ -225,6 +225,16 @@ const ROUTES: RouteHandler[] = [
   },
   {
     method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/notifications\/deliveries/,
+    handler: (_req, match) => serveJson(`projects/${match[1]}/notifications-deliveries.json`)(),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/notifications\/defaults/,
+    handler: (_req, match) => serveJson(`projects/${match[1]}/notifications-defaults.json`)(),
+  },
+  {
+    method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/memberships/,
     handler: (_req, match) => serveJson(`projects/${match[1]}/memberships.json`)(),
   },
@@ -237,6 +247,7 @@ const ROUTES: RouteHandler[] = [
   // User-scoped endpoints (settings)
   { method: "GET", pattern: /^\/api\/v1\/user\/channels/, handler: serveJson("user/channels.json") },
   { method: "GET", pattern: /^\/api\/v1\/user\/subscriptions/, handler: serveJson("user/subscriptions.json") },
+  { method: "GET", pattern: /^\/api\/v1\/user\/deliveries/, handler: serveJson("user/deliveries.json") },
   { method: "GET", pattern: /^\/api\/v1\/user\/notifications\/unread-count/, handler: serveJson("user/notifications-unread-count.json") },
   { method: "GET", pattern: /^\/api\/v1\/user\/notifications/, handler: serveJson("user/notifications.json") },
 

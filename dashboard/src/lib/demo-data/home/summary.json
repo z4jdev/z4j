@@ -1,44 +1,117 @@
 {
+  "user": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "email": "demo@example.com",
+    "display_name": "Demo Admin",
+    "is_admin": true
+  },
+  "aggregate": {
+    "tasks_24h": 556210,
+    "failures_24h": 183,
+    "failure_rate_24h": 0.00033,
+    "workers_online": 9,
+    "workers_total": 10,
+    "agents_online": 19,
+    "agents_total": 20,
+    "stuck_commands": 1
+  },
   "projects": [
     {
       "id": "00000000-0000-4000-9000-000000000001",
       "slug": "example.com",
       "name": "example.com",
-      "tasks_total": 18472,
-      "tasks_failed_24h": 1,
+      "environment": "production",
+      "role": "admin",
+      "tasks_24h": 142,
+      "failures_24h": 1,
+      "failure_rate_24h": 0.007,
+      "workers_online": 1,
+      "workers_total": 1,
       "agents_online": 3,
-      "agents_offline": 0,
-      "schedules_active": 5
+      "agents_total": 3,
+      "stuck_commands": 0,
+      "last_activity_at_offset_s": -8,
+      "health": "healthy"
     },
     {
       "id": "00000000-0000-4000-9000-000000000002",
       "slug": "fastapi.example.com",
       "name": "fastapi.example.com",
-      "tasks_total": 363264,
-      "tasks_failed_24h": 20,
+      "environment": "production",
+      "role": "admin",
+      "tasks_24h": 9842,
+      "failures_24h": 20,
+      "failure_rate_24h": 0.002,
+      "workers_online": 2,
+      "workers_total": 2,
       "agents_online": 4,
-      "agents_offline": 0,
-      "schedules_active": 6
+      "agents_total": 4,
+      "stuck_commands": 0,
+      "last_activity_at_offset_s": -3,
+      "health": "healthy"
     },
     {
       "id": "00000000-0000-4000-9000-000000000003",
       "slug": "django.example.com",
       "name": "django.example.com",
-      "tasks_total": 17426472,
-      "tasks_failed_24h": 124,
+      "environment": "production",
+      "role": "admin",
+      "tasks_24h": 482104,
+      "failures_24h": 124,
+      "failure_rate_24h": 0.00026,
+      "workers_online": 3,
+      "workers_total": 4,
       "agents_online": 7,
-      "agents_offline": 1,
-      "schedules_active": 6
+      "agents_total": 8,
+      "stuck_commands": 1,
+      "last_activity_at_offset_s": -2,
+      "health": "degraded"
     },
     {
       "id": "00000000-0000-4000-9000-000000000004",
       "slug": "tasks.example.com",
       "name": "tasks.example.com",
-      "tasks_total": 2305080,
-      "tasks_failed_24h": 38,
+      "environment": "production",
+      "role": "admin",
+      "tasks_24h": 64104,
+      "failures_24h": 38,
+      "failure_rate_24h": 0.00059,
+      "workers_online": 3,
+      "workers_total": 3,
       "agents_online": 5,
-      "agents_offline": 0,
-      "schedules_active": 8
+      "agents_total": 5,
+      "stuck_commands": 0,
+      "last_activity_at_offset_s": -1,
+      "health": "healthy"
+    }
+  ],
+  "attention": [
+    {
+      "kind": "agent_offline",
+      "severity": "warning",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "project_slug": "django.example.com",
+      "project_name": "django.example.com",
+      "message": "worker-emails-1 has been offline for 8m -- emails queue depth growing",
+      "count": 1
+    },
+    {
+      "kind": "high_failure_rate",
+      "severity": "warning",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "project_slug": "django.example.com",
+      "project_name": "django.example.com",
+      "message": "emails.send_scheduled_campaigns has 4 consecutive failures (smtp connection refused)",
+      "count": 4
+    },
+    {
+      "kind": "stuck_commands",
+      "severity": "warning",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "project_slug": "django.example.com",
+      "project_name": "django.example.com",
+      "message": "1 admin command pending agent ack > 5min",
+      "count": 1
     }
   ]
 }

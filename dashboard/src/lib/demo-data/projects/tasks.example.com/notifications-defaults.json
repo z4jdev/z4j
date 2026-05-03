@@ -1,0 +1,27 @@
+[
+  {
+    "id": "c0000000-0000-4300-9000-000000000001",
+    "project_id": "00000000-0000-4000-9000-000000000004",
+    "trigger": "task.failed",
+    "filters": {},
+    "in_app": true,
+    "project_channel_ids": [
+      "50000000-0000-4003-e000-000000000001",
+      "50000000-0000-4003-e000-000000000002"
+    ],
+    "cooldown_seconds": 0,
+    "created_at_offset_s": -2592000
+  },
+  {
+    "id": "c0000000-0000-4300-9000-000000000002",
+    "project_id": "00000000-0000-4000-9000-000000000004",
+    "trigger": "agent.offline",
+    "filters": {},
+    "in_app": true,
+    "project_channel_ids": [
+      "50000000-0000-4003-e000-000000000001"
+    ],
+    "cooldown_seconds": 300,
+    "created_at_offset_s": -2592000
+  }
+]

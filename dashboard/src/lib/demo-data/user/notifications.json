@@ -1,1 +1,114 @@
-[]
+[
+  {
+    "id": "d0000000-0000-4000-1000-000000000001",
+    "project_id": "00000000-0000-4000-9000-000000000003",
+    "subscription_id": "e0000000-0000-4000-2000-000000000001",
+    "trigger": "task.failed",
+    "reason": "subscribed",
+    "title": "Task failed: emails.send_scheduled_campaigns",
+    "body": "smtp.example.com:587 connection refused (4 consecutive failures)",
+    "data": {
+      "project_slug": "django.example.com"
+    },
+    "read_at_offset_s": null,
+    "created_at_offset_s": -180
+  },
+  {
+    "id": "d0000000-0000-4000-1000-000000000002",
+    "project_id": "00000000-0000-4000-9000-000000000003",
+    "subscription_id": "e0000000-0000-4000-2000-000000000002",
+    "trigger": "agent.offline",
+    "reason": "subscribed",
+    "title": "Agent offline: worker-emails-1",
+    "body": "Heartbeat lost 8 minutes ago",
+    "data": {
+      "project_slug": "django.example.com"
+    },
+    "read_at_offset_s": null,
+    "created_at_offset_s": -480
+  },
+  {
+    "id": "d0000000-0000-4000-1000-000000000003",
+    "project_id": "00000000-0000-4000-9000-000000000003",
+    "subscription_id": "e0000000-0000-4000-2000-000000000003",
+    "trigger": "task.failed",
+    "reason": "subscribed",
+    "title": "Task failed: emails.send_scheduled_campaigns",
+    "body": "smtp.example.com:587 connection refused",
+    "data": {
+      "project_slug": "django.example.com"
+    },
+    "read_at_offset_s": null,
+    "created_at_offset_s": -780
+  },
+  {
+    "id": "d0000000-0000-4000-1000-000000000004",
+    "project_id": "00000000-0000-4000-9000-000000000002",
+    "subscription_id": "e0000000-0000-4000-2000-000000000004",
+    "trigger": "task.retried",
+    "reason": "subscribed",
+    "title": "Task retried: webhooks.deliver",
+    "body": "ConnectTimeout to https://customer-3.example.com/hooks; retry 2 of 3",
+    "data": {
+      "project_slug": "fastapi.example.com"
+    },
+    "read_at_offset_s": null,
+    "created_at_offset_s": -90
+  },
+  {
+    "id": "d0000000-0000-4000-1000-000000000005",
+    "project_id": "00000000-0000-4000-9000-000000000004",
+    "subscription_id": "e0000000-0000-4000-2000-000000000001",
+    "trigger": "task.succeeded",
+    "reason": "subscribed",
+    "title": "Daily ETL completed: etl.warehouse_load",
+    "body": "Loaded 4.2M rows to Snowflake in 64m 12s",
+    "data": {
+      "project_slug": "tasks.example.com"
+    },
+    "read_at_offset_s": -64500,
+    "created_at_offset_s": -64560
+  },
+  {
+    "id": "d0000000-0000-4000-1000-000000000006",
+    "project_id": "00000000-0000-4000-9000-000000000004",
+    "subscription_id": "e0000000-0000-4000-2000-000000000002",
+    "trigger": "task.succeeded",
+    "reason": "subscribed",
+    "title": "GDPR purge run completed",
+    "body": "Purged 12 eligible accounts (dry_run=false)",
+    "data": {
+      "project_slug": "tasks.example.com"
+    },
+    "read_at_offset_s": -61020,
+    "created_at_offset_s": -61080
+  },
+  {
+    "id": "d0000000-0000-4000-1000-000000000007",
+    "project_id": "00000000-0000-4000-9000-000000000001",
+    "subscription_id": "e0000000-0000-4000-2000-000000000003",
+    "trigger": "task.failed",
+    "reason": "subscribed",
+    "title": "Task failed: exports.generate_csv",
+    "body": "TimeoutError: query exceeded statement_timeout (30s) - 2 retries used",
+    "data": {
+      "project_slug": "example.com"
+    },
+    "read_at_offset_s": -3509,
+    "created_at_offset_s": -3569
+  },
+  {
+    "id": "d0000000-0000-4000-1000-000000000008",
+    "project_id": "00000000-0000-4000-9000-000000000001",
+    "subscription_id": "e0000000-0000-4000-2000-000000000004",
+    "trigger": "agent.online",
+    "reason": "subscribed",
+    "title": "Agent online: beat-1",
+    "body": "Reconnected after restart",
+    "data": {
+      "project_slug": "example.com"
+    },
+    "read_at_offset_s": -86280,
+    "created_at_offset_s": -86340
+  }
+]

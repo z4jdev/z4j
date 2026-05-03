@@ -3,20 +3,25 @@
     "id": "50000000-0000-4003-e000-000000000001",
     "project_id": "00000000-0000-4000-9000-000000000004",
     "name": "ops-alerts",
-    "kind": "slack",
     "is_active": true,
-    "config": {"webhook_url": "https://hooks.slack.com/services/T0XXXXX/B0XXXXX/zzzzzz"},
+    "config": {
+      "webhook_url": "https://hooks.slack.com/services/T0XXXXX/B0XXXXX/zzzzzz"
+    },
     "created_at_offset_s": -7776000,
-    "updated_at_offset_s": -7776000
+    "updated_at_offset_s": -7776000,
+    "type": "slack"
   },
   {
     "id": "50000000-0000-4003-e000-000000000002",
     "project_id": "00000000-0000-4000-9000-000000000004",
     "name": "ml-team-webhook",
-    "kind": "webhook",
     "is_active": true,
-    "config": {"url": "https://internal.tasks.example.com/hooks/ml-alerts", "headers": {}},
+    "config": {
+      "url": "https://internal.tasks.example.com/hooks/ml-alerts",
+      "headers": {}
+    },
     "created_at_offset_s": -5184000,
-    "updated_at_offset_s": -5184000
+    "updated_at_offset_s": -5184000,
+    "type": "webhook"
   }
 ]
