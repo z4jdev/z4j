@@ -126,6 +126,11 @@ const ROUTES: RouteHandler[] = [
   { method: "POST", pattern: /^\/api\/v1\/auth\/logout$/, handler: handleLogout },
   { method: "GET", pattern: /^\/api\/v1\/auth\/me$/, handler: serveJson("auth/me.json") },
 
+  // Server health pill in the topbar (refetches every 30s; if this
+  // 404s the pill flips to "z4j offline" which makes the demo feel
+  // half-broken).
+  { method: "GET", pattern: /^\/api\/v1\/health$/, handler: serveJson("system/health.json") },
+
   // First-boot check used by /login's beforeLoad guard. The demo is
   // never first-boot (a "demo admin" exists), so always return false
   // to keep visitors on the login page rather than redirecting them
@@ -196,6 +201,22 @@ const ROUTES: RouteHandler[] = [
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/workers/,
     handler: (_req, match) => serveJson(`projects/${match[1]}/workers.json`)(),
+  },
+  // Project overview stats (the big card grid on /projects/<slug>/).
+  // Query params (hours=24 etc.) are ignored; demo serves a fixed
+  // snapshot per project regardless of the time-range selector.
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/stats/,
+    handler: (_req, match) => serveJson(`projects/${match[1]}/stats.json`)(),
+  },
+  // Trend buckets for the charts on the trends route. Query params
+  // ignored; the dashboard re-renders against the same snapshot
+  // when the user flips window / bucket size.
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/trends/,
+    handler: (_req, match) => serveJson(`projects/${match[1]}/trends.json`)(),
   },
   {
     method: "GET",

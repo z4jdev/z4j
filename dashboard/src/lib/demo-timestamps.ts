@@ -3,23 +3,20 @@
  *
  * Static seed timestamps go stale immediately ("Last fired: 11
  * months ago"). Solution: seed JSON stores time as
- * `*_offset_s` integers (seconds relative to "now"), and
+ * `<final_field>_offset_s` integers (seconds relative to "now"), and
  * `applyDemoTimestamps()` walks the parsed JSON tree just before
- * it is returned to the dashboard, replacing each `*_offset_s`
- * field with an ISO timestamp computed from the page-load anchor.
+ * it is returned to the dashboard, replacing each `_offset_s`
+ * suffix with an ISO timestamp computed from the page-load anchor.
  *
- * Convention:
+ * Convention: the field is named with the FINAL desired name plus
+ * `_offset_s`. The suffix is stripped entirely:
  *
- *   { "last_fired_offset_s": -300 }
+ *   "last_fired_at_offset_s": -300   -> "last_fired_at": "<iso 5min ago>"
+ *   "occurred_at_offset_s":  -3600   -> "occurred_at":  "<iso 1h ago>"
+ *   "t_offset_s":            -60     -> "t":            "<iso 1min ago>"
  *
- * becomes:
- *
- *   { "last_fired_at": "<iso 5 minutes before page-load>" }
- *
- * The `_offset_s` suffix is stripped and replaced with `_at`. If
- * the field name does not end in `_offset_s` the value is left
- * untouched (so absolute-time fields like "id" or "name" pass
- * through). The transform recurses into nested objects + arrays.
+ * If the field name does not end in `_offset_s` the value is left
+ * untouched. The transform recurses into nested objects + arrays.
  *
  * Anchor is captured once per module load (which happens on first
  * page load), so refreshing the demo nudges all timestamps "into
@@ -35,7 +32,9 @@ function applyOne(value: unknown): unknown {
     const result: Record<string, unknown> = {};
     for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
       if (key.endsWith("_offset_s") && typeof v === "number") {
-        const newKey = key.slice(0, -"_offset_s".length) + "_at";
+        // Strip the _offset_s suffix entirely. Convention: the field
+        // was named "<final>_offset_s", so the new key is "<final>".
+        const newKey = key.slice(0, -"_offset_s".length);
         result[newKey] = new Date(ANCHOR_MS + v * 1000).toISOString();
       } else {
         result[key] = applyOne(v);

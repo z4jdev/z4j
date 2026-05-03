@@ -1,0 +1,37 @@
+{
+  "tasks_by_state": {
+    "pending": 8,
+    "received": 2,
+    "started": 12,
+    "success": 64104,
+    "failure": 38,
+    "retry": 18,
+    "revoked": 0,
+    "rejected": 0,
+    "unknown": 0
+  },
+  "tasks_total": 2305080,
+  "tasks_failed_24h": 38,
+  "tasks_succeeded_24h": 64104,
+  "failure_rate_24h": 0.0006,
+  "agents_online": 5,
+  "agents_offline": 0,
+  "workers_online": 3,
+  "workers_offline": 0,
+  "commands_pending": 0,
+  "commands_completed_24h": 22,
+  "commands_failed_24h": 0,
+  "commands_timeout_24h": 0,
+  "queue_depths": [
+    {"name": "celery-default", "engine": "celery", "pending_count": 4, "broker_type": "redis", "last_seen_at_offset_s": -4},
+    {"name": "rq-default", "engine": "rq", "pending_count": 2, "broker_type": "redis", "last_seen_at_offset_s": -6},
+    {"name": "dramatiq-default", "engine": "dramatiq", "pending_count": 12, "broker_type": "redis", "last_seen_at_offset_s": -3}
+  ],
+  "system_health": {
+    "status": "healthy",
+    "agents_all_online": true,
+    "queue_depth_ok": true,
+    "failure_rate_ok": true,
+    "brain_db_ok": true
+  }
+}

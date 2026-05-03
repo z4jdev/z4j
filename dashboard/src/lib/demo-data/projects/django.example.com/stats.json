@@ -1,0 +1,39 @@
+{
+  "tasks_by_state": {
+    "pending": 18,
+    "received": 4,
+    "started": 32,
+    "success": 482104,
+    "failure": 124,
+    "retry": 41,
+    "revoked": 2,
+    "rejected": 0,
+    "unknown": 0
+  },
+  "tasks_total": 17426472,
+  "tasks_failed_24h": 124,
+  "tasks_succeeded_24h": 482104,
+  "failure_rate_24h": 0.0003,
+  "agents_online": 7,
+  "agents_offline": 1,
+  "workers_online": 3,
+  "workers_offline": 1,
+  "commands_pending": 1,
+  "commands_completed_24h": 48,
+  "commands_failed_24h": 2,
+  "commands_timeout_24h": 0,
+  "queue_depths": [
+    {"name": "default", "engine": "celery", "pending_count": 14, "broker_type": "rabbitmq", "last_seen_at_offset_s": -4},
+    {"name": "billing", "engine": "celery", "pending_count": 2, "broker_type": "rabbitmq", "last_seen_at_offset_s": -6},
+    {"name": "emails", "engine": "celery", "pending_count": 482, "broker_type": "rabbitmq", "last_seen_at_offset_s": -480},
+    {"name": "exports", "engine": "celery", "pending_count": 0, "broker_type": "rabbitmq", "last_seen_at_offset_s": -1800},
+    {"name": "search", "engine": "celery", "pending_count": 8, "broker_type": "rabbitmq", "last_seen_at_offset_s": -120}
+  ],
+  "system_health": {
+    "status": "degraded",
+    "agents_all_online": false,
+    "queue_depth_ok": false,
+    "failure_rate_ok": true,
+    "brain_db_ok": true
+  }
+}
