@@ -73,8 +73,12 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-extras --dev
 
-      - name: Run tests
-        run: uv run pytest -xvs tests/
+      - name: Run unit tests
+        # Integration tests live in tests/integration/ and run in
+        # their own job (needs Postgres service container). Scoping
+        # this job to tests/unit/ avoids attempting them twice
+        # (they'd skip here without Postgres, which is wasteful).
+        run: uv run pytest -xvs tests/unit/
 
   integration:
     name: Integration tests (Postgres 18)
@@ -156,22 +160,23 @@ jobs:
           uv tool run twine check dist/*
 
       # ---------------------------------------------------------------
-      # Wheel-content assertion (defense against the v1.0.11 / v1.0.15
-      # SPA-bundle regression). twine check above only validates
-      # METADATA - it cannot detect that the wheel is missing the
-      # bundled dashboard. We unzip the built wheel and assert the
-      # SPA index.html plus a minimum number of asset files actually
+      # Wheel-content assertion. twine check validates METADATA only;
+      # it cannot detect that the wheel is missing the bundled
+      # dashboard. We unzip the built wheel and assert the SPA
+      # index.html plus a minimum number of asset files actually
       # ship inside. If a future change to packaging or the build
       # toolchain accidentally strips dashboard/dist/, this step
-      # fails the build BEFORE the artefact is uploaded - the same
-      # regression cannot reach a release tag again.
-      # Mirrors scripts/release-split.sh's [4b/6] check in the
-      # monorepo.
+      # fails the build BEFORE the artefact is uploaded.
+      #
+      # The wheel name is z4j-VERSION-py3-none-any.whl (the project
+      # name is "z4j" since the 1.4.0 consolidation). The brain code
+      # ships under the z4j_brain/ namespace inside the wheel, which
+      # is where the dashboard bundle also lives.
       # ---------------------------------------------------------------
       - name: Verify dashboard SPA bundled in wheel
         run: |
           set -euo pipefail
-          WHEEL=$(ls dist/z4j_brain-*.whl | head -1)
+          WHEEL=$(ls dist/z4j-*.whl | head -1)
           echo "Inspecting wheel: ${WHEEL}"
           ASSET_COUNT=$(unzip -l "${WHEEL}" | grep -c 'z4j_brain/dashboard/dist/' || true)
           HAS_INDEX=$(unzip -l "${WHEEL}" | grep -c 'z4j_brain/dashboard/dist/index.html' || true)
@@ -179,13 +184,13 @@ jobs:
           echo "  dashboard/dist/index.html: ${HAS_INDEX}"
           if [ "${HAS_INDEX}" -lt 1 ] || [ "${ASSET_COUNT}" -lt 100 ]; then
             echo ""
-            echo "::error::z4j-brain wheel is MISSING the bundled dashboard SPA."
+            echo "::error::z4j wheel is MISSING the bundled dashboard SPA."
             echo "  Expected: index.html + 100+ asset files under z4j_brain/dashboard/dist/"
             echo "  Got:      ${HAS_INDEX} index.html, ${ASSET_COUNT} total entries."
             echo ""
             echo "  Likely cause: the dashboard build step did not run, or a"
             echo "  recursive directory exclusion stripped dashboard/dist/ before"
-            echo "  build. Same defect as v1.0.11 + v1.0.15."
+            echo "  build."
             exit 1
           fi
 
@@ -197,16 +202,21 @@ jobs:
       # any failure mode where the file is in the wheel but the boot
       # path doesn't find it (path resolution bug, lifecycle bug,
       # missing runtime dep, etc.).
+      #
+      # Console-script name is `z4j` (single entry point since the
+      # 1.4.0 consolidation; the pre-1.4 `z4j-brain` alias was dropped).
+      # The brain still exposes its version via `z4j_brain.__version__`
+      # for backwards compatibility with code that imports it.
       # ---------------------------------------------------------------
       - name: Install + boot smoke (GET / must return 200 HTML)
         run: |
           set -euo pipefail
-          WHEEL=$(ls dist/z4j_brain-*.whl | head -1)
+          WHEEL=$(ls dist/z4j-*.whl | head -1)
           python -m venv /tmp/smoke-venv
           /tmp/smoke-venv/bin/pip install --quiet "${WHEEL}"
           INSTALLED_VERSION=$(/tmp/smoke-venv/bin/python -c \
             "from z4j_brain import __version__; print(__version__)")
-          echo "Installed z4j-brain ${INSTALLED_VERSION}"
+          echo "Installed z4j ${INSTALLED_VERSION}"
           # Random port to avoid collisions in shared CI runners.
           PORT=$(/tmp/smoke-venv/bin/python -c \
             "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")
@@ -217,7 +227,7 @@ jobs:
           export Z4J_BIND_HOST="127.0.0.1"
           export Z4J_BIND_PORT="${PORT}"
           export Z4J_LOG_JSON="false"
-          /tmp/smoke-venv/bin/z4j-brain serve > /tmp/smoke.log 2>&1 &
+          /tmp/smoke-venv/bin/z4j serve > /tmp/smoke.log 2>&1 &
           BRAIN_PID=$!
           # Wait up to 30s for boot.
           for i in $(seq 1 30); do
