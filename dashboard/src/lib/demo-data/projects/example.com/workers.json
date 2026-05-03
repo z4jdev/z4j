@@ -1,0 +1,21 @@
+[
+  {
+    "id": "70000000-0000-4000-0000-000000000001",
+    "project_id": "00000000-0000-4000-9000-000000000001",
+    "engine": "celery",
+    "name": "worker-1@worker-host.example.com",
+    "hostname": "worker-host.example.com",
+    "pid": 1842,
+    "concurrency": 8,
+    "queues": ["default", "billing", "analytics", "exports", "search"],
+    "state": "online",
+    "last_heartbeat_offset_s": -8,
+    "load_average": [0.42, 0.38, 0.35],
+    "active_tasks": 1,
+    "processed": 18472,
+    "failed": 38,
+    "succeeded": 18434,
+    "retried": 12,
+    "created_at_offset_s": -7776000
+  }
+]

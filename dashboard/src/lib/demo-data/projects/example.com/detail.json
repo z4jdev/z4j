@@ -1,0 +1,12 @@
+{
+  "id": "00000000-0000-4000-9000-000000000001",
+  "slug": "example.com",
+  "name": "example.com",
+  "description": "Marketing site, Celery + celery-beat. Small healthy starter project.",
+  "environment": "production",
+  "timezone": "UTC",
+  "retention_days": 30,
+  "is_active": true,
+  "created_at_offset_s": -7776000,
+  "updated_at_offset_s": -3600
+}

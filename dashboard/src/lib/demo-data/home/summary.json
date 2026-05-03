@@ -1,0 +1,44 @@
+{
+  "projects": [
+    {
+      "id": "00000000-0000-4000-9000-000000000001",
+      "slug": "example.com",
+      "name": "example.com",
+      "tasks_total": 18472,
+      "tasks_failed_24h": 1,
+      "agents_online": 3,
+      "agents_offline": 0,
+      "schedules_active": 5
+    },
+    {
+      "id": "00000000-0000-4000-9000-000000000002",
+      "slug": "fastapi.example.com",
+      "name": "fastapi.example.com",
+      "tasks_total": 363264,
+      "tasks_failed_24h": 20,
+      "agents_online": 4,
+      "agents_offline": 0,
+      "schedules_active": 6
+    },
+    {
+      "id": "00000000-0000-4000-9000-000000000003",
+      "slug": "django.example.com",
+      "name": "django.example.com",
+      "tasks_total": 17426472,
+      "tasks_failed_24h": 124,
+      "agents_online": 7,
+      "agents_offline": 1,
+      "schedules_active": 6
+    },
+    {
+      "id": "00000000-0000-4000-9000-000000000004",
+      "slug": "tasks.example.com",
+      "name": "tasks.example.com",
+      "tasks_total": 2305080,
+      "tasks_failed_24h": 38,
+      "agents_online": 5,
+      "agents_offline": 0,
+      "schedules_active": 8
+    }
+  ]
+}

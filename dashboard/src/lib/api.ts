@@ -18,6 +18,17 @@ import type { ErrorEnvelope } from "./api-types";
 
 const API_BASE = "/api/v1";
 
+// Demo-mode build (VITE_Z4J_DEMO_MODE=true) swaps the global fetch
+// for an in-browser interceptor that returns canned JSON for read
+// endpoints and toast-blocks every mutation. The conditional uses
+// import.meta.env so the demo module is tree-shaken out of the
+// production bundle. See DEMO-Z4J-DEV-DESIGN.md.
+const fetchImpl: typeof fetch = import.meta.env.VITE_Z4J_DEMO_MODE === "true"
+  ? // The dynamic import is awaited at module load via a top-level
+    // await; Vite supports this for ES module targets.
+    (await import("./api.demo")).demoFetch
+  : fetch;
+
 const CSRF_COOKIE_NAMES = ["__Host-z4j_csrf", "z4j_csrf"];
 const CSRF_HEADER = "X-CSRF-Token";
 
@@ -139,7 +150,7 @@ export async function apiCall<T>(
 
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetchImpl(url, {
       method,
       headers,
       credentials: "include",

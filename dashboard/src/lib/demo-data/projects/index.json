@@ -1,0 +1,50 @@
+[
+  {
+    "id": "00000000-0000-4000-9000-000000000001",
+    "slug": "example.com",
+    "name": "example.com",
+    "description": "Marketing site, Celery + celery-beat. Small healthy starter project.",
+    "environment": "production",
+    "timezone": "UTC",
+    "retention_days": 30,
+    "is_active": true,
+    "created_at_offset_s": -7776000,
+    "updated_at_offset_s": -3600
+  },
+  {
+    "id": "00000000-0000-4000-9000-000000000002",
+    "slug": "fastapi.example.com",
+    "name": "fastapi.example.com",
+    "description": "API gateway, FastAPI + arq + arq-cron. Medium scale, all green.",
+    "environment": "production",
+    "timezone": "UTC",
+    "retention_days": 30,
+    "is_active": true,
+    "created_at_offset_s": -15552000,
+    "updated_at_offset_s": -1800
+  },
+  {
+    "id": "00000000-0000-4000-9000-000000000003",
+    "slug": "django.example.com",
+    "name": "django.example.com",
+    "description": "Customer-facing app, Django + Celery + django-celery-beat. Large scale, ONE current incident.",
+    "environment": "production",
+    "timezone": "UTC",
+    "retention_days": 90,
+    "is_active": true,
+    "created_at_offset_s": -31536000,
+    "updated_at_offset_s": -300
+  },
+  {
+    "id": "00000000-0000-4000-9000-000000000004",
+    "slug": "tasks.example.com",
+    "name": "tasks.example.com",
+    "description": "Internal job runner, native z4j-scheduler driving Celery + RQ + Dramatiq workers from one place.",
+    "environment": "production",
+    "timezone": "UTC",
+    "retention_days": 60,
+    "is_active": true,
+    "created_at_offset_s": -10368000,
+    "updated_at_offset_s": -120
+  }
+]

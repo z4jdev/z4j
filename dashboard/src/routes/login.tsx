@@ -94,11 +94,18 @@ function describeLoginError(err: unknown): { title: string; description: string 
   };
 }
 
+// Demo build (VITE_Z4J_DEMO_MODE=true) pre-fills the login form so a
+// demo visitor only has to click Sign in to land on the dashboard.
+// In production these stay empty strings so the form renders blank.
+const IS_DEMO = import.meta.env.VITE_Z4J_DEMO_MODE === "true";
+const DEMO_EMAIL = "demo@example.com";
+const DEMO_PASSWORD = "demo";
+
 function LoginPage() {
   const navigate = useNavigate();
   const login = useLogin();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState(IS_DEMO ? DEMO_EMAIL : "");
+  const [password, setPassword] = useState(IS_DEMO ? DEMO_PASSWORD : "");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<{
     title: string;
@@ -215,6 +222,35 @@ function LoginPage() {
             </CardFooter>
           </form>
         </Card>
+
+        {IS_DEMO && (
+          <div
+            role="note"
+            className="rounded-lg border border-yellow-300/60 bg-yellow-50 px-4 py-3 text-xs leading-relaxed text-yellow-950 dark:border-yellow-400/40 dark:bg-yellow-400/10 dark:text-yellow-100"
+          >
+            <p>
+              <strong className="font-semibold">DEMO MODE</strong> -- credentials
+              are pre-filled (
+              <code className="rounded bg-yellow-200/60 px-1 font-mono dark:bg-yellow-400/20">
+                demo@example.com
+              </code>{" "}
+              /{" "}
+              <code className="rounded bg-yellow-200/60 px-1 font-mono dark:bg-yellow-400/20">
+                demo
+              </code>
+              ). Click Sign in to continue. No real account, no real services.{" "}
+              <a
+                href="https://z4j.com/install/"
+                target="_blank"
+                rel="noopener"
+                className="font-semibold underline decoration-1 underline-offset-2 hover:decoration-2"
+              >
+                Install z4j for real
+              </a>
+              .
+            </p>
+          </div>
+        )}
 
       </div>
     </div>

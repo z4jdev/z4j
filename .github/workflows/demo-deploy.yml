@@ -1,0 +1,104 @@
+name: demo-deploy
+
+# Continuous redeploy of demo.z4j.dev on every push to main that
+# touches the dashboard or its seed data. Built via `pnpm build:demo`,
+# uploaded to the Cloudflare Pages project z4jdemo via wrangler.
+#
+# By design this fires on every dashboard change, NOT only on release
+# tags, so the demo always reflects the current production-bound code
+# rather than the most recent tagged version. See
+# DEMO-Z4J-DEV-DESIGN.md "The release / sync flow" for rationale.
+#
+# Required repository secrets (configure once at z4jdev/z4j Settings ->
+# Secrets and variables -> Actions):
+#
+#   CLOUDFLARE_API_TOKEN
+#     A scoped Cloudflare API token with permissions:
+#       Account: Cloudflare Pages:Edit
+#       Zone:    Workers Routes:Edit (only needed if custom-domain
+#                changes happen via this workflow; safe to grant)
+#     Create at: dash.cloudflare.com -> My Profile -> API Tokens.
+#
+#   CLOUDFLARE_ACCOUNT_ID
+#     The 32-char hex account ID. Visible at the bottom-right of any
+#     page on dash.cloudflare.com, or via `wrangler whoami`.
+#
+# Until both secrets are set the deploy step will fail with a wrangler
+# auth error; the build step still runs so PR-time UI breakage is
+# caught regardless.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "dashboard/**"
+      - ".github/workflows/demo-deploy.yml"
+  workflow_dispatch:
+
+# One in-flight deploy per branch. A new push cancels the previous
+# run -- the demo always reflects the newest commit, so the older
+# deploy would be obsolete anyway.
+concurrency:
+  group: demo-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy-demo:
+    name: Build + deploy demo.z4j.dev
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: pnpm install --frozen-lockfile
+
+      - name: Build demo SPA
+        working-directory: dashboard
+        run: pnpm build:demo
+
+      # Smoke check: assert dist-demo/ has the bundle, the seed data
+      # tree, and the Cloudflare Pages routing files. If any of these
+      # are missing, fail the build BEFORE talking to Cloudflare.
+      - name: Verify build output shape
+        working-directory: dashboard
+        run: |
+          set -euo pipefail
+          test -f dist-demo/index.html || { echo "::error::dist-demo/index.html missing"; exit 1; }
+          test -f dist-demo/_redirects || { echo "::error::dist-demo/_redirects missing"; exit 1; }
+          test -f dist-demo/_headers || { echo "::error::dist-demo/_headers missing"; exit 1; }
+          test -d dist-demo/demo-data/projects || { echo "::error::dist-demo/demo-data/projects missing"; exit 1; }
+          test -f dist-demo/demo-data/projects/index.json || { echo "::error::projects/index.json missing"; exit 1; }
+          test -f dist-demo/demo-data/auth/me.json || { echo "::error::auth/me.json missing"; exit 1; }
+          # Each of the four canonical projects must have a tasks file.
+          for slug in example.com fastapi.example.com django.example.com tasks.example.com; do
+            test -f "dist-demo/demo-data/projects/${slug}/tasks.json" \
+              || { echo "::error::demo-data/projects/${slug}/tasks.json missing"; exit 1; }
+          done
+          echo "Demo build output shape OK."
+
+      # Cloudflare Pages deploy. Uses wrangler-action so secrets stay
+      # masked in the workflow log. Branch=main marks this as the
+      # production deploy; preview deploys (Cloudflare's per-PR
+      # previews) are not used here because we deploy from main only.
+      - name: Deploy to Cloudflare Pages (z4jdemo)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dashboard/dist-demo --project-name=z4jdemo --branch=main --commit-dirty=true
