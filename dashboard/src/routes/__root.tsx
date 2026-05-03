@@ -12,15 +12,20 @@ export const Route = createRootRouteWithContext<RouterContext>()({
 });
 
 function RootLayout() {
-  // DemoBanner renders nothing in production builds (gated on
-  // VITE_Z4J_DEMO_MODE inside the component). In demo builds it
-  // renders the sticky top banner AND mounts the mutation-toast
-  // listener that the mock-fetch interceptor (api.demo.ts) talks
-  // to via window events.
+  // Wrap the whole app in a min-h-screen flex column so the demo
+  // banner (when rendered) takes its natural height at the top and
+  // the auth layout below it (also flex-1) fills exactly the
+  // remaining viewport. In production DemoBanner returns null so
+  // the wrapper is a one-child flex column with no visible effect.
+  // The combination prevents the "banner + auth-layout-min-h-screen
+  // = 100vh + banner_height" scroll-overflow that a naive sibling
+  // banner would introduce.
   return (
-    <>
+    <div className="flex min-h-screen flex-col">
       <DemoBanner />
-      <Outlet />
-    </>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <Outlet />
+      </div>
+    </div>
   );
 }

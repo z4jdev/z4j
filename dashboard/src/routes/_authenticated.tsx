@@ -54,7 +54,15 @@ function AuthenticatedLayout() {
 
   return (
     <SidebarProvider>
-      <div className="flex min-h-screen w-full bg-background">
+      {/* min-h-0 + flex-1 (rather than min-h-screen) so this layout
+          fills the parent flex-column's remaining space exactly.
+          In production the parent is min-h-screen flex-col with this
+          as the only flex child -- net effect is identical to
+          min-h-screen here. In demo mode the DemoBanner sibling
+          takes its natural height first; this layout fills what is
+          left, so total page height stays at viewport height with
+          no extra vertical scroll. */}
+      <div className="flex min-h-0 w-full flex-1 bg-background">
         <AppSidebar />
         <main className="flex min-w-0 flex-1 flex-col">
           <Topbar />
