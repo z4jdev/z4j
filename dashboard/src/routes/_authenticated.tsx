@@ -3,6 +3,7 @@ import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { api, ApiError } from "@/lib/api";
 import type { UserMePublic } from "@/lib/api-types";
 import { AppSidebar } from "@/components/layout/app-sidebar";
+import { DemoBanner } from "@/components/layout/demo-banner";
 import { SidebarProvider } from "@/components/layout/sidebar-context";
 import { Topbar } from "@/components/layout/topbar";
 import {
@@ -54,18 +55,21 @@ function AuthenticatedLayout() {
 
   return (
     <SidebarProvider>
-      {/* min-h-0 + flex-1 (rather than min-h-screen) so this layout
-          fills the parent flex-column's remaining space exactly.
-          In production the parent is min-h-screen flex-col with this
-          as the only flex child -- net effect is identical to
-          min-h-screen here. In demo mode the DemoBanner sibling
-          takes its natural height first; this layout fills what is
-          left, so total page height stays at viewport height with
-          no extra vertical scroll. */}
-      <div className="flex min-h-0 w-full flex-1 bg-background">
+      <div className="flex min-h-screen w-full bg-background">
         <AppSidebar />
         <main className="flex min-w-0 flex-1 flex-col">
           <Topbar />
+          {/* DemoBanner renders nothing in production (gated on
+              VITE_Z4J_DEMO_MODE). In demo builds it sits inside
+              the page content area, just below the Topbar and
+              above each page's own header. It scrolls with the
+              content like any normal page element -- no fixed
+              positioning, no z-index, no extra scrollbar. The
+              once-on-load visibility is intentional: tell the
+              user this is a demo, then get out of the way. The
+              persistent reminder lives in the toast that fires
+              on every blocked mutation. */}
+          <DemoBanner />
           <Outlet />
         </main>
       </div>
