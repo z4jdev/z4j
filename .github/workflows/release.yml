@@ -46,8 +46,13 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-extras --dev
 
-      - name: Run tests
-        run: uv run pytest -xvs tests/
+      - name: Run unit tests
+        # Post-1.4.0: tests live under backend/tests/ (the brain
+        # code that absorbed the z4j-brain dist). Integration tests
+        # need Postgres -- run unit suite only here. Comprehensive
+        # testing happens locally before tag-push per
+        # RELEASE-DISCIPLINE.md.
+        run: uv run pytest -xvs backend/tests/unit/
 
       - name: Build wheel + sdist
         run: uv build
