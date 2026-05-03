@@ -1,30 +1,36 @@
 # =============================================================================
 # z4j release Dockerfile.
 #
-# Slim runtime that pip-installs z4j-brain from PyPI. The published wheel
-# bundles the React dashboard, alembic.ini, and migrations - so this Dockerfile
-# does NOT need pnpm, Vite, or the monorepo source tree to build.
+# Slim runtime that pip-installs z4j from PyPI. The published wheel
+# bundles the React dashboard, alembic.ini, and migrations -- so this
+# Dockerfile does NOT need pnpm, Vite, or the monorepo source tree to build.
 #
 # Image is bit-identical to:
-#   pip install "z4j-brain[postgres]==${Z4J_BRAIN_VERSION}"
-#   z4j-brain serve
+#   pip install "z4j[postgres]==${Z4J_VERSION}"
+#   z4j serve
 #
 # Built by .github/workflows/release-docker.yml on tag push (multi-arch
 # native amd64 + arm64). Published as z4jdev/z4j:VERSION + :latest.
+#
+# Note on the build-arg name: the workflow passes ``Z4J_BRAIN_VERSION``
+# for backwards compatibility with the pre-1.4.0 build system (the
+# secret name on GitHub uses that key). We accept it under both names.
 # =============================================================================
 
 ARG PYTHON_VERSION=3.14
 
 FROM python:${PYTHON_VERSION}-slim-trixie AS runtime
 
-# OCI image metadata - consumed by Docker Hub UI, GitHub Container
+# OCI image metadata -- consumed by Docker Hub UI, GitHub Container
 # Registry, Syft, Trivy, Docker Scout, etc.
 ARG Z4J_BRAIN_VERSION
+ARG Z4J_VERSION
+ENV Z4J_RESOLVED_VERSION="${Z4J_VERSION:-${Z4J_BRAIN_VERSION}}"
 LABEL org.opencontainers.image.title="z4j" \
       org.opencontainers.image.description="z4j: open-source control plane for Python task infrastructure" \
-      org.opencontainers.image.version="${Z4J_BRAIN_VERSION}" \
+      org.opencontainers.image.version="${Z4J_RESOLVED_VERSION}" \
       org.opencontainers.image.source="https://github.com/z4jdev/z4j" \
-      org.opencontainers.image.url="https://pypi.org/project/z4j-brain/" \
+      org.opencontainers.image.url="https://pypi.org/project/z4j/" \
       org.opencontainers.image.documentation="https://z4j.dev" \
       org.opencontainers.image.vendor="z4j contributors" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
@@ -53,16 +59,16 @@ RUN set -eux; \
     mkdir -p /app /data; \
     chown -R z4j:z4j /app /data
 
-# Install z4j-brain from PyPI + run the leanness pass in the SAME
-# RUN so the cleanup actually frees disk in the resulting layer
-# (Docker layers are additive; cleanup in a later RUN keeps the
-# original bytes around forever). The leanness pass trims ~80 MB
-# of test fixtures, type stubs, bytecode, and unused SQLAlchemy
-# dialects (we only ship support for sqlite + postgresql; the
+# Install z4j from PyPI + run the leanness pass in the SAME RUN so
+# the cleanup actually frees disk in the resulting layer (Docker
+# layers are additive; cleanup in a later RUN keeps the original
+# bytes around forever). The leanness pass trims ~80 MB of test
+# fixtures, type stubs, bytecode, and unused SQLAlchemy dialects
+# (we only ship support for sqlite + postgresql; the
 # mssql/mysql/oracle dialect packages ship with SQLAlchemy by
-# default but z4j-brain never uses them).
+# default but z4j never uses them).
 RUN set -eux; \
-    pip install --no-cache-dir "z4j-brain[postgres]==${Z4J_BRAIN_VERSION}"; \
+    pip install --no-cache-dir "z4j[postgres]==${Z4J_RESOLVED_VERSION}"; \
     SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])"); \
     find "${SITE_PACKAGES}" -type d -name '__pycache__' -prune -exec rm -rf {} +; \
     find "${SITE_PACKAGES}" -type f -name '*.pyc' -delete; \
@@ -78,9 +84,8 @@ RUN set -eux; \
         2>/dev/null || true
 
 # Entrypoint script: auto-mint secrets if not provided, auto-migrate,
-# then exec z4j-brain. Mirrors the behavior of the dev Dockerfile so
-# users see identical first-boot UX regardless of which image variant
-# they use.
+# then exec z4j. Mirrors the dev Dockerfile's first-boot UX so users
+# see identical behavior regardless of which image variant they use.
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
@@ -116,13 +121,13 @@ RUN printf '%s\n' \
     '    } > /data/secret.env' \
     '    chmod 600 /data/secret.env' \
     '    echo "[z4j] minted fresh Z4J_SECRET + Z4J_SESSION_SECRET, persisted to /data/secret.env"' \
-    '    echo "[z4j] WARNING: evaluation mode - set Z4J_SECRET via env and back /data up for production"' \
+    '    echo "[z4j] WARNING: evaluation mode -- set Z4J_SECRET via env and back /data up for production"' \
     '  fi' \
     '  export Z4J_SECRET Z4J_SESSION_SECRET' \
     'fi' \
     '' \
     'echo "[z4j] running migrations"' \
-    'z4j-brain migrate upgrade head' \
+    'z4j migrate upgrade head' \
     'echo "[z4j] starting server"' \
     'exec "$@"' \
     > /app/entrypoint.sh && \
@@ -138,10 +143,10 @@ USER z4j
 
 EXPOSE 7700
 
-# Health endpoint check - the brain mounts /api/v1/health unauthenticated.
+# Health endpoint check -- z4j mounts /api/v1/health unauthenticated.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; \
 sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7700/api/v1/health',timeout=3).status==200 else 1)"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
-CMD ["z4j-brain", "serve"]
+CMD ["z4j", "serve"]
