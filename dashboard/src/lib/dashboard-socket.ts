@@ -61,6 +61,20 @@ export class DashboardSocket {
   private abortController = new AbortController();
 
   constructor(private opts: DashboardSocketOptions) {
+    // Demo build (VITE_Z4J_DEMO_MODE=true): there is no real backend
+    // to connect to, so do NOT open a WebSocket. The dashboard's
+    // useDashboardSocket consumers degrade gracefully when the
+    // socket never reaches "open" -- they just rely on REST refetch
+    // intervals instead of push updates. Returning early also
+    // ensures the demo build cannot accidentally make any outbound
+    // server-side connection: the static-asset GETs to Cloudflare
+    // Pages and the in-browser mock-fetch interceptor are the ONLY
+    // network egress paths.
+    if (import.meta.env.VITE_Z4J_DEMO_MODE === "true") {
+      this.closed = true;
+      this.setStatus("closed");
+      return;
+    }
     this.connect();
     // Detect laptop sleep/wake: if the tab was hidden for a long
     // time and becomes visible, force a reconnect - the browser

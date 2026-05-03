@@ -24,7 +24,8 @@
  * See DEMO-Z4J-DEV-DESIGN.md for the full architecture.
  */
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, access, writeFile } from "node:fs/promises";
+import { cp, mkdir, access, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -78,6 +79,63 @@ await writeFile(
   resolve(dashboardRoot, "dist-demo/_redirects"),
   "/*    /index.html   200\n",
 );
+// Defense-in-depth CSP for the demo build. The mock-fetch
+// interceptor + WebSocket short-circuit already prevent any
+// outbound server-side request from inside the demo SPA. The CSP
+// is the BACKSTOP: even if a future code change accidentally
+// introduces an outbound fetch / WebSocket / image / script load
+// to anywhere except this origin, the browser refuses it. Reset
+// demo and every other UI control are now physically incapable
+// of reaching any server other than demo.z4j.dev's static-asset
+// surface.
+//
+// What's allowed:
+//   default-src 'self'              -- everything from this origin
+//   script-src 'self' 'sha256-XXX'  -- bundle JS + the dist/index.html
+//                                     theme-flicker inline script
+//                                     (computed from the built
+//                                     index.html so any change to
+//                                     the inline script automatically
+//                                     re-rolls into the CSP next build)
+//   style-src 'self' 'unsafe-inline' -- Tailwind injects inline styles
+//   img-src 'self' data:            -- bundled SVG + data URIs
+//   font-src 'self' data:           -- bundled fonts + data URIs
+//   connect-src 'self'              -- fetch/XHR/WS to this origin only
+//   frame-ancestors 'none'          -- nobody can iframe demo.z4j.dev
+//   base-uri 'self'                 -- no <base> hijack
+//   form-action 'self'              -- no off-origin form posts
+//
+// Compute SHA256 of every inline <script> in dist-demo/index.html.
+// Vite typically emits at most one (the theme-flicker shim). This
+// loop tolerates multiple in case future template changes add more.
+const indexHtml = await readFile(
+  resolve(dashboardRoot, "dist-demo/index.html"),
+  "utf8",
+);
+const inlineScriptHashes = [];
+const inlineScriptRe = /<script>([\s\S]*?)<\/script>/g;
+let inlineMatch;
+while ((inlineMatch = inlineScriptRe.exec(indexHtml)) !== null) {
+  const sha = createHash("sha256").update(inlineMatch[1]).digest("base64");
+  inlineScriptHashes.push(`'sha256-${sha}'`);
+}
+console.log(
+  `[build:demo] CSP script-src includes ${inlineScriptHashes.length} inline script hash(es)`,
+);
+const scriptSrc = ["'self'", ...inlineScriptHashes].join(" ");
+
+const csp = [
+  "default-src 'self'",
+  `script-src ${scriptSrc}`,
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+].join("; ");
+
 await writeFile(
   resolve(dashboardRoot, "dist-demo/_headers"),
   [
@@ -91,6 +149,7 @@ await writeFile(
     "  X-Frame-Options: DENY",
     "  X-Content-Type-Options: nosniff",
     "  Referrer-Policy: strict-origin-when-cross-origin",
+    `  Content-Security-Policy: ${csp}`,
     "",
   ].join("\n"),
 );

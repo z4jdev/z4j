@@ -50,44 +50,68 @@ function DemoBannerInner() {
     return () => window.removeEventListener("demo:blocked-mutation", handler);
   }, []);
 
+  // Render TWO siblings:
+  //   1. The fixed banner pinned to viewport top (always visible
+  //      regardless of which scroll container is active).
+  //   2. A non-fixed spacer of equal height that occupies the same
+  //      vertical space in the document flow so the rest of the page
+  //      (sidebar, topbar, content) is pushed down and not covered.
+  //
+  // We tried `position: sticky top-0` first; it failed because the
+  // dashboard's auth layout wraps content in a flex column whose
+  // child becomes the implicit scroll container, and sticky inside
+  // a stacking context outside that container does not stay pinned
+  // when the inner container scrolls. Fixed avoids the issue
+  // entirely.
+  //
+  // The window.location.reload in "Reset demo" is purely client-side
+  // -- no server request is issued. No mutation reaches Cloudflare
+  // Pages, no state changes anywhere outside this browser tab.
+  const BANNER_H = "h-9 sm:h-10";
   return (
-    <div
-      role="banner"
-      aria-label="Demo mode"
-      className="sticky top-0 z-50 flex items-center justify-center gap-3 bg-yellow-300 px-4 py-1.5 text-xs font-medium text-yellow-950 sm:text-sm"
-    >
-      <span>
-        <strong className="font-bold">DEMO MODE</strong>
-        <span className="ml-1 hidden sm:inline">
-          {" "}
-          -- data is fake, no services connected.
+    <>
+      <div
+        role="banner"
+        aria-label="Demo mode"
+        className={`fixed inset-x-0 top-0 z-[60] flex items-center justify-center gap-3 bg-yellow-300 px-4 text-xs font-medium text-yellow-950 sm:text-sm ${BANNER_H}`}
+      >
+        <span>
+          <strong className="font-bold">DEMO MODE</strong>
+          <span className="ml-1 hidden sm:inline">
+            {" "}
+            -- data is fake, no services connected.
+          </span>
         </span>
-      </span>
-      <span className="hidden h-3 w-px bg-yellow-900/30 sm:inline-block" />
-      <button
-        type="button"
-        onClick={() => window.location.reload()}
-        className="underline decoration-1 underline-offset-2 hover:decoration-2"
-      >
-        Reset demo
-      </button>
-      <span className="h-3 w-px bg-yellow-900/30" />
-      <button
-        type="button"
-        onClick={() => navigate({ to: "/setup" }).catch(() => undefined)}
-        className="hidden underline decoration-1 underline-offset-2 hover:decoration-2 sm:inline"
-      >
-        First-boot setup
-      </button>
-      <span className="hidden h-3 w-px bg-yellow-900/30 sm:inline-block" />
-      <a
-        href="https://z4j.com/install/"
-        target="_blank"
-        rel="noopener"
-        className="underline decoration-1 underline-offset-2 hover:decoration-2"
-      >
-        Install z4j for real
-      </a>
-    </div>
+        <span className="hidden h-3 w-px bg-yellow-900/30 sm:inline-block" />
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="underline decoration-1 underline-offset-2 hover:decoration-2"
+        >
+          Reset demo
+        </button>
+        <span className="h-3 w-px bg-yellow-900/30" />
+        <button
+          type="button"
+          onClick={() => navigate({ to: "/setup" }).catch(() => undefined)}
+          className="hidden underline decoration-1 underline-offset-2 hover:decoration-2 sm:inline"
+        >
+          First-boot setup
+        </button>
+        <span className="hidden h-3 w-px bg-yellow-900/30 sm:inline-block" />
+        <a
+          href="https://z4j.com/install/"
+          target="_blank"
+          rel="noopener"
+          className="underline decoration-1 underline-offset-2 hover:decoration-2"
+        >
+          Install z4j for real
+        </a>
+      </div>
+      {/* Spacer so the rest of the page is pushed down and the
+          fixed banner does not overlap the topbar. Height MUST
+          match the banner's height above. */}
+      <div aria-hidden="true" className={BANNER_H} />
+    </>
   );
 }
