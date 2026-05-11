@@ -224,7 +224,7 @@ async def list_agents(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
     agents = AgentRepository(db_session)
@@ -265,7 +265,7 @@ async def create_agent(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 
@@ -336,7 +336,7 @@ async def revoke_agent(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 

@@ -42,7 +42,7 @@ from z4j_brain.persistence.enums import TaskPriority, TaskState
 #: under the same project_id always derives the same brain-side
 #: id (idempotent across replays) but DIFFERENT project_ids
 #: cannot ever collide on the same brain-side id (closes the
-#: cross-project censorship vector - R3 finding H1).
+#: cross-project censorship vector).
 _EVENT_ID_NAMESPACE = UUID("c4d2c84e-2f0a-4b6c-9c5b-1d6f9a1e7c2a")
 
 #: Bounds for the ``occurred_at`` clamp. We accept events up to
@@ -51,15 +51,15 @@ _EVENT_ID_NAMESPACE = UUID("c4d2c84e-2f0a-4b6c-9c5b-1d6f9a1e7c2a")
 #: This protects against malicious agents picking an
 #: ``occurred_at`` outside the pre-created partition window
 #: (which would raise ``no partition of relation "events" found``
-#: on Postgres) - R3 finding C2. It also protects against an
-#: attacker using a far-future timestamp to dodge dedupe.
+#: on Postgres). It also protects against an attacker using a
+#: far-future timestamp to dodge dedupe.
 _OCCURRED_AT_PAST_LIMIT = timedelta(days=400)
-#: Tight future clamp (60s, down from 5 min) so a hostile agent
-#: cannot stamp ``task.succeeded`` 4m59s in the future to "lock"
-#: a task's state column against every legitimate subsequent
-#: event within the window. 60 s is plenty of slack for NTP
-#: drift between the agent's clock and the brain's - the
-#: ReplayGuard's freshness window is already ±60 s. R5 H1.
+#: Tight future clamp (60s) so a hostile agent cannot stamp
+#: ``task.succeeded`` minutes in the future to "lock" a task's
+#: state column against every legitimate subsequent event within
+#: the window. 60s is plenty of slack for NTP drift between the
+#: agent's clock and the brain's; the ReplayGuard's freshness
+#: window is already ±60s.
 _OCCURRED_AT_FUTURE_LIMIT = timedelta(seconds=60)
 
 if TYPE_CHECKING:
@@ -75,10 +75,42 @@ if TYPE_CHECKING:
 logger = structlog.get_logger("z4j.brain.event_ingestor")
 
 
+def _looks_like_deadlock(exc: BaseException) -> bool:
+    """Best-effort detection of a Postgres serialisation/deadlock error.
+
+    Used by the per-event savepoint retry path. The exact
+    ``DeadlockDetectedError`` lives in ``asyncpg.exceptions`` but
+    the SQLAlchemy wrapper boxes it in ``DBAPIError``; we match
+    against the SQLSTATE if available, then fall back to a substring
+    check so the path also catches the SQLite ``OperationalError:
+    database is locked`` and the cockroachdb / yugabyte equivalents
+    that operators may run.
+    """
+    sqlstate = getattr(getattr(exc, "orig", exc), "sqlstate", None)
+    if sqlstate in {"40P01", "40001"}:
+        return True
+    msg = str(exc).lower()
+    return any(token in msg for token in (
+        "deadlock", "could not serialize", "database is locked",
+        "lock_not_available", "current transaction is aborted",
+    ))
+
+
 #: Map from agent-side EventKind to the TaskState the brain should
 #: project onto the ``tasks`` row. Events whose state mapping is
 #: None do not change the task's state column (e.g. heartbeat-only
 #: events, schedule events).
+# Terminal task states. Used by the state-machine guard to decide
+# whether a late-arriving event with an earlier occurred_at should
+# be allowed to overwrite the current row's state. A terminal state
+# ALWAYS wins over a non-terminal state regardless of timestamp;
+# within the same tier the monotonic-timestamp guard applies.
+_TERMINAL_TASK_STATES = frozenset({
+    TaskState.SUCCESS,
+    TaskState.FAILURE,
+    TaskState.REVOKED,
+})
+
 _STATE_FOR_KIND: dict[EventKind, TaskState | None] = {
     EventKind.TASK_RECEIVED: TaskState.RECEIVED,
     EventKind.TASK_STARTED: TaskState.STARTED,
@@ -115,13 +147,13 @@ class EventIngestor:
         Per-event redaction failures do NOT poison the batch - the
         bad event is logged + skipped, the rest still ingest.
 
-        Worker upserts and the agent heartbeat are batched (v1.0.15
-        P-1): instead of one ``upsert_from_event`` per event +
-        ``touch_heartbeat`` at the end (N+1 round-trips), we
-        accumulate ``(engine, worker_name) -> max_occurred_at`` while
-        iterating and emit ONE bulk upsert + ONE
-        ``touch_heartbeat_at`` after the loop. Saves ~N round-trips
-        per batch on the workers + agents tables.
+        Worker upserts and the agent heartbeat are batched: instead
+        of one ``upsert_from_event`` per event + ``touch_heartbeat``
+        at the end (N+1 round-trips), we accumulate
+        ``(engine, worker_name) -> max_occurred_at`` while iterating
+        and emit ONE bulk upsert + ONE ``touch_heartbeat_at`` after
+        the loop. Saves ~N round-trips per batch on the workers +
+        agents tables.
         """
         new_count = 0
         # Accumulator for worker upserts. Key is (engine, name);
@@ -129,12 +161,10 @@ class EventIngestor:
         # in this batch. We pick max so a stale event late in the
         # batch can't roll the worker's heartbeat backwards.
         worker_seen: dict[tuple[str, str], datetime] = {}
-        # Round-7 audit fix R7-HIGH (perf) (Apr 2026): same trick
-        # for queue touches. Pre-fix every event with a ``queue``
-        # field fired its own ``queue_repo.touch`` round-trip, a
-        # 1000-event batch all in one queue did 1000 upserts. Now
-        # we collect ``(engine, name)`` while iterating and emit
-        # one ``touch`` per unique pair after the loop.
+        # Same dedup trick for queue touches: collect
+        # ``(engine, name)`` pairs while iterating and emit one
+        # ``touch`` per unique pair after the loop, so a 1000-event
+        # batch all hitting one queue does 1 upsert instead of 1000.
         queues_seen: set[tuple[str, str]] = set()
         # Track max(occurred_at) across the whole batch so the agent
         # heartbeat carries a real event timestamp instead of racing
@@ -142,35 +172,86 @@ class EventIngestor:
         # skew between brain replicas reorder agent liveness).
         batch_max_occurred_at: datetime | None = None
 
+        # Wrap each per-event ingest in its own savepoint
+        # (``session.begin_nested()``) so a deadlock on event N rolls
+        # back only event N's writes - the parent transaction stays
+        # alive and the rest of the batch survives. Without per-event
+        # savepoints a single deadlock would put asyncpg into
+        # ``aborted`` state and every subsequent statement would
+        # raise ``InFailedSqlTransactionError``, losing every
+        # innocent event in the batch.
+        #
+        # The retry path runs the same event ONCE more inside a fresh
+        # savepoint (covers the typical 2-process deadlock cycle
+        # where one transaction wins on the retry). If the retry also
+        # deadlocks we log + skip that single event; the rest of the
+        # batch survives.
+        from sqlalchemy.exc import DBAPIError, OperationalError
+        session_obj = event_repo.session
         for raw_event in events:
-            try:
-                event_max = await self._ingest_one(
-                    raw_event=raw_event,
-                    project_id=project_id,
-                    agent_id=agent_id,
-                    event_repo=event_repo,
-                    task_repo=task_repo,
-                    queue_repo=queue_repo,
-                    worker_seen=worker_seen,
-                    queues_seen=queues_seen,
-                )
-                if event_max is None:
-                    # Per-event ingest skipped (bad envelope, dup, etc.)
-                    continue
-                inserted, occurred_at = event_max
-                if inserted:
-                    new_count += 1
-                if (
-                    batch_max_occurred_at is None
-                    or occurred_at > batch_max_occurred_at
-                ):
-                    batch_max_occurred_at = occurred_at
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "z4j event_ingestor: per-event ingest failed; skipping",
-                    project_id=str(project_id),
-                    agent_id=str(agent_id),
-                )
+            for _attempt in (1, 2):
+                try:
+                    async with session_obj.begin_nested():
+                        event_max = await self._ingest_one(
+                            raw_event=raw_event,
+                            project_id=project_id,
+                            agent_id=agent_id,
+                            event_repo=event_repo,
+                            task_repo=task_repo,
+                            queue_repo=queue_repo,
+                            worker_seen=worker_seen,
+                            queues_seen=queues_seen,
+                        )
+                except (OperationalError, DBAPIError) as exc:
+                    # Deadlock / serialization failure / similar
+                    # transient SQL error. ``begin_nested`` already
+                    # rolled the savepoint back, so the parent
+                    # transaction is intact - retry once.
+                    if _attempt == 1 and _looks_like_deadlock(exc):
+                        logger.info(
+                            "z4j event_ingestor: per-event deadlock; "
+                            "retrying inside fresh savepoint",
+                            project_id=str(project_id),
+                            agent_id=str(agent_id),
+                        )
+                        continue
+                    # Non-deadlock SQL error after retry: the
+                    # savepoint already rolled back the failing
+                    # event's writes; we log + skip it. The rest of
+                    # the batch can still commit cleanly. Re-raising
+                    # would force the agent to re-send the entire
+                    # batch on reconnect, which under sustained
+                    # contention amplifies latency by an order of
+                    # magnitude (round-13 perf observed 8s+ p99
+                    # under that retry-pressure path). Skipping a
+                    # truly-broken event (poison message that
+                    # repeatably fails) is the correct trade.
+                    logger.exception(
+                        "z4j event_ingestor: per-event SQL error; skipping",
+                        project_id=str(project_id),
+                        agent_id=str(agent_id),
+                    )
+                    break
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "z4j event_ingestor: per-event ingest failed; skipping",
+                        project_id=str(project_id),
+                        agent_id=str(agent_id),
+                    )
+                    break
+                else:
+                    if event_max is None:
+                        # Per-event ingest skipped (bad envelope, dup, etc.)
+                        break
+                    inserted, occurred_at = event_max
+                    if inserted:
+                        new_count += 1
+                    if (
+                        batch_max_occurred_at is None
+                        or occurred_at > batch_max_occurred_at
+                    ):
+                        batch_max_occurred_at = occurred_at
+                    break
 
         # Bulk worker upsert. One round-trip for the whole batch.
         # Wrapped in a savepoint with per-row fallback so a deadlock
@@ -184,8 +265,8 @@ class EventIngestor:
                 worker_seen=worker_seen,
             )
 
-        # Round-7 audit fix R7-HIGH (perf): one queue.touch per
-        # unique (engine, queue) pair seen in the batch. Each
+        # One queue.touch per unique (engine, queue) pair seen in
+        # the batch. Each
         # ``touch`` is wrapped to make a single failure non-fatal
         # for the whole batch, matching the prior per-event
         # try/except.
@@ -295,7 +376,7 @@ class EventIngestor:
         Worker hostnames carried in the event payload are recorded
         into ``worker_seen`` (an out-parameter dict) instead of
         being upserted inline; the caller flushes them as one bulk
-        statement after the loop (v1.0.15 P-1).
+        statement after the loop.
         """
         # Redaction defense in depth.
         scrubbed = self._redaction.scrub(raw_event)
@@ -330,14 +411,39 @@ class EventIngestor:
         # 2. Project A and Project B can never collide on the same
         #    brain-side id, even if their agents pick the same
         #    raw uuid. Project-A agent CAN'T censor Project-B's
-        #    events by picking known ids (R3 finding H1).
+        #    events by picking known ids.
         #
         # If the agent omitted the id (or sent an unparseable /
         # nil / max / non-v4-v7 value - see _coerce_event_id), we
         # mint a fresh uuid4 with a logged warning. Idempotency
         # is lost for that single event but the system stays safe.
         agent_event_id = _coerce_event_id(scrubbed.get("id"))
-        if agent_event_id is None:
+
+        # For events that carry a task_id,
+        # derive the brain-side event_id from the CONTENT
+        # ``(project_id, task_id, kind, occurred_at_unix_seconds)``
+        # rather than from the agent-supplied id. This dedupes the
+        # celery-events fanout where 9 agents each receive every
+        # task lifecycle event from the broker (different agents
+        # generate different ids for the same logical event, so the
+        # legacy agent-id-keyed dedupe missed them and the brain
+        # inserted 9 rows per task per kind). The new key collapses
+        # them to ONE row.
+        #
+        # Why second-precision: a real legitimate "duplicate" within
+        # the same second is impossible (same task can't run twice
+        # per second per worker for celery's lifecycle events). A
+        # genuine retry produces different occurred_at values seconds
+        # apart and gets a distinct id. Heartbeats / agent_status
+        # frames have no task_id and stay on the legacy agent-id key
+        # so per-agent freshness is preserved.
+        if task_id:
+            occurred_at_int = int(occurred_at.timestamp())
+            event_id = uuid5(
+                _EVENT_ID_NAMESPACE,
+                f"{project_id}:{task_id}:{kind.value}:{occurred_at_int}",
+            )
+        elif agent_event_id is None:
             event_id = uuid4()
             logger.warning(
                 "z4j event_ingestor: agent omitted or sent invalid event id, "
@@ -379,8 +485,7 @@ class EventIngestor:
         )
 
         # 2) Touch the queue if mentioned.
-        # Round-7 audit fix R7-HIGH (perf) (Apr 2026): defer the
-        # touch when a batch-level dedup set was supplied; the
+        # Defer the touch when a batch-level dedup set was supplied; the
         # caller (``ingest_batch``) flushes one touch per unique
         # ``(engine, queue)`` pair after the loop. Keeps the legacy
         # eager path for any caller that doesn't batch.
@@ -400,9 +505,9 @@ class EventIngestor:
 
         # 3) Record the worker into the batch-level accumulator.
         # The bulk upsert runs once after the whole batch is in;
-        # see :meth:`ingest_batch` (v1.0.15 P-1). Picking max
-        # occurred_at means a stale event arriving late in the
-        # batch can't roll the worker's heartbeat backwards.
+        # see :meth:`ingest_batch`. Picking max occurred_at means
+        # a stale event arriving late in the batch can't roll
+        # the worker's heartbeat backwards.
         worker_name = data.get("worker") if isinstance(data, dict) else None
         if isinstance(worker_name, str) and worker_name:
             key = (engine, worker_name)
@@ -554,11 +659,55 @@ class EventIngestor:
 
         new_state = _STATE_FOR_KIND.get(kind)
         if new_state is not None:
-            if (
+            # Audit F-3 (1.5): the monotonic-timestamp guard was
+            # designed to prevent a late ``task.started`` from
+            # rewinding a finished ``task.succeeded``. But it also
+            # dropped legitimate terminal events that arrived with
+            # an earlier ``occurred_at`` than a non-terminal event
+            # already in the row - common during reconnect-replay
+            # bursts where the agent's buffer drains in non-strict
+            # chronological order, and also when Celery's broker-
+            # events monitor reports a child-process-emitted
+            # ``task.started`` AFTER signals.task_postrun has
+            # already emitted ``task.succeeded`` from the parent
+            # (broker latency >> signal handler latency).
+            #
+            # Refined rule: terminal states (SUCCESS, FAILURE,
+            # REVOKED) ALWAYS win over non-terminal states (PENDING,
+            # RECEIVED, STARTED, RETRY) regardless of timestamp
+            # ordering. Within the terminal set, the timestamp
+            # ordering still applies (so a stale .succeeded does
+            # not overwrite a fresher .failed and vice versa).
+            # Within the non-terminal set, the timestamp ordering
+            # also still applies (a stale .started does not
+            # overwrite a fresher .received).
+            current_state = (
+                existing_task.state if existing_task else None
+            )
+            current_terminal = current_state in _TERMINAL_TASK_STATES
+            new_terminal = new_state in _TERMINAL_TASK_STATES
+            if new_terminal and not current_terminal:
+                # Promote to terminal regardless of timestamp - the
+                # task is provably done; non-terminal can't argue.
+                updates["state"] = new_state
+            elif not new_terminal and current_terminal:
+                # Never demote terminal back to non-terminal.
+                logger.debug(
+                    "z4j event_ingestor: refusing to demote terminal "
+                    "state with non-terminal event",
+                    project_id=str(project_id),
+                    task_id=task_id,
+                    event_kind=kind.value,
+                    current_state=current_state.value if current_state else None,
+                )
+            elif (
                 existing_latest is not None
                 and occurred_at < existing_latest
             ):
-                # Stale event - keep the state column alone.
+                # Same-tier transition (terminal->terminal or
+                # non-terminal->non-terminal): keep timestamp
+                # monotonicity. Stale event for the same tier is
+                # dropped.
                 logger.info(
                     "z4j event_ingestor: dropping out-of-order state transition",
                     project_id=str(project_id),
@@ -679,7 +828,7 @@ class EventIngestor:
 
             record_swallowed("event_ingestor", "task_metrics")
 
-        # Round-7 audit fix R7-HIGH (perf) (Apr 2026): pass the
+        # Pass the
         # ``existing_task`` we already loaded above so
         # ``upsert_from_event`` skips its own redundant SELECT.
         await task_repo.upsert_from_event(
@@ -756,12 +905,12 @@ def _task_latest_lifecycle_at(task: Any) -> datetime | None:
     ``received_at`` in that order (most recent lifecycle stage
     wins). Returns None when the task row doesn't exist yet.
 
-    **Defence in depth (R5 H1):** even though the ingest path
-    clamps incoming ``occurred_at`` to ``now + 60s``, an older
-    row may still carry a timestamp from before the clamp was
-    tightened. We apply ``min(ts, now)`` here so the guard can
-    never "pin" a task's state by comparing against a future
-    timestamp baked into its lifecycle columns.
+    **Defence in depth:** even though the ingest path clamps
+    incoming ``occurred_at`` to ``now + 60s``, an older row may
+    still carry a timestamp from before the clamp was tightened.
+    We apply ``min(ts, now)`` here so the guard can never "pin"
+    a task's state by comparing against a future timestamp baked
+    into its lifecycle columns.
     """
     if task is None:
         return None
@@ -834,7 +983,7 @@ def _clamp_occurred_at(
 
     Defends against:
 
-    - **DoS via unpartitioned timestamp** (R3 finding C2): the
+    - **DoS via unpartitioned timestamp**: the
       partitioned events table only has partitions pre-created
       for a finite window. A timestamp outside that window
       raises ``no partition of relation "events" found`` on

@@ -88,8 +88,7 @@ class TriggerScheduleClient:
         self._settings = settings
         self._channel: grpc.aio.Channel | None = None
         self._stub: pb_grpc.SchedulerServiceStub | None = None
-        # Round-7 audit fix R7-MED (race) (Apr 2026): serialise
-        # connect/close. Without this, two concurrent ``trigger()``
+        # Serialise connect/close. Without this, two concurrent ``trigger()``
         # callers could both see ``self._channel is None``, both
         # build a ``secure_channel``, both assign, the loser's
         # channel leaks (no ``close()``, no GC because of grpc-aio

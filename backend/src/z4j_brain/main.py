@@ -130,7 +130,7 @@ def create_app(
 
     hasher = PasswordHasher(settings)
 
-    # Audit fix CRIT-3 (1.2.2 fifth-pass): run the canonical-fields
+    # Run the canonical-fields
     # round-trip drift guard at startup so a future regression is
     # caught early, but BEFORE we've started the brain proper, so
     # the operator sees a clean error rather than a half-booted
@@ -167,15 +167,14 @@ def create_app(
     # that owns the WebSocket. It loads the command row, signs the
     # frame, pushes it to the WS, and marks the row dispatched.
     #
-    # Round-6 audit fix WS-HIGH-1 (Apr 2026): claim FIRST, push
-    # second. ``mark_dispatched`` is a conditional UPDATE
-    # (``WHERE status=PENDING``) so two concurrent callers race
-    # for the claim - only the winner pushes. Pre-fix the push
-    # ran before the claim, so the WS gateway drain + the
+    # Claim FIRST, push second. ``mark_dispatched`` is a
+    # conditional UPDATE (``WHERE status=PENDING``) so two
+    # concurrent callers race for the claim - only the winner
+    # pushes. Without this ordering the WS gateway drain + the
     # registry reconcile loop could each push the same command
-    # to the same agent. Agent's in-memory dedup catches this
+    # to the same agent; the agent's in-memory dedup catches it
     # within 300s, but a process restart between the two pushes
-    # = duplicate execution for destructive commands.
+    # would mean duplicate execution for destructive commands.
     async def deliver_local(command_id: UUID, ws: WebSocket) -> bool:
         from z4j_brain.persistence.repositories import CommandRepository
 
@@ -277,7 +276,8 @@ def create_app(
         if settings.embedded_scheduler_pki_dir:
             pki_dir = _PkiPath(settings.embedded_scheduler_pki_dir)
         else:
-            pki_dir = _PkiPath.home() / ".z4j" / "embedded-pki"
+            from z4j_core.paths import z4j_home as _z4j_home
+            pki_dir = _z4j_home() / "embedded-pki"
         embedded_pki = mint_loopback_pki(pki_dir)
         # Derive a settings copy with the auto-minted PKI + forced
         # scheduler_grpc_enabled. ``model_copy`` bypasses the frozen
@@ -374,15 +374,15 @@ def create_app(
         ),
     ]
     if settings.scheduler_grpc_enabled:
-        # Round-4 audit fix (Apr 2026): wrap each scheduler-grpc
-        # worker tick in a per-worker Postgres advisory lock so
-        # multi-replica brain deployments only run one tick per
-        # interval globally. Pre-fix every replica ran every tick
-        # → duplicate work, duplicate audit rows, duplicate
+        # Wrap each scheduler-grpc worker tick in a per-worker
+        # Postgres advisory lock so multi-replica brain
+        # deployments only run one tick per interval globally.
+        # Otherwise every replica would run every tick →
+        # duplicate work, duplicate audit rows, duplicate
         # dispatcher calls. The lock id is a stable hash of the
-        # worker name; the lock is xact-scoped (auto-released on
-        # tick end or crash). SQLite no-ops the lock - single-
-        # writer DB so no contention possible.
+        # worker name; the lock is xact-scoped (auto-released
+        # on tick end or crash). SQLite no-ops the lock since
+        # it's a single-writer DB so no contention possible.
         from z4j_brain.domain.workers._leader_lock import (
             acquire_per_worker_lock,
         )
@@ -529,7 +529,7 @@ def create_app(
             settings.notifications_webhook_allow_http,
         )
 
-        # Round-4 audit fix (Apr 2026): start the denial-audit
+        # Start the denial-audit
         # queue drain task. The error middleware enqueues
         # denial-audit events fire-and-forget; this task drains
         # them on its own session (avoiding the per-request
@@ -575,6 +575,15 @@ def create_app(
                 "audit_last_deleted": audit_sweeper.last_deleted,
                 "audit_last_run_at": audit_sweeper.last_run_at,
                 "audit_error": audit_sweeper.last_error,
+                # 1.5.0: agent_status_history retention counters.
+                # Same sweeper, separate stream + retention knob
+                # (event_retention_days, not audit_retention_days).
+                "agent_status_pruned_total": (
+                    audit_sweeper.total_agent_status_deleted
+                ),
+                "agent_status_last_deleted": (
+                    audit_sweeper.last_agent_status_deleted
+                ),
                 "wal_pages_last": wal_checkpoint.last_pages_checkpointed,
                 "wal_last_run_at": wal_checkpoint.last_run_at,
                 "wal_error": wal_checkpoint.last_error,
@@ -604,59 +613,93 @@ def create_app(
         if scheduler_grpc_server is not None:
             try:
                 await scheduler_grpc_server.start()
-            except Exception:  # noqa: BLE001
-                # Hard failure here means TLS material is missing or
-                # the bind port is taken. Brain still serves REST so
-                # operators can investigate, but the scheduler will
-                # be unable to connect. Log critical so the operator
-                # sees it without scrolling.
+            except Exception as exc:  # noqa: BLE001
+                # In production we MUST refuse to start when
+                # scheduler_grpc cannot. Operator who
+                # fat-fingers ``Z4J_SCHEDULER_GRPC_INSECURE=true`` in
+                # production previously got a healthy-looking brain
+                # whose scheduler integration was silently broken.
+                # In dev we keep the soft-fail so a missing TLS
+                # bundle doesn't block local iteration.
                 logger.critical(
-                    "z4j scheduler_grpc start failed; scheduler "
-                    "will be unable to connect",
+                    "z4j scheduler_grpc start failed",
                     exc_info=True,
+                    environment=settings.environment,
                 )
+                if settings.environment == "production":
+                    raise RuntimeError(
+                        "scheduler_grpc failed to start in production "
+                        f"(environment={settings.environment!r}); "
+                        "refusing to bind brain HTTP. Original error: "
+                        f"{exc!r}",
+                    ) from exc
 
         # Embedded scheduler sidecar - spawn AFTER the gRPC server
         # is up so the subprocess's first connect attempt finds it
         # bound. The supervisor's auto-restart handles the (rare)
         # transient where the subprocess wins the race anyway.
+        #
+        # Multi-worker safety: under ``--workers=N`` every uvicorn
+        # worker runs this lifespan. Without leader-locking each
+        # worker would spawn its own ``z4j-scheduler`` subprocess
+        # and all N would race for port 7800. We gate the spawn on
+        # a session-scoped Postgres advisory lock so only ONE
+        # worker per brain process group spawns. The other workers
+        # log + skip; if the leader worker dies, Postgres releases
+        # the lock on connection close and the next lifespan to
+        # acquire takes over.
         nonlocal embedded_supervisor
         if (
             settings.embedded_scheduler
             and scheduler_grpc_server is not None
             and scheduler_grpc_server.bound_port > 0
         ):
-            from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
-                EmbeddedSchedulerSupervisor,
+            from z4j_brain.domain.workers._leader_lock import (  # noqa: PLC0415
+                try_acquire_singleton_lock,
             )
 
-            embedded_supervisor = EmbeddedSchedulerSupervisor(
-                settings=settings,
-                pki=embedded_pki,
-                # The subprocess always connects via loopback.
-                # ``bind_host=0.0.0.0`` on the brain side covers
-                # both loopback and external connects; we just hand
-                # the subprocess ``127.0.0.1`` because that's the
-                # only SAN on the auto-minted server cert.
-                brain_grpc_host="127.0.0.1",
-                brain_grpc_port=scheduler_grpc_server.bound_port,
-                brain_rest_url=f"http://127.0.0.1:{settings.bind_port}",
+            got_lock = await try_acquire_singleton_lock(
+                db, "embedded_scheduler_supervisor",
             )
-            try:
-                await embedded_supervisor.start()
-            except Exception:  # noqa: BLE001
-                logger.critical(
-                    "z4j embedded scheduler supervisor start "
-                    "failed; brain will keep running but the embedded "
-                    "scheduler is down. Set Z4J_EMBEDDED_SCHEDULER=0 "
-                    "and run a separate scheduler container if this "
-                    "persists.",
-                    exc_info=True,
+            if not got_lock:
+                logger.info(
+                    "z4j embedded scheduler: another brain worker holds "
+                    "the supervisor lock; skipping spawn in this worker",
                 )
+                # Skip spawn in this worker; the leader handles it.
+                # Fall through to the rest of the lifespan.
                 embedded_supervisor = None
+            else:
+                from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
+                    EmbeddedSchedulerSupervisor,
+                )
 
-        # Round-8 audit fix R8-Bootstrap-MED (Apr 2026): mark the
-        # lifespan as ready AFTER all background subsystems
+                embedded_supervisor = EmbeddedSchedulerSupervisor(
+                    settings=settings,
+                    pki=embedded_pki,
+                    # The subprocess always connects via loopback.
+                    # ``bind_host=0.0.0.0`` on the brain side covers
+                    # both loopback and external connects; we just hand
+                    # the subprocess ``127.0.0.1`` because that's the
+                    # only SAN on the auto-minted server cert.
+                    brain_grpc_host="127.0.0.1",
+                    brain_grpc_port=scheduler_grpc_server.bound_port,
+                    brain_rest_url=f"http://127.0.0.1:{settings.bind_port}",
+                )
+                try:
+                    await embedded_supervisor.start()
+                except Exception:  # noqa: BLE001
+                    logger.critical(
+                        "z4j embedded scheduler supervisor start "
+                        "failed; brain will keep running but the embedded "
+                        "scheduler is down. Set Z4J_EMBEDDED_SCHEDULER=0 "
+                        "and run a separate scheduler container if this "
+                        "persists.",
+                        exc_info=True,
+                    )
+                    embedded_supervisor = None
+
+        # Mark the lifespan as ready AFTER all background subsystems
         # (registry, worker supervisor, dashboard hub, embedded
         # scheduler if enabled) are up. The /health/ready probe
         # gates on this flag so k8s readiness doesn't flip "ready"
@@ -665,9 +708,9 @@ def create_app(
         try:
             yield
         finally:
-            # Round-8 audit fix R8-Bootstrap-MED: clear ready flag
-            # the moment we begin shutdown so /health/ready returns
-            # 503 and load balancers stop sending new traffic.
+            # Clear the ready flag the moment we begin shutdown
+            # so /health/ready returns 503 and load balancers
+            # stop sending new traffic.
             app.state.lifespan_ready = False
             # Stop the embedded scheduler subprocess FIRST so it can
             # cleanly drain any in-flight RPC against the gRPC
@@ -715,7 +758,7 @@ def create_app(
                 await registry.stop()
             except Exception:  # noqa: BLE001
                 logger.exception("z4j registry stop crashed")
-            # Round-4 audit fix (Apr 2026): drain the denial-audit
+            # Drain the denial-audit
             # queue before tearing down the DB. Best-effort with a
             # bounded wait so a clogged queue doesn't block
             # shutdown indefinitely.
@@ -837,6 +880,10 @@ def create_app(
     from z4j_brain.api import system as system_api  # noqa: PLC0415
 
     app.include_router(system_api.router, prefix="/api/v1")
+    # 1.5.0: admin-scoped /admin/settings (read-only effective config).
+    from z4j_brain.api import admin_settings as admin_settings_api  # noqa: PLC0415
+
+    app.include_router(admin_settings_api.router, prefix="/api/v1")
     app.include_router(agent_longpoll_api.router, prefix="/api/v1")
     # Invitations - two routers (admin project-scoped + public accept).
     app.include_router(invitations_api.admin_router, prefix="/api/v1")

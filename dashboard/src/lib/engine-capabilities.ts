@@ -20,7 +20,7 @@
  * silently restrict schedules for a future engine adapter.
  */
 
-export type ScheduleKind = "cron" | "interval" | "one_shot" | "solar";
+export type ScheduleKind = "cron" | "interval" | "clocked" | "solar";
 
 export interface EngineCaps {
   /** Kinds the engine + its z4j adapter pair supports. */
@@ -46,7 +46,7 @@ export interface EngineCaps {
  * break the form before the map is updated.
  */
 const _DEFAULT_CAPS: EngineCaps = {
-  kinds: ["cron", "interval", "one_shot", "solar"],
+  kinds: ["cron", "interval", "clocked", "solar"],
   hasQueues: true,
   queueHint: "",
 };
@@ -60,7 +60,7 @@ const _ENGINE_CAPS: Record<string, EngineCaps> = {
   celery: {
     // celery via z4j-celery + (z4j-celerybeat | z4j-scheduler) is
     // the most capable adapter pair. All four kinds work.
-    kinds: ["cron", "interval", "one_shot", "solar"],
+    kinds: ["cron", "interval", "clocked", "solar"],
     hasQueues: true,
     queueHint:
       "Celery routing key. Maps to broker queue (RabbitMQ vhost queue / Redis list).",
@@ -70,7 +70,7 @@ const _ENGINE_CAPS: Record<string, EngineCaps> = {
     // enqueue_at. No native solar support; operator who needs
     // solar on RQ would compute the next event in their task and
     // re-enqueue.
-    kinds: ["cron", "interval", "one_shot"],
+    kinds: ["cron", "interval", "clocked"],
     hasQueues: true,
     queueHint: "RQ queue name. Workers attach to one or more named queues.",
   },
@@ -86,7 +86,7 @@ const _ENGINE_CAPS: Record<string, EngineCaps> = {
     // arq has cron jobs (defined statically, not dynamic) + delayed
     // jobs (one_shot equivalent via enqueue_job(_defer_until=...)).
     // No queue concept - all jobs go to one Redis stream.
-    kinds: ["cron", "interval", "one_shot"],
+    kinds: ["cron", "interval", "clocked"],
     hasQueues: false,
     queueHint:
       "arq has no queue routing - all jobs share one Redis stream.",
@@ -102,7 +102,7 @@ const _ENGINE_CAPS: Record<string, EngineCaps> = {
   taskiq: {
     // taskiq supports scheduling via taskiq-scheduler. Most
     // brokers support queue routing.
-    kinds: ["cron", "interval", "one_shot"],
+    kinds: ["cron", "interval", "clocked"],
     hasQueues: true,
     queueHint:
       "taskiq label that the broker routes on (e.g. RabbitMQ binding key).",

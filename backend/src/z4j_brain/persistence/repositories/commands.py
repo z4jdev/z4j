@@ -41,18 +41,19 @@ class CommandRepository(BaseRepository[Command]):
     ) -> Command:
         """Insert a Command row. Idempotent on (project_id, idempotency_key).
 
-        Round-4 audit fix (Apr 2026): when ``idempotency_key`` is set
-        and a row with the same ``(project_id, idempotency_key)``
-        already exists, return the existing row instead of raising
-        ``IntegrityError``. Pre-fix, two scheduler instances ticking
-        the same schedule (HA failover, retry-after-timeout, or two
-        brain replicas behind a load balancer both serving a
-        retried FireSchedule) both minted the same deterministic
-        ``fire_id = uuid5(NAMESPACE, schedule_id + scheduled_for)``;
-        the second insert raised IntegrityError; the FireSchedule
-        handler reported ``brain_error`` to the scheduler; the
-        scheduler retried; the schedule wedged per-fire until
-        something else broke the cycle.
+        When ``idempotency_key`` is set and a row with the same
+        ``(project_id, idempotency_key)`` already exists, returns
+        the existing row instead of raising ``IntegrityError``.
+        Without this, two scheduler instances ticking the same
+        schedule (HA failover, retry-after-timeout, or two brain
+        replicas behind a load balancer both serving a retried
+        FireSchedule) would both mint the same deterministic
+        ``fire_id = uuid5(NAMESPACE, schedule_id +
+        scheduled_for)``; the second insert raises
+        IntegrityError; the FireSchedule handler reports
+        ``brain_error`` to the scheduler; the scheduler retries;
+        the schedule wedges per-fire until something else breaks
+        the cycle.
 
         With idempotent insert, the second caller gets the same
         Command back as if it had won the race, the dispatcher's

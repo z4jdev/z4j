@@ -77,12 +77,13 @@ class UserAdminPublic(BaseModel):
 
 
 def _validate_user_timezone(value: str | None) -> str | None:
-    """Round-8 audit fix R8-Pyd-MED (Apr 2026): IANA tz validation.
+    """IANA tz validation.
 
-    Mirrors the schedule API's tz validator. Pre-fix any 64-char
-    string was accepted, so a typo like ``"America/New York"`` (with
-    a space) was persisted on the user row, breaking dashboard
-    renders that fed it to ``zoneinfo.ZoneInfo`` later.
+    Mirrors the schedule API's tz validator. Without this, any
+    64-char string would be accepted, so a typo like
+    ``"America/New York"`` (with a space) would be persisted on
+    the user row, breaking dashboard renders that feed it to
+    ``zoneinfo.ZoneInfo`` later.
     """
     if value is None or value == "":
         return value

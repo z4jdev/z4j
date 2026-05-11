@@ -238,10 +238,13 @@ class TestSubscriptionCreateGlobalAdmin:
                     "cooldown_seconds": 0,
                 },
             )
-            # Either 403 (auth error path) or 401 (deps decided session
-            # was anonymous) is acceptable here, the point is that the
-            # 1.3.2 fix MUST NOT have widened the door to non-admins.
-            assert resp.status_code in (401, 403), (
+            # 401 (anonymous session), 403 (auth error path), or 404
+            # (S-3 hardening, 2026-05: non-member denial is now
+            # indistinguishable from a true "project doesn't exist"
+            # so the slug namespace can't be enumerated) are all
+            # acceptable here. The 1.3.2 fix MUST NOT have widened
+            # the door to non-admins.
+            assert resp.status_code in (401, 403, 404), (
                 f"non-admin non-member POST /user/subscriptions "
                 f"returned {resp.status_code}: {resp.text}. The "
                 f"1.3.2 ``is_admin`` bypass must remain narrow."

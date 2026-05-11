@@ -21,6 +21,9 @@ Public surface:
 from __future__ import annotations
 
 from z4j_brain.persistence.repositories._base import BaseRepository
+from z4j_brain.persistence.repositories.agent_status_history import (
+    AgentStatusHistoryRepository,
+)
 from z4j_brain.persistence.repositories.agent_workers import (
     AgentWorkerRepository,
 )
@@ -61,6 +64,7 @@ from z4j_brain.persistence.repositories.workers import WorkerRepository
 
 __all__ = [
     "AgentRepository",
+    "AgentStatusHistoryRepository",
     "AgentWorkerRepository",
     "ApiKeyRepository",
     "AuditLogRepository",

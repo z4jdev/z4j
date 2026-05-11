@@ -71,17 +71,29 @@ _BASE_CSP: str = (
     "form-action 'self'; "
     "frame-ancestors 'none'; "
     # frame-src 'none' explicitly closes the iframe-injection
-    # vector even though no current page embeds iframes
-    # (R3 finding M-4 / Round-3 dashboard pass).
+    # vector even though no current page embeds iframes.
     "frame-src 'none'; "
     "base-uri 'none'; "
     "object-src 'none'"
 )
 
-_SETUP_CSP: str = (
+_SETUP_CSP_TEMPLATE: str = (
     "default-src 'none'; "
-    "script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self' 'nonce-{nonce}'; "
+    "style-src 'self' 'nonce-{nonce}'; "
+    "connect-src 'self'; "
+    "form-action 'self'; "
+    "base-uri 'none'; "
+    "frame-ancestors 'none'"
+)
+# Fallback when no nonce is provided (e.g. the /setup 404 plaintext
+# response). The 404 has no inline script or style blocks, so
+# ``'self'`` alone is sufficient and ``'unsafe-inline'`` is dropped
+# entirely.
+_SETUP_CSP_FALLBACK: str = (
+    "default-src 'none'; "
+    "script-src 'self'; "
+    "style-src 'self'; "
     "connect-src 'self'; "
     "form-action 'self'; "
     "base-uri 'none'; "
@@ -142,7 +154,23 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # CSP for HTML responses only.
         content_type = headers.get("content-type", "")
         if content_type.startswith("text/html"):
-            csp = _SETUP_CSP if path.startswith("/setup") else _BASE_CSP
+            if path.startswith("/setup"):
+                # S-6: prefer the per-request nonce variant when the
+                # handler supplied one; fall back to the no-inline
+                # version for routes (404 etc.) that have no inline
+                # blocks at all. ``MutableHeaders`` has no ``pop``;
+                # use ``get`` + ``del`` so the internal marker
+                # never leaks to the wire.
+                nonce = headers.get("X-Z4J-CSP-Nonce")
+                if nonce is not None:
+                    del headers["X-Z4J-CSP-Nonce"]
+                csp = (
+                    _SETUP_CSP_TEMPLATE.format(nonce=nonce)
+                    if nonce
+                    else _SETUP_CSP_FALLBACK
+                )
+            else:
+                csp = _BASE_CSP
             headers.setdefault("Content-Security-Policy", csp)
 
         # HSTS only in production HTTPS deployments.

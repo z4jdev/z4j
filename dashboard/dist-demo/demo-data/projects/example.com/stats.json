@@ -1,0 +1,39 @@
+{
+  "tasks_by_state": {
+    "pending": 1,
+    "received": 0,
+    "started": 1,
+    "success": 142,
+    "failure": 1,
+    "retry": 1,
+    "revoked": 0,
+    "rejected": 0,
+    "unknown": 0
+  },
+  "tasks_total": 18472,
+  "tasks_failed_24h": 1,
+  "tasks_succeeded_24h": 142,
+  "failure_rate_24h": 0.007,
+  "agents_online": 3,
+  "agents_offline": 0,
+  "workers_online": 1,
+  "workers_offline": 0,
+  "commands_pending": 0,
+  "commands_completed_24h": 0,
+  "commands_failed_24h": 0,
+  "commands_timeout_24h": 0,
+  "queue_depths": [
+    {"name": "default", "engine": "celery", "pending_count": 1, "broker_type": "redis", "last_seen_at_offset_s": -8},
+    {"name": "billing", "engine": "celery", "pending_count": 0, "broker_type": "redis", "last_seen_at_offset_s": -22},
+    {"name": "analytics", "engine": "celery", "pending_count": 0, "broker_type": "redis", "last_seen_at_offset_s": -88},
+    {"name": "exports", "engine": "celery", "pending_count": 0, "broker_type": "redis", "last_seen_at_offset_s": -3600},
+    {"name": "search", "engine": "celery", "pending_count": 0, "broker_type": "redis", "last_seen_at_offset_s": -55}
+  ],
+  "system_health": {
+    "status": "healthy",
+    "agents_all_online": true,
+    "queue_depth_ok": true,
+    "failure_rate_ok": true,
+    "brain_db_ok": true
+  }
+}

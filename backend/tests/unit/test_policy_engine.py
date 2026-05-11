@@ -122,7 +122,7 @@ class TestRequireMember:
         membership = await policy.require_member(
             memberships,
             user=viewer_user,
-            project_id=project.id,
+            project=project,
             min_role=ProjectRole.VIEWER,
         )
         assert membership.role == ProjectRole.VIEWER
@@ -139,7 +139,7 @@ class TestRequireMember:
             await policy.require_member(
                 memberships,
                 user=viewer_user,
-                project_id=project.id,
+                project=project,
                 min_role=ProjectRole.OPERATOR,
             )
 
@@ -154,7 +154,7 @@ class TestRequireMember:
         membership = await policy.require_member(
             memberships,
             user=operator_user,
-            project_id=project.id,
+            project=project,
             min_role=ProjectRole.VIEWER,
         )
         assert membership.role == ProjectRole.OPERATOR
@@ -171,7 +171,7 @@ class TestRequireMember:
         membership = await policy.require_member(
             memberships,
             user=global_admin,
-            project_id=project.id,
+            project=project,
             min_role=ProjectRole.ADMIN,
         )
         assert membership.role == ProjectRole.ADMIN
@@ -185,13 +185,21 @@ class TestRequireMember:
         user = User(email="lone@example.com", password_hash="x", is_admin=False, is_active=True)
         session.add(user)
         await session.commit()
+        # S-3 (2026-05): non-member denial returns 404, not 403.
+        # Build a synthetic Project so we can pass it positionally.
+        from z4j_brain.persistence.models import Project as _Proj
+
+        ghost = _Proj(slug="nope")
+        # Stash an id without committing - the test only reads
+        # ``project.id`` and ``project.slug`` inside the helper.
+        ghost.id = uuid.uuid4()  # type: ignore[assignment]
 
         policy = PolicyEngine()
         memberships = MembershipRepository(session)
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(NotFoundError):
             await policy.require_member(
                 memberships,
                 user=user,
-                project_id=uuid.uuid4(),
+                project=ghost,
                 min_role=ProjectRole.VIEWER,
             )

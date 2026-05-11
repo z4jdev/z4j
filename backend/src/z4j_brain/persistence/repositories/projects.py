@@ -24,9 +24,8 @@ from z4j_brain.persistence.repositories._base import BaseRepository
 # circuit to ``None`` before the query runs. Pre-validation
 # prevents ``asyncpg.CharacterNotInRepertoireError`` on path
 # params that carry NUL (``0x00``) or other bytes Postgres
-# refuses to accept as UTF-8 text - surfaced by the 2026-04-21
-# Pass 5 security audit as finding S1 (null-byte injection
-# turning a slug lookup into an unhandled HTTP 500).
+# refuses to accept as UTF-8 text (a null-byte injection in the
+# slug lookup would otherwise turn into an unhandled HTTP 500).
 _SLUG_SAFE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$")
 
 

@@ -200,8 +200,40 @@ def mint_loopback_pki(out_dir: Path) -> LoopbackPKI:
     _validate_pki_out_dir(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Re-chmod because mkdir mode does not retro-apply on existing
-    # dirs and umask may have stripped bits.
-    out_dir.chmod(0o700)
+    # dirs and umask may have stripped bits. We tolerate EPERM
+    # because operators sometimes point ``Z4J_EMBEDDED_SCHEDULER_PKI_DIR``
+    # at a root-owned docker named-volume; the z4j process runs as
+    # uid 10001 and cannot chmod a directory it doesn't own. If the
+    # mode is already restrictive enough (no world or group bits set)
+    # we continue; otherwise we surface a clear error so the operator
+    # can either chown the volume to z4j or pick a directory the
+    # z4j user owns.
+    try:
+        out_dir.chmod(0o700)
+    except PermissionError:
+        import stat as _stat
+
+        try:
+            current_mode = out_dir.stat().st_mode & 0o777
+        except OSError as exc:
+            raise OSError(
+                f"cannot chmod nor stat embedded PKI dir {out_dir!s}; "
+                "either chown it to the z4j user (uid 10001) or point "
+                "Z4J_EMBEDDED_SCHEDULER_PKI_DIR at a directory the z4j "
+                "user owns",
+            ) from exc
+        if current_mode & (_stat.S_IRWXG | _stat.S_IRWXO):
+            raise OSError(
+                f"embedded PKI dir {out_dir!s} is not owned by the z4j "
+                f"user and has overly permissive mode {oct(current_mode)}; "
+                "either chown it to z4j (uid 10001) so we can apply 0o700, "
+                "or pre-set it to 0o700 yourself before starting the "
+                "brain. The PKI material must not be world or group "
+                "readable.",
+            )
+        # Mode is already restrictive enough; continue without
+        # chmod. Operator-chosen pre-locked-down directories are a
+        # valid setup.
 
     ca_cert, ca_key = _mint_ca()
     server_cert = _mint_leaf(
@@ -423,21 +455,21 @@ class EmbeddedSchedulerSupervisor:
         self._watchdog: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._restart_count = 0
-        # Audit fix (Apr 2026 follow-up): track the stdout/stderr
-        # forwarder tasks so we can cancel them before re-spawning.
-        # Pre-fix every restart leaked two new asyncio tasks; after
-        # 100 restarts brain held 200 dead tasks reading from
-        # already-closed pipes (they exited on EOF eventually so
-        # no FD leak, but ``asyncio.all_tasks()`` introspection +
-        # task-name registry got cluttered).
+        # Track the stdout/stderr forwarder tasks so we can
+        # cancel them before re-spawning. Without this, every
+        # restart would leak two new asyncio tasks; after 100
+        # restarts brain would hold 200 dead tasks reading from
+        # already-closed pipes (they exit on EOF eventually so no
+        # FD leak, but ``asyncio.all_tasks()`` introspection +
+        # task-name registry get cluttered).
         self._stdout_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
-        # Audit fix 7.1 (Apr 2026): when the watchdog gives up
-        # after the restart cap is exhausted, flip this flag so
-        # operator-facing health checks (brain's /api/v1/health
-        # path can read it) and metrics scrapers can detect that
-        # embedded mode is permanently down. Pre-fix the watchdog
-        # logged CRITICAL once and returned, leaving brain looking
+        # When the watchdog gives up after the restart cap is
+        # exhausted, flip this flag so operator-facing health
+        # checks (brain's /api/v1/health path can read it) and
+        # metrics scrapers can detect that embedded mode is
+        # permanently down. Without this, the watchdog would just
+        # log CRITICAL once and return, leaving brain looking
         # healthy while fires silently stopped.
         self._permanently_failed = False
 
@@ -463,7 +495,7 @@ class EmbeddedSchedulerSupervisor:
 
     @property
     def health_state(self) -> str:
-        """Round-9 audit fix R9-Sched-H1 (Apr 2026): tri-state.
+        """Tri-state health signal for /health probes.
 
         Returns one of:
 
@@ -474,12 +506,10 @@ class EmbeddedSchedulerSupervisor:
         - ``"failed"``, watchdog gave up; only a brain restart
           will recover. /health probes should treat as critical.
 
-        Pre-fix the only signal was ``is_running`` (instantaneous)
-        and ``permanently_failed`` (set after the cap). A k8s
-        readiness probe checking ``is_running`` flapped red on
-        every transient crash during the backoff window even
-        though the watchdog was about to respawn, paging
-        operators on harmless restarts.
+        Without the tri-state, a k8s readiness probe checking
+        ``is_running`` would flap red on every transient crash
+        during the backoff window even though the watchdog was
+        about to respawn, paging operators on harmless restarts.
         """
         if self._permanently_failed:
             return "failed"
@@ -552,16 +582,16 @@ class EmbeddedSchedulerSupervisor:
                     pass
             setattr(self, prev_task_attr, None)
 
-        # Round-9 audit fix R9-Sched-H2 (Apr 2026): validate every
-        # element of ``embedded_scheduler_argv`` against an allow-list.
-        # Pre-fix the operator-controlled list was splatted straight
-        # into ``create_subprocess_exec``, a misconfigured operator,
-        # a future Settings loader that exposed this via dashboard /
-        # API, or a compromised .env file could inject arbitrary
-        # arguments into the trusted subprocess (e.g. swap to a
-        # different module, inject ``-c "import os; ..."``-shaped
-        # tricks via flag-value confusion). The allow-list is the
-        # known-good set of z4j_scheduler subcommands + their flags.
+        # Validate every element of ``embedded_scheduler_argv``
+        # against an allow-list. Splatting the operator-controlled
+        # list straight into ``create_subprocess_exec`` means a
+        # misconfigured operator, a future Settings loader that
+        # exposed this via dashboard / API, or a compromised .env
+        # file could inject arbitrary arguments into the trusted
+        # subprocess (e.g. swap to a different module, inject
+        # ``-c "import os; ..."``-shaped tricks via flag-value
+        # confusion). The allow-list is the known-good set of
+        # z4j_scheduler subcommands + their flags.
         _SCHEDULER_ARG_ALLOWLIST = {
             "serve", "import", "export", "verify",
             "--config", "--log-level", "--leader-backend",
@@ -581,15 +611,14 @@ class EmbeddedSchedulerSupervisor:
             validated_extra.append(arg)
         argv = [sys.executable, "-m", "z4j_scheduler", *validated_extra]
         env = self._build_subprocess_env()
-        # Round-4 audit fix (Apr 2026): protect against orphan
-        # subprocess on stop()-mid-spawn cancellation. Pre-fix, if
-        # ``stop()`` cancelled the watchdog while the spawn
-        # awaitable was in flight, the asyncio.create_subprocess_exec
-        # could have already forked the child; the cancellation
-        # interrupted the assignment to ``self._proc`` BEFORE the
-        # child handle was registered, so ``_terminate_subprocess``
-        # never found it and the orphan PID survived.
-        # Now: assign immediately, AND re-terminate on
+        # Protect against orphan subprocess on stop()-mid-spawn
+        # cancellation. If ``stop()`` cancels the watchdog while
+        # the spawn awaitable is in flight, the
+        # asyncio.create_subprocess_exec may have already forked
+        # the child; if cancellation interrupts the assignment to
+        # ``self._proc`` BEFORE the child handle is registered,
+        # ``_terminate_subprocess`` won't find it and the orphan
+        # PID survives. So assign immediately AND re-terminate on
         # CancelledError so the orphan is killed even if we never
         # got past the spawn boundary.
         proc: asyncio.subprocess.Process | None = None
@@ -697,7 +726,7 @@ class EmbeddedSchedulerSupervisor:
         # subprocesses from external scheduler containers when both
         # exist in a hybrid deploy. The trailing ``-embedded`` is
         # not a SAN check - it's a label only.
-        # Round-9 audit fix R9-Sched-MED (Apr 2026): use
+        # Use
         # ``socket.gethostname()`` as the cross-platform hostname
         # fallback instead of the static literal ``"brain"``.
         # ``os.uname()`` raises AttributeError on Windows so the
@@ -741,12 +770,11 @@ class EmbeddedSchedulerSupervisor:
         per-severity routing should ship the scheduler's own
         stdout to their log aggregator directly.
 
-        Round-8 audit fix R8-Bootstrap-MED (Apr 2026): redact
-        lines that mention secret-bearing TLS material paths
+        Lines that mention secret-bearing TLS material paths
         (``Z4J_SCHEDULER_TLS_*``, ``BEGIN PRIVATE KEY``,
-        ``CERTIFICATE``) before forwarding. The scheduler's own
-        debug paths sometimes log file paths that an upstream
-        log aggregator should not see verbatim.
+        ``CERTIFICATE``) are redacted before forwarding. The
+        scheduler's own debug paths sometimes log file paths
+        that an upstream log aggregator should not see verbatim.
         """
         if stream is None:
             return
@@ -769,8 +797,8 @@ class EmbeddedSchedulerSupervisor:
                     decoded = line.decode("utf-8", errors="replace").rstrip()
                 except Exception:  # noqa: BLE001
                     decoded = repr(line)
-                # R8-Bootstrap-MED: redact whole lines that look
-                # secret-bearing rather than try to scrub in-line.
+                # Redact whole lines that look secret-bearing
+                # rather than try to scrub in-line.
                 if any(t in decoded for t in _REDACT_TOKENS):
                     logger.warning(
                         "z4j.brain.embedded_scheduler[%s]: <redacted "
@@ -815,13 +843,12 @@ class EmbeddedSchedulerSupervisor:
                 return
             self._restart_count += 1
             if max_attempts == 0 or self._restart_count > max_attempts:
-                # Audit fix 7.1 (Apr 2026): flip the
-                # ``permanently_failed`` flag so brain's /health
-                # probe + any operator-facing dashboard can
-                # detect that embedded mode is down. Pre-fix the
-                # watchdog logged CRITICAL once and returned;
-                # brain looked healthy while fires silently
-                # stopped.
+                # Flip the ``permanently_failed`` flag so
+                # brain's /health probe + any operator-facing
+                # dashboard can detect that embedded mode is
+                # down. Without this the watchdog would just log
+                # CRITICAL once and return, and brain would look
+                # healthy while fires silently stopped.
                 self._permanently_failed = True
                 logger.critical(
                     "z4j.brain.embedded_scheduler: subprocess exited "
@@ -832,14 +859,14 @@ class EmbeddedSchedulerSupervisor:
                     returncode, max_attempts,
                 )
                 return
-            # Audit fix (Apr 2026 follow-up): randomised backoff
-            # (decorrelated jitter) defends against thundering-
-            # herd in multi-replica brain deployments. Pre-fix,
-            # all replicas crashed in lockstep on a shared
-            # dependency outage and respawned in lockstep, hitting
-            # brain's gRPC port simultaneously. Multiplying by
-            # uniform(0.7, 1.3) decorrelates restart times by up
-            # to 60% within the cap.
+            # Randomised backoff (decorrelated jitter) defends
+            # against thundering-herd in multi-replica brain
+            # deployments: without jitter, all replicas crashing
+            # in lockstep on a shared dependency outage would
+            # respawn in lockstep and hit brain's gRPC port
+            # simultaneously. Multiplying by uniform(0.7, 1.3)
+            # decorrelates restart times by up to 60% within
+            # the cap.
             import random  # noqa: PLC0415
 
             base_delay = min(60.0, backoff * (2 ** (self._restart_count - 1)))
@@ -864,19 +891,19 @@ class EmbeddedSchedulerSupervisor:
                     "z4j.brain.embedded_scheduler: respawn failed; "
                     "watchdog continuing",
                 )
-                # Round-4 audit fix (Apr 2026): when respawn
-                # raises, the next loop iteration's
+                # When respawn raises, the next loop iteration's
                 # ``await self._proc.wait()`` returns IMMEDIATELY
                 # because ``self._proc`` is still the previous
-                # dead handle (``returncode`` is set). Pre-fix,
-                # the loop then incremented ``_restart_count``
-                # for what is essentially a phantom restart -
-                # within seconds the cap was "exhausted" by
-                # phantom increments and ``_permanently_failed``
-                # was set despite the failure being a transient
-                # spawn error. Fix: sleep a backoff window AND
-                # decrement the counter so the failed spawn
-                # doesn't burn an attempt.
+                # dead handle (``returncode`` is set). Without
+                # this guard the loop would increment
+                # ``_restart_count`` for what is essentially a
+                # phantom restart - within seconds the cap would
+                # be "exhausted" by phantom increments and
+                # ``_permanently_failed`` would be set despite
+                # the failure being a transient spawn error.
+                # Sleeping a backoff window AND decrementing the
+                # counter means the failed spawn doesn't burn an
+                # attempt.
                 self._restart_count = max(0, self._restart_count - 1)
                 # Guard against tight loop with backoff.
                 await asyncio.sleep(min(60.0, delay))

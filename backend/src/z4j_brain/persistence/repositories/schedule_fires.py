@@ -53,13 +53,12 @@ class ScheduleFireRepository:
         pending-fires replay worker write the row blindly without
         TOCTOU concerns.
 
-        Round-4 audit fix (Apr 2026): the previous
-        ``session.rollback()`` on IntegrityError wiped the caller's
-        ENTIRE outer transaction (releasing FOR UPDATE locks +
-        discarding queued audit/dispatcher writes). Replaced with a
-        SAVEPOINT (``begin_nested``) so only the failed INSERT
-        rolls back. Also: previously the upgrade case (buffered →
-        delivered) was a no-op; now we update the row's status +
+        A bare ``session.rollback()`` on IntegrityError would
+        wipe the caller's ENTIRE outer transaction (releasing
+        FOR UPDATE locks + discarding queued audit/dispatcher
+        writes). We use a SAVEPOINT (``begin_nested``) so only
+        the failed INSERT rolls back. The upgrade case
+        (buffered → delivered) updates the row's status +
         command_id so the dashboard's "buffered" state correctly
         progresses to "delivered" once the agent comes online.
         """
@@ -119,10 +118,10 @@ class ScheduleFireRepository:
           un-acked (``acked_at IS NULL``). False on a duplicate ack
           (HA scheduler retry, network duplicate).
 
-        Round-4 audit fix (Apr 2026): callers use ``was_first_ack``
-        to skip duplicate notification dispatch. Pre-fix two acks
-        for the same fire_id (HA scheduler retry, network blip)
-        would each fan out a notification → operators got two
+        Callers use ``was_first_ack`` to skip duplicate
+        notification dispatch. Otherwise two acks for the same
+        fire_id (HA scheduler retry, network blip) would each
+        fan out a notification → operators would get two
         "Schedule X failed" alerts for one failure.
 
         ``latency_ms`` is computed here from
@@ -210,14 +209,13 @@ class ScheduleFireRepository:
     ) -> dict[UUID, list[ScheduleFire]]:
         """Bulk variant of :meth:`recent_failures`.
 
-        Round-7 audit fix R7-HIGH (perf) (Apr 2026): the
-        ScheduleCircuitBreaker tick used to call
-        :meth:`recent_failures` once per enabled schedule (10k
-        SELECTs + 10k sessions for a 10k-fleet). This single-query
-        variant returns the most-recent ``per_schedule_limit`` rows
-        for every supplied id in one round-trip via
-        ``ROW_NUMBER() OVER (PARTITION BY schedule_id ORDER BY
-        fired_at DESC)``.
+        The per-schedule call pattern would issue one
+        :meth:`recent_failures` SELECT per enabled schedule (10k
+        SELECTs + 10k sessions for a 10k-fleet). This
+        single-query variant returns the most-recent
+        ``per_schedule_limit`` rows for every supplied id in one
+        round-trip via ``ROW_NUMBER() OVER (PARTITION BY
+        schedule_id ORDER BY fired_at DESC)``.
 
         On SQLite (no window function in older builds) we fall back
         to a single ``WHERE schedule_id IN (...)`` then sort + slice

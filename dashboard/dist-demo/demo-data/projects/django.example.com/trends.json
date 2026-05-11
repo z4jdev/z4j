@@ -1,0 +1,222 @@
+{
+  "window": "24h",
+  "bucket": "1h",
+  "series": [
+    {
+      "t_offset_s": -86400,
+      "success": 12097,
+      "failure": 6,
+      "retry": 23,
+      "revoked": 1,
+      "total": 12127,
+      "avg_runtime_ms": 1410
+    },
+    {
+      "t_offset_s": -82800,
+      "success": 9191,
+      "failure": 12,
+      "retry": 23,
+      "revoked": 1,
+      "total": 9227,
+      "avg_runtime_ms": 1592
+    },
+    {
+      "t_offset_s": -79200,
+      "success": 7117,
+      "failure": 4,
+      "retry": 12,
+      "revoked": 0,
+      "total": 7133,
+      "avg_runtime_ms": 1647
+    },
+    {
+      "t_offset_s": -75600,
+      "success": 4463,
+      "failure": 5,
+      "retry": 11,
+      "revoked": 0,
+      "total": 4479,
+      "avg_runtime_ms": 1232
+    },
+    {
+      "t_offset_s": -72000,
+      "success": 3404,
+      "failure": 5,
+      "retry": 10,
+      "revoked": 0,
+      "total": 3419,
+      "avg_runtime_ms": 1716
+    },
+    {
+      "t_offset_s": -68400,
+      "success": 2146,
+      "failure": 3,
+      "retry": 3,
+      "revoked": 0,
+      "total": 2152,
+      "avg_runtime_ms": 1396
+    },
+    {
+      "t_offset_s": -64800,
+      "success": 1925,
+      "failure": 3,
+      "retry": 4,
+      "revoked": 0,
+      "total": 1932,
+      "avg_runtime_ms": 1380
+    },
+    {
+      "t_offset_s": -61200,
+      "success": 2293,
+      "failure": 2,
+      "retry": 4,
+      "revoked": 0,
+      "total": 2299,
+      "avg_runtime_ms": 1325
+    },
+    {
+      "t_offset_s": -57600,
+      "success": 2769,
+      "failure": 2,
+      "retry": 8,
+      "revoked": 0,
+      "total": 2779,
+      "avg_runtime_ms": 1774
+    },
+    {
+      "t_offset_s": -54000,
+      "success": 4559,
+      "failure": 5,
+      "retry": 7,
+      "revoked": 0,
+      "total": 4571,
+      "avg_runtime_ms": 1166
+    },
+    {
+      "t_offset_s": -50400,
+      "success": 6991,
+      "failure": 6,
+      "retry": 20,
+      "revoked": 1,
+      "total": 7018,
+      "avg_runtime_ms": 1535
+    },
+    {
+      "t_offset_s": -46800,
+      "success": 9235,
+      "failure": 6,
+      "retry": 26,
+      "revoked": 0,
+      "total": 9267,
+      "avg_runtime_ms": 1489
+    },
+    {
+      "t_offset_s": -43200,
+      "success": 10080,
+      "failure": 6,
+      "retry": 18,
+      "revoked": 0,
+      "total": 10104,
+      "avg_runtime_ms": 1060
+    },
+    {
+      "t_offset_s": -39600,
+      "success": 12048,
+      "failure": 13,
+      "retry": 35,
+      "revoked": 1,
+      "total": 12097,
+      "avg_runtime_ms": 1381
+    },
+    {
+      "t_offset_s": -36000,
+      "success": 16905,
+      "failure": 16,
+      "retry": 38,
+      "revoked": 0,
+      "total": 16959,
+      "avg_runtime_ms": 1474
+    },
+    {
+      "t_offset_s": -32400,
+      "success": 17406,
+      "failure": 21,
+      "retry": 35,
+      "revoked": 0,
+      "total": 17462,
+      "avg_runtime_ms": 1620
+    },
+    {
+      "t_offset_s": -28800,
+      "success": 21225,
+      "failure": 11,
+      "retry": 58,
+      "revoked": 1,
+      "total": 21295,
+      "avg_runtime_ms": 1804
+    },
+    {
+      "t_offset_s": -25200,
+      "success": 18036,
+      "failure": 22,
+      "retry": 47,
+      "revoked": 2,
+      "total": 18107,
+      "avg_runtime_ms": 1791
+    },
+    {
+      "t_offset_s": -21600,
+      "success": 19697,
+      "failure": 20,
+      "retry": 24,
+      "revoked": 1,
+      "total": 19742,
+      "avg_runtime_ms": 1750
+    },
+    {
+      "t_offset_s": -18000,
+      "success": 20638,
+      "failure": 13,
+      "retry": 56,
+      "revoked": 1,
+      "total": 20708,
+      "avg_runtime_ms": 1488
+    },
+    {
+      "t_offset_s": -14400,
+      "success": 19586,
+      "failure": 13,
+      "retry": 50,
+      "revoked": 1,
+      "total": 19650,
+      "avg_runtime_ms": 1542
+    },
+    {
+      "t_offset_s": -10800,
+      "success": 19398,
+      "failure": 23,
+      "retry": 33,
+      "revoked": 1,
+      "total": 19455,
+      "avg_runtime_ms": 1361
+    },
+    {
+      "t_offset_s": -7200,
+      "success": 16882,
+      "failure": 20,
+      "retry": 34,
+      "revoked": 1,
+      "total": 16937,
+      "avg_runtime_ms": 1214
+    },
+    {
+      "t_offset_s": -3600,
+      "success": 13200,
+      "failure": 606,
+      "retry": 926,
+      "revoked": 1,
+      "total": 14733,
+      "avg_runtime_ms": 1750
+    }
+  ]
+}

@@ -31,24 +31,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-#: Default location for the persistent allowed-hosts file. Mirrors
-#: ``~/.z4j/secret.env`` (where the brain persists auto-minted secrets);
-#: the same directory is the natural home for operator-managed config.
-DEFAULT_PATH = Path.home() / ".z4j" / "allowed-hosts"
+from z4j_core.paths import z4j_home
 
 
 def get_path() -> Path:
     """Return the canonical allowed-hosts file path.
 
-    Honours ``Z4J_HOME`` if set (operators who relocate the brain's
-    state directory); otherwise defaults to ``~/.z4j/allowed-hosts``.
+    Resolves to ``z4j_home() / "allowed-hosts"``. ``Z4J_HOME``
+    relocates the entire z4j state directory; this file moves with it.
     """
-    import os
-
-    home = os.environ.get("Z4J_HOME")
-    if home:
-        return Path(home) / "allowed-hosts"
-    return DEFAULT_PATH
+    return z4j_home() / "allowed-hosts"
 
 
 def read_persisted() -> list[str]:
@@ -161,7 +153,6 @@ def remove(hosts_to_remove: list[str]) -> tuple[list[str], list[str]]:
 
 
 __all__ = [
-    "DEFAULT_PATH",
     "add",
     "get_path",
     "read_persisted",

@@ -55,11 +55,11 @@ class PendingFiresRepository:
     ) -> PendingFire:
         """Insert a buffered fire. Idempotent on ``fire_id``.
 
-        Round-4 audit fix (Apr 2026): use a SAVEPOINT
-        (``begin_nested``) on IntegrityError so the failed INSERT
-        rolls back without wiping the caller's outer transaction.
-        Pre-fix the ``session.rollback()`` released FOR UPDATE
-        locks the FireSchedule handler held on the schedule row.
+        Uses a SAVEPOINT (``begin_nested``) on IntegrityError so
+        the failed INSERT rolls back without wiping the caller's
+        outer transaction. A bare ``session.rollback()`` would
+        release the FOR UPDATE locks the FireSchedule handler
+        holds on the schedule row.
         """
         row = PendingFire(
             fire_id=fire_id,
@@ -91,14 +91,14 @@ class PendingFiresRepository:
     ) -> list[PendingFire]:
         """Return buffered fires for one (project, engine), oldest first.
 
-        Round-4 audit fix (Apr 2026): on Postgres we use ``SELECT
-        ... FOR UPDATE SKIP LOCKED`` so multi-replica brain
-        workers cannot pick the same row. Pre-fix two replay
-        workers running in parallel both fetched the same fire_id,
-        both called ``dispatcher.issue`` (which now dedupes via
-        commands.idempotency_key but still costs a round-trip),
-        and one of them left the buffer row stuck because the
-        ``IntegrityError`` was previously swallowed.
+        On Postgres we use ``SELECT ... FOR UPDATE SKIP LOCKED``
+        so multi-replica brain workers cannot pick the same row.
+        Otherwise two replay workers running in parallel would
+        both fetch the same fire_id, both call
+        ``dispatcher.issue`` (deduped via
+        commands.idempotency_key but still a wasted round-trip),
+        and one of them would leave the buffer row stuck if
+        ``IntegrityError`` were ever swallowed.
 
         SQLite doesn't support ``SKIP LOCKED`` and only one writer
         runs at a time anyway, so the lock falls through harmlessly.

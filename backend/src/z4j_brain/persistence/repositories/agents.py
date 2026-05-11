@@ -97,7 +97,7 @@ class AgentRepository(BaseRepository[Agent]):
         capabilities: dict[str, Any],
         host: dict[str, Any] | None = None,
         agent_version: str | None = None,
-    ) -> None:
+    ) -> datetime:
         """Set state=online + bump connect/seen + refresh handshake metadata.
 
         ``host`` carries the agent's optional ``host`` dict from the hello
@@ -128,7 +128,7 @@ class AgentRepository(BaseRepository[Agent]):
             # ``versions.json`` snapshot.
             metadata_updates["version"] = str(agent_version)
 
-        # Round-7 audit fix R7-LOW (race) (Apr 2026): use Postgres
+        # Use Postgres
         # ``jsonb_set`` so the metadata write is a single atomic UPDATE
         # instead of SELECT-then-UPDATE. The previous RMW could lose
         # concurrent updates from a NAT-bounce double-reconnect (both
@@ -156,7 +156,7 @@ class AgentRepository(BaseRepository[Agent]):
                 # SQLAlchemy's ``Base.metadata``). Pre-1.3.1 this
                 # referenced ``agent_metadata`` which does not
                 # exist as a real column.
-                # Audit fix S006-D (1.4.0): use ``CAST(:name AS jsonb)``
+                # Use ``CAST(:name AS jsonb)``
                 # instead of ``:name::jsonb``. SQLAlchemy 2.x's text()
                 # bindparam regex parses ``:meta_0_value::jsonb`` as
                 # the parameter name ``meta_0_value::jsonb`` (greedy on
@@ -228,13 +228,80 @@ class AgentRepository(BaseRepository[Agent]):
                     capabilities=capabilities,
                 ),
             )
+        # Return the timestamp written to
+        # ``last_connect_at`` so the caller can plumb it into a
+        # later ``mark_offline(captured_at=...)`` call. The race the
+        # captured_at gates against requires exact-pair semantics
+        # between this connection's mark_online and its eventual
+        # mark_offline; the wall clock at close time isn't precise
+        # enough.
+        return now
 
-    async def mark_offline(self, agent_id: UUID) -> None:
-        """Set state=offline. Idempotent."""
+    async def mark_offline(
+        self,
+        agent_id: UUID,
+        *,
+        captured_at: datetime | None = None,
+    ) -> None:
+        """Set state=offline conditional on no fresher connect having landed.
+
+        An unconditional UPDATE racing the new connection's
+        ``mark_online`` would leave agents pinned at
+        ``state=offline`` while their WS was alive and heartbeats
+        were flowing. The race window: a closing-connection task
+        commits ``mark_offline`` AFTER a reconnecting-connection
+        task has committed ``mark_online``, and the late writer
+        wins.
+
+        When the caller knows when the offlining gateway task
+        was processing the close (``captured_at``), we only flip
+        state if no connect newer than that timestamp has
+        landed. Combined with the heartbeat handler's
+        opportunistic re-promotion of state to online, agents
+        cannot stay stuck offline while their WS is alive.
+
+        ``captured_at`` is optional for backwards compat with
+        callers that don't track the close timestamp; in that
+        case the unconditional behavior runs and the caller is
+        responsible for ensuring no race exists. New callers
+        should pass it.
+        """
+        stmt = update(Agent).where(Agent.id == agent_id)
+        if captured_at is not None:
+            # Only flip state if no fresher connect has happened.
+            # ``last_connect_at`` is bumped on every successful
+            # mark_online; if it's > captured_at, a newer
+            # connection won the race and we MUST NOT clobber.
+            from sqlalchemy import or_
+
+            stmt = stmt.where(
+                or_(
+                    Agent.last_connect_at.is_(None),
+                    Agent.last_connect_at <= captured_at,
+                ),
+            )
+        stmt = stmt.values(state=AgentState.OFFLINE)
+        await self.session.execute(stmt)
+
+    async def promote_online_if_offline(self, agent_id: UUID) -> None:
+        """Re-assert state=online if currently offline. Heartbeat path.
+
+        Heartbeats arriving from a live WS connection flip the
+        state column back to ``online`` if it wrongly drifted to
+        ``offline`` (e.g. a late mark_offline from a previous
+        close that lost the race against the new connection's
+        mark_online). Idempotent: a no-op when the agent is
+        already online.
+
+        The operation is a single indexed UPDATE with a WHERE
+        guard so the row is touched only when needed; cheap to call
+        from every heartbeat.
+        """
         await self.session.execute(
             update(Agent)
             .where(Agent.id == agent_id)
-            .values(state=AgentState.OFFLINE),
+            .where(Agent.state == AgentState.OFFLINE)
+            .values(state=AgentState.ONLINE),
         )
 
     async def touch_heartbeat(self, agent_id: UUID) -> None:

@@ -294,10 +294,10 @@ class CommandDispatcher:
             # Race or replay: the command was already terminal,
             # almost always because the timeout sweeper transitioned
             # it to TIMEOUT before the agent's late result arrived
-            # (R3 finding M7 - operator-visible "X seems to have
-            # timed out but actually finished" signal). We log + bump
-            # a metric so operators can see how often this happens
-            # and tune ``command_timeout_seconds`` if needed.
+            # (operator-visible "X seems to have timed out but
+            # actually finished" signal). We log + bump a metric
+            # so operators can see how often this happens and
+            # tune ``command_timeout_seconds`` if needed.
             logger.info(
                 "z4j command_dispatcher: result for non-pending command, ignoring",
                 command_id=str(command_id),

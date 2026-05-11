@@ -22,16 +22,16 @@ describe("capsForEngine", () => {
   it("celery supports every kind including solar", () => {
     const c = capsForEngine("celery");
     expect(c.kinds).toEqual(
-      expect.arrayContaining(["cron", "interval", "one_shot", "solar"]),
+      expect.arrayContaining(["cron", "interval", "clocked", "solar"]),
     );
     expect(c.hasQueues).toBe(true);
     expect(c.queueHint).toContain("RabbitMQ");
   });
 
-  it("rq supports cron / interval / one_shot but NOT solar", () => {
+  it("rq supports cron / interval / clocked but NOT solar", () => {
     const r = capsForEngine("rq");
     expect(r.kinds).toEqual(
-      expect.arrayContaining(["cron", "interval", "one_shot"]),
+      expect.arrayContaining(["cron", "interval", "clocked"]),
     );
     expect(r.kinds).not.toContain("solar");
     expect(r.hasQueues).toBe(true);
@@ -56,9 +56,9 @@ describe("capsForEngine", () => {
     expect(h.kinds.sort()).toEqual(["cron", "interval"]);
   });
 
-  it("taskiq supports cron / interval / one_shot", () => {
+  it("taskiq supports cron / interval / clocked", () => {
     const t = capsForEngine("taskiq");
-    expect(t.kinds.sort()).toEqual(["cron", "interval", "one_shot"]);
+    expect(t.kinds.sort()).toEqual(["clocked", "cron", "interval"]);
   });
 
   it("unknown engine falls back to permissive defaults", () => {
@@ -95,12 +95,12 @@ describe("isKindSupported", () => {
     }
   });
 
-  it("every engine except dramatiq + huey supports one_shot", () => {
-    expect(isKindSupported("celery", "one_shot")).toBe(true);
-    expect(isKindSupported("rq", "one_shot")).toBe(true);
-    expect(isKindSupported("arq", "one_shot")).toBe(true);
-    expect(isKindSupported("taskiq", "one_shot")).toBe(true);
-    expect(isKindSupported("dramatiq", "one_shot")).toBe(false);
-    expect(isKindSupported("huey", "one_shot")).toBe(false);
+  it("every engine except dramatiq + huey supports clocked", () => {
+    expect(isKindSupported("celery", "clocked")).toBe(true);
+    expect(isKindSupported("rq", "clocked")).toBe(true);
+    expect(isKindSupported("arq", "clocked")).toBe(true);
+    expect(isKindSupported("taskiq", "clocked")).toBe(true);
+    expect(isKindSupported("dramatiq", "clocked")).toBe(false);
+    expect(isKindSupported("huey", "clocked")).toBe(false);
   });
 });

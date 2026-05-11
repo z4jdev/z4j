@@ -91,7 +91,7 @@ def set_allow_http_webhooks(allow: bool) -> None:
 #: Hard cap on response body bytes we read from a webhook target.
 #: Hostile webhooks could otherwise stream multi-GB responses
 #: within the request timeout window and exhaust dispatcher
-#: memory (R3 finding M14). 8 KiB is more than enough to capture
+#: Memory. 8 KiB is more than enough to capture
 #: a useful error message.
 _MAX_RESPONSE_BYTES = 8 * 1024
 
@@ -126,11 +126,11 @@ async def resolve_and_pin(url: str) -> tuple[str | None, str | None]:
             ip = ipaddress.ip_address(raw_ip)
         except ValueError:
             continue
-        # Round-7 audit fix R7-HIGH (Apr 2026): use the unified
-        # semantic-property check that catches IPv4-mapped IPv6,
-        # 6to4, NAT64, and CGNAT alongside the classic private/loopback
-        # ranges. Pre-fix this loop iterated only ``_BLOCKED_NETWORKS``
-        # and missed the v4-mapped-v6 bypass.
+        # Use the unified semantic-property check that catches
+        # IPv4-mapped IPv6, 6to4, NAT64, and CGNAT alongside the
+        # classic private/loopback ranges. A bare
+        # ``_BLOCKED_NETWORKS`` iteration misses the
+        # v4-mapped-v6 bypass.
         block_reason = _ip_is_blocked(ip)
         if block_reason is not None:
             return block_reason, None
@@ -189,7 +189,7 @@ async def _post(
     if pin_ip is not None:
         pinned, original_host, _port = _pin_url_to_ip(url, pin_ip)
         request_url = str(pinned)
-        # Round-7 audit fix R7-LOW (Apr 2026): the IP-pin's Host
+        # The IP-pin's Host
         # header MUST win over any caller-supplied value. Otherwise
         # a future code path that bypassed ``validate_webhook_headers``
         # could let an attacker re-route the pinned request to a
@@ -242,9 +242,8 @@ async def _post(
         return resp
     finally:
         if not using_shared:
-            # Round-8 audit fix R8-Async-MED (Apr 2026): shield the
-            # ad-hoc client close so a request-cancel mid-aclose
-            # doesn't leak the client + its connection pool.
+            # Shield the ad-hoc client close so a request-cancel
+            # mid-aclose doesn't leak the client + its connection pool.
             try:
                 await asyncio.shield(client_owner.aclose())
             except Exception:  # noqa: BLE001
@@ -269,7 +268,7 @@ def _allowed_schemes() -> frozenset[str]:
 
 #: Private/reserved IP ranges that must never be targeted by webhooks.
 #:
-#: Round-7 audit fix R7-HIGH (Apr 2026): the prior list was
+#: The prior list was
 #: enumeration-based and missed IPv4-mapped IPv6 (``::ffff:127.0.0.1``,
 #: ``::ffff:169.254.169.254``), those addresses do NOT match the
 #: ``127.0.0.0/8`` / ``169.254.0.0/16`` IPv4 networks, so an attacker
@@ -305,8 +304,8 @@ _BLOCKED_NETWORKS = [
 def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
     """Return a human-readable block reason or None if ``ip`` is OK.
 
-    Round-7 audit fix R7-HIGH (Apr 2026): unifies the three SSRF
-    checks the codebase used to repeat per-callsite. Always:
+    Unifies the SSRF checks the codebase used to repeat
+    per-callsite. Always:
 
     1. Unwrap an IPv4-mapped IPv6 address (``::ffff:1.2.3.4``) into
        its 4-byte twin and recurse, without this, ``::ffff:127.0.0.1``
@@ -382,13 +381,13 @@ def _static_url_checks(url: str) -> tuple[str | None, str | None]:
 # value is (expires_monotonic, [ip_strings]). Empty list = NXDOMAIN /
 # resolver failure (so repeated misses are also cached briefly).
 #
-# Audit fix S007 (1.4.0): bounded LRU. Pre-fix the cache was an
-# unbounded ``dict``, so an authenticated tenant who could create
-# notification channels (or test webhooks) for many distinct
-# hostnames could grow it without bound. The 30s TTL evicts on
-# next-lookup, but a continuous flow of new hostnames would still
-# accumulate stale entries between sweeps. The hard LRU cap
-# guarantees bounded memory regardless of churn pattern.
+# Bounded LRU. An unbounded ``dict`` would let an
+# authenticated tenant who can create notification channels
+# (or test webhooks) for many distinct hostnames grow it
+# without bound. The 30s TTL evicts on next-lookup, but a
+# continuous flow of new hostnames would still accumulate
+# stale entries between sweeps. The hard LRU cap guarantees
+# bounded memory regardless of churn pattern.
 #
 # 10000 entries is well above any realistic deployment (a homelab
 # brain has tens of channels; a multi-tenant deployment in the
@@ -400,7 +399,7 @@ _DNS_CACHE_MAX = 10_000
 _DNS_TTL = 30.0
 
 
-#: Hard timeout on a DNS resolve (audit P-5, added v1.0.14). The OS
+#: Hard timeout on a DNS resolve. The OS
 #: resolver normally takes 5-50ms but a stale /etc/resolv.conf or
 #: a slow upstream resolver can block for 30s+. Wrapping in
 #: asyncio.wait_for caps the wait so a slow-DNS host can't block a
@@ -426,7 +425,7 @@ async def _resolve_cached(hostname: str) -> list[str]:
     now = time.monotonic()
     entry = _DNS_CACHE.get(hostname)
     if entry is not None and entry[0] > now:
-        # Audit fix S007 (1.4.0): touch MRU on hit so a hot
+        # Touch MRU on hit so a hot
         # hostname doesn't get evicted while idle ones survive.
         _DNS_CACHE.move_to_end(hostname)
         return entry[1]
@@ -496,7 +495,7 @@ async def validate_webhook_url(url: str) -> str | None:
             ip = ipaddress.ip_address(raw_ip)
         except ValueError:
             continue
-        # Round-7 audit fix R7-HIGH (Apr 2026): unified semantic check.
+        # Unified semantic check.
         block_reason = _ip_is_blocked(ip)
         if block_reason is not None:
             return block_reason
@@ -523,8 +522,7 @@ def validate_telegram_config(config: dict[str, Any]) -> str | None:
     an admin could supply ``bot_token = "123:abc@attacker.internal:8080/x"``,
     which httpx parses as userinfo and dials the attacker's host.
     Both the project-admin-managed channel path and the user-
-    managed channel path MUST call this - the earlier code only
-    wired it into the project path (external audit High #2).
+    managed channel path MUST call this.
     """
     bot_token = config.get("bot_token")
     if bot_token is not None:
@@ -573,8 +571,7 @@ async def validate_smtp_config(config: dict[str, Any]) -> str | None:
       ``_BLOCKED_NETWORKS`` guard used for webhook URLs)
     - Non-standard ``smtp_port`` (allowlist above)
 
-    Called by both the project-channel and user-channel validators
-    (external audit High #3).
+    Called by both the project-channel and user-channel validators.
     """
     host = config.get("smtp_host")
     if host is not None:
@@ -589,7 +586,7 @@ async def validate_smtp_config(config: dict[str, Any]) -> str | None:
         except ValueError:
             ip = None
         if ip is not None:
-            # Round-7 audit fix R7-HIGH (Apr 2026): unified semantic check.
+            # Unified semantic check.
             block_reason = _ip_is_blocked(ip)
             if block_reason is not None:
                 return f"smtp_host {block_reason}"
@@ -641,7 +638,7 @@ def _validate_webhook_url(url: str) -> str | None:
             ip = ipaddress.ip_address(sockaddr[0])
         except ValueError:
             continue
-        # Round-7 audit fix R7-HIGH (Apr 2026): unified semantic check.
+        # Unified semantic check.
         block_reason = _ip_is_blocked(ip)
         if block_reason is not None:
             return block_reason
@@ -862,9 +859,8 @@ async def deliver_email(
     # for public providers (Gmail / Mailgun / Brevo / SendGrid /
     # Postmark) is infeasible. For operator-run SMTP hosts, the
     # blocklist below on re-resolve still refuses private-range
-    # hits. Audit 2026-04-24 Medium-5 (to be filed): the R5 H2
-    # finding is downgraded from "pin the IP" to "re-validate at
-    # dispatch".
+    # hits. The "pin the IP" property is downgraded to
+    # "re-validate at dispatch" for SMTP.
     try:
         import ipaddress as _ipaddress
 
@@ -884,8 +880,7 @@ async def deliver_email(
                     parsed_ip = _ipaddress.ip_address(raw_ip)
                 except ValueError:
                     continue
-                # Round-7 audit fix R7-HIGH (Apr 2026): unified
-                # semantic check covers IPv4-mapped IPv6 etc.
+                # Unified semantic check covers IPv4-mapped IPv6 etc.
                 block_reason = _ip_is_blocked(parsed_ip)
                 if block_reason is not None:
                     return DeliveryResult(
@@ -903,12 +898,12 @@ async def deliver_email(
     subject = _build_email_subject(payload)
     body_text = _build_email_body(payload)
 
-    # Round-6 audit fix Notif-MED (Apr 2026): defensive header
-    # injection guard. The Subject / From / To values flow from a
-    # mix of operator config (``from_addr``, ``to_addrs``) and
-    # caller payload (``subject`` for transactional emails). A bare
-    # ``msg["Subject"] = subject`` with an attacker-controlled
-    # newline would let RFC 5322 header injection through (BCC
+    # Defensive header injection guard. The Subject / From / To
+    # values flow from a mix of operator config (``from_addr``,
+    # ``to_addrs``) and caller payload (``subject`` for
+    # transactional emails). A bare ``msg["Subject"] = subject``
+    # with an attacker-controlled newline would let RFC 5322
+    # header injection through (BCC
     # smuggling, body forgery). Reject any value containing CR/LF
     # before it reaches MIMEText, which itself accepts any string.
     def _no_crlf(value: str, field: str) -> str:
@@ -1034,13 +1029,12 @@ async def deliver_slack(
     if ssrf_error:
         return DeliveryResult(success=False, error=f"blocked: {ssrf_error}")
 
-    # Round-6 audit fix Notif-MED (Apr 2026): host-lock the Slack
-    # dispatcher to ``hooks.slack.com``. Without this, a tenant
-    # admin can register a "Slack" channel pointing at an arbitrary
-    # attacker-controlled HTTPS endpoint and use it as a generic
-    # data-exfil sink that LOOKS like Slack in the audit log. The
-    # SSRF check above only rejects PRIVATE addresses; a public
-    # attacker host passes it.
+    # Host-lock the Slack dispatcher to ``hooks.slack.com``.
+    # Without this, a tenant admin can register a "Slack" channel
+    # pointing at an arbitrary attacker-controlled HTTPS endpoint
+    # and use it as a generic data-exfil sink that LOOKS like
+    # Slack in the audit log. The SSRF check above only rejects
+    # PRIVATE addresses; a public attacker host passes it.
     try:
         slack_host = urlparse(webhook_url).hostname or ""
     except Exception:  # noqa: BLE001
@@ -1245,7 +1239,7 @@ def validate_pagerduty_config(config: dict[str, Any]) -> str | None:
         return "severity_map must be an object {trigger: severity}"
     # Cap dict size so a hostile or accidental large config can't
     # bloat the channel row or amplify dispatch-time payload merge
-    # work (audit M-3). 32 is well above the universe of triggers
+    # Work. 32 is well above the universe of triggers
     # z4j supports today (~6) with headroom for future additions.
     if len(smap) > 32:
         return f"severity_map has too many entries ({len(smap)} > 32)"
@@ -1430,10 +1424,10 @@ async def deliver_discord(
             error=f"blocked: {ssrf_error}",
         )
 
-    # Round-6 audit fix Notif-MED (Apr 2026): host-lock the Discord
-    # dispatcher to discord.com / discordapp.com / canary.discord.com /
-    # ptb.discord.com (the four official webhook hosts). Same threat
-    # model as the Slack host-lock above.
+    # Host-lock the Discord dispatcher to discord.com /
+    # discordapp.com / canary.discord.com / ptb.discord.com
+    # (the four official webhook hosts). Same threat model as
+    # the Slack host-lock above.
     _DISCORD_ALLOWED_HOSTS = frozenset({
         "discord.com",
         "discordapp.com",

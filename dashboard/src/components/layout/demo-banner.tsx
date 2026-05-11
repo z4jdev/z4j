@@ -42,7 +42,6 @@
  */
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
-import { useNavigate } from "@tanstack/react-router";
 
 const IS_DEMO = import.meta.env.VITE_Z4J_DEMO_MODE === "true";
 
@@ -56,7 +55,6 @@ export function DemoBanner() {
 }
 
 function DemoBannerInner() {
-  const navigate = useNavigate();
   const lastToastAt = useRef(0);
 
   useEffect(() => {
@@ -98,7 +96,13 @@ function DemoBannerInner() {
       <span className="h-3 w-px bg-yellow-900/30" />
       <button
         type="button"
-        onClick={() => navigate({ to: "/setup" }).catch(() => undefined)}
+        onClick={() => {
+          // The brain's first-boot setup page is server-rendered HTML
+          // outside the TanStack Router app, so navigate via
+          // window.location instead of the router (matches the other
+          // off-router transitions in this component).
+          window.location.href = "/setup";
+        }}
         className="hidden underline decoration-1 underline-offset-2 hover:decoration-2 sm:inline"
       >
         First-boot setup

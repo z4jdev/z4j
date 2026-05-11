@@ -65,8 +65,7 @@ class ScheduleCircuitBreakerWorker:
             ScheduleFireRepository,
         )
 
-        # Round-7 audit fix R7-HIGH (perf) (Apr 2026): the prior
-        # version opened ONE fresh session per enabled schedule and
+        # The prior version opened ONE fresh session per enabled schedule and
         # ran ``recent_failures`` per-schedule. At 10k enabled
         # schedules (the comment below admitted this was the design
         # ceiling) that was 10k sessions + 10k SELECTs per breaker
@@ -141,16 +140,15 @@ class ScheduleCircuitBreakerWorker:
             if current is None or not current.is_enabled:
                 return
 
-            # Round-4 audit fix (Apr 2026): re-read the failure
-            # streak inside this transaction. Pre-fix, ``tick()``
-            # opened session A, evaluated the streak, closed it,
-            # then ``_disable_and_audit`` opened session B with
+            # Re-read the failure streak inside this
+            # transaction. Without this re-read, ``tick()`` would
+            # open session A, evaluate the streak, close it, then
+            # ``_disable_and_audit`` would open session B with
             # only an ``is_enabled`` re-check - a successful fire
-            # landing between A and B still tripped the breaker on
-            # a healthy schedule. The race was flagged in the
-            # round-2 audit and re-flagged in round-3 as still
-            # open. We now query ``recent_failures`` again under
-            # session B and bail if the streak no longer holds.
+            # landing between A and B would still trip the
+            # breaker on a healthy schedule. We query
+            # ``recent_failures`` again under session B and bail
+            # if the streak no longer holds.
             fires = await ScheduleFireRepository(
                 session,
             ).recent_failures(

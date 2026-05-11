@@ -10,8 +10,7 @@ spreadsheet. Task names, audit ``action`` values, ``user_agent``
 headers, and exception strings are all operator-visible in Excel /
 Google Sheets / LibreOffice; without the apostrophe prefix a
 crafted value starting with ``=``, ``+``, ``-``, ``@``, tab, or CR
-becomes a live formula (external audit High #4, same rationale as
-``tasks.py``).
+becomes a live formula. Same rationale as ``tasks.py``.
 """
 
 from __future__ import annotations

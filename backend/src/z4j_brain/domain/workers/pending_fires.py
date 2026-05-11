@@ -110,16 +110,17 @@ class PendingFiresReplayWorker:
             engines_by_project[project_id].append(engine)
 
         replayed_total = 0
-        # Round-4 audit fix (Apr 2026): per-fire transaction so a
-        # crash mid-replay doesn't leave the buffer row + the
-        # dispatcher state inconsistent. Pre-fix one outer session
-        # held the whole loop, but ``dispatcher.issue`` commits
-        # internally after each call - so each ``delete_by_fire_id``
-        # ran in a NEW unconfirmed transaction (the dispatcher's
-        # commit closed the previous one). A SIGKILL between two
-        # successful issues left some buffer rows committed-deleted
-        # and others queued-but-not-deleted, then re-dispatched on
-        # next tick. With per-fire commits, every successful
+        # Per-fire transaction so a crash mid-replay doesn't
+        # leave the buffer row + the dispatcher state
+        # inconsistent. With one outer session holding the
+        # whole loop, ``dispatcher.issue`` commits internally
+        # after each call - so each ``delete_by_fire_id`` would
+        # run in a NEW unconfirmed transaction (the dispatcher's
+        # commit having closed the previous one). A SIGKILL
+        # between two successful issues would then leave some
+        # buffer rows committed-deleted and others
+        # queued-but-not-deleted, to be re-dispatched on next
+        # tick. With per-fire commits, every successful
         # issue+delete is atomic from the buffer's perspective.
         for project_id, engines in engines_by_project.items():
             async with self._db.session() as session:

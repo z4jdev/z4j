@@ -40,14 +40,14 @@ class _IPBucket:
         self._max_hits = max_hits
         self._hits: dict[str, deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
-        # Audit M1: inline-prune counter. Without this a spoofed-
+        # Inline-prune counter. Without this a spoofed-
         # XFF botnet with 1M distinct IPs would grow ``_hits``
         # until OOM.
         self._hits_since_prune = 0
 
     async def hit(self, key: str) -> bool:
         """Record a hit for ``key``; return True if within budget."""
-        # Audit M1: clamp the key so an attacker can't burn memory
+        # Clamp the key so an attacker can't burn memory
         # by submitting arbitrarily long ``X-Forwarded-For`` values.
         if len(key) > _IP_KEY_MAX_LEN:
             key = key[:_IP_KEY_MAX_LEN]
@@ -149,10 +149,8 @@ through but stops a runaway script. Each import does config
 validation including a SSRF DNS resolve.
 """
 
-# Round-6 audit fix WS-HIGH-3 (Apr 2026): per-IP throttle on the
-# agent-facing endpoints. Pre-fix the WS handshake + long-poll
-# event-batch endpoints had no rate limit. A leaked or guessed
-# bearer could:
+# Per-IP throttle on the agent-facing endpoints. Without this,
+# a leaked or guessed bearer could:
 #   - open thousands of WS connections (the "second connection
 #     wins" only kicks the OTHER active session; doesn't prevent
 #     a flood of new connections),

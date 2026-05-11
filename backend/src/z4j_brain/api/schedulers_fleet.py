@@ -85,14 +85,13 @@ async def list_fleet(
     fleet, but only global admins (``user.is_admin``) can view it.
     """
     if not user.is_admin:
-        # Audit fix M-1 (Apr 2026): pre-fix this returned an empty
-        # FleetResponse to render gracefully on the dashboard, but
-        # silently masking a denied request as "no schedulers
-        # configured" obscures both the audit trail (no failed-auth
-        # row) and the operator UX (the page implies there's
-        # nothing here when actually they're forbidden). Raise an
-        # explicit 403 so the dashboard knows to render a "you
-        # don't have access" state.
+        # Raise an explicit 403 so the dashboard knows to render
+        # a "you don't have access" state. Returning an empty
+        # FleetResponse would render gracefully on the dashboard
+        # but silently mask a denied request as "no schedulers
+        # configured", obscuring both the audit trail (no
+        # failed-auth row) and the operator UX (the page implies
+        # there's nothing here when actually they're forbidden).
         from z4j_brain.errors import AuthorizationError  # noqa: PLC0415
 
         raise AuthorizationError(
@@ -114,7 +113,7 @@ async def list_fleet(
     if not urls:
         return FleetResponse(schedulers=[], total=0, healthy=0)
 
-    # Audit fix L-5 (Apr 2026): explicit ``follow_redirects=False``.
+    # Explicit ``follow_redirects=False``.
     # httpx defaults to following redirects; a compromised scheduler
     # could redirect the brain's probe to internal-metadata services
     # (cloud-instance metadata at 169.254.169.254 etc). Pin to false

@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from z4j_brain.api.deps import (
     get_audit_log_repo,
@@ -85,8 +85,24 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    # Reserved-TLD-tolerant email (admin@test.local etc). Mirrors
+    # the validator on setup.CompleteRequest. The brain admin is
+    # authenticated locally; reserved TLDs are intended for dev/
+    # test fixtures.
+    email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=256)
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        """Symmetric with bootstrap + /setup (S-1). Single source of
+        truth in :func:`validate_admin_email`."""
+        from z4j_brain.domain.auth_service import validate_admin_email
+
+        try:
+            return validate_admin_email(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from None
 
 
 class UserPublic(BaseModel):
@@ -467,7 +483,7 @@ async def change_password(
     # for the same user serialise here. Without this, both can
     # pass ``verify`` and both call ``revoke_all_for_user`` +
     # ``sessions.create``, leaving TWO live post-rotation
-    # sessions instead of one (R3 finding H6). SQLite ignores
+    # sessions instead of one. SQLite ignores
     # FOR UPDATE; the test suite covers per-process serialisation
     # there. Postgres honours it strictly.
     await users.lock_for_password_change(user.id)
@@ -865,8 +881,8 @@ async def _send_password_reset_email(
     )
 
     logger = logging.getLogger("z4j.brain.auth.password_reset")
-    # Round-9 audit fix R9-Auth-MED (Apr 2026): place the token
-    # in the URL FRAGMENT rather than the query string. The
+    # Place the token in the URL FRAGMENT rather than the query
+    # string. The
     # fragment is never sent in the Referer header to third-party
     # assets on the reset page, never written to server-side
     # access logs, and is excluded from most browser-history
@@ -974,14 +990,13 @@ async def password_reset_confirm(
         raise NotFoundError("invalid_or_expired")
 
     hasher = PasswordHasher(settings)
-    # Round-9 audit fix R9-Auth-H1 (Apr 2026): enforce the password
-    # policy on reset-confirm. Pre-fix this call site went straight
-    # to ``hasher.hash`` while every OTHER write path
-    # (``setup_service.complete``, ``change_password``,
-    # ``invitations.accept``) called ``validate_policy`` first. An
-    # attacker who phished a reset link could land any 8-char
-    # password on the account, Pydantic enforced ``min_length=8``
-    # but nothing else. Now mirrors ``change_password`` exactly.
+    # Enforce the password policy on reset-confirm so this path
+    # matches every OTHER write path (``setup_service.complete``,
+    # ``change_password``, ``invitations.accept``) that calls
+    # ``validate_policy`` first. Without this an attacker who
+    # phished a reset link could land any 8-char password on the
+    # account; Pydantic enforces ``min_length=8`` but nothing
+    # more. Mirrors ``change_password`` exactly.
     hasher.validate_policy(body.new_password)
     new_hash = hasher.hash(body.new_password)
 
@@ -1000,7 +1015,7 @@ async def password_reset_confirm(
     )
     # Invalidate any OTHER unconsumed reset tokens for this user
     # so a minted-but-unused token from an earlier request can't
-    # second-reset the account (audit M5).
+    # second-reset the account.
     from sqlalchemy import update as _sa_update
     await db_session.execute(
         _sa_update(PasswordResetToken)

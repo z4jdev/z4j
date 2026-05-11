@@ -39,16 +39,25 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: RequestResponseEndpoint,
     ) -> Response:
+        from z4j_core.observability import bind as _bind, clear as _clear
+
         incoming = request.headers.get(_HEADER)
         request_id = _normalize(incoming) or _generate()
 
         request.state.request_id = request_id
+        # Phase G: bind into both context systems. structlog's own
+        # context is consumed by the brain's structlog processor
+        # pipeline; z4j_core.observability is consumed by the stdlib
+        # logging filter and shared with adapter packages so a single
+        # request_id flows across every z4j component.
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
+        z4j_tokens = _bind(request_id=request_id)
 
         try:
             response = await call_next(request)
         finally:
+            _clear(z4j_tokens)
             structlog.contextvars.clear_contextvars()
 
         response.headers[_HEADER] = request_id

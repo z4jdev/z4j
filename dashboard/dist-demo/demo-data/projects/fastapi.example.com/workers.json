@@ -1,0 +1,40 @@
+[
+  {
+    "id": "70000000-0000-4001-0000-000000000001",
+    "project_id": "00000000-0000-4000-9000-000000000002",
+    "engine": "arq",
+    "name": "worker-1@worker-1.fastapi.example.com",
+    "hostname": "worker-1.fastapi.example.com",
+    "pid": 2418,
+    "concurrency": 16,
+    "queues": ["default", "webhooks", "indexing"],
+    "state": "online",
+    "last_heartbeat_offset_s": -4,
+    "load_average": [0.61, 0.58, 0.55],
+    "active_tasks": 3,
+    "processed": 184320,
+    "failed": 12,
+    "succeeded": 184308,
+    "retried": 38,
+    "created_at_offset_s": -15552000
+  },
+  {
+    "id": "70000000-0000-4001-0000-000000000002",
+    "project_id": "00000000-0000-4000-9000-000000000002",
+    "engine": "arq",
+    "name": "worker-2@worker-2.fastapi.example.com",
+    "hostname": "worker-2.fastapi.example.com",
+    "pid": 1893,
+    "concurrency": 16,
+    "queues": ["default", "webhooks", "indexing"],
+    "state": "online",
+    "last_heartbeat_offset_s": -11,
+    "load_average": [0.49, 0.51, 0.48],
+    "active_tasks": 2,
+    "processed": 178944,
+    "failed": 8,
+    "succeeded": 178936,
+    "retried": 24,
+    "created_at_offset_s": -15552000
+  }
+]

@@ -196,7 +196,7 @@ async def list_audit(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 

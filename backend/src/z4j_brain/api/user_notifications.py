@@ -148,12 +148,11 @@ async def _validate_channel_config(
     unsafe input. Only keys present in ``config`` are checked, so
     PATCH payloads work too.
 
-    Previously this validator only covered webhook + slack - the
-    telegram + email paths slipped through unchecked, giving any
-    authenticated user an SSRF and a blind SMTP egress primitive
-    on their own channel (external audit High #2 + #3). Every
-    channel type is now validated via the shared domain-level
-    helpers so the project-admin and user paths stay in sync.
+    Every channel type is validated via the shared domain-level
+    helpers (covering webhook, slack, telegram, and email) so an
+    authenticated user cannot turn their own channel into an SSRF
+    or blind SMTP-egress primitive, and the project-admin and user
+    paths stay in sync.
     """
     if not config:
         return
@@ -237,7 +236,7 @@ class UserChannelCreate(BaseModel):
     @field_validator("config")
     @classmethod
     def _check_config_size(cls, v: dict[str, Any]) -> dict[str, Any]:
-        # Audit P-8: cap config size at the request boundary (16 KiB
+        # Cap config size at the request boundary (16 KiB
         # JSON-serialized) so a hostile or runaway client can't bloat
         # the channel row.
         from z4j_brain.api.notifications import _validate_config_size
@@ -311,7 +310,7 @@ class UserSubscriptionCreate(BaseModel):
     trigger: str = Field(pattern=_TRIGGER_PATTERN)
     filters: SubscriptionFilters = Field(default_factory=SubscriptionFilters)
     in_app: bool = True
-    # Round-8 audit fix R8-Pyd-H5 (Apr 2026): cap channel_ids lists.
+    # Cap channel_ids lists.
     project_channel_ids: list[uuid.UUID] = Field(
         default_factory=list, max_length=64,
     )
@@ -333,7 +332,6 @@ class UserSubscriptionUpdate(BaseModel):
     trigger: str | None = Field(default=None, pattern=_TRIGGER_PATTERN)
     filters: SubscriptionFilters | None = None
     in_app: bool | None = None
-    # Round-8 audit fix R8-Pyd-H5 (Apr 2026).
     project_channel_ids: list[uuid.UUID] | None = Field(
         default=None, max_length=64,
     )
@@ -585,7 +583,7 @@ async def import_user_channel_from_project(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project_id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 
@@ -781,12 +779,12 @@ async def test_user_channel_config(
     ``notification_deliveries`` - preflight semantics only. Runs the
     same SSRF / format guards as ``create_user_channel``.
 
-    Round-6 audit fix Notif-HIGH (Apr 2026): the project-channel test
-    endpoints already record a ``notifications.channel.test`` audit
-    row (data-exfil pivot via attacker-controlled webhook URL); the
-    user-scoped variant was missing it. Same threat model, a
-    compromised user account can dial out arbitrary HTTP / SMTP
-    payloads to attacker infrastructure carrying brain test content.
+    Records a ``notifications.channel.test`` audit row to match
+    the project-channel test endpoints (data-exfil pivot via
+    attacker-controlled webhook URL); the user-scoped variant
+    has the same threat model - a compromised user account can
+    dial out arbitrary HTTP / SMTP payloads to attacker
+    infrastructure carrying brain test content.
     """
     from z4j_brain.api.notifications import _destination_summary
 
@@ -835,9 +833,8 @@ async def test_saved_user_channel(
     lookup by ``user.id`` so a leaked UUID cannot cross-test another
     user's channel.
 
-    Round-6 audit fix Notif-HIGH (Apr 2026): also writes the
-    ``user_notifications.channel.test`` audit row that the project-
-    channel variant has had since 1.0.14.
+    Writes a ``user_notifications.channel.test`` audit row,
+    matching the project-channel variant.
     """
     from z4j_brain.api.notifications import _destination_summary
     from z4j_brain.errors import NotFoundError
@@ -895,10 +892,10 @@ async def list_user_subscriptions(
     """List the caller's subscriptions, optionally filtered to one project.
 
     When ``project_id`` is supplied the caller must currently be a
-    member of that project (R3 finding M10). Today the underlying
-    query already scopes by ``user.id`` so a non-member sees only an
-    empty list, but the explicit check documents intent and prevents
-    a regression if ``list_for_user`` is ever widened to span users.
+    member of that project. Today the underlying query already
+    scopes by ``user.id`` so a non-member sees only an empty list,
+    but the explicit check documents intent and prevents a
+    regression if ``list_for_user`` is ever widened to span users.
 
     v1.1.0: keyset paginated on ``(project_id, trigger, id)``.
     Cursor encoded as ``"<project_uuid_hex>|<trigger>|<sub_uuid_hex>"``.
@@ -956,6 +953,7 @@ async def create_user_subscription(
     body: UserSubscriptionCreate,
     user: "User" = Depends(get_current_user),
     memberships: "MembershipRepository" = Depends(get_membership_repo),
+    projects: "ProjectRepository" = Depends(get_project_repo),
     db_session: "AsyncSession" = Depends(get_session),
 ) -> UserSubscriptionPublic:
     from z4j_brain.persistence.models.notification import UserSubscription
@@ -966,7 +964,7 @@ async def create_user_subscription(
     )
 
     # User must be a member of the project they're subscribing to.
-    # Bug fixed in 1.3.2: global brain admins (``user.is_admin``) MUST
+    # Global brain admins (``user.is_admin``) MUST
     # bypass this membership check. /auth/me synthesises an admin
     # membership for them on every project (so the project switcher
     # renders), but the Membership table itself has no row for a
@@ -980,10 +978,19 @@ async def create_user_subscription(
     # admins without touching the DB.
     from z4j_brain.domain.policy_engine import PolicyEngine
 
-    await PolicyEngine().require_member(
+    policy = PolicyEngine()
+    project = await projects.get(body.project_id)
+    if project is None or not project.is_active:
+        from z4j_brain.errors import NotFoundError
+
+        raise NotFoundError(
+            "project not found",
+            details={"project_id": str(body.project_id)},
+        )
+    await policy.require_member(
         memberships,
         user=user,
-        project_id=body.project_id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
 

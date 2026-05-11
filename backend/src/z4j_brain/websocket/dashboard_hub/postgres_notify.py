@@ -347,7 +347,7 @@ class PostgresNotifyDashboardHub:
             return  # forward-compat: unknown topic
 
         # Strong-ref the fire-and-forget task to defeat GC + log any
-        # unhandled exception (audit P-10). Mirrors the registry
+        # Unhandled exception. Mirrors the registry
         # pg-notify pattern at registry/postgres_notify.py:457.
         task = asyncio.create_task(
             self._fan_out_remote(project_id, topic),

@@ -82,31 +82,30 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         """Return the row_hmac of the most recently inserted row.
 
         Used by ``AuditService.record`` to build the HMAC chain
-        anchor (audit v3 - finding A8). Returns None for the very
-        first row ever written (genesis).
+        anchor. Returns None for the very first row ever written
+        (genesis).
 
-        Round-9 audit fix R9-Stor-H4 (Apr 2026): the chain anchor
-        lock used to be taken HERE, but the caller may then do
-        seconds of I/O (signing, audit metadata serialisation,
-        etc.) before the actual INSERT, turning the audit chain
-        into a global serialisation point. The lock is now taken
-        by :meth:`acquire_chain_lock` immediately before the
-        INSERT in ``AuditService.record``, holding it for
-        microseconds instead.
+        The chain anchor lock is NOT taken here, because the
+        caller may then do seconds of I/O (signing, audit
+        metadata serialisation, etc.) before the actual INSERT,
+        turning the audit chain into a global serialisation
+        point. The lock is taken by :meth:`acquire_chain_lock`
+        immediately before the INSERT in
+        ``AuditService.record``, holding it for microseconds
+        instead.
 
-        Round-9 audit fix R9-Stor-H5 (Apr 2026): also depends on
-        the new ``ux_audit_log_prev_row_hmac`` partial UNIQUE index
-        (migration ``2026_04_28_0012-audit_chain_unique.py``) so
+        This also depends on the
+        ``ux_audit_log_prev_row_hmac`` partial UNIQUE index so
         that a concurrent insert that wins the race instead of
-        blocking on the lock collides at the DB level rather than
-        silently forking the chain.
+        blocking on the lock collides at the DB level rather
+        than silently forking the chain.
 
-        Round-9 audit fix R9-Stor-MED-7 (Apr 2026): also order by
-        ``id DESC`` as a deterministic tiebreaker. Two rows with
-        identical ``occurred_at`` (sub-microsecond resolution on
-        some platforms / bulk audit writes in a single tx) used to
-        fall through to Postgres heap order, so the chain anchor
-        flipped non-deterministically between calls.
+        Orders by ``id DESC`` as a deterministic tiebreaker.
+        Two rows with identical ``occurred_at`` (sub-microsecond
+        resolution on some platforms / bulk audit writes in a
+        single tx) would otherwise fall through to Postgres
+        heap order, flipping the chain anchor
+        non-deterministically between calls.
         """
         from sqlalchemy import desc as _desc  # noqa: PLC0415
 
@@ -119,18 +118,19 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         return result.scalar_one_or_none()
 
     async def acquire_chain_lock(self) -> None:
-        """Round-9 audit fix R9-Stor-H4 (Apr 2026): tight chain lock.
+        """Tight chain lock taken JUST before the INSERT.
 
-        Take a Postgres transaction-scoped advisory lock JUST before
-        the INSERT in ``AuditService.record``. The lock is released
-        on commit (xact-scope), so it's held for microseconds rather
-        than the seconds the prior R7 placement allowed. Combined
-        with the UNIQUE partial index on ``prev_row_hmac``, a
-        concurrent racer that bypasses the lock fails at the DB
-        level instead of forking the chain silently.
+        Takes a Postgres transaction-scoped advisory lock
+        immediately before the INSERT in ``AuditService.record``.
+        The lock is released on commit (xact-scope), so it's
+        held for microseconds. Combined with the UNIQUE partial
+        index on ``prev_row_hmac``, a concurrent racer that
+        bypasses the lock fails at the DB level instead of
+        forking the chain silently.
 
-        SQLite no-ops the lock, the dialect doesn't ship
-        ``pg_advisory_xact_lock`` and the dev path is single-writer.
+        SQLite no-ops the lock - the dialect doesn't ship
+        ``pg_advisory_xact_lock`` and the dev path is
+        single-writer.
         """
         # Stable magic so the same lock is reused across processes.
         # 0x7A_34_6A_DA = "z4j" + "ada"(udit) ASCII pun, fits in int32.
@@ -148,8 +148,7 @@ class AuditLogRepository(BaseRepository[AuditLog]):
             )
         except Exception:  # noqa: BLE001
             # Lock is best-effort. The UNIQUE partial index on
-            # ``prev_row_hmac`` (R9-Stor-H5) is the durable
-            # safeguard.
+            # ``prev_row_hmac`` is the durable safeguard.
             pass
 
     async def count_recent_by_action_and_ip(
@@ -187,22 +186,21 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         since: datetime,
         exclude_actions: tuple[str, ...] = (),
     ) -> int:
-        """Round-8 audit fix R8-HIGH-6 (Apr 2026): global counter.
+        """Global counter complementing the per-IP variant.
 
-        Mirrors :meth:`count_recent_by_action_and_ip` but does NOT
-        filter by IP. SetupService uses this to enforce a global
-        cap that complements the per-IP cap, closing the bypass
-        where an attacker on a NAT or distributed botnet rotates
-        source IPs to brute-force the 256-bit setup token without
-        ever hitting the per-IP threshold.
+        Mirrors :meth:`count_recent_by_action_and_ip` but does
+        NOT filter by IP. SetupService uses this to enforce a
+        global cap that complements the per-IP cap, closing the
+        bypass where an attacker on a NAT or distributed botnet
+        rotates source IPs to brute-force the 256-bit setup
+        token without ever hitting the per-IP threshold.
 
-        Round-9 audit fix R9-Reaud-H1 (Apr 2026): added
-        ``exclude_actions`` so the SetupService can subtract the
-        single ``setup.completed`` row that a successful first-boot
-        leaves behind. Pre-fix the global cap counted that
-        success-row toward the 8x-per-IP ceiling, effectively
-        consuming one of the legitimate retry budget on a brand-new
-        install before the first failed attempt.
+        ``exclude_actions`` lets the SetupService subtract the
+        single ``setup.completed`` row that a successful
+        first-boot leaves behind. Without this, the global cap
+        would count that success-row toward the 8x-per-IP
+        ceiling, consuming one of the legitimate retry budget
+        on a brand-new install before the first failed attempt.
         """
         where_clauses = [
             AuditLog.action.like(f"{action_prefix}%"),

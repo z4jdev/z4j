@@ -179,7 +179,7 @@ async def _visible_projects(
     project-scoped Bearer key), the returned list is filtered to
     that single project only - without this, a project-A-bound
     key would see every project its owner has access to via the
-    home / recent-failures aggregates (external audit Critical #1).
+    home / recent-failures aggregates.
     """
     if user.is_admin:
         # Global admin: every active project, with their actual role
@@ -345,7 +345,7 @@ async def get_summary(
     for row in event_rows:
         task_stats[row.project_id] = (int(row.tasks_24h or 0), int(row.failures_24h or 0))
 
-    # Audit H18: bound last_activity_at to a rolling 30-day window
+    # Bound last_activity_at to a rolling 30-day window
     # so the MAX aggregate doesn't scan every events partition for
     # every home/summary load. The card already shows "no recent
     # activity" when the value is null - quiet projects fall into

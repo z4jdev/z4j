@@ -1,0 +1,12 @@
+{
+  "id": "00000000-0000-4000-9000-000000000004",
+  "slug": "tasks.example.com",
+  "name": "tasks.example.com",
+  "description": "Internal job runner, native z4j-scheduler driving Celery + RQ + Dramatiq workers from one place.",
+  "environment": "production",
+  "timezone": "UTC",
+  "retention_days": 60,
+  "is_active": true,
+  "created_at_offset_s": -10368000,
+  "updated_at_offset_s": -120
+}

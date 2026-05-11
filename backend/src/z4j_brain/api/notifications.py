@@ -86,7 +86,6 @@ _CHANNEL_TYPE_PATTERN = r"^(webhook|email|slack|telegram|pagerduty|discord)$"
 #: (an SMTP block with full server cert chain runs ~4 KiB) but
 #: rejects abusive 1 MiB payloads before they hit the DB / are
 #: re-serialized into HMAC bodies / copied into PD custom_details.
-#: Audit P-8 (added v1.0.14).
 _CHANNEL_CONFIG_MAX_BYTES = 16 * 1024
 
 
@@ -223,11 +222,10 @@ class SubscriptionFilters(BaseModel):
     docs/MIGRATIONS.md.
     """
 
-    # Round-8 audit fix R8-Pyd-MED (Apr 2026): cap the priority
-    # list. Pre-fix the list was unbounded; a 1M-element list of
-    # the same Literal value bloated the dispatcher's per-event
-    # match loop with no functional benefit (only 4 distinct
-    # priorities exist, so 8 covers the matrix).
+    # Cap the priority list so a 1M-element list of the same
+    # Literal value can't bloat the dispatcher's per-event match
+    # loop (only 4 distinct priorities exist, so 8 covers the
+    # matrix).
     priority: list[Literal["critical", "high", "normal", "low"]] | None = (
         Field(default=None, max_length=8)
     )
@@ -253,8 +251,6 @@ class SubscriptionFilters(BaseModel):
         and character classes (``[...]``). Realistic operator
         patterns use 1-3 wildcards (``"my_app.*.send_email"``);
         20+ wildcards is always pathological.
-
-        Audit P-2 (added v1.0.14).
         """
         if v is None:
             return None
@@ -279,10 +275,9 @@ class DefaultSubscriptionCreate(BaseModel):
     trigger: str = Field(pattern=_TRIGGER_PATTERN)
     filters: SubscriptionFilters = Field(default_factory=SubscriptionFilters)
     in_app: bool = True
-    # Round-8 audit fix R8-Pyd-H5 (Apr 2026): cap channel_ids list.
-    # Pre-fix a 10M-UUID list forced ``get_many_for_project`` to
-    # build an enormous IN-clause. Real subscriptions hit at most
-    # a handful of channels.
+    # Cap channel_ids list so a 10M-UUID list can't force
+    # ``get_many_for_project`` to build an enormous IN-clause.
+    # Real subscriptions hit at most a handful of channels.
     project_channel_ids: list[uuid.UUID] = Field(
         default_factory=list, max_length=64,
     )
@@ -519,7 +514,7 @@ async def _resolve_member_project(
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
     await policy.require_member(
-        memberships, user=user, project_id=project.id, min_role=min_role,
+        memberships, user=user, project=project, min_role=min_role,
     )
     return project.id
 
@@ -1110,7 +1105,7 @@ async def _dispatch_test(
                 channel_config=config,
                 max_len=2048,
             )
-            # Snapshot channel name + type (audit L-2) so historical
+            # Snapshot channel name + type so historical
             # rows survive a future channel rename / delete with their
             # original destination intact. For unsaved-config preflight
             # tests there's no channel name; store None so the read
@@ -1452,7 +1447,6 @@ class DefaultSubscriptionUpdate(BaseModel):
     trigger: str | None = Field(default=None, pattern=_TRIGGER_PATTERN)
     filters: SubscriptionFilters | None = None
     in_app: bool | None = None
-    # Round-8 audit fix R8-Pyd-H5 (Apr 2026).
     project_channel_ids: list[uuid.UUID] | None = Field(
         default=None, max_length=64,
     )
@@ -1663,11 +1657,11 @@ async def clear_deliveries(
     data-loss risk. Operators who need long-term retention should
     forward via webhooks to an external log store.
 
-    Audit: as of v1.0.14 (audit L-1) every clear writes one row to
-    the brain audit_log so a rogue admin cannot silently delete
-    delivery history to cover the trail of a sensitive test
-    dispatch. The audit row carries the actor, the row count, and
-    the optional ``before`` timestamp.
+    Every clear writes one row to the brain audit_log so a rogue
+    admin cannot silently delete delivery history to cover the
+    trail of a sensitive test dispatch. The audit row carries
+    the actor, the row count, and the optional ``before``
+    timestamp.
     """
     from z4j_brain.api.deps import get_settings
     from z4j_brain.domain.audit_service import AuditService

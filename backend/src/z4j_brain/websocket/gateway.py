@@ -42,6 +42,7 @@ from z4j_core.errors import SignatureError
 from z4j_core.transport.frames import (
     CommandFrame,
     CommandPayload,
+    Frame,
     HelloAckFrame,
     HelloAckPayload,
     HelloFrame,
@@ -79,11 +80,11 @@ async def ws_agent(websocket: WebSocket) -> None:
     settings = _settings_from(websocket)
     db = _db_from(websocket)
 
-    # Round-6 audit fix WS-HIGH-3 (Apr 2026): per-IP rate limit
-    # on the WS handshake. Pre-fix a leaked bearer could open
-    # thousands of connections (the "second connection wins"
-    # policy only kicks the OTHER active session per agent;
-    # doesn't prevent connect floods).
+    # Per-IP rate limit on the WS handshake. Without this, a
+    # leaked bearer could open thousands of connections; the
+    # "second connection wins" policy only kicks the OTHER
+    # active session per agent, it doesn't prevent connect
+    # floods.
     from z4j_brain.domain.ip_rate_limit import _agent_connect_bucket  # noqa: PLC0415
 
     client_host = websocket.client.host if websocket.client else None
@@ -198,8 +199,15 @@ async def ws_agent(websocket: WebSocket) -> None:
     # 3) Update the agent row, send hello_ack
     # ------------------------------------------------------------------
     session_id = uuid.uuid4()
+    # Capture this connection's mark_online timestamp
+    # so the eventual mark_offline at close-time can pass it as
+    # ``captured_at``. With the conditional WHERE on
+    # ``last_connect_at <= captured_at`` in mark_offline, a fresh
+    # reconnection's mark_online (which writes a NEWER
+    # last_connect_at) cannot be clobbered by this connection's
+    # late-arriving mark_offline.
     async with db.session() as db_session:
-        await AgentRepository(db_session).mark_online(
+        connect_at = await AgentRepository(db_session).mark_online(
             agent_id,
             protocol_version=first_frame.payload.protocol_version,
             framework_adapter=first_frame.payload.framework,
@@ -269,8 +277,7 @@ async def ws_agent(websocket: WebSocket) -> None:
     # cannot forge frames against other projects.
     master_bytes = settings.secret.get_secret_value().encode("utf-8")
     project_secret = derive_project_secret(master_bytes, project_id)
-    # Round-9 audit fix R9-Wire-H1+H2 (Apr 2026): pass the
-    # newly-minted session_id into the signer + verifier so the
+    # Pass the newly-minted session_id into the signer + verifier so the
     # HMAC envelope binds to this specific session. A captured
     # frame from a previous session can't be replayed inside this
     # one, the verifier reconstitutes the envelope with THIS
@@ -301,6 +308,16 @@ async def ws_agent(websocket: WebSocket) -> None:
     registry = _registry_from(websocket)
     ingestor: EventIngestor = websocket.app.state.event_ingestor
     dispatcher: CommandDispatcher = websocket.app.state.command_dispatcher
+    # Callback the FrameRouter uses to emit
+    # outbound frames (event_batch_ack today; reserved for any
+    # future brain->agent control frame). The FrameSigner is
+    # already attached to the websocket above; the closure binds
+    # both. ``websocket.send_bytes`` is async; the closure preserves
+    # exception propagation so the FrameRouter's ack-emit branch
+    # can log on failure without losing the trace.
+    async def _send_frame(out: "Frame") -> None:
+        await websocket.send_bytes(signer.sign_and_serialize(out))
+
     frame_router = FrameRouter(
         db=db,
         ingestor=ingestor,
@@ -309,6 +326,7 @@ async def ws_agent(websocket: WebSocket) -> None:
         agent_id=agent_id,
         dashboard_hub=getattr(websocket.app.state, "dashboard_hub", None),
         worker_id=first_frame.payload.worker_id,
+        send_frame=_send_frame,
     )
 
     # Worker-first protocol (1.2.0+): pull the optional worker_id
@@ -389,53 +407,183 @@ async def ws_agent(websocket: WebSocket) -> None:
         # with no frame the agent has either died, NAT-dropped us,
         # or wedged its event loop - in all cases the right answer
         # is to free the file descriptor.
+        #
+        # Decouple ingest from the recv loop. Awaiting
+        # ``frame_router.dispatch(frame)`` inline here would open a
+        # DB session, run N upserts per event_batch, and a
+        # notification fanout - all while the python ``websockets``
+        # library cannot dispatch its periodic PING (PING/PONG runs
+        # on the same per-connection asyncio task as application
+        # messages). After ~ping_interval (20s) of starvation the
+        # brain's outbound PING never fires, the agent waits another
+        # ping_timeout (30s), and the connection closes with code
+        # 1011 "keepalive ping timeout". Under heavy event-fanout
+        # this disconnect-storms multiple agents simultaneously even
+        # though CPU is idle - the bottleneck is serialised awaitable
+        # chains, not saturation.
+        #
+        # The fix: a per-connection bounded asyncio.Queue plus a
+        # dedicated ingest worker coroutine. The recv loop just
+        # enqueues and returns immediately, freeing the connection
+        # task to handle protocol-layer PING/PONG promptly. The queue
+        # is bounded so a saturated ingest path applies backpressure
+        # rather than growing memory unboundedly; under sustained
+        # overload the recv loop blocks on ``put`` (NOT on dispatch),
+        # so PING/PONG can still drain in the meantime because
+        # ``put`` releases the loop between awaits.
         idle_timeout = float(settings.ws_idle_timeout_seconds)
-        while True:
-            try:
-                frame = await asyncio.wait_for(
-                    _recv_frame(
-                        websocket,
-                        max_bytes=settings.ws_max_frame_bytes,
-                        verifier=verifier,
-                    ),
-                    timeout=idle_timeout,
-                )
-            except asyncio.TimeoutError:
-                logger.info(
-                    "z4j gateway: idle timeout, closing",
-                    agent_id=str(agent_id),
-                    idle_seconds=idle_timeout,
-                )
-                await _safe_close(websocket, code=4408)
-                break
-            except WebSocketDisconnect:
-                break
-            except _BadFrame:
-                # Bad frame is connection-fatal - kill the WS to
-                # avoid de-syncing the wire protocol.
-                await _safe_close(websocket, code=4400)
-                break
-            except SignatureError as exc:
-                # v2 envelope verification failure. One forged frame
-                # means the peer cannot be trusted for the rest of
-                # the session; close with a distinct code so
-                # operators can distinguish a crypto failure from a
-                # plain malformed frame.
-                logger.error(
-                    "z4j gateway: frame verification failed, closing",
-                    agent_id=str(agent_id),
-                    reason=str(exc),
-                )
-                await _safe_close(websocket, code=4403)
-                break
-            except Exception:  # noqa: BLE001
-                logger.exception("z4j gateway: unexpected recv error")
-                await _safe_close(websocket, code=1011)
-                break
+        ingest_queue: asyncio.Queue[Frame] = asyncio.Queue(
+            maxsize=settings.ws_ingest_queue_maxsize,
+        )
 
-            await frame_router.dispatch(frame)
+        async def _ingest_worker() -> None:
+            """Drain ingest_queue and dispatch each frame.
+
+            Single-producer / single-consumer: one worker per
+            connection so within-connection ordering is preserved
+            and the per-event savepoint+retry path in the
+            event_ingestor cannot silently skip events that fail a
+            non-deadlock SQL exception. Throughput-driven designs
+            with multiple parallel workers per connection look
+            tempting on benchmarks but produce out-of-order arrivals
+            at the ingestor, which combined with the per-event
+            savepoint loop's "log + skip on non-deadlock failure"
+            branch silently drops events the agent has already had
+            ack'd and confirmed-evicted. Single worker is the
+            correct trade.
+
+            ``frame_router.dispatch`` already wraps every code path
+            in ``try/except`` and never raises, so this worker has
+            no per-frame error handling of its own.
+            """
+            while True:
+                frame = await ingest_queue.get()
+                try:
+                    await frame_router.dispatch(frame)
+                finally:
+                    ingest_queue.task_done()
+
+        ingest_tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(
+                _ingest_worker(),
+                name=f"z4j_ingest_{agent_id}",
+            ),
+        ]
+
+        try:
+            while True:
+                try:
+                    frame = await asyncio.wait_for(
+                        _recv_frame(
+                            websocket,
+                            max_bytes=settings.ws_max_frame_bytes,
+                            verifier=verifier,
+                        ),
+                        timeout=idle_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.info(
+                        "z4j gateway: idle timeout, closing",
+                        agent_id=str(agent_id),
+                        idle_seconds=idle_timeout,
+                    )
+                    await _safe_close(websocket, code=4408)
+                    break
+                except WebSocketDisconnect:
+                    break
+                except _BadFrame:
+                    # Bad frame is connection-fatal - kill the WS to
+                    # avoid de-syncing the wire protocol.
+                    await _safe_close(websocket, code=4400)
+                    break
+                except SignatureError as exc:
+                    # v2 envelope verification failure. One forged frame
+                    # means the peer cannot be trusted for the rest of
+                    # the session; close with a distinct code so
+                    # operators can distinguish a crypto failure from a
+                    # plain malformed frame.
+                    logger.error(
+                        "z4j gateway: frame verification failed, closing",
+                        agent_id=str(agent_id),
+                        reason=str(exc),
+                    )
+                    await _safe_close(websocket, code=4403)
+                    break
+                except Exception:  # noqa: BLE001
+                    logger.exception("z4j gateway: unexpected recv error")
+                    await _safe_close(websocket, code=1011)
+                    break
+
+                # Enqueue for the ingest worker. Block-don't-drop on
+                # full: if the ingest path is sustained-saturated, the
+                # recv loop blocks on ``put`` (NOT on dispatch), which
+                # is fine because ``put`` releases the loop between
+                # awaits so PING/PONG keeps flowing. Dropping on full
+                # would silently lose frames - the agent has no way
+                # to know it happened (ack-aware paths live a layer
+                # up). Blocking instead applies backpressure all the
+                # way back to the agent's send buffer where the
+                # buffer's bounded size is the correct backpressure
+                # signal.
+                await ingest_queue.put(frame)
+        finally:
+            # Cancel the ingest workers so we don't leak coroutines
+            # when the recv loop exits. Swallow each
+            # ``CancelledError`` so the outer ``finally`` for the
+            # connection cleanup still runs.
+            for t in ingest_tasks:
+                t.cancel()
+            for t in ingest_tasks:
+                try:
+                    await t
+                except (asyncio.CancelledError, BaseException):  # noqa: BLE001
+                    pass
+
+            # Drain the ingest queue so any frames held by cancelled
+            # ``put`` futures are released. Without this, an
+            # ``EventBatchFrame`` sitting in ``Queue._putters`` (from
+            # a recv loop that was cancelled mid-``put`` while the
+            # queue was full) stays reachable through the queue
+            # object's internal deques, which in turn stays reachable
+            # via the ``_send_frame`` closure -> ``websocket`` ->
+            # ``_z4j_verifier`` -> ``ReplayGuard`` cycle. The agent
+            # re-ships unacked entries on reconnect via the
+            # app-level ack and the brain dedupes via the
+            # content-derived event_id, so dropping these in-flight
+            # frames is safe.
+            try:
+                while True:
+                    ingest_queue.get_nowait()
+                    ingest_queue.task_done()
+            except asyncio.QueueEmpty:
+                pass
+
+            # Drop the strong references the route handler attached
+            # to the websocket so the per-session FrameSigner /
+            # FrameVerifier (and its 4096-entry replay-guard nonce
+            # window) can be GC'd as soon as the route handler
+            # returns. Without this the verifier stays reachable
+            # through ``websocket`` for as long as the framework
+            # keeps the websocket object alive, and a high-churn
+            # reconnect rate accumulates 4K nonces per disconnected
+            # session in memory.
+            try:
+                websocket._z4j_signer = None  # type: ignore[attr-defined]
+                websocket._z4j_verifier = None  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Tear down the FrameRouter's per-connection background
+            # tasks + clear its outbound callback. The router holds a
+            # closure capturing ``websocket`` + ``signer``; clearing
+            # ``_send_frame`` breaks that cycle so the router itself
+            # can be collected without waiting on cycle-GC.
+            try:
+                frame_router.aclose()
+            except Exception:  # noqa: BLE001
+                pass
     finally:
-        # Round-7 audit fix R7-HIGH (race) (Apr 2026): pass our own
+        # Pass our own
         # ``websocket`` so the registry only evicts the entry IF it
         # still points at us. v1.2.0: also pass worker_id so the
         # registry only drops THIS worker's slot, not all slots
@@ -461,7 +609,15 @@ async def ws_agent(websocket: WebSocket) -> None:
                     agent_id=agent_id, worker_id=agent_worker_id,
                 )
                 if last_worker_gone:
-                    await AgentRepository(db_session).mark_offline(agent_id)
+                    # Pass connect_at so the conditional
+                    # WHERE clause in mark_offline skips the row when a
+                    # fresher reconnect has already bumped last_connect_at.
+                    # Without this guard the late mark_offline would pin
+                    # the agent to state=offline indefinitely while the
+                    # new ws + heartbeats stream uninterrupted.
+                    await AgentRepository(db_session).mark_offline(
+                        agent_id, captured_at=connect_at,
+                    )
                 await db_session.commit()
         except Exception:  # noqa: BLE001
             logger.exception(
@@ -598,15 +754,15 @@ async def _drain_pending_for_agent(
         commands = list(result.scalars().all())
 
     for cmd in commands:
-        # Round-6 audit fix WS-HIGH-1 (Apr 2026): claim FIRST,
-        # push second. Pre-fix the registry's reconcile loop
-        # could see this same PENDING command and concurrently
-        # push it to the same agent - causing duplicate execution
-        # for destructive commands (purge_queue, restart_worker,
-        # bulk_retry) when the agent's in-memory dedup TTL was
-        # exceeded or the agent process restarted between the two
-        # pushes. Long-poll path already does claim-then-push
-        # (agent_longpoll.py); the WS path now matches.
+        # Claim FIRST, push second. Otherwise the registry's
+        # reconcile loop could see this same PENDING command and
+        # concurrently push it to the same agent - causing
+        # duplicate execution for destructive commands
+        # (purge_queue, restart_worker, bulk_retry) when the
+        # agent's in-memory dedup TTL was exceeded or the agent
+        # process restarted between the two pushes. Long-poll
+        # path uses claim-then-push (agent_longpoll.py); the WS
+        # path matches.
         async with db.session() as session:
             from z4j_brain.persistence.repositories import CommandRepository
 
@@ -630,8 +786,8 @@ async def _drain_pending_for_agent(
                 "expires it. Continuing with the next command.",
                 command_id=str(cmd.id),
             )
-            # Round-6 audit fix WS-MED-2: continue draining so a
-            # single push failure doesn't strand the whole batch.
+            # Continue draining so a single push failure doesn't
+            # strand the whole batch.
             continue
 
 

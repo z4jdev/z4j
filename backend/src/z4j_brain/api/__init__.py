@@ -9,6 +9,7 @@ added in later phases as the corresponding domain services land.
 from __future__ import annotations
 
 from z4j_brain.api import (
+    admin_settings,
     agents,
     audit,
     auth,
@@ -28,6 +29,7 @@ from z4j_brain.api import (
 )
 
 __all__ = [
+    "admin_settings",
     "agents",
     "audit",
     "auth",

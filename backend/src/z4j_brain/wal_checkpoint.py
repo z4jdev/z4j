@@ -17,7 +17,7 @@ opportunistically without blocking concurrent readers/writers.
 PASSIVE is the safe default; TRUNCATE (which forcibly resets
 the WAL file) is reserved for an explicit operator action and
 *not* the periodic loop, because it can stall behind a long-
-running read transaction (audit fix MED-14).
+running read transaction.
 
 Postgres deployments don't need this, the task detects the
 dialect at start and exits cleanly if it's not SQLite.
@@ -59,7 +59,7 @@ class WalCheckpointTask:
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._last_run_at: datetime | None = None
-        # Audit fix MED (second pass): -1 sentinel matches the
+        # -1 sentinel matches the
         # documented "no useful number" semantics. 0 used to mean
         # "ran once and checkpointed nothing" AND "never run yet"
         #, distinct states that operators graphing the gauge need

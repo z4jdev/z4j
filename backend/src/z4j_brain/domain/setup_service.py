@@ -97,7 +97,7 @@ class SetupService:
         # Optional reference to the brain's DatabaseManager so
         # _record_setup_failure can open a dedicated short-lived
         # session - the failure audit then survives a rollback of
-        # the caller's transaction (R3 finding H4). The CLI path
+        # the caller's transaction. The CLI path
         # constructs SetupService without a db_manager (it has
         # its own session); the production path threads it in
         # from main.py's lifespan.
@@ -378,16 +378,16 @@ class SetupService:
         the token, so any further attempt against the consumed
         token will be a failure that bumps the counter normally.
 
-        Known limitation (R3 finding M9 - accepted trade-off):
-        two concurrent pre-checks can both observe ``count <
-        threshold`` and both proceed, so the budget can overshoot
-        by at most ``uvicorn_workers × concurrency - 1``. Making
-        this truly atomic would require coupling the budget
-        check into the audit INSERT via a Postgres CTE, which
-        mixes concerns and complicates the audit chain. At the
-        default threshold (10 attempts per 15 min per IP) the
-        overshoot is a rounding error on the rate-limit signal,
-        not a security bypass.
+        Known limitation (accepted trade-off): two concurrent
+        pre-checks can both observe ``count < threshold`` and
+        both proceed, so the budget can overshoot by at most
+        ``uvicorn_workers × concurrency - 1``. Making this truly
+        atomic would require coupling the budget check into the
+        audit INSERT via a Postgres CTE, which mixes concerns
+        and complicates the audit chain. At the default threshold
+        (10 attempts per 15 min per IP) the overshoot is a
+        rounding error on the rate-limit signal, not a security
+        bypass.
         """
         cutoff = datetime.now(UTC) - timedelta(minutes=15)
         existing = await audit_log.count_recent_by_action_and_ip(
@@ -397,7 +397,7 @@ class SetupService:
         )
         if existing >= self._settings.first_boot_attempts_per_ip:
             return False
-        # Round-8 audit fix R8-HIGH-6 (Apr 2026): also enforce a
+        # Also enforce a
         # GLOBAL cap so an attacker who rotates source IPs (NAT
         # botnet, X-Forwarded-For abuse if proxy chain is misconfigured,
         # cloud function fan-out) can't multiply the per-IP budget by
@@ -406,7 +406,7 @@ class SetupService:
         # per-IP cap which still terminates the brute-force in seconds
         # of attempts even at the most permissive setting.
         global_cap = self._settings.first_boot_attempts_per_ip * 8
-        # Round-9 audit fix R9-Reaud-H1 (Apr 2026): exclude
+        # Exclude
         # ``setup.completed`` from the count. On a brand-new install
         # the success row would otherwise immediately consume one of
         # the 8x retry budget, hurting the next legitimate
@@ -428,14 +428,14 @@ class SetupService:
     ) -> None:
         """Record a failed setup attempt.
 
-        Uses a DEDICATED short-lived session when a db_manager was
-        wired in at construction time, so the failure row survives
-        a rollback of the caller's transaction (R3 finding H4 -
-        without this, an exception in the success path further
-        down ``complete()`` would also wipe the failure audit,
-        leaving no trace AND under-counting the attempt budget).
-        Falls back to the caller's session when no db_manager is
-        available (CLI path, tests).
+        Uses a DEDICATED short-lived session when a db_manager
+        was wired in at construction time, so the failure row
+        survives a rollback of the caller's transaction. Without
+        this, an exception in the success path further down
+        ``complete()`` would also wipe the failure audit,
+        leaving no trace AND under-counting the attempt budget.
+        Falls back to the caller's session when no db_manager
+        is available (CLI path, tests).
         """
         if self._db_manager is not None:
             try:

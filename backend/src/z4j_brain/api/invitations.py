@@ -243,19 +243,19 @@ async def mint_invitation(
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
     await policy.require_member(
-        memberships, user=user, project_id=project.id,
+        memberships, user=user, project=project,
         min_role=ProjectRole.ADMIN,
     )
 
-    # Round-9 audit fix R9-Auth-LOW (Apr 2026): canonicalize the
-    # invitee email at mint time. Pre-fix ``get_by_email`` casefolded
-    # but did NOT NFKC/IDNA normalize, so an admin who pasted
-    # ``Ｕｓｅｒ@example.com`` (full-width) while ``user@example.com``
-    # already existed got a "no existing user" response, the invite
-    # was minted, and accept-time TOCTOU re-canonicalization
-    # eventually 409'd, wasted invite + confusing UX. Canonicalize
-    # before the dup-check AND store the canonical form on the row
-    # so the accept path sees consistent state.
+    # Canonicalize the invitee email at mint time. ``get_by_email``
+    # casefolds but does NOT NFKC/IDNA normalize, so without this
+    # an admin who pasted ``Ｕｓｅｒ@example.com`` (full-width)
+    # while ``user@example.com`` already existed would get a "no
+    # existing user" response, the invite would be minted, and
+    # accept-time TOCTOU re-canonicalization would eventually
+    # 409 - wasted invite + confusing UX. Canonicalize before
+    # the dup-check AND store the canonical form on the row so
+    # the accept path sees consistent state.
     from z4j_brain.domain.auth_service import canonicalize_email  # noqa: PLC0415
 
     canonical_email = canonicalize_email(body.email)
@@ -318,7 +318,7 @@ async def mint_invitation(
     return InvitationMintPublic(
         invitation=_invitation_public(row),
         token=plaintext,
-        # Round-9 audit fix R9-Auth-MED (Apr 2026): URL fragment
+        # URL fragment
         # not query string. See auth.py password-reset accept_url
         # for the threat model, fragment isn't sent in Referer
         # headers, isn't written to access logs, and isn't synced
@@ -369,7 +369,7 @@ async def _try_send_invitation_email(
     if not email_channels:
         return False
 
-    # Round-9 audit fix R9-Auth-MED (Apr 2026): URL fragment.
+    # URL fragment.
     accept_url = (
         f"{settings.public_url.rstrip('/')}/invite#token={token}"
         if getattr(settings, "public_url", None)
@@ -422,7 +422,7 @@ async def list_pending_invitations(
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
     await policy.require_member(
-        memberships, user=user, project_id=project.id,
+        memberships, user=user, project=project,
         min_role=ProjectRole.ADMIN,
     )
     rows = await invitations.list_for_project(project.id)
@@ -452,7 +452,7 @@ async def revoke_invitation(
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
     await policy.require_member(
-        memberships, user=user, project_id=project.id,
+        memberships, user=user, project=project,
         min_role=ProjectRole.ADMIN,
     )
     row = await invitations.get(invitation_id)
@@ -554,7 +554,7 @@ async def accept_invitation(
     if project is None:
         raise NotFoundError("invalid_or_expired")
 
-    # Defense-in-depth (audit M1): re-validate the stored role
+    # Defense-in-depth: re-validate the stored role
     # against the current ProjectRole enum. ``role`` is a free-text
     # column; if a future enum narrowing or a buggy code path ever
     # writes a non-enum value, accept must refuse rather than grant.
@@ -573,14 +573,13 @@ async def accept_invitation(
             details={"email": row.email},
         )
 
-    # Audit fix M1 (1.4.0 pre-release pass): enforce the same
-    # password policy here as every other write path (auth.py
-    # password change, users.py admin create / set, cli.py
-    # changepassword, setup_service first-boot). Pre-fix the
-    # invitation-accept handler called ``hasher.hash`` directly,
-    # bypassing the 3-of-4-character-classes + common-password
-    # denylist + max-length checks. ``Field(min_length=12)`` on the
-    # request schema only enforces length, not strength -- a 12-char
+    # Enforce the same password policy here as every other write
+    # path (auth.py password change, users.py admin create / set,
+    # cli.py changepassword, setup_service first-boot). Calling
+    # ``hasher.hash`` directly would bypass the
+    # 3-of-4-character-classes + common-password denylist +
+    # max-length checks. ``Field(min_length=12)`` on the request
+    # schema only enforces length, not strength -- a 12-char
     # value like "Summer2025!!" or "qwertyuiop12" would pass.
     hasher = PasswordHasher(settings)
     hasher.validate_policy(body.password)

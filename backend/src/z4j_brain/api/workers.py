@@ -121,7 +121,7 @@ async def list_workers(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
     repo = WorkerRepository(db_session)
@@ -153,7 +153,7 @@ async def get_worker_detail(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
 

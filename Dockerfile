@@ -41,7 +41,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     Z4J_LOG_JSON=true \
     Z4J_BIND_HOST=0.0.0.0 \
-    Z4J_BIND_PORT=7700
+    Z4J_BIND_PORT=7700 \
+    Z4J_HOME=/data
 
 # Install runtime OS deps + create non-root user.
 #   - tini: proper PID-1 signal handling
@@ -83,62 +84,15 @@ RUN set -eux; \
     find "${SITE_PACKAGES}" -type f -name '*.so' -exec strip --strip-unneeded {} + \
         2>/dev/null || true
 
-# Entrypoint script: auto-mint secrets if not provided, auto-migrate,
-# then exec z4j. Mirrors the dev Dockerfile's first-boot UX so users
-# see identical behavior regardless of which image variant they use.
-RUN printf '%s\n' \
-    '#!/bin/sh' \
-    'set -eu' \
-    '' \
-    '# SQLite-by-default. If the operator did not set Z4J_DATABASE_URL,' \
-    '# we point at /data/z4j.db and configure the local registry' \
-    '# backend (Postgres LISTEN/NOTIFY would not work over SQLite).' \
-    '# This makes `docker run -p 7700:7700 z4jdev/z4j` zero-config.' \
-    'if [ -z "${Z4J_DATABASE_URL:-}" ]; then' \
-    '  mkdir -p /data' \
-    '  export Z4J_DATABASE_URL="sqlite+aiosqlite:////data/z4j.db"' \
-    '  export Z4J_REGISTRY_BACKEND="${Z4J_REGISTRY_BACKEND:-local}"' \
-    '  export Z4J_ENVIRONMENT="${Z4J_ENVIRONMENT:-dev}"' \
-    '  export Z4J_ALLOWED_HOSTS="${Z4J_ALLOWED_HOSTS:-[\"localhost\",\"127.0.0.1\"]}"' \
-    '  echo "[z4j] using SQLite at /data/z4j.db (dev mode)"' \
-    'fi' \
-    '' \
-    '# z4j first-boot UX:' \
-    '#   1. Z4J_SECRET set by operator -> use it' \
-    '#   2. /data/secret.env exists from a previous boot -> reuse it' \
-    '#   3. neither -> mint fresh + persist to /data/secret.env' \
-    'if [ -z "${Z4J_SECRET:-}" ]; then' \
-    '  if [ -f /data/secret.env ]; then' \
-    '    . /data/secret.env' \
-    '    echo "[z4j] loaded persisted Z4J_SECRET from /data/secret.env"' \
-    '  else' \
-    '    mkdir -p /data' \
-    '    Z4J_SECRET=$(python -c "import secrets; print(secrets.token_urlsafe(48))")' \
-    '    Z4J_SESSION_SECRET=$(python -c "import secrets; print(secrets.token_urlsafe(48))")' \
-    '    {' \
-    '      printf "export Z4J_SECRET=%s\\n" "$Z4J_SECRET"' \
-    '      printf "export Z4J_SESSION_SECRET=%s\\n" "$Z4J_SESSION_SECRET"' \
-    '    } > /data/secret.env' \
-    '    chmod 600 /data/secret.env' \
-    '    echo "[z4j] minted fresh Z4J_SECRET + Z4J_SESSION_SECRET, persisted to /data/secret.env"' \
-    '    echo "[z4j] WARNING: evaluation mode -- set Z4J_SECRET via env and back /data up for production"' \
-    '  fi' \
-    '  export Z4J_SECRET Z4J_SESSION_SECRET' \
-    'fi' \
-    '' \
-    'echo "[z4j] running migrations"' \
-    'z4j migrate upgrade head' \
-    'echo "[z4j] starting server"' \
-    'exec "$@"' \
-    > /app/entrypoint.sh && \
-    chmod +x /app/entrypoint.sh && \
-    chown z4j:z4j /app/entrypoint.sh
-
-# Mount /data for SQLite and persisted secrets. Volume-mount this
-# named volume in production for durability across container restarts.
+# Volume mount for SQLite, persisted secrets, embedded PKI, allowed-hosts.
+# Z4J_HOME=/data is set above so every state file lands here, covered by
+# the named volume. Pre-1.5 the entrypoint shell duplicated the Python
+# atomic-mint logic and only covered /data/secret.env + /data/z4j.db;
+# /app/.z4j/embedded-pki and /app/.z4j/allowed-hosts leaked outside the
+# volume. 1.5 collapses to a single Python code path.
 VOLUME /data
 
-WORKDIR /app
+WORKDIR /data
 USER z4j
 
 EXPOSE 7700
@@ -148,5 +102,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; \
 sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7700/api/v1/health',timeout=3).status==200 else 1)"
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
-CMD ["z4j", "serve"]
+# `z4j serve` itself handles SQLite-by-default, atomic secret mint
+# (mode 0o600, O_CREAT|O_EXCL|O_NOFOLLOW), and auto-migration via
+# Z4J_AUTO_MIGRATE=true (the default). Identical code path runs on
+# bare metal, in containers, and in CI.
+ENTRYPOINT ["/usr/bin/tini", "--", "z4j"]
+CMD ["serve"]

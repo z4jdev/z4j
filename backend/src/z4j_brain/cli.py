@@ -16,11 +16,17 @@ remember the uvicorn invocation flags.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from z4j_brain import __version__
+from z4j_core.paths import (
+    ensure_z4j_home,
+    reject_deprecated_path_env,
+    z4j_home,
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -76,7 +82,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve = sub.add_parser("serve", help="run uvicorn against create_app")
     serve.add_argument("--host", default=None, help="bind host")
     serve.add_argument("--port", type=int, default=None, help="bind port")
-    serve.add_argument("--workers", type=int, default=1)
+    serve.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            "Number of uvicorn worker processes. Default: "
+            "min(4, os.cpu_count()). The pre-1.5 default of 1 caused "
+            "agent flap under modest load (single asyncio event loop "
+            "couldn't dispatch WebSocket PONGs while ingesting events). "
+            "Set explicitly to override."
+        ),
+    )
     serve.add_argument("--reload", action="store_true")
     # --environment / --env: CLI shortcut for setting Z4J_ENVIRONMENT.
     # Wins over the env var (CLI > env > auto-detect default). Most
@@ -232,10 +249,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Currently exposes ``rewrite-scheduler`` for the explicit
     # migration of ``Schedule.scheduler`` values when an operator
     # has flipped a project's ``default_scheduler_owner`` and wants
-    # to retroactively migrate existing rows. Round-9 audit fix:
-    # we deliberately do NOT auto-rewrite at PATCH time (that path
-    # caused a six-round cascade of concurrency + lock + staleness
-    # bugs). Operators who want migration use this command.
+    # to retroactively migrate existing rows. We deliberately do
+    # NOT auto-rewrite at PATCH time; operators who want migration
+    # use this command.
     projects_cmd = sub.add_parser(
         "projects",
         help="project-scoped operations (rewrite-scheduler, ...)",
@@ -626,6 +642,59 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="HTTP timeout per PyPI lookup in seconds (default: 10)",
     )
 
+    # init - scaffold ~/.z4j/config.env from a documented template.
+    init = sub.add_parser(
+        "init",
+        help="scaffold ~/.z4j/config.env (one-time setup helper)",
+    )
+    init.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help=(
+            "overwrite an existing config.env. Default behavior is "
+            "to refuse so an operator never accidentally clobbers "
+            "their tuned values."
+        ),
+    )
+
+    # config - introspect and validate the runtime tunables file.
+    config_cmd = sub.add_parser(
+        "config",
+        help="inspect and validate ~/.z4j/config.env",
+    )
+    config_sub = config_cmd.add_subparsers(
+        dest="config_command", required=True,
+    )
+    config_show = config_sub.add_parser(
+        "show",
+        help="print effective settings + their source (env / file / default)",
+    )
+    config_show.add_argument(
+        "--reveal-secrets",
+        action="store_true",
+        default=False,
+        help=(
+            "print secret values in cleartext. Default is to mask "
+            "every secret as ***. Required for one-off debugging "
+            "(\"is this secret what I expect\") but should never "
+            "land in a script."
+        ),
+    )
+    config_validate = config_sub.add_parser(
+        "validate",
+        help="parse a candidate config file and report errors",
+    )
+    config_validate.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help=(
+            "path to a candidate .env file. Defaults to "
+            "$Z4J_HOME/config.env."
+        ),
+    )
+
     # version
     sub.add_parser("version", help="print installed z4j version")
 
@@ -691,6 +760,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "upgrade":
         return _run_upgrade(args)
 
+    if args.command == "init":
+        return _run_init(args)
+
+    if args.command == "config":
+        if args.config_command == "show":
+            return _run_config_show(args)
+        if args.config_command == "validate":
+            return _run_config_validate(args)
+        parser.error(f"unknown config subcommand {args.config_command!r}")
+        return 2
+
     parser.error(f"unknown command {args.command!r}")
     return 2
 
@@ -737,11 +817,11 @@ def _run_upgrade(args: argparse.Namespace) -> int:
     )
 
     rows: list[dict[str, str | bool]] = []
-    network_errors: list[str] = []  # audit fix HIGH-12: aggregate
+    network_errors: list[str] = []  # aggregate
     behind = 0
 
-    # Audit fix HIGH-12: bound the CLI's wall-clock at
-    # ``args.timeout`` total (not per-call). 15 sequential 10s
+    # Bound the CLI's wall-clock at ``args.timeout`` total (not
+    # per-call). 15 sequential 10s
     # timeouts would otherwise let a slow PyPI keep us spinning
     # for 150s. We give each call ``min(per_pkg, time_remaining)``
     # so the whole loop fits inside the operator's expectation.
@@ -960,14 +1040,13 @@ def _run_metrics_token_show(args: argparse.Namespace) -> int:  # noqa: ARG001
     ``$(z4j metrics-token)`` safely.
     """
     import os
-    from pathlib import Path as _Path
 
     token = os.environ.get("Z4J_METRICS_AUTH_TOKEN")
     if token:
         print(token)  # noqa: T201
         return 0
 
-    secret_env = _Path.home() / ".z4j" / "secret.env"
+    secret_env = z4j_home() / "secret.env"
     if secret_env.exists():
         for line in secret_env.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -1005,12 +1084,11 @@ def _run_metrics_token_rotate(args: argparse.Namespace) -> int:  # noqa: ARG001
     """
     import os
     import secrets as _secrets
-    from pathlib import Path as _Path
 
-    secret_env = _Path.home() / ".z4j" / "secret.env"
+    secret_env = z4j_home() / "secret.env"
     if not secret_env.exists():
         print(  # noqa: T201
-            "z4j metrics-token rotate: ~/.z4j/secret.env does not exist. "
+            f"z4j metrics-token rotate: {secret_env} does not exist. "
             "Run `z4j serve` once to auto-mint the secret store first.",
             file=sys.stderr,
         )
@@ -1031,8 +1109,8 @@ def _run_metrics_token_rotate(args: argparse.Namespace) -> int:  # noqa: ARG001
         out_lines.append(f"Z4J_METRICS_AUTH_TOKEN={new_token}")
     new_content = ("\n".join(out_lines) + "\n").encode("utf-8")
 
-    # Atomic write: tmp file in the same directory, then rename. The
-    # tmp is created with O_EXCL + 0o600 from the start (audit M-1) so
+    # Atomic write: tmp file in the same directory, then rename.
+    # The tmp file is created with O_EXCL + 0o600 from the start so
     # no race window exists where a local user could read the new
     # token from the temp file before chmod tightens it. Pre-1.0.14
     # used Path.write_text which created the file with the process
@@ -1122,7 +1200,6 @@ def _run_doctor(args: argparse.Namespace) -> int:
     """
     import asyncio
     import os
-    from pathlib import Path as _Path
 
     # Reuse the existing check to catch config / DB / migration issues
     # up front. If that fails, the rest of doctor is moot.
@@ -1180,7 +1257,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
     # Warning 3: auto-minted secrets - the operator should back up
     # the persisted secret.env file off-host.
-    secret_env = _Path.home() / ".z4j" / "secret.env"
+    secret_env = z4j_home() / "secret.env"
     if secret_env.exists():
         warnings.append(
             f"Brain secrets were auto-minted and persisted to "
@@ -1391,18 +1468,17 @@ def _run_allowed_hosts(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Secret-file mint helpers (Round-8 audit fix R8-HIGH-1 + R8-HIGH-2).
+# Secret-file mint helpers.
 # ---------------------------------------------------------------------------
 
 
 def _write_secret_env_atomic(path: Path, payload: bytes) -> None:
     """Mint a fresh secret.env with mode 0o600 atomically.
 
-    Round-8 audit fix R8-HIGH-1 (Apr 2026): pre-fix the file was
-    written with the process umask (typically 0o644) and chmod'd
-    afterward, on a multi-user host any local UID could read the
-    secrets in the brief window before chmod, and on Windows chmod
-    is a no-op so the file stayed world-readable.
+    A naive write with the process umask (typically 0o644) and
+    chmod afterward leaves a window where any local UID can read
+    the secrets on a multi-user host, and on Windows chmod is a
+    no-op so the file stays world-readable.
 
     Strategy:
 
@@ -1445,11 +1521,11 @@ def _write_secret_env_atomic(path: Path, payload: bytes) -> None:
 def _append_secret_env_atomic(path: Path, payload: bytes) -> None:
     """Append a single ``KEY=value\\n`` line to an existing secret.env.
 
-    Round-8 audit fix R8-HIGH-2 (Apr 2026): the prior code did
-    ``path.open("a")`` which (a) follows symlinks, (b) is not atomic,
-    and (c) doesn't re-assert mode. A colocated user who pre-created
-    a symlink at ``secret.env`` after install would see the freshly-
-    minted token written through the symlink to the attacker's path.
+    A naive ``path.open("a")`` (a) follows symlinks, (b) is not
+    atomic, and (c) doesn't re-assert mode. A colocated user
+    who pre-created a symlink at ``secret.env`` after install
+    would see the freshly-minted token written through the
+    symlink to the attacker's path.
 
     Strategy: read existing payload, mint a fresh file via
     :func:`_write_secret_env_atomic` with the appended line, then
@@ -1490,6 +1566,27 @@ def _run_serve(args: argparse.Namespace) -> int:
 
     import uvicorn
 
+    # Hard-fail early if any of the dropped 1.4 path-override env vars
+    # (Z4J_RUNTIME_DIR, Z4J_BUFFER_DIR, Z4J_BUFFER_PATH) are set.
+    # Silent ignore would leave operators thinking they had relocated
+    # state when they hadn't, which is a security footgun. The error
+    # text directs them at the single Z4J_HOME variable that 1.5
+    # consolidated to.
+    reject_deprecated_path_env()
+
+    # Z4J_LOG_FORMAT is the unified env var documented for both the
+    # brain and the agent. The brain's structlog setup keys off
+    # Z4J_LOG_JSON (boolean) for historical reasons; translate here
+    # so operators see one consistent variable name. Explicit
+    # Z4J_LOG_JSON wins if both are set (less surprising than the
+    # other order).
+    raw_format = os.environ.get("Z4J_LOG_FORMAT", "").strip().lower()
+    if raw_format and "Z4J_LOG_JSON" not in os.environ:
+        if raw_format == "json":
+            os.environ["Z4J_LOG_JSON"] = "true"
+        elif raw_format == "text":
+            os.environ["Z4J_LOG_JSON"] = "false"
+
     # --environment / --env CLI flag wins over Z4J_ENVIRONMENT env var
     # (CLI > env > auto-detect default). We set it BEFORE the rest of
     # the env-var defaulting below so the auto-promote and bind-host
@@ -1508,8 +1605,8 @@ def _run_serve(args: argparse.Namespace) -> int:
     # password lands in a module-level holder so it never appears
     # in ``os.environ``.
     #
-    # Round-8 audit fix R8-HIGH-4 (Apr 2026): the prior version
-    # set ``Z4J_BOOTSTRAP_ADMIN_PASSWORD`` in ``os.environ``, which
+    # The prior version set ``Z4J_BOOTSTRAP_ADMIN_PASSWORD`` in
+    # ``os.environ``, which
     # made it readable via ``/proc/<pid>/environ`` by the same UID
     # for the lifetime of the process AND inheritable by every
     # subprocess we fork. The module-global holder pattern keeps
@@ -1517,7 +1614,7 @@ def _run_serve(args: argparse.Namespace) -> int:
     if args.admin_email:
         os.environ["Z4J_BOOTSTRAP_ADMIN_EMAIL"] = args.admin_email
     if args.admin_password:
-        # Round-9 audit fix R9-Reaud-H2 (Apr 2026): refuse the
+        # Refuse the
         # ``--admin-password`` flag together with ``--workers > 1``.
         # On POSIX uvicorn forks N workers from the parent process;
         # the in-process ``_CLI_BOOTSTRAP_PASSWORD`` holder is
@@ -1545,15 +1642,12 @@ def _run_serve(args: argparse.Namespace) -> int:
 
     # Default to SQLite if no DATABASE_URL is set (bare-metal mode).
     if not os.environ.get("Z4J_DATABASE_URL"):
-        data_dir = Path.home() / ".z4j"
-        # Round-8 audit fix R8-MED-2 (Apr 2026): force ~/.z4j to
-        # 0o700 on first creation. Previously created with default
-        # umask (typically 0o755 → world-traversable on multi-user
-        # hosts). Even though private files inside are 0o600, leaking
-        # filenames + cert metadata is undesirable. ``mkdir(mode=...)``
-        # only takes effect on creation; existing dirs are unchanged
-        # so we don't surprise an operator who deliberately widened it.
-        data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Force ~/.z4j to
+        # 0o700 on first creation. ensure_z4j_home() applies the mode
+        # whether the directory is being created or already exists,
+        # which is stricter than the pre-1.5 inline mkdir(mode=...)
+        # call (mkdir's mode arg only fires on creation).
+        data_dir = ensure_z4j_home()
         db_path = data_dir / "z4j.db"
         os.environ["Z4J_DATABASE_URL"] = f"sqlite+aiosqlite:///{db_path}"
         os.environ.setdefault("Z4J_REGISTRY_BACKEND", "local")
@@ -1576,8 +1670,7 @@ def _run_serve(args: argparse.Namespace) -> int:
     # In production the operator must set Z4J_SECRET + Z4J_SESSION_SECRET
     # explicitly (case 1). Auto-mint is for dev / homelab / evaluation.
     if not os.environ.get("Z4J_SECRET"):
-        data_dir = Path.home() / ".z4j"
-        data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data_dir = ensure_z4j_home()
         secret_env = data_dir / "secret.env"
         if secret_env.exists():
             for line in secret_env.read_text(encoding="utf-8").splitlines():
@@ -1599,10 +1692,9 @@ def _run_serve(args: argparse.Namespace) -> int:
                 import secrets as _secrets  # local alias, avoid shadow
 
                 new_metrics = _secrets.token_urlsafe(32)
-                # Round-8 audit fix R8-HIGH-2 (Apr 2026): symlink-safe
-                # atomic append via :func:`_append_secret_env_atomic`.
-                # Pre-fix ``open("a")`` followed symlinks and didn't
-                # re-assert mode.
+                # Symlink-safe atomic append via
+                # :func:`_append_secret_env_atomic` so we don't
+                # follow a planted symlink and we keep mode 0o600.
                 _append_secret_env_atomic(
                     secret_env,
                     f"Z4J_METRICS_AUTH_TOKEN={new_metrics}\n".encode("utf-8"),
@@ -1664,16 +1756,16 @@ def _run_serve(args: argparse.Namespace) -> int:
                 f"Z4J_SESSION_SECRET={new_session}\n"
                 f"Z4J_METRICS_AUTH_TOKEN={new_metrics}\n"
             ).encode("utf-8")
-            # Round-8 audit fix R8-HIGH-1 (Apr 2026): atomic mode-0o600
-            # mint via O_CREAT|O_EXCL|O_NOFOLLOW. Pre-fix the file was
-            # written with the process umask (typically 0o644) and
-            # chmod'd afterward, on a multi-user host any local UID
-            # could read all three secrets in the brief window before
-            # chmod, and on Windows chmod is a no-op so the file stayed
-            # world-readable. ``O_EXCL`` blocks a colocated user who
-            # pre-creates the file as a symlink to e.g. /etc/cron.d/.
-            # ``O_NOFOLLOW`` rejects an existing-symlink attack on the
-            # filename itself.
+            # Atomic mode-0o600 mint via
+            # O_CREAT|O_EXCL|O_NOFOLLOW. A naive write with the
+            # process umask (typically 0o644) and chmod afterward
+            # leaves a window where any local UID can read all
+            # three secrets on a multi-user host, and on Windows
+            # chmod is a no-op so the file stays world-readable.
+            # ``O_EXCL`` blocks a colocated user who pre-creates
+            # the file as a symlink to e.g. /etc/cron.d/.
+            # ``O_NOFOLLOW`` rejects an existing-symlink attack on
+            # the filename itself.
             _write_secret_env_atomic(secret_env, payload)
             os.environ["Z4J_SECRET"] = new_secret
             os.environ["Z4J_SESSION_SECRET"] = new_session
@@ -1953,14 +2045,27 @@ def _run_serve(args: argparse.Namespace) -> int:
             "z4j: REFUSING TO START.\n"
             "\n"
             f"  Z4J_ENVIRONMENT=dev + bind {bind!r} is unsafe:\n"
-            "  cookies are not Secure, no HSTS, no host-header\n"
-            "  validation. Dev defaults are localhost-only.\n"
+            "  in dev mode the brain skips Secure-cookie / HSTS /\n"
+            "  host-header validation, so binding to a non-loopback\n"
+            "  address would expose those weakened defaults to\n"
+            "  whatever can reach this socket.\n"
             "\n"
-            "  Pick one:\n"
-            "  1. Localhost-only dev:\n"
+            "  Pick one of:\n"
+            "\n"
+            "  1. Localhost-only dev (the default for ad-hoc work):\n"
             "       z4j serve --host 127.0.0.1\n"
             "\n"
-            "  2. Public production:\n"
+            "  2. Docker / k8s dev stack on an internal network:\n"
+            "       Z4J_ENVIRONMENT=production \\\n"
+            "       Z4J_PUBLIC_URL=http://localhost:7700 \\\n"
+            "       Z4J_ALLOWED_HOSTS='[\"localhost\",\"127.0.0.1\"]' \\\n"
+            "       Z4J_ALLOW_HTTP_PUBLIC_URL=true \\\n"
+            "       z4j serve --host 0.0.0.0\n"
+            "     (Z4J_ALLOW_HTTP_PUBLIC_URL=true is the explicit\n"
+            "     opt-in for production-shaped config without TLS;\n"
+            "     only safe on a trusted internal network.)\n"
+            "\n"
+            "  3. Public production with TLS:\n"
             "       Z4J_ENVIRONMENT=production \\\n"
             "       Z4J_PUBLIC_URL=https://tasks.example.com \\\n"
             "       Z4J_ALLOWED_HOSTS='[\"tasks.example.com\"]' \\\n"
@@ -2001,14 +2106,61 @@ def _run_serve(args: argparse.Namespace) -> int:
             f"(persists across restarts).",
         )
 
+    # Default workers count is now min(4, cpu) instead
+    # of the pre-1.5 hardcoded 1. Single uvicorn worker was unable to
+    # dispatch WebSocket PONGs within the 10s ping_timeout while
+    # ingesting agent event_batches under load, causing agent flap.
+    # Multi-worker spreads connection handling across processes; each
+    # process has its own asyncio event loop. The min(4, cpu) cap
+    # mirrors the gunicorn convention (2 * cpu + 1 is the canonical
+    # web-tier shape; 4 is sufficient for the brain's mostly-async
+    # workload without needing per-worker DB pool tuning).
+    if args.workers is None:
+        try:
+            cpu = os.cpu_count() or 2
+        except Exception:  # noqa: BLE001
+            cpu = 2
+        workers_resolved = max(1, min(4, cpu))
+    else:
+        workers_resolved = int(args.workers)
+    if workers_resolved == 1:
+        # Operator explicitly chose --workers=1, OR the host has only
+        # 1 CPU. Either way emit an INFO so the trade-off is visible
+        # in startup logs - operators investigating agent flap can
+        # then connect the dots without grepping the source.
+        print(  # noqa: T201
+            "z4j: starting with --workers=1. This works fine for "
+            "<=5 agents but agent disconnects can be triggered by "
+            "event-loop contention at higher counts. Pass "
+            "--workers=4 (or --workers=$(nproc)) for production.",
+        )
+
     uvicorn.run(
         "z4j_brain.main:create_app",
         host=args.host or settings.bind_host,
         port=args.port or settings.bind_port,
         factory=True,
-        workers=args.workers,
+        workers=workers_resolved,
         reload=args.reload,
         log_config=None,  # we configure structlog ourselves
+        # Drop the ``Server: uvicorn`` header. Cosmetic but removes
+        # a free piece of fingerprint data (uvicorn version implies
+        # cpython version implies known CVE applicability) that an
+        # attacker would otherwise get before sending a single
+        # payload.
+        server_header=False,
+        # Widen the brain-side WebSocket PING/PONG cadence so the
+        # outbound PING gets plenty of headroom when ingest is
+        # bursty. uvicorn's defaults (20s/20s) are too tight under
+        # sustained 100 task/s × 10 agent fanout: the underlying
+        # ``websockets`` library serializes PING with application
+        # sends on the same connection task, and a busy ingest
+        # path will starve PING dispatch within the default
+        # window. 60s/60s tolerates ~2 minutes of starvation
+        # before close. Mirror the agent-side bumps in
+        # z4j-bare/transport/websocket.py.
+        ws_ping_interval=60.0,
+        ws_ping_timeout=60.0,
     )
     return 0
 
@@ -2171,8 +2323,7 @@ def _run_migrate_sync(
                     "alembic_version",
                 }
                 extra_tables = db_tables - known_tables
-                # Round-7 audit fix R7-LOW (Apr 2026): defensively
-                # validate the table identifier before f-string
+                # Defensively validate the table identifier before f-string
                 # interpolation. Today ``db_tables`` comes from
                 # ``inspect(engine).get_table_names()`` and is therefore
                 # operator-controlled, but a future code path that
@@ -2823,10 +2974,9 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
     """
     import asyncio
     import sys
-    from pathlib import Path
 
     # Refuse early if there's no DB to reset (pre-first-boot state).
-    db_path = Path.home() / ".z4j" / "z4j.db"
+    db_path = z4j_home() / "z4j.db"
     if not db_path.exists():
         print(  # noqa: T201
             f"z4j reset-setup: no DB found at {db_path}. "
@@ -2957,33 +3107,27 @@ def _bootstrap_env_for_management_commands() -> None:
 
     Idempotent: safe to call multiple times.
 
-    Round-8 audit fix R8-HIGH-3 (Apr 2026): the previous version
-    silently MINTED a fresh ``Z4J_SECRET`` here when ``secret.env``
-    was absent. That was a real footgun: any management command
-    run BEFORE the first ``serve`` (e.g. ``z4j status``,
-    ``z4j check``, ``z4j audit verify``) would bake in a secret the
-    operator never saw a banner for. Then the eventual ``serve``
-    would either re-use that secret silently (good) or run
-    ``z4j audit verify`` later against rows signed under a
-    different secret (silent verification mismatches).
-
-    New behavior: management commands READ an existing secret.env
-    if present, but REFUSE to mint when missing, they exit with a
-    clear error pointing the operator at ``z4j serve`` (which
-    mints + prints the visible setup banner).
+    Management commands READ an existing secret.env if present,
+    but REFUSE to mint when missing - they exit with a clear
+    error pointing the operator at ``z4j serve`` (which mints +
+    prints the visible setup banner). Silently minting here
+    would be a footgun: any management command run BEFORE the
+    first ``serve`` (e.g. ``z4j status``, ``z4j check``,
+    ``z4j audit verify``) would bake in a secret the operator
+    never saw a banner for, leading to silent verification
+    mismatches against audit rows signed under a different
+    secret.
     """
     import os
-    from pathlib import Path
 
     if not os.environ.get("Z4J_DATABASE_URL"):
-        data_dir = Path.home() / ".z4j"
-        data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data_dir = ensure_z4j_home()
         db_path = data_dir / "z4j.db"
         os.environ["Z4J_DATABASE_URL"] = f"sqlite+aiosqlite:///{db_path}"
         os.environ.setdefault("Z4J_REGISTRY_BACKEND", "local")
 
     if not os.environ.get("Z4J_SECRET"):
-        secret_env = Path.home() / ".z4j" / "secret.env"
+        secret_env = z4j_home() / "secret.env"
         if secret_env.exists():
             for line in secret_env.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -3097,7 +3241,7 @@ def _run_reset(args: argparse.Namespace) -> int:
             await db.dispose()
 
         if args.nuke_secrets:
-            secret_env = Path.home() / ".z4j" / "secret.env"
+            secret_env = z4j_home() / "secret.env"
             if secret_env.exists():
                 secret_env.unlink()
                 print(  # noqa: T201
@@ -3462,8 +3606,8 @@ def _run_bootstrap_admin(args: argparse.Namespace) -> int:
 
     # Thread the env-var path inside run_first_boot_check so the
     # CLI and the env-var mode produce byte-identical outcomes.
-    # Round-8 audit fix R8-HIGH-4 (Apr 2026): password lands in the
-    # in-process holder instead of os.environ. See cli.py serve
+    # Password lands in the in-process holder instead of os.environ.
+    # See cli.py serve
     # path comment + startup.py::set_cli_bootstrap_password for the
     # full rationale (avoids /proc/<pid>/environ leakage and
     # subprocess inheritance).
@@ -3505,6 +3649,270 @@ def _run_bootstrap_admin(args: argparse.Namespace) -> int:
         return 0
 
     return asyncio.run(_bootstrap())
+
+
+_CONFIG_ENV_TEMPLATE = """\
+# z4j runtime tunables.
+# Loaded by the brain at startup via Pydantic Settings.
+#
+# Precedence (highest to lowest):
+#   1. process environment variables (Z4J_*)
+#   2. ./.env in the brain's working directory (dev convenience)
+#   3. THIS FILE
+#   4. code defaults
+#
+# Edit any value below to change runtime behavior. Restart the brain
+# to pick up changes; see `z4j config show` for the effective values.
+#
+# Bootstrap settings (database URL, secrets, listen address, log
+# format) live in $Z4J_HOME/secret.env or your environment - they
+# are intentionally not in this file because the operator usually
+# wants them sourced from a secret manager.
+
+# How long to retain task events before the periodic sweeper purges
+# them. Increase for forensic / compliance environments. Decrease to
+# reduce DB size if you only care about recent state.
+# Z4J_EVENT_RETENTION_DAYS=30
+
+# Audit-log retention. Independent from event retention because the
+# audit log is required by SOC 2 / ISO 27001 controls; you typically
+# want it longer.
+# Z4J_AUDIT_RETENTION_DAYS=365
+
+# How long the brain waits for a command frame to receive its
+# command_ack before timing out. Bump if you have intentionally slow
+# command handlers (e.g. a custom retry that holds the connection).
+# Z4J_COMMAND_TIMEOUT_SECONDS=30
+
+# How long an agent can be silent before the brain considers it
+# disconnected. Drives the dashboard's online/offline indicator.
+# Z4J_AGENT_OFFLINE_TIMEOUT_SECONDS=60
+
+# Per-IP rate limit for the public setup endpoint (unauthenticated
+# first-boot URL). Tighten if you suspect token-guessing attempts.
+# Z4J_RATELIMIT_FIRST_BOOT_ATTEMPTS_PER_IP=5
+
+# Maximum size of a single inbound payload (events, commands, etc.).
+# Defaults to 10 MB. Bump for environments that ship oversized task
+# arguments, but be aware of memory implications.
+# Z4J_MAX_PAYLOAD_SIZE_BYTES=10485760
+
+# WebSocket frame size limit. Should match or exceed
+# Z4J_MAX_PAYLOAD_SIZE_BYTES.
+# Z4J_MAX_WS_FRAME_BYTES=10485760
+"""
+
+
+def _run_init(args: argparse.Namespace) -> int:
+    """Scaffold ``$Z4J_HOME/config.env`` from a documented template.
+
+    Idempotent: refuses to overwrite an existing file unless
+    ``--force`` is passed. Mirrors the ``cargo init`` / ``git init``
+    UX. Useful for homelab and dev installs; production deploys
+    typically render their config.env from a Helm template or
+    Ansible role.
+    """
+    config_env = z4j_home() / "config.env"
+    if config_env.exists() and not args.force:
+        print(  # noqa: T201
+            f"z4j init: {config_env} already exists. Pass --force to "
+            "overwrite, or edit the file directly. Run `z4j config show` "
+            "to see the effective settings.",
+            file=sys.stderr,
+        )
+        return 1
+
+    ensure_z4j_home()
+    config_env.write_text(_CONFIG_ENV_TEMPLATE, encoding="utf-8")
+    try:
+        config_env.chmod(0o644)
+    except OSError:
+        pass
+    print(  # noqa: T201
+        f"z4j init: created {config_env} with the documented "
+        "tunables template. Edit it to change runtime behavior, "
+        "then restart `z4j serve`. Run `z4j config show` to see "
+        "the effective settings any time.",
+    )
+    return 0
+
+
+def _config_source(field: str, settings: object, env: dict[str, str]) -> str:
+    """Identify where a setting's effective value came from.
+
+    Thin wrapper around :func:`z4j_brain.config_introspect.config_source`
+    that preserves the original kwargs shape used by ``z4j config show``.
+    Detects whether the field is a secret on the Settings instance and
+    omits secret.env from the search path when it is.
+    """
+    from z4j_brain.config_introspect import config_source as _shared
+
+    is_secret = False
+    try:
+        from pydantic import SecretStr
+
+        value = getattr(settings, field, None)
+        is_secret = isinstance(value, SecretStr)
+    except Exception:  # noqa: BLE001
+        pass
+    return _shared(field, env=env, is_secret_field=is_secret)
+
+
+def _run_config_show(args: argparse.Namespace) -> int:
+    """Print the brain's effective settings + their source.
+
+    Useful for diagnosing "why isn't my change taking effect" without
+    grepping log files. Secrets are masked unless --reveal-secrets is
+    passed; the flag exists for one-off debugging and should never be
+    redirected to a file or piped to a logging system.
+    """
+    import os
+
+    from pydantic import SecretStr
+
+    from z4j_brain.settings import Settings
+
+    try:
+        settings = Settings()  # type: ignore[call-arg]
+    except Exception as exc:  # noqa: BLE001
+        print(  # noqa: T201
+            f"z4j config show: failed to load Settings: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    env = {k: v for k, v in os.environ.items() if k.startswith("Z4J_")}
+
+    print(  # noqa: T201
+        f"z4j config show: effective settings (Z4J_HOME={z4j_home()})\n",
+    )
+    field_width = max(
+        (len(f) for f in settings.model_fields),
+        default=20,
+    )
+    for field_name in sorted(settings.model_fields):
+        value: Any = getattr(settings, field_name)
+        if isinstance(value, SecretStr):
+            display = (
+                value.get_secret_value() if args.reveal_secrets
+                else "***"
+            )
+        elif isinstance(value, list) and not value:
+            display = "[]"
+        elif isinstance(value, dict) and not value:
+            display = "{}"
+        else:
+            display = str(value)
+        source = _config_source(field_name, settings, env)
+        print(  # noqa: T201
+            f"  {field_name:<{field_width}}  {display}  ({source})",
+        )
+    return 0
+
+
+def _run_config_validate(args: argparse.Namespace) -> int:
+    """Pre-flight a candidate config file before deploying it.
+
+    Reads the file, populates a temporary environment with its
+    contents, attempts to construct :class:`Settings`. Reports parse
+    errors with line numbers and validation errors with field
+    locations. Exits 0 if the file would build a valid Settings.
+    """
+    import os
+
+    candidate = Path(args.path) if args.path else (z4j_home() / "config.env")
+    if not candidate.exists():
+        print(  # noqa: T201
+            f"z4j config validate: {candidate} does not exist. "
+            "Run `z4j init` to scaffold it.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        text = candidate.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(  # noqa: T201
+            f"z4j config validate: cannot read {candidate}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    parsed: dict[str, str] = {}
+    parse_errors: list[str] = []
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            parse_errors.append(
+                f"line {lineno}: missing '=' (got {raw!r})",
+            )
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key.startswith("Z4J_"):
+            parse_errors.append(
+                f"line {lineno}: key {key!r} does not start with Z4J_",
+            )
+            continue
+        parsed[key] = value.strip().strip('"').strip("'")
+
+    if parse_errors:
+        print(  # noqa: T201
+            f"z4j config validate: {len(parse_errors)} parse error(s) "
+            f"in {candidate}:",
+            file=sys.stderr,
+        )
+        for err in parse_errors:
+            print(f"  {err}", file=sys.stderr)  # noqa: T201
+        return 1
+
+    # Build a Settings instance from this file's contents alone. We
+    # snapshot os.environ, replace it with the parsed values, attempt
+    # construction, and restore. Settings reads its own bootstrap
+    # values from env (DB URL, secrets); we have to inject those if
+    # the candidate file isn't expected to provide them.
+    # Build a Settings instance directly from the parsed dict instead
+    # of round-tripping through ``os.environ.clear()``. The earlier
+    # design called ``os.environ.clear()`` then repopulated, which
+    # works on Linux but breaks on Windows: clearing wipes
+    # ``SystemRoot`` / ``ComSpec`` / ``USERPROFILE`` / ``WINDIR``
+    # which Python's ``asyncio.windows_events._overlapped`` C
+    # extension needs to load. ``import pydantic_settings`` triggers
+    # the asyncio import and dies with WinError 10106. The audit
+    # M-2 finding flagged the underlying race risk; this is the
+    # concrete consequence on Windows.
+    init_kwargs: dict[str, object] = {}
+    for key, value in parsed.items():
+        field_name = key.removeprefix("Z4J_").lower()
+        init_kwargs[field_name] = value
+
+    # Required fields the candidate file isn't expected to carry get
+    # placeholder values so Settings construction reaches the
+    # cross-field validators (which is what we are actually testing).
+    init_kwargs.setdefault(
+        "database_url", "sqlite+aiosqlite:///:memory:",
+    )
+    init_kwargs.setdefault("secret", "x" * 48)
+    init_kwargs.setdefault("session_secret", "y" * 48)
+
+    from z4j_brain.settings import Settings
+
+    try:
+        Settings(**init_kwargs)
+    except Exception as exc:  # noqa: BLE001
+        print(  # noqa: T201
+            f"z4j config validate: {candidate} failed validation: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(  # noqa: T201
+        f"z4j config validate: {candidate} is valid "
+        f"({len(parsed)} setting(s) parsed).",
+    )
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

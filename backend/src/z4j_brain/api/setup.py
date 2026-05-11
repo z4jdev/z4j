@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field, field_validator
 
 from z4j_brain.auth.sessions import generate_csrf_token
 from z4j_brain.persistence.repositories import SessionRepository
@@ -76,9 +76,29 @@ class StatusResponse(BaseModel):
 
 class CompleteRequest(BaseModel):
     token: str = Field(min_length=10, max_length=200)
-    email: EmailStr
+    # Email accepts reserved TLDs (.local, .test, .example, .invalid)
+    # because the brain admin email is purely a login identifier;
+    # nobody is going to send mail to it. Strict pydantic ``EmailStr``
+    # rejected ``admin@test.local`` at first-boot setup, blocking
+    # operators following dev / homelab tutorials. RFC 6761 reserves
+    # those TLDs and email-validator's ``allow_special_use_domain``
+    # opts back into accepting them; we use that path when available
+    # and fall back to a permissive shape check.
+    email: str = Field(min_length=3, max_length=320)
     display_name: str | None = Field(default=None, max_length=200)
     password: str = Field(min_length=8, max_length=256)
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        """Symmetric with bootstrap + login (S-1). Single source of
+        truth in :func:`validate_admin_email`."""
+        from z4j_brain.domain.auth_service import validate_admin_email
+
+        try:
+            return validate_admin_email(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from None
 
 
 class CompleteResponse(BaseModel):
@@ -560,14 +580,14 @@ async def setup_form(
     field. The server's only job is to gate visibility on the
     first-boot flag.
 
-    Round-8 audit fix R8-Bootstrap-MED (Apr 2026): also require
-    that an active token row exists. Pre-fix, between a successful
-    ``complete()`` commit and the user row becoming visible to a
-    parallel reader (Postgres replica lag), ``users.count() == 0``
-    could still be True even though the setup is conceptually done.
-    The form would render referencing a stale URL, confusing UX
-    and a small information leak about install state. Tying
-    visibility to "active token AND users empty" closes the gap.
+    Visibility also requires that an active token row exists.
+    Otherwise, between a successful ``complete()`` commit and
+    the user row becoming visible to a parallel reader (Postgres
+    replica lag), ``users.count() == 0`` could still be True
+    even though the setup is conceptually done; the form would
+    render referencing a stale URL, confusing UX and a small
+    information leak about install state. Tying visibility to
+    "active token AND users empty" closes the gap.
     """
     if not await setup_service.is_first_boot(users):
         return HTMLResponse(
@@ -584,7 +604,25 @@ async def setup_form(
             "<!doctype html><meta charset=utf-8><title>Not found</title><p>404</p>",
             status_code=404,
         )
-    return HTMLResponse(content=_FORM_HTML)
+    # Per-request CSP nonce on the inline
+    # <script> + <style> blocks so the response can drop
+    # ``'unsafe-inline'`` from the script-src / style-src
+    # directives. Without the nonce, a stored XSS injected anywhere
+    # the page renders user input would execute; with the nonce,
+    # only the server-emitted blocks tagged with the matching nonce
+    # run. The nonce is fresh per request (16 bytes of urandom,
+    # base64) so it cannot be replayed from a leaked snapshot.
+    import base64
+    import os as _os
+
+    nonce = base64.b64encode(_os.urandom(16)).decode("ascii").rstrip("=")
+    body = _FORM_HTML.replace("<script>", f'<script nonce="{nonce}">', 1)
+    body = body.replace("<style>", f'<style nonce="{nonce}">', 1)
+    response = HTMLResponse(content=body)
+    # The middleware reads this attribute and uses it to override
+    # ``'unsafe-inline'`` with ``'nonce-X'`` in the CSP for /setup.
+    response.headers["X-Z4J-CSP-Nonce"] = nonce
+    return response
 
 
 __all__ = ["router_api", "router_html"]

@@ -80,7 +80,7 @@ class ProjectPublic(BaseModel):
 # accepted (so future schedulers can be added without a code
 # change), but these four are what the dashboard renders badges
 # for + what the per-project default validator suggests.
-# Audit fix CRIT-4 (1.2.2 seventh-pass): tightened from 64 to 40
+# Tightened from 64 to 40
 # chars. ``Schedule.scheduler`` is ``String(40)`` (defined long
 # before 1.2.2); a 41+ char value passing the regex but failing
 # the INSERT was a latent inconsistency exposed by 1.2.2's
@@ -89,8 +89,8 @@ _SCHEDULER_OWNER_PATTERN = r"^[a-z][a-z0-9_-]{0,39}$"
 _SCHEDULER_OWNER_REGEX = re.compile(_SCHEDULER_OWNER_PATTERN)
 
 
-# Round-8 audit fix R8-Pyd-LOW (Apr 2026): tighten environment to
-# a known-good shape. We use a pattern instead of Literal so older
+# Tighten environment to a known-good shape. We use a pattern
+# instead of Literal so older
 # rows with values outside the canonical set (e.g. ``staging-eu``,
 # ``qa1``) can still be re-PATCHed without forcing the operator to
 # rename. The dashboard's audit-log filter knows the canonical
@@ -138,7 +138,7 @@ class CreateProjectRequest(BaseModel):
         max_length=40,
         pattern=_SCHEDULER_OWNER_PATTERN,
     )
-    # 1.2.2 audit fix MED-13: optional allow-list of scheduler
+    # Optional allow-list of scheduler
     # names that may own schedules in this project. ``None`` =
     # unrestricted. Cap at 32 entries (a generous fleet count) so
     # a typo'd config can't bloat the row.
@@ -223,8 +223,7 @@ async def list_projects(
     project - the scope layer writes
     ``request.state.api_key_project_slug`` at auth time and this
     handler respects it. Without this filter a project-A-bound
-    key could enumerate every project the owner user can see
-    (external audit, Critical #1).
+    key could enumerate every project the owner user can see.
     """
     bound_slug: str | None = getattr(
         request.state, "api_key_project_slug", None,
@@ -260,7 +259,7 @@ async def get_project(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
     return _project_payload(project)
@@ -288,7 +287,7 @@ async def create_project(
 ) -> ProjectPublic:
     if not _SLUG_RE.match(body.slug):
         raise ConflictError(
-            "slug must match ^[a-z0-9][a-z0-9-]{1,62}$",
+            f"slug must match {_SLUG_RE.pattern}",
             details={"slug": body.slug},
         )
     existing = await projects.get_by_slug(body.slug)
@@ -298,7 +297,7 @@ async def create_project(
             details={"slug": body.slug},
         )
 
-    # Audit fix HIGH-9 (1.2.2 second-pass): same cross-check as
+    # Same cross-check as
     # update_project, if both default_scheduler_owner and
     # allowed_schedulers are set, the default must be in the list.
     if (
@@ -396,7 +395,7 @@ async def update_project(
     if body.slug is not None and body.slug != project.slug:
         if not _SLUG_RE.match(body.slug):
             raise ConflictError(
-                "slug must match ^[a-z0-9][a-z0-9-]{1,62}$",
+                f"slug must match {_SLUG_RE.pattern}",
                 details={"slug": body.slug},
             )
         existing = await projects.get_by_slug(body.slug)
@@ -433,7 +432,7 @@ async def update_project(
             )
         changed["allowed_schedulers"] = body.allowed_schedulers
         project.allowed_schedulers = body.allowed_schedulers
-    # Audit fix HIGH-9 (1.2.2 second-pass): cross-check that the
+    # Cross-check that the
     # post-PATCH ``default_scheduler_owner`` is in the allow-list.
     # The "default is implicitly allowed" rule means a mismatch
     # silently widens the allow-list, surprising operators who

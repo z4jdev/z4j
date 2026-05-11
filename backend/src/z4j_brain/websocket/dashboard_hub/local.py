@@ -45,7 +45,7 @@ _QUEUE_MAX = 64
 #: at once. The cap defends against a hostile authenticated user
 #: opening one WS per project (admins see ALL projects in a
 #: brain instance) and exhausting the event loop with one
-#: writer task per WS (R3 finding H5).
+#: Writer task per WS.
 _MAX_SUBSCRIBERS_PER_USER = 50
 
 
@@ -124,7 +124,7 @@ class LocalDashboardHub:
                 sub.writer.cancel()
                 raise RuntimeError("dashboard hub is stopped")
             # Per-user cap: refuse new subscriptions once the user
-            # has _MAX_SUBSCRIBERS_PER_USER live (R3 finding H5).
+            # Has _MAX_SUBSCRIBERS_PER_USER live.
             if user_id is not None:
                 user_subs = self._by_user.get(user_id, set())
                 if len(user_subs) >= _MAX_SUBSCRIBERS_PER_USER:

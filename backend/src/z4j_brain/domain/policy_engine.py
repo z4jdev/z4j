@@ -29,8 +29,7 @@ from z4j_brain.persistence.enums import ProjectRole
 # shipping control bytes (notably NUL ``0x00``) into the
 # ``asyncpg`` driver, which raises ``CharacterNotInRepertoireError``
 # and produces a generic HTTP 500 instead of the clean 404 the
-# caller deserves. Pass 5 security audit on 2026-04-21 surfaced
-# this as finding S1 via ``GET /projects/default%00b/tasks``.
+# caller deserves (e.g. ``GET /projects/default%00b/tasks``).
 _SLUG_SAFE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$")
 
 if TYPE_CHECKING:
@@ -91,15 +90,24 @@ class PolicyEngine:
         memberships: MembershipRepository,
         *,
         user: User,
-        project_id: UUID,
+        project: Project,
         min_role: ProjectRole,
     ) -> Membership:
-        """Verify ``user`` has at least ``min_role`` on ``project_id``.
+        """Verify ``user`` has at least ``min_role`` on ``project``.
 
         Global brain admins (``user.is_admin``) bypass the check -
         they always have admin-equivalent access on every project.
         Returns the membership row on success so callers can
         inspect the actual role.
+
+        When a non-admin user has NO membership on a project,
+        raises 404 ``project not found`` instead of 403, so the
+        response is byte-identical to ``get_project_or_404`` for
+        nonexistent slugs. A 403/404 split would otherwise let
+        any authenticated user enumerate every project slug in
+        the brain. The insufficient-role branch keeps 403 because
+        at that point the user already PROVED membership and the
+        slug is not a secret to them.
         """
         if user.is_admin:
             # Synthesize an admin-grade membership row for the
@@ -109,13 +117,13 @@ class PolicyEngine:
 
             return Membership(
                 user_id=user.id,
-                project_id=project_id,
+                project_id=project.id,
                 role=ProjectRole.ADMIN,
             )
 
         all_memberships = await memberships.list_for_user(user.id)
         for m in all_memberships:
-            if m.project_id == project_id:
+            if m.project_id == project.id:
                 if role_rank(m.role) >= role_rank(min_role):
                     return m
                 raise AuthorizationError(
@@ -123,9 +131,10 @@ class PolicyEngine:
                     f"(need at least {min_role.value!r})",
                     details={"have": m.role.value, "need": min_role.value},
                 )
-        raise AuthorizationError(
-            "no membership on this project",
-            details={"need": min_role.value},
+        # S-3: indistinguishable from a true 404 for non-admins.
+        raise NotFoundError(
+            f"project {project.slug!r} not found",
+            details={"slug": project.slug},
         )
 
 

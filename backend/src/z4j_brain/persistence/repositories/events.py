@@ -79,7 +79,7 @@ class EventRepository(BaseRepository[Event]):
         # transaction (which owns the ingest batch's queue/worker
         # touches and task projections) is preserved - without
         # this, one duplicate event poisons every projection in
-        # the batch (R3 finding C1).
+        # the batch.
         row = Event(
             id=event_id,
             project_id=project_id,

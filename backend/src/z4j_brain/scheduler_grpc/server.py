@@ -105,7 +105,7 @@ class SchedulerGrpcServer:
             )
             return
 
-        # Audit fix H-1 (Apr 2026): emit the empty-allow-list
+        # Emit the empty-allow-list
         # warning BEFORE TLS material loading so the warning fires
         # even when the TLS path fails (otherwise an operator's
         # first sign of a misconfigured allow-list could be hidden
@@ -114,8 +114,8 @@ class SchedulerGrpcServer:
         # "scheduler_grpc_open_ca".
         allowed_cns = tuple(self._settings.scheduler_grpc_allowed_cns)
         if not allowed_cns:
-            # Audit fix S004 (1.4.0): if the operator opted into
-            # fail-closed mode via ``Z4J_SCHEDULER_GRPC_REQUIRE_ALLOWLIST``,
+            # If the operator opted into fail-closed mode via
+            # ``Z4J_SCHEDULER_GRPC_REQUIRE_ALLOWLIST``,
             # refuse to start. This catches "I meant to set the
             # allow-list and forgot" instead of falling back to
             # trust-the-CA mode silently.
@@ -148,10 +148,38 @@ class SchedulerGrpcServer:
                 extra={"event": "scheduler_grpc_open_ca"},
             )
 
-        creds = _build_server_credentials(self._settings)
-        interceptors = (
-            SchedulerAllowlistInterceptor(allowed_cns=allowed_cns),
+        # Insecure-port path: mirror the scheduler-side
+        # insecure_grpc opt-in. Refused outside dev/test environments
+        # to make the security trade-off explicit. The mTLS allowlist
+        # interceptor cannot run without client certs, so when
+        # insecure mode is on we don't install it. This is OK because
+        # insecure mode requires environment != production by the
+        # check below; a production deployment hits the secure path.
+        insecure_mode = bool(
+            getattr(self._settings, "scheduler_grpc_insecure", False),
         )
+        if insecure_mode:
+            if self._settings.environment.strip().lower() == "production":
+                raise RuntimeError(
+                    "z4j.brain.scheduler_grpc: scheduler_grpc_insecure=true "
+                    "is refused in production. Either provide a TLS "
+                    "bundle (Z4J_SCHEDULER_GRPC_TLS_CERT/KEY/CA) or "
+                    "set Z4J_ENVIRONMENT=dev to acknowledge the "
+                    "trade-off for non-production deployments.",
+                )
+            logger.warning(
+                "z4j.brain.scheduler_grpc: serving INSECURE channel "
+                "(scheduler_grpc_insecure=true). Use only on trusted "
+                "loopback or container networks. The mTLS allow-list "
+                "is bypassed in this mode.",
+            )
+            creds = None
+            interceptors: tuple = ()
+        else:
+            creds = _build_server_credentials(self._settings)
+            interceptors = (
+                SchedulerAllowlistInterceptor(allowed_cns=allowed_cns),
+            )
         # gRPC server options. The two ``min_*ping*`` knobs match
         # the scheduler client's keepalive cadence (30s by default,
         # see ``z4j_scheduler.storage.brain_client``). Without them,
@@ -189,17 +217,27 @@ class SchedulerGrpcServer:
             f"{self._settings.scheduler_grpc_bind_host}"
             f":{self._settings.scheduler_grpc_bind_port}"
         )
-        # ``add_secure_port`` returns the port that was actually bound;
-        # capture it so test fixtures using port=0 can discover the
-        # ephemeral port the kernel assigned.
-        self._bound_port = server.add_secure_port(bind_addr, creds)
+        # ``add_secure_port`` / ``add_insecure_port`` returns the port
+        # that was actually bound; capture it so test fixtures using
+        # port=0 can discover the ephemeral port the kernel assigned.
+        if insecure_mode:
+            self._bound_port = server.add_insecure_port(bind_addr)
+        else:
+            self._bound_port = server.add_secure_port(bind_addr, creds)
         await server.start()
         self._server = server
-        logger.info(
-            "z4j.brain.scheduler_grpc: serving on %s (mTLS, allow-list=%s)",
-            bind_addr,
-            tuple(self._settings.scheduler_grpc_allowed_cns) or "(open CA)",
-        )
+        if insecure_mode:
+            logger.info(
+                "z4j.brain.scheduler_grpc: serving on %s (INSECURE "
+                "channel, no mTLS, allow-list bypassed)",
+                bind_addr,
+            )
+        else:
+            logger.info(
+                "z4j.brain.scheduler_grpc: serving on %s (mTLS, allow-list=%s)",
+                bind_addr,
+                tuple(self._settings.scheduler_grpc_allowed_cns) or "(open CA)",
+            )
 
     async def stop(self) -> None:
         """Stop the gRPC server and drain in-flight RPCs.

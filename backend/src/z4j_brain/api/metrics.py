@@ -89,7 +89,7 @@ z4j_commands_total = Counter(
 #: always: the timeout sweeper marked it TIMEOUT before the
 #: agent's late ``command_result`` arrived). Operators can graph
 #: this against ``z4j_commands_total`` to spot
-#: ``command_timeout_seconds`` mis-tuning. R3 finding M7.
+#: ``command_timeout_seconds`` mis-tuning.
 z4j_command_late_results_total = Counter(
     "z4j_command_late_results_total",
     "Command results that arrived after the row was already terminal "
@@ -101,7 +101,7 @@ z4j_command_late_results_total = Counter(
 #: Gauge for in-memory state held by the brain process - sessions
 #: in the long-poll signer registry, throttle entries, dashboard
 #: subscriptions, etc. Lets operators see brain-restart drops
-#: instead of guessing (R3 finding M8). Subsystems register a
+#: Instead of guessing. Subsystems register a
 #: zero-arg callable via :func:`register_inmemory_subsystem`; the
 #: gauge is sampled at scrape time.
 z4j_inmemory_state_items = Gauge(
@@ -236,7 +236,7 @@ def record_swallowed(module: str, site: str) -> None:
 # from the outside. These metrics expose their state so a Grafana
 # alert can fire if either stalls or starts logging errors.
 #
-# Audit fix CRIT-5: every self-watch metric is a Gauge sampled
+# Every self-watch metric is a Gauge sampled
 # at scrape time. The earlier design used a synthetic-delta
 # Counter which had two flaws:
 #   1) Multiple Prometheus replicas scraping the same brain would
@@ -447,7 +447,7 @@ async def metrics_endpoint(
     Refreshes lazy in-memory state gauges before rendering so a
     Prometheus scrape gets a fresh ``z4j_inmemory_state_items``
     snapshot without forcing every subsystem to update on every
-    mutation (R3 finding M8).
+    mutation.
     """
     _check_metrics_auth(request, settings)
     _refresh_inmemory_gauges()

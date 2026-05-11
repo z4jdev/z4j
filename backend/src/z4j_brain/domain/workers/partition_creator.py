@@ -55,30 +55,31 @@ class PartitionCreatorWorker:
     async def tick(self) -> None:
         """One sweep: create future partitions + drop expired ones.
 
-        Round-9 audit fixes (Apr 2026):
+        Three defensive properties:
 
-        - **R9-Stor-H1**: emit a WARN when the ``events_default``
-          partition contains rows. The default partition is the
-          catch-all for any ``occurred_at`` outside the daily
-          windows; a row landing there means either the
-          pre-creator missed a tick or an agent supplied a wildly
-          out-of-range timestamp. Either way it requires operator
-          attention, non-empty default partition silently blocks
-          ``ATTACH PARTITION`` for that range later.
-        - **R9-Stor-H2**: refuse to ``DROP`` a partition whose
-          MAX(occurred_at) is past the cutoff. Pre-fix the worker
-          parsed the partition NAME for the date and dropped on
-          name alone, clock skew between worker and DB hosts, or
-          a manually re-attached partition with rows from a
-          different range, would silently destroy live data.
-        - **R9-Stor-H3**: set ``lock_timeout='2s'`` before each
-          ``CREATE PARTITION OF`` DDL. Pre-fix the DDL took
-          ACCESS EXCLUSIVE on the parent for the duration; under
-          heavy ingest a tick competing with INSERT statements
-          would pile up waiters and the DDL would self-cancel
-          mid-mutation against the catalog. Bounded
-          ``lock_timeout`` lets the DDL fail fast and retry on
-          the next tick, leaving the catalog clean.
+        - **non-empty default alarm**: emit a WARN when the
+          ``events_default`` partition contains rows. The default
+          partition is the catch-all for any ``occurred_at``
+          outside the daily windows; a row landing there means
+          either the pre-creator missed a tick or an agent
+          supplied a wildly out-of-range timestamp. Either way
+          it requires operator attention - a non-empty default
+          partition silently blocks ``ATTACH PARTITION`` for
+          that range later.
+        - **MAX-bounded drops**: refuse to ``DROP`` a partition
+          whose MAX(occurred_at) is past the cutoff. Parsing the
+          partition NAME for the date and dropping on name alone
+          would silently destroy live data on clock skew between
+          worker and DB hosts, or a manually re-attached
+          partition with rows from a different range.
+        - **bounded lock acquisition**: set ``lock_timeout='2s'``
+          before each ``CREATE PARTITION OF`` DDL. Without this
+          the DDL would take ACCESS EXCLUSIVE on the parent for
+          the duration; under heavy ingest a tick competing with
+          INSERT statements would pile up waiters and the DDL
+          would self-cancel mid-mutation against the catalog.
+          Bounded ``lock_timeout`` lets the DDL fail fast and
+          retry on the next tick, leaving the catalog clean.
         """
         today = date.today()
 
@@ -89,9 +90,9 @@ class PartitionCreatorWorker:
             if dialect != "postgresql":
                 return
 
-            # R9-Stor-H3: bound lock acquisition for THIS tick's
-            # session. Postgres ``lock_timeout`` is per-session;
-            # the setting clears at session close.
+            # Bound lock acquisition for THIS tick's session.
+            # Postgres ``lock_timeout`` is per-session; the
+            # setting clears at session close.
             await session.execute(text("SET LOCAL lock_timeout = '2s'"))
 
             # Create partitions for today + lookahead.
@@ -123,7 +124,7 @@ class PartitionCreatorWorker:
                         error=str(exc)[:300],
                     )
 
-            # R9-Stor-H1: alarm on non-empty default partition.
+            # Alarm on non-empty default partition.
             try:
                 default_count = (
                     await session.execute(
@@ -177,10 +178,10 @@ class PartitionCreatorWorker:
                         continue
                     if partition_date >= cutoff:
                         continue
-                    # R9-Stor-H2: probe MAX(occurred_at) before drop.
-                    # Refuse if any row in the partition is newer
-                    # than the cutoff, name-based parsing alone
-                    # can't catch clock skew or manually re-attached
+                    # Probe MAX(occurred_at) before drop. Refuse
+                    # if any row in the partition is newer than
+                    # the cutoff: name-based parsing alone can't
+                    # catch clock skew or manually re-attached
                     # partitions covering a different range.
                     try:
                         max_occurred = (

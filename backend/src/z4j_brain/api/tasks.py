@@ -152,7 +152,7 @@ async def list_tasks(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
 
@@ -250,7 +250,7 @@ async def get_task(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
     task = await TaskRepository(db_session).get_by_engine_task_id(
@@ -328,7 +328,7 @@ async def get_task_tree(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
     max_nodes = 500
@@ -373,12 +373,12 @@ class BulkDeleteRequest(BaseModel):
     # ``extra=forbid`` rejects unknown keys at the Pydantic
     # validation layer so a caller can't smuggle a body field
     # like ``project_id`` or ``engine`` and accidentally hit a
-    # future code path that respects it (R3 finding M12 - the
-    # current handler hardwires Task.project_id == project.id
-    # in the WHERE clause, so this is defence in depth).
+    # future code path that respects it. The current handler
+    # hardwires Task.project_id == project.id in the WHERE
+    # clause, so this is defence in depth.
     model_config = {"extra": "forbid"}
 
-    # Round-8 audit fix R8-Pyd-H4 (Apr 2026): cap the explicit list.
+    # Cap the explicit list.
     # The handler slices to :1000 below the validator, but Pydantic
     # parses + UUID-validates the whole list first, a 10M-element
     # list still OOM-walks the validator before the slice. The cap
@@ -434,7 +434,7 @@ async def bulk_delete_tasks(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 

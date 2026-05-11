@@ -70,7 +70,7 @@ async def list_queues(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
     rows = await QueueRepository(db_session).list_for_project(project.id)

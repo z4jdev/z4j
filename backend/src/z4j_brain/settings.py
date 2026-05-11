@@ -18,6 +18,29 @@ from typing import Any, Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from z4j_core.paths import z4j_home
+
+
+def _env_file_chain() -> tuple[str, ...]:
+    """Build the env-file precedence tuple for Pydantic Settings.
+
+    Resolved at module-load time. Pydantic's later-wins-on-collision
+    behavior orders these from lowest to highest precedence:
+
+    - secret.env: auto-minted secrets (not human-edited)
+    - config.env: human-edited tunables
+    - ./.env: dev-workflow CWD override
+
+    Process env vars beat all three. Files that don't exist are
+    silently ignored by Pydantic Settings.
+    """
+    home = z4j_home()
+    return (
+        str(home / "secret.env"),
+        str(home / "config.env"),
+        ".env",
+    )
+
 
 class ConfigError(ValueError):
     """Settings misconfiguration.
@@ -85,9 +108,24 @@ class Settings(BaseSettings):
             assets that will be mounted at ``/``.
     """
 
+    # Pydantic Settings env-file precedence: the first match in the
+    # tuple is the lowest-precedence file; later files override
+    # earlier files; env vars override every file. Layout (1.5+):
+    #
+    #   1. $Z4J_HOME/secret.env  - auto-minted secrets (mode 0o600).
+    #      Operators never edit this file directly.
+    #   2. $Z4J_HOME/config.env  - human-edited runtime tunables.
+    #      Generated as a documented template by ``z4j init``.
+    #   3. ./.env  - CWD override for dev workflows. Mirrors the
+    #      pre-1.5 single-file behavior so existing dev scripts keep
+    #      working unchanged.
+    #
+    # Process env vars beat all of the above. Z4J_HOME is resolved
+    # once at module-load time (the path is operator-set at process
+    # start; we never relocate it mid-process).
     model_config = SettingsConfigDict(
         env_prefix="Z4J_",
-        env_file=".env",
+        env_file=_env_file_chain(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -105,7 +143,7 @@ class Settings(BaseSettings):
         ...,
         description="Master HMAC signing key (>=32 bytes)",
     )
-    #: Round-6 audit fix SR-HIGH (Apr 2026): comma-separated list of
+    #: Comma-separated list of
     #: previously-active master HMAC secrets accepted DURING a rotation
     #: window. The brain signs new tokens with ``secret`` only, but
     #: accepts a verification match against ``secret`` OR any of these
@@ -126,7 +164,7 @@ class Settings(BaseSettings):
         ...,
         description="Session cookie signing key (>=32 bytes)",
     )
-    #: Round-6 audit fix SR-HIGH (Apr 2026): same multi-key acceptance
+    #: Same multi-key acceptance
     #: window for the session-cookie signing key. See
     #: :attr:`previous_secrets` for rotation semantics.
     previous_session_secrets: SecretStr | None = Field(
@@ -245,7 +283,7 @@ class Settings(BaseSettings):
     #: Exports don't paginate; this cap is the backstop that
     #: prevents a single export from pulling a multi-million-row
     #: resultset into memory. Audit 2026-04-24 Low-3.
-    # Export row cap (audit P-6, lowered v1.0.14). Pre-1.0.14 the
+    # Export row cap. Pre-1.0.14 the
     # ceiling was 5_000_000 - a single CSV/XLSX export at that size
     # materializes hundreds of MB of task rows (with their JSONB
     # args/kwargs/result/traceback blobs) into Python memory before
@@ -472,6 +510,21 @@ class Settings(BaseSettings):
     #: 3 missed pings of headroom which is plenty for normal
     #: network jitter and tab-throttling on backgrounded tabs.
     ws_idle_timeout_seconds: int = Field(default=90, ge=15, le=3600)
+    #: Bounded per-connection ingest queue. Decouples application-
+    #: level frame dispatch (DB writes, notification fanout) from the
+    #: WebSocket recv loop so the protocol-layer PING/PONG can drain
+    #: promptly even while a slow DB transaction is in flight.
+    #: Default of 2000 holds ~60 event_batch frames at the typical
+    #: agent batch size of ~30 events. The recv loop blocks (rather
+    #: than dropping) on full so backpressure flows back to the
+    #: agent's send buffer. Single-producer / single-consumer: one
+    #: worker drains the queue per connection so within-connection
+    #: ordering is preserved and the per-event savepoint+retry path
+    #: in the event_ingestor cannot silently skip events that fail
+    #: a non-deadlock SQL exception. Larger queue depth substitutes
+    #: for the parallel-worker design that briefly traded ordering
+    #: for throughput.
+    ws_ingest_queue_maxsize: int = Field(default=2_000, ge=16, le=50_000)
     #: Background worker poll intervals.
     command_timeout_sweep_seconds: int = Field(default=5, ge=1, le=300)
     agent_health_sweep_seconds: int = Field(default=10, ge=1, le=300)
@@ -539,6 +592,15 @@ class Settings(BaseSettings):
     scheduler_grpc_tls_key: str | None = None
     #: Path to the CA bundle used to validate scheduler client certs.
     scheduler_grpc_tls_ca: str | None = None
+    #: DEV / TEST ONLY: bind the scheduler gRPC port WITHOUT TLS.
+    #: Mirrors the scheduler-side ``insecure_grpc`` opt-in. Refused
+    #: when ``environment`` is ``"production"``: the scheduler
+    #: channel is the brain's most-privileged inbound surface, so
+    #: insecure transport is never acceptable in production.
+    #: Use only on trusted loopback or container-internal networks
+    #: (e.g. local docker-compose dev stacks where provisioning a
+    #: cert chain would be friction without security benefit).
+    scheduler_grpc_insecure: bool = False
     #: Allow-list of CN/SAN values accepted from client certs.
     #: Empty = trust any cert the CA bundle validates (operator
     #: chose "trust the CA"). Populate to add an extra check.
@@ -579,7 +641,7 @@ class Settings(BaseSettings):
     #: ["acme", "globex"]}'``. Slugs (not UUIDs) so operators can
     #: hand-edit the env var without pasting opaque ids.
     #:
-    #: Audit fix M-5 (Apr 2026): closes the per-cert project-binding
+    #: Closes the per-cert project-binding
     #: gap raised in the spec-§22 deferral. Empty default keeps
     #: existing single-tenant deployments unchanged.
     scheduler_grpc_cn_project_bindings: dict[str, list[str]] = Field(
@@ -808,8 +870,8 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"{field_name} must be at least 32 bytes long",
                 )
-        # Round-6 audit fix SR-HIGH (Apr 2026): each entry in the
-        # rotation lists must independently meet the 32-byte floor.
+        # Each entry in the rotation lists must independently meet
+        # the 32-byte floor.
         # An attacker who could slip in a short "previous" secret
         # would otherwise downgrade the verification surface.
         for field_name in ("previous_secrets", "previous_session_secrets"):
@@ -953,7 +1015,7 @@ class Settings(BaseSettings):
                 )
 
     # ------------------------------------------------------------------
-    # Round-6 audit fix SR-HIGH (Apr 2026): rotation helpers.
+    # Rotation helpers.
     # Callers that VERIFY a token signed by an unknown-but-historical
     # secret use these helpers; callers that MINT new tokens always use
     # ``self.secret`` / ``self.session_secret`` directly so a rotated-

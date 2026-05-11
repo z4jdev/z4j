@@ -87,7 +87,7 @@ async def list_events_for_task(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
 

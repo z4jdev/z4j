@@ -17,6 +17,7 @@ import {
   Palette,
   Send,
   Settings,
+  SlidersHorizontal,
   UserCircle,
   Users,
   Users2,
@@ -65,6 +66,14 @@ function SettingsLayout() {
         { label: "Projects", to: "/settings/projects", icon: FolderKanban },
         { label: "General", to: "/settings/general", icon: Settings },
         { label: "System", to: "/settings/system", icon: Activity },
+        // 1.5.0: read-only effective-config view; mirrors `z4j config show`.
+        // Sits next to System because both are diagnostic/observability
+        // surfaces, and operators reach for them together.
+        {
+          label: "Runtime config",
+          to: "/settings/runtime",
+          icon: SlidersHorizontal,
+        },
       ],
     },
   ];

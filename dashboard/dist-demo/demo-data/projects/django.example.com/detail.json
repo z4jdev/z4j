@@ -1,0 +1,12 @@
+{
+  "id": "00000000-0000-4000-9000-000000000003",
+  "slug": "django.example.com",
+  "name": "django.example.com",
+  "description": "Customer-facing app, Django + Celery + django-celery-beat. Large scale, ONE current incident.",
+  "environment": "production",
+  "timezone": "UTC",
+  "retention_days": 90,
+  "is_active": true,
+  "created_at_offset_s": -31536000,
+  "updated_at_offset_s": -300
+}

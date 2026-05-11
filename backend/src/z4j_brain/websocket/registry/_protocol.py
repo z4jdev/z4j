@@ -141,12 +141,12 @@ class BrainRegistry(Protocol):
         """Drop one slot for ``agent_id``. Returns ``True`` if the
         agent has no more registered workers after this call.
 
-        Round-7 audit fix R7-HIGH (race) (Apr 2026): callers that
-        track the WebSocket they're tearing down should pass it as
-        ``ws``; the registry only evicts the slot if its current
-        entry IS that exact WebSocket. Prevents the old gateway's
-        ``finally`` block from clobbering a freshly-replaced
-        connection after a "second connection wins" force-close.
+        Callers that track the WebSocket they're tearing down
+        should pass it as ``ws``; the registry only evicts the
+        slot if its current entry IS that exact WebSocket. This
+        prevents the old gateway's ``finally`` block from
+        clobbering a freshly-replaced connection after a
+        "second connection wins" force-close.
 
         v1.2.0+: when the connection was registered with a
         ``worker_id``, callers MUST pass the same ``worker_id``

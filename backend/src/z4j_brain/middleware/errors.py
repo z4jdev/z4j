@@ -10,13 +10,13 @@ In production this middleware NEVER includes a stack trace in the
 response body. The full traceback is logged with the request id so
 operators can correlate.
 
-Audit fix AU-1/AU-2 (Apr 2026 follow-up): denials and validation
-failures on schedule endpoints leave an audit-log breadcrumb so
-brute-force IDOR enumeration attempts have a forensic trail. Pre-fix
-a 403/422 left zero evidence behind beyond a structured log line
-(non-tamper-evident, easily filtered out of an attacker-prepared
-log aggregator). Post-fix the row lands in the tamper-evident
-``audit_log`` table that is HMAC-chained.
+Denials and validation failures on schedule endpoints leave an
+audit-log breadcrumb so brute-force IDOR enumeration attempts
+have a forensic trail. A bare 403/422 would leave zero evidence
+beyond a structured log line (non-tamper-evident, easily filtered
+out of an attacker-prepared log aggregator); the row instead
+lands in the tamper-evident ``audit_log`` table which is
+HMAC-chained.
 """
 
 from __future__ import annotations
@@ -43,10 +43,10 @@ from z4j_brain.errors import (
 logger = structlog.get_logger("z4j.brain.errors")
 
 
-# Audit fix AU-1/AU-2 (Apr 2026 follow-up): match the path prefixes
-# we want to record denials for. Currently scheduler-adjacent
-# endpoints (the IDOR enumeration target identified by the audit).
-# Add additional prefixes here as new sensitive surfaces ship.
+# Match the path prefixes we want to record denials for.
+# Currently scheduler-adjacent endpoints (the IDOR enumeration
+# target). Add additional prefixes here as new sensitive
+# surfaces ship.
 _AUDITED_PATH_RE = re.compile(
     r"^/api/v\d+/projects/(?P<slug>[a-z0-9_\-]+)/schedules",
     re.IGNORECASE,
@@ -87,7 +87,7 @@ async def _record_denial_if_relevant(
 ) -> None:
     """Best-effort denial-audit enqueue.
 
-    Audit fix AU-1/AU-2 (Apr 2026 follow-up). Catches:
+    Catches:
 
     - ``AuthorizationError`` (403)  → ``schedules.access.denied``
     - ``AuthenticationError`` (401) → ``schedules.access.unauth``
@@ -95,16 +95,15 @@ async def _record_denial_if_relevant(
     - ``ValidationError`` / Pydantic ValidationError (422)
                                     → ``schedules.access.invalid``
 
-    Round-4 audit fix (Apr 2026): the previous implementation
-    opened a NEW DB session synchronously inside the request scope
-    to write the audit row. Under attack (IDOR enumeration), every
-    4xx doubled the per-request connection demand and could
-    starve the connection pool, turning the audit safety net into
-    a self-DoS amplifier. Now: enqueue a fire-and-forget event
-    on a bounded async queue; a single background drain task
-    persists the row using its own session at its own pace. The
-    queue drops the oldest event on overflow rather than blocking
-    the request handler.
+    Writing the audit row from a NEW DB session synchronously
+    inside the request scope would, under attack (IDOR
+    enumeration), double the per-request connection demand on
+    every 4xx and could starve the connection pool, turning the
+    audit safety net into a self-DoS amplifier. Instead we
+    enqueue a fire-and-forget event on a bounded async queue;
+    a single background drain task persists the row using its
+    own session at its own pace. The queue drops the oldest
+    event on overflow rather than blocking the request handler.
 
     Skipped silently when:
 

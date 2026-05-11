@@ -53,7 +53,7 @@ import {
 import { ApiError } from "@/lib/api";
 import type { SchedulePublic } from "@/lib/api-types";
 
-type Kind = "cron" | "interval" | "one_shot" | "solar";
+type Kind = "cron" | "interval" | "clocked" | "solar";
 type CatchUp = "skip" | "fire_one_missed" | "fire_all_missed";
 
 interface FormState {
@@ -362,8 +362,8 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
                   {engineCaps.kinds.includes("interval") && (
                     <SelectItem value="interval">interval</SelectItem>
                   )}
-                  {engineCaps.kinds.includes("one_shot") && (
-                    <SelectItem value="one_shot">one_shot</SelectItem>
+                  {engineCaps.kinds.includes("clocked") && (
+                    <SelectItem value="clocked">clocked</SelectItem>
                   )}
                   {engineCaps.kinds.includes("solar") && (
                     <SelectItem value="solar">solar</SelectItem>
@@ -473,7 +473,7 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
               label="Timezone"
               hint={
                 form.kind !== "cron"
-                  ? "Only used for cron-kind schedules; intervals and one_shot fire on absolute UTC instants."
+                  ? "Only used for cron-kind schedules; intervals and clocked fire on absolute UTC instants."
                   : undefined
               }
             >

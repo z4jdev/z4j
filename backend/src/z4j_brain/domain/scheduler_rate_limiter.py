@@ -159,15 +159,15 @@ class SchedulerRateLimiter:
     ) -> None:
         """Add ``tokens`` back to ``cert_cn``'s bucket (capped at capacity).
 
-        Round-4 audit fix (Apr 2026): the FireSchedule path
-        consumes a token BEFORE validating the schedule (row lock,
-        is_enabled check, agent-pick). When the post-consume
-        validation fails the schedule is NOT actually fired, but
-        the bucket charge persists. At enterprise scale (1000s of
-        schedules being mass-disabled by an operator) the chatty
-        scheduler can transiently exhaust its bucket and 429
-        legitimate fires. ``refund`` returns the unspent token to
-        the bucket so accounting stays accurate.
+        The FireSchedule path consumes a token BEFORE validating
+        the schedule (row lock, is_enabled check, agent-pick).
+        When the post-consume validation fails the schedule is
+        NOT actually fired, but the bucket charge persists. At
+        enterprise scale (1000s of schedules being mass-disabled
+        by an operator) the chatty scheduler can transiently
+        exhaust its bucket and 429 legitimate fires. ``refund``
+        returns the unspent token to the bucket so accounting
+        stays accurate.
 
         Best-effort: refund failures are NOT propagated. The fire
         already failed for an upstream reason; double-failure

@@ -187,7 +187,7 @@ export function useScheduleResync(slug: string) {
 export interface ScheduleCreateBody {
   name: string;
   engine: string;
-  kind: "cron" | "interval" | "one_shot" | "solar";
+  kind: "cron" | "interval" | "clocked" | "solar";
   expression: string;
   task_name: string;
   timezone?: string;
@@ -202,7 +202,7 @@ export interface ScheduleCreateBody {
 
 export interface ScheduleUpdateBody {
   engine?: string;
-  kind?: "cron" | "interval" | "one_shot" | "solar";
+  kind?: "cron" | "interval" | "clocked" | "solar";
   expression?: string;
   task_name?: string;
   timezone?: string;

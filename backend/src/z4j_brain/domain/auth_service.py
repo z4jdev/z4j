@@ -106,6 +106,78 @@ def canonicalize_email(raw: str) -> str:
     return f"{local.casefold()}@{domain_idna}"
 
 
+# Reserved / special-use TLDs that operators commonly choose for the
+# brain admin email in dev / homelab / CI / corp-internal stacks.
+# email-validator's ``test_environment=True`` covers the RFC 6761
+# triplet (.test / .example / .invalid) but NOT .local (RFC 6762
+# mDNS), .localhost, .internal, or .arpa. The brain admin email is
+# only ever used as a login identifier; nobody sends mail to it.
+# We treat these as syntactically valid so an operator who uses
+# ``Z4J_BOOTSTRAP_ADMIN_EMAIL=admin@homelab.local`` does not get
+# locked out of their own brain at first login.
+_OPERATOR_RESERVED_TLDS = frozenset({
+    "local",
+    "localhost",
+    "internal",
+    "intranet",
+    "private",
+    "corp",
+    "home",
+    "lan",
+    "arpa",
+})
+
+
+def validate_admin_email(raw: str) -> str:
+    """Validate + normalise an admin email.
+
+    Single source of truth for first-boot bootstrap (env var or CLI
+    flag), the ``/setup`` complete endpoint, and the
+    ``/api/v1/auth/login`` request body. Symmetric across all three
+    so an email that boots an admin can also log it in.
+
+    Returns the canonicalised form. Raises :class:`ValueError` on
+    any input the brain would refuse at any of the three sites.
+    """
+    if raw is None:
+        raise ValueError("email is required")
+    cleaned = raw.strip()
+    if not cleaned or "@" not in cleaned or " " in cleaned:
+        raise ValueError("not a valid email address")
+    local, _, domain = cleaned.rpartition("@")
+    if not local or not domain or "." not in domain:
+        raise ValueError("not a valid email address")
+
+    tld = domain.rsplit(".", 1)[-1].casefold()
+    if tld in _OPERATOR_RESERVED_TLDS:
+        # Operator-friendly reserved TLD path: skip email-validator
+        # (which rejects these even with test_environment=True) and
+        # fall through to canonicalize_email for IDNA + casefold
+        # normalisation.
+        return canonicalize_email(cleaned)
+
+    try:
+        import inspect as _inspect
+
+        from email_validator import EmailNotValidError, validate_email
+    except ImportError:
+        # email-validator missing - shape check already passed.
+        return canonicalize_email(cleaned)
+
+    kwargs: dict[str, object] = {"check_deliverability": False}
+    sig = _inspect.signature(validate_email)
+    params = sig.parameters
+    if "test_environment" in params:
+        kwargs["test_environment"] = True
+    elif "allow_special_use_domain" in params:
+        kwargs["allow_special_use_domain"] = True
+    try:
+        validated = validate_email(cleaned, **kwargs)
+    except EmailNotValidError as exc:
+        raise ValueError(str(exc)) from None
+    return canonicalize_email(validated.normalized)
+
+
 class AuthService:
     """Login / logout / current-user orchestration.
 

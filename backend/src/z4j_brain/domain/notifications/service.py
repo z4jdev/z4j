@@ -534,7 +534,7 @@ class NotificationService:
                     error=result.error,
                 )
 
-        # Round-8 audit fix R8-Async-MED (Apr 2026): use
+        # Use
         # ``return_exceptions=True`` so a CancelledError on one
         # leg doesn't sibling-cancel every other in-flight HTTP
         # request mid-pin-IP / SNI handshake (those leak
@@ -663,7 +663,7 @@ class NotificationService:
         pattern = filters.get("task_name_pattern")
         if pattern:
             if isinstance(pattern, str):
-                # Audit P-2: defense-in-depth against ReDoS from
+                # Defense-in-depth against ReDoS from
                 # patterns that pre-date the v1.0.14 validator. A
                 # subscription created in 1.0.13 with
                 # ``"a*a*a*a*a*a*a*a*a*a*a*a*a*b"`` is already in

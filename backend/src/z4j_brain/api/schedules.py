@@ -189,7 +189,7 @@ async def list_schedules(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
     cursor_name, cursor_id = _decode_schedules_cursor(cursor)
@@ -283,7 +283,7 @@ async def list_schedule_fires(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
 
@@ -322,7 +322,7 @@ async def get_schedule(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
     schedule = await ScheduleRepository(db_session).get_for_project(
@@ -341,7 +341,6 @@ async def get_schedule(
 # ---------------------------------------------------------------------------
 
 
-# --- Audit-driven hardening (Apr 2026) ---
 #
 # Field caps + enum constraints applied to every operator-facing
 # schedule body. The API layer was previously schema-permissive
@@ -351,10 +350,10 @@ async def get_schedule(
 # 1. **DoS via unbounded args/kwargs**: an admin (or compromised
 #    admin token) could POST a 100MB JSON payload that OOM'd the
 #    brain on parse + bloated the JSONB column. Fixed via
-#    a serialised-size cap enforced at the boundary (audit H-1).
+#    A serialised-size cap enforced at the boundary.
 # 2. **Unconstrained kind values**: ``kind: str`` accepted any
 #    string at the API; OpenAPI docs lied about allowed values
-#    and the wire was looser than the underlying enum (audit H-2).
+#    And the wire was looser than the underlying enum.
 # 3. **Name corruption**: control characters in ``name`` flowed
 #    into audit metadata, dashboard, and gRPC payloads. Operators
 #    could break log-line parsing; the dashboard had to render
@@ -362,23 +361,25 @@ async def get_schedule(
 # 4. **Length cliffs**: ``expression``, ``task_name``, ``queue``,
 #    ``source`` could carry MB-scale strings (audit M-4 / L-3).
 
-_KIND_VOCAB = ("cron", "interval", "one_shot", "solar")
+_KIND_VOCAB = ("cron", "interval", "clocked", "solar")
 _CATCH_UP_VOCAB = ("skip", "fire_one_missed", "fire_all_missed")
 
 
 def _validate_iana_timezone(value: str) -> str:
-    """Round-8 audit fix R8-Time-H2 (Apr 2026): reject bad IANA tz at API.
+    """Reject bad IANA tz at the API boundary.
 
-    Pre-fix the only validation was ``max_length``. A typo like
-    ``"America/New York"`` (space) or a junk string like ``"Foo/Bar"``
-    was accepted at create time, watch-streamed to the scheduler,
-    and on first tick ``cron.next_fire`` raised ``CronExpressionError``
-    which the engine swallowed by disabling the schedule. Operators
-    saw a created-but-never-firing schedule and no API-side error.
+    Without this validator, the only validation is
+    ``max_length``: a typo like ``"America/New York"`` (space)
+    or a junk string like ``"Foo/Bar"`` would be accepted at
+    create time, watch-streamed to the scheduler, and on first
+    tick ``cron.next_fire`` would raise ``CronExpressionError``
+    which the engine swallows by disabling the schedule -
+    operators see a created-but-never-firing schedule and no
+    API-side error.
 
-    Validates by attempting :class:`zoneinfo.ZoneInfo` construction.
-    Empty string and ``"UTC"`` always pass. Returns the trimmed
-    value.
+    Validates by attempting :class:`zoneinfo.ZoneInfo`
+    construction. Empty string and ``"UTC"`` always pass.
+    Returns the trimmed value.
     """
     if value is None:
         return value
@@ -465,12 +466,12 @@ class ScheduleCreateIn(BaseModel):
         ..., min_length=1, max_length=_EXPRESSION_MAX,
         pattern=_NO_CONTROL_CHARS,
     )
-    # Round-3 audit fix (Apr 2026): reject control characters in
-    # ``task_name``. Pre-fix the cron exporter's DISABLED branch
-    # could be coerced into emitting an active crontab line by
-    # planting a newline in this field. Defense-in-depth at the
-    # API boundary so any future renderer / exporter that forgets
-    # to sanitize is still safe.
+    # Reject control characters in ``task_name``. Without this,
+    # the cron exporter's DISABLED branch could be coerced into
+    # emitting an active crontab line by planting a newline in
+    # this field. Defense-in-depth at the API boundary so any
+    # future renderer / exporter that forgets to sanitize is
+    # still safe.
     task_name: str = Field(
         ..., min_length=1, max_length=_TASK_NAME_MAX,
         pattern=_NO_CONTROL_CHARS,
@@ -537,8 +538,8 @@ class ScheduleUpdateIn(BaseModel):
     flip a single attribute (timezone, expression, queue) without
     re-sending the rest of the row.
 
-    NOTE (1.2.2 audit fix): ``scheduler`` is intentionally NOT in
-    this model. Changing a schedule's owner mid-flight would
+    NOTE: ``scheduler`` is intentionally NOT in this model.
+    Changing a schedule's owner mid-flight would
     create surprising side-effects (the new owner has different
     fire history, possibly different `allowed_schedulers`
     membership). Operators who need to migrate ownership delete +
@@ -554,7 +555,7 @@ class ScheduleUpdateIn(BaseModel):
         default=None, min_length=1, max_length=_EXPRESSION_MAX,
         pattern=_NO_CONTROL_CHARS,
     )
-    # Round-3 audit fix (Apr 2026): see ScheduleCreateIn.task_name.
+    # See ScheduleCreateIn.task_name.
     task_name: str | None = Field(
         default=None, min_length=1, max_length=_TASK_NAME_MAX,
         pattern=_NO_CONTROL_CHARS,
@@ -640,7 +641,7 @@ async def create_schedule(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 
@@ -653,7 +654,7 @@ async def create_schedule(
         create_data["scheduler"] = getattr(
             project, "default_scheduler_owner", "z4j-scheduler",
         )
-    # 1.2.2 audit fix MED-13: enforce per-project allow-list when
+    # Enforce per-project allow-list when
     # set. ``None`` means unrestricted (the default).
     _validate_scheduler_in_allowlist(project, create_data["scheduler"])
 
@@ -719,7 +720,7 @@ async def update_schedule(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 
@@ -792,7 +793,7 @@ async def delete_schedule(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 
@@ -914,7 +915,7 @@ async def _enable_or_disable(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.OPERATOR,
     )
 
@@ -1068,7 +1069,7 @@ async def trigger_schedule_now(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.OPERATOR,
     )
 
@@ -1104,10 +1105,10 @@ async def trigger_schedule_now(
             idempotency_key=f"trigger:{schedule_id}:{user.id}",
         )
         if response.error_code:
-            # Audit fix M-2 (Apr 2026): record the failed trigger
-            # attempt BEFORE raising. Pre-fix the brain had no
-            # record an operator attempted a trigger that the
-            # scheduler refused; an attacker probing for valid
+            # Record the failed trigger attempt BEFORE raising.
+            # Otherwise the brain would have no record an
+            # operator attempted a trigger that the scheduler
+            # refused, and an attacker probing for valid
             # schedule_ids could brute-force without leaving a
             # forensic trail.
             try:
@@ -1274,7 +1275,7 @@ class ImportedScheduleIn(BaseModel):
         ..., min_length=1, max_length=_EXPRESSION_MAX,
         pattern=_NO_CONTROL_CHARS,
     )
-    # Round-3 audit fix (Apr 2026): see ScheduleCreateIn.task_name.
+    # See ScheduleCreateIn.task_name.
     task_name: str = Field(
         ..., min_length=1, max_length=_TASK_NAME_MAX,
         pattern=_NO_CONTROL_CHARS,
@@ -1285,12 +1286,12 @@ class ImportedScheduleIn(BaseModel):
     kwargs: dict[str, Any] = {}
     catch_up: str = Field(default="skip", min_length=1, max_length=20)
     is_enabled: bool = True
-    # Audit fix CRIT-2 (1.2.2 second-pass): default ``None`` so
-    # the import handler resolves to the project's
-    # ``default_scheduler_owner`` instead of overriding it with a
-    # hardcoded ``"z4j-scheduler"``. Pre-fix, a project that had
-    # flipped its default to ``celery-beat`` saw imported rows
-    # silently land under ``z4j-scheduler`` ownership.
+    # Default ``None`` so the import handler resolves to the
+    # project's ``default_scheduler_owner`` instead of overriding
+    # it with a hardcoded ``"z4j-scheduler"``. Otherwise a
+    # project that had flipped its default to ``celery-beat``
+    # would see imported rows silently land under
+    # ``z4j-scheduler`` ownership.
     scheduler: str | None = Field(
         default=None, min_length=1, max_length=40,
     )
@@ -1337,7 +1338,7 @@ class ImportedScheduleIn(BaseModel):
         return _validate_args_kwargs_size(v, "kwargs")
 
 
-# Audit fix H-3 (Apr 2026): the ``replace_for_source`` mode deletes
+# The ``replace_for_source`` mode deletes
 # every schedule sharing the source label that's NOT in the batch.
 # Without an allow-list, an admin (or compromised admin token) can
 # POST ``mode=replace_for_source, source_filter="dashboard",
@@ -1524,12 +1525,12 @@ async def import_schedules(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 
     if body.mode not in ("upsert", "replace_for_source"):
-        # Audit fix L-4 (Apr 2026): mode is a semantic input error,
+        # Mode is a semantic input error,
         # not a missing resource. Was raising NotFoundError → 404,
         # which misled clients. Use ValidationError → 422 to match
         # the diff endpoint's behavior + the rest of the API.
@@ -1538,7 +1539,7 @@ async def import_schedules(
             details={"mode": body.mode},
         )
 
-    # Audit fix H-3 (Apr 2026): pre-flight ``source_filter`` against
+    # Pre-flight ``source_filter`` against
     # the replace-mode allow-list BEFORE we take the advisory lock
     # or do any per-row work. This is the check that prevents an
     # admin (or compromised admin token) from posting
@@ -1574,13 +1575,13 @@ async def import_schedules(
     # lock is released on commit/rollback - no manual cleanup. Only
     # applies on Postgres; SQLite has a single writer so the race
     # cannot happen there.
-    # 1.2.2 round-7 audit fix CRIT: acquire the project-wide
+    # Acquire the project-wide
     # advisory lock FOR EVERY import mode so a concurrent project
     # PATCH that rewrites stored ``Schedule.scheduler`` values
     # cannot race this import. ``update_project`` takes the SAME
     # ``(proj_int, 0)`` lock; both paths serialize on it.
     #
-    # Round-7 second pass: the lock used to be inside the
+    # The lock used to be inside the
     # ``replace_for_source`` branch (because the source-specific
     # lock only matters for replace), but the PATCH-vs-import race
     # affects EVERY import that touches declarative-source rows
@@ -1620,19 +1621,19 @@ async def import_schedules(
     summary = ImportSchedulesResponse(
         inserted=0, updated=0, unchanged=0, failed=0, deleted=0, errors={},
     )
-    # Audit fix N-2 (Apr 2026 follow-up): for replace_for_source
-    # mode, pre-load the entire (scheduler, name) -> id map for
-    # the batch in a SINGLE query, then look up failed-row ids
-    # in-memory. Pre-fix the failure-recovery path issued one
-    # SELECT per failed row inside the import loop - a 5000-row
-    # import with 5% failures was 250 sequential round-trips
-    # serialized inside the request. Operational scale + admin-
-    # driven imports made this a real tail-latency contributor.
-    # Audit fix CRIT-2 (1.2.2 second-pass): resolve each row's
-    # scheduler to the project's ``default_scheduler_owner`` when
-    # the row didn't pick. Pre-fix the import default was a
-    # hardcoded ``"z4j-scheduler"`` which silently overrode the
-    # project's chosen default for every row that didn't specify.
+    # For replace_for_source mode, pre-load the entire
+    # (scheduler, name) -> id map for the batch in a SINGLE
+    # query, then look up failed-row ids in-memory. Otherwise
+    # the failure-recovery path issues one SELECT per failed
+    # row inside the import loop - a 5000-row import with 5%
+    # failures becomes 250 sequential round-trips serialized
+    # inside the request. Operational scale + admin-driven
+    # imports make this a real tail-latency contributor.
+    # Resolve each row's scheduler to the project's
+    # ``default_scheduler_owner`` when the row didn't pick;
+    # otherwise the import default would be a hardcoded
+    # ``"z4j-scheduler"`` which silently overrides the project's
+    # chosen default for every row that didn't specify.
     project_default_scheduler = getattr(
         project, "default_scheduler_owner", "z4j-scheduler",
     )
@@ -1656,8 +1657,7 @@ async def import_schedules(
         # See migration ``2026_05_01_0019_legacy_scheduler_migrate``.
         # That migration runs at upgrade time so the lookup here
         # finds them under the new key without runtime dual-key
-        # logic (which had a double-firing bug, see round-4
-        # audit fix CRIT).
+        # logic (which has a double-firing failure mode).
         batch_keys = [
             (_resolve_scheduler(row.scheduler), row.name)
             for row in body.schedules
@@ -1682,7 +1682,7 @@ async def import_schedules(
     surviving_ids: set[uuid.UUID] = set()
     for idx, row in enumerate(body.schedules):
         try:
-            # 1.2.2 audit fix MED-13: enforce per-project
+            # Enforce per-project
             # allowed_schedulers allow-list before we touch the DB.
             # When the project sets the list, a row with an
             # unauthorised ``scheduler`` value is rejected per-row
@@ -1706,7 +1706,7 @@ async def import_schedules(
             # error map so they can fix the source and re-import.
             summary.failed += 1
             summary.errors[idx] = str(exc)
-            # Audit fix M-6 (Apr 2026): in replace_for_source mode,
+            # In replace_for_source mode,
             # add the EXISTING brain row's id (if any) to
             # surviving_ids when the upsert fails. Without this, a
             # row with a syntax error was excluded from
@@ -1777,8 +1777,8 @@ async def import_schedules(
             body.source_filter
             or (body.schedules[0].source if body.schedules else None)
         )
-    # Audit fix HIGH-11 (1.2.2): also record the API key that
-    # fired this action (if the request came in via bearer auth).
+    # Also record the API key that fired this action (if the
+    # request came in via bearer auth).
     api_key_id = resolve_api_key_id(request)
     await audit.record(
         audit_log,
@@ -1881,7 +1881,7 @@ async def diff_schedules(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 
@@ -1891,7 +1891,7 @@ async def diff_schedules(
             details={"mode": body.mode},
         )
 
-    # Audit fix H-3 (Apr 2026): mirror the :import endpoint's
+    # Mirror the :import endpoint's
     # source-label allow-list on :diff. Otherwise an admin could
     # use the (read-only, unaudited) diff endpoint to enumerate
     # which schedules they would wipe with a follow-up :import call,
@@ -1920,14 +1920,14 @@ async def diff_schedules(
     # the DELETE set for replace_for_source without a second pass.
     batch_keys: set[tuple[str, str]] = set()
 
-    # Audit fix N-3 (Apr 2026 follow-up): batch the existing-row
-    # lookup. Pre-fix the diff endpoint issued one SELECT per row
-    # in the batch - a 5000-row reconciler dry-run was 5000
-    # sequential queries. Now: one batched SELECT per request.
-    # ``tuple_(...).in_(...)`` is portable across Postgres + SQLite.
+    # Batch the existing-row lookup. A per-row SELECT would
+    # turn a 5000-row reconciler dry-run into 5000 sequential
+    # queries; one batched SELECT per request is the supported
+    # path. ``tuple_(...).in_(...)`` is portable across Postgres
+    # + SQLite.
     from sqlalchemy import tuple_  # noqa: PLC0415
 
-    # Audit fix CRIT-2 (1.2.2 second-pass): same project-default
+    # Same project-default
     # resolution as the :import path, so :diff previews the same
     # row identity that :import will write.
     diff_project_default = getattr(
@@ -2160,7 +2160,7 @@ async def resync_schedules(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 

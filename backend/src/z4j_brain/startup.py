@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger("z4j.brain.startup")
 
 
-# Round-8 audit fix R8-HIGH-4 (Apr 2026): module-level holder for
+# Module-level holder for
 # the bootstrap password supplied via ``z4j serve
 # --admin-password``. Stays in process memory only, never lands in
 # ``os.environ`` (where ``/proc/<pid>/environ`` would expose it to
@@ -102,14 +102,14 @@ async def run_first_boot_check(
     bootstrap_name = (
         os.environ.get("Z4J_BOOTSTRAP_ADMIN_DISPLAY_NAME", "").strip() or None
     )
-    # Round-8 audit fix R8-HIGH-4 (Apr 2026): consume the cli-supplied
+    # Consume the cli-supplied
     # password from the in-process holder. cli.py never puts it into
     # ``os.environ`` so /proc/<pid>/environ leakage and subprocess
     # inheritance are both eliminated.
     cli_password = _consume_cli_bootstrap_password()
     if cli_password:
         bootstrap_password = cli_password
-    # Round-8 audit fix R8-HIGH-5 (Apr 2026): pop the env-var
+    # Pop the env-var
     # variant of the password as soon as we've captured it locally.
     # On Linux it was previously readable via /proc/<pid>/environ
     # for the entire process lifetime AND propagated to every
@@ -124,6 +124,25 @@ async def run_first_boot_check(
     # across env-bootstrap, banner-mint, and setup token delete,
     # which left SQLAlchemy in a partial-tx state after a
     # partial-flush-then-raise).
+    if bootstrap_email and bootstrap_password:
+        # Pre-validate the email through the SAME shape rules
+        # that ``/api/v1/auth/login`` enforces. Without this, an
+        # operator can stand the brain up with a reserved-TLD email
+        # the login endpoint won't accept and lock themselves out.
+        # We validate before opening the bootstrap session so the
+        # error path is plain - log + fall through to the banner.
+        from z4j_brain.domain.auth_service import validate_admin_email
+
+        try:
+            bootstrap_email = validate_admin_email(bootstrap_email)
+        except ValueError as exc:
+            logger.error(
+                "z4j auto-bootstrap email rejected, falling back "
+                "to setup-token banner",
+                reason=str(exc),
+            )
+            bootstrap_email = ""  # falls through to banner path
+
     if bootstrap_email and bootstrap_password:
         async with db.session() as bootstrap_session:
             users = UserRepository(bootstrap_session)
@@ -154,7 +173,7 @@ async def run_first_boot_check(
                 return
 
     # Banner path in a fresh session. Re-check is_first_boot inside
-    # the transaction (audit H5): closes the TOCTOU where the UI
+    # the transaction: closes the TOCTOU where the UI
     # POSTs /api/v1/setup/complete between the outer check and the
     # token mint.
     async with db.session() as session:

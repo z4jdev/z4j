@@ -79,12 +79,11 @@ class ApiKeyCreated(ApiKeyPublic):
 
 class CreateApiKeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    # Round-8 audit fix R8-Pyd-H6 (Apr 2026): cap list cardinality
-    # AND per-element length. Pre-fix the list was unbounded and
-    # each scope string was unbounded, so a 1M-element list of
-    # 100KB strings reached ``validate_requested_scopes`` before
-    # rejection. ``ALL_SCOPES`` has tens of values; 64 leaves
-    # plenty of headroom.
+    # Cap list cardinality AND per-element length so a
+    # 1M-element list of 100KB strings doesn't reach
+    # ``validate_requested_scopes`` before rejection.
+    # ``ALL_SCOPES`` has tens of values; 64 leaves plenty of
+    # headroom.
     scopes: list[str] = Field(
         default_factory=list,
         max_length=64,

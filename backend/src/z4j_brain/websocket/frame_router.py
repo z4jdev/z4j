@@ -19,6 +19,8 @@ project.
 
 from __future__ import annotations
 
+import time
+from collections import deque
 from datetime import UTC, datetime
 import asyncio
 from typing import TYPE_CHECKING, Any
@@ -27,8 +29,11 @@ from uuid import UUID
 import structlog
 
 from z4j_core.transport.frames import (
+    AgentStatusFrame,
     CommandAckFrame,
     CommandResultFrame,
+    EventBatchAckFrame,
+    EventBatchAckPayload,
     EventBatchFrame,
     Frame,
     HeartbeatFrame,
@@ -36,6 +41,8 @@ from z4j_core.transport.frames import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from z4j_brain.domain import CommandDispatcher, EventIngestor
     from z4j_brain.domain.notifications import NotificationService
     from z4j_brain.persistence.database import DatabaseManager
@@ -45,7 +52,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger("z4j.brain.frame_router")
 
 #: Backpressure cap on detached notification dispatch tasks per
-#: connection (audit P-4). Each task runs ``evaluate_and_dispatch``
+#: connection. Each task runs ``evaluate_and_dispatch``
 #: in its own DB session and may make external HTTP calls; an event
 #: flood from a misbehaving agent shouldn't be allowed to spawn
 #: thousands of in-flight tasks. The cap is per-FrameRouter (i.e.
@@ -54,8 +61,8 @@ logger = structlog.get_logger("z4j.brain.frame_router")
 #: subscription fanout.
 _MAX_PENDING_NOTIFICATION_TASKS = 256
 
-#: Round-8 audit fix R8-Async-H4 (Apr 2026): hard cap on the number
-#: of notification dispatch tasks that can hold an OPEN DB session
+#: Hard cap on the number of notification dispatch tasks that can
+#: hold an OPEN DB session
 #: at once. Each ``_dispatch_notification`` call opens its own
 #: ``db.session()`` inside the task body. Without this bound, the
 #: 256-task ceiling above lets ~256 sessions drain the brain's pool
@@ -101,6 +108,15 @@ def _log_notify_task_exception(task: asyncio.Task[object]) -> None:
         )
 
 
+# Phase H rate cap. The agent's heartbeat module emits
+# one agent_status per heartbeat (default 10s = 6/min). A misbehaving
+# agent could ship them at line rate; we drop frames over this cap
+# rather than amplify into per-frame DB writes. 12/min is 2x the
+# nominal rate so transient catch-up after a backoff recovery still
+# fits inside the window.
+_AGENT_STATUS_RATE_PER_MINUTE = 12
+
+
 class FrameRouter:
     """Per-connection inbound-frame dispatcher."""
 
@@ -114,6 +130,7 @@ class FrameRouter:
         agent_id: UUID,
         dashboard_hub: "DashboardHub | None" = None,
         worker_id: str | None = None,
+        send_frame: "Callable[[Frame], Awaitable[None]] | None" = None,
     ) -> None:
         self._db = db
         self._ingestor = ingestor
@@ -127,12 +144,86 @@ class FrameRouter:
         # agent_workers (rather than guessing from the heartbeat
         # frame itself, which doesn't carry worker_id).
         self._worker_id = worker_id
-        # Strong references to detached notification dispatch tasks
-        # (audit P-4 + P-10). Without this the asyncio event loop
-        # may GC the task before its coroutine completes, swallowing
-        # any exception. Tasks remove themselves on completion via
-        # the done callback.
+        # Callback to send a signed frame back
+        # over the same connection. Used to emit ``event_batch_ack``
+        # after a successful ingest commit so the agent can confirm-
+        # and-evict the matching buffer entries. ``None`` for
+        # connections that don't support outbound frames (none in
+        # practice but kept optional so unit tests that construct a
+        # bare FrameRouter don't have to wire a stub).
+        self._send_frame = send_frame
+        # Strong references to outstanding ack-send tasks (created
+        # by ``asyncio.create_task`` in ``_handle_event_batch``).
+        # Without this the asyncio loop GCs the coroutine before
+        # the websocket write completes. Tasks remove themselves on
+        # completion via ``discard`` callback.
+        self._pending_ack_tasks: set[asyncio.Task[None]] = set()
+        # Strong references to detached notification dispatch tasks.
+        # Without this the asyncio event loop may GC the task before
+        # its coroutine completes, swallowing any exception. Tasks
+        # remove themselves on completion via the done callback.
         self._pending_notify_tasks: set[asyncio.Task[None]] = set()
+        # Per-agent rate cap on inbound agent_status frames. The
+        # agent's heartbeat module emits one every ~10s by design
+        # (6/min); a misbehaving agent post-handshake (or a hostile
+        # one with a stolen bearer that passed HMAC verification)
+        # could ship them at line rate and force one DB INSERT each.
+        # The sliding-window cap bounds the worst-case write rate
+        # per (agent_id) connection.
+        # 12/minute = 6× the nominal rate, so a stuck-at-1Hz agent
+        # is throttled but a healthy agent that briefly bunches
+        # frames after a backoff recovery still makes it through.
+        self._agent_status_window: deque[float] = deque(
+            maxlen=_AGENT_STATUS_RATE_PER_MINUTE,
+        )
+        # One WARNING per overflow burst, not per dropped frame.
+        # A hostile peer holding a valid bearer
+        # + HMAC could otherwise pump frames at line rate and turn
+        # the rate cap into a log-volume amplifier (one structlog
+        # JSON line per frame). Edge-triggered: warn on rising
+        # edge, info on falling edge, silent in steady state.
+        # Counter records the dropped-frame count so the
+        # falling-edge log line still tells the operator how big
+        # the burst was.
+        self._agent_status_overflow_active: bool = False
+        self._agent_status_overflow_dropped: int = 0
+
+    def aclose(self) -> None:
+        """Cancel pending background tasks and clear strong references.
+
+        Called from the gateway's connection-cleanup ``finally`` so the
+        router (and its captured closures) become collectible without
+        waiting on Python's cyclic GC. Without this, the
+        ``_send_frame`` closure pins ``websocket`` -> ``_z4j_verifier``
+        -> ``ReplayGuard`` (4096 nonces) per disconnected session, and
+        a high-churn reconnect rate accumulates the per-session state
+        in memory. Idempotent and safe to call multiple times.
+        """
+        for t in list(self._pending_ack_tasks):
+            t.cancel()
+        for t in list(self._pending_notify_tasks):
+            t.cancel()
+        self._send_frame = None
+
+    async def _send_frame_safe(self, out: "Frame") -> None:
+        """Send ``out`` via the per-connection send_frame callback.
+
+        Wraps any exception so a failed websocket write doesn't
+        propagate out of an unawaited task and crash the surrounding
+        connection. The agent's reconnect path re-ships unacked
+        entries; the brain dedupes via the content-derived event_id
+        (Bug X-B fix).
+        """
+        if self._send_frame is None:
+            return
+        try:
+            await self._send_frame(out)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "z4j frame_router: outbound frame send failed",
+                agent_id=str(self._agent_id),
+                frame_type=getattr(out, "type", None),
+            )
 
     async def dispatch(self, frame: Frame) -> None:
         """Route ``frame`` to the right service. Never raises."""
@@ -145,6 +236,8 @@ class FrameRouter:
                 await self._handle_command_ack(frame)
             elif isinstance(frame, CommandResultFrame):
                 await self._handle_command_result(frame)
+            elif isinstance(frame, AgentStatusFrame):
+                await self._handle_agent_status(frame)
             elif isinstance(frame, RegistryDeltaFrame):
                 # B5 wires this into the task discovery pipeline.
                 logger.debug(
@@ -181,7 +274,7 @@ class FrameRouter:
             WorkerRepository,
         )
 
-        # Round-6 audit fix WS-MED (Apr 2026): cap the per-frame
+        # Cap the per-frame
         # event count. The wire-frame validator already enforces
         # ``max_ws_frame_bytes`` (1 MiB by default), but events are
         # small JSON dicts so a single 1 MiB frame can carry
@@ -201,18 +294,55 @@ class FrameRouter:
             )
             events = events[:_EVENT_BATCH_CAP]
 
-        async with self._db.session() as session:
-            await self._ingestor.ingest_batch(
-                events=events,
-                project_id=self._project_id,
-                agent_id=self._agent_id,
-                agents=AgentRepository(session),
-                event_repo=EventRepository(session),
-                task_repo=TaskRepository(session),
-                queue_repo=QueueRepository(session),
-                worker_repo=WorkerRepository(session),
-            )
-            await session.commit()
+        accepted_count = 0
+        commit_ok = False
+        try:
+            async with self._db.session() as session:
+                accepted_count = await self._ingestor.ingest_batch(
+                    events=events,
+                    project_id=self._project_id,
+                    agent_id=self._agent_id,
+                    agents=AgentRepository(session),
+                    event_repo=EventRepository(session),
+                    task_repo=TaskRepository(session),
+                    queue_repo=QueueRepository(session),
+                    worker_repo=WorkerRepository(session),
+                )
+                await session.commit()
+                commit_ok = True
+        finally:
+            # Emit an ``event_batch_ack`` so the agent can confirm-
+            # and-evict the matching buffer entries. Sending only on
+            # commit success means a deadlock storm in ingest does
+            # NOT silently consume buffer entries on the agent.
+            #
+            # Fire-and-forget the send so the next event_batch can
+            # start ingesting immediately. Awaiting the ack send
+            # inline would serialize ``ingest_one × N + commit +
+            # ack_send`` per frame, which under high event rate +
+            # high fanout would push the ack ~30s past commit and
+            # trip the agent's ack watchdog. Spawning a task lets
+            # the websocket send write happen concurrently with the
+            # next ingest.
+            if commit_ok and self._send_frame is not None:
+                ack = EventBatchAckFrame(
+                    id=f"eba_{frame.id}"[:64],
+                    ts=datetime.now(UTC),
+                    payload=EventBatchAckPayload(
+                        acked_id=frame.id,
+                        received=len(events),
+                        accepted=accepted_count,
+                        rejected=max(len(events) - accepted_count, 0),
+                    ),
+                )
+                ack_task = asyncio.create_task(
+                    self._send_frame_safe(ack),
+                    name=f"z4j_ack_{frame.id}",
+                )
+                # Hold a strong reference so the task isn't GC'd
+                # mid-flight; it removes itself when done.
+                self._pending_ack_tasks.add(ack_task)
+                ack_task.add_done_callback(self._pending_ack_tasks.discard)
 
         # One publish per batch (not per event) - the dashboard
         # refetches the list and gets every change in one round
@@ -240,7 +370,15 @@ class FrameRouter:
         )
 
         async with self._db.session() as session:
-            await AgentRepository(session).touch_heartbeat(self._agent_id)
+            agents_repo = AgentRepository(session)
+            await agents_repo.touch_heartbeat(self._agent_id)
+            # Promote state back to online if it was
+            # wrongly pinned to offline by a late mark_offline that
+            # lost a race against this connection's mark_online. The
+            # operation is a single indexed UPDATE with a guard,
+            # so it's a no-op when the agent is already online (the
+            # common case).
+            await agents_repo.promote_online_if_offline(self._agent_id)
             # Worker-first persistence (1.2.1+): refresh THIS worker's
             # last_seen_at so the dashboard can distinguish a healthy
             # multi-worker fleet from a partially-degraded one (e.g.
@@ -254,8 +392,8 @@ class FrameRouter:
             # The agent sends keys like "celery.queue_depths" with
             # a dict of {queue_name: depth}.
             adapter_health = frame.payload.adapter_health or {}
-            # Round-6 audit fix WS-MED (Apr 2026): cap the number of
-            # adapter_health top-level keys we'll iterate. Nominal
+            # Cap the number of adapter_health top-level keys we'll
+            # iterate. Nominal
             # production load is single-digit (one per engine + a
             # few well-known suffixes); a malicious or buggy agent
             # supplying 100k keys would otherwise force 100k key
@@ -281,7 +419,6 @@ class FrameRouter:
 
                         depths = _json.loads(value)
                         if isinstance(depths, dict):
-                            # Round-6 audit fix WS-MED (Apr 2026):
                             # cap inner queue_depths dict size to
                             # prevent a malicious agent from
                             # triggering thousands of upserts per
@@ -364,14 +501,15 @@ class FrameRouter:
                             queue_repo_w = QueueRepository(session)
                             # Collect every hostname's update payload
                             # into one list and emit ONE bulk upsert
-                            # at the end (v1.0.15 P-1). Replaces the
-                            # per-hostname savepointed upsert that was
-                            # the dominant cost in this hot path
-                            # (heartbeat fires every 10s per agent
-                            # connection - ~6 frontends × prefork=2
-                            # ≈ 6 concurrent heartbeats was where the
-                            # original PendingRollbackError cascade
-                            # was caught in audit pass 9 / 2026-04-21).
+                            # at the end. A per-hostname savepointed
+                            # upsert would be the dominant cost in
+                            # this hot path (heartbeat fires every
+                            # 10s per agent connection, so even a
+                            # handful of frontends with prefork
+                            # pools produces enough concurrent
+                            # heartbeats to trigger
+                            # PendingRollbackError cascades without
+                            # this batching).
                             bulk_rows: list[dict[str, Any]] = []
                             queue_names_to_touch: list[str] = []
                             for hostname, data in details.items():
@@ -417,8 +555,8 @@ class FrameRouter:
                                         if isinstance(q, dict)
                                     ]
                                     row["queues"] = queue_list
-                                    # Collect for separate queue touches
-                                    # below. Worker → queue is N:M; one
+                                    # Collect for separate queue touches below.
+                                    # Worker → queue is N:M; one
                                     # worker can announce multiple
                                     # queues, so this stays a flat list.
                                     queue_names_to_touch.extend(
@@ -477,8 +615,8 @@ class FrameRouter:
                                                 hostname=str(row["name"]),
                                             )
 
-                            # Register each queue this worker is
-                            # consuming so the Queues page reflects
+                            # Register each queue this worker is consuming
+                            # so the Queues page reflects
                             # them even when task events don't carry
                             # a ``queue`` field (Celery only emits
                             # queue names for explicit routing;
@@ -511,6 +649,94 @@ class FrameRouter:
                         )
 
             await session.commit()
+
+    # ------------------------------------------------------------------
+    # agent_status (Phase H, 1.5.0+)
+    # ------------------------------------------------------------------
+
+    async def _handle_agent_status(self, frame: AgentStatusFrame) -> None:
+        """Persist one agent self-report snapshot to ``agent_status_history``.
+
+        The frame's ``payload`` is dumped to a JSON-friendly dict and
+        stored as JSONB on Postgres / JSON on SQLite. ``captured_at``
+        is the frame's ``ts`` field (when the agent built the
+        snapshot), NOT ``datetime.now()`` - the dashboard timeline
+        should reflect the agent's clock, not the brain's.
+
+        Rate-capped per audit M-6: a misbehaving (or compromised
+        post-handshake) agent shipping frames at line rate would
+        otherwise amplify into a DB INSERT per frame. The sliding
+        window is per-(connection,agent_id); over-rate frames are
+        dropped silently after a single WARNING per overflow.
+
+        Errors during persistence are logged but never break the WS
+        connection. agent_status is observability data, not load-
+        bearing for the control plane; a transient DB hiccup must
+        not flap the agent's session.
+        """
+        # Rate cap with edge-triggered logging (S-5).
+        now_mono = time.monotonic()
+        window = self._agent_status_window
+        # Trim frames older than 60 seconds.
+        while window and now_mono - window[0] > 60.0:
+            window.popleft()
+        if len(window) >= _AGENT_STATUS_RATE_PER_MINUTE:
+            self._agent_status_overflow_dropped += 1
+            if not self._agent_status_overflow_active:
+                # Rising edge: one WARNING per overflow burst.
+                self._agent_status_overflow_active = True
+                logger.warning(
+                    "z4j frame_router: agent_status rate cap exceeded; "
+                    "subsequent frames dropped silently until window drains",
+                    agent_id=str(self._agent_id),
+                    cap_per_minute=_AGENT_STATUS_RATE_PER_MINUTE,
+                )
+            return
+        if self._agent_status_overflow_active:
+            # Falling edge: report the burst size and reset.
+            logger.info(
+                "z4j frame_router: agent_status rate cap window drained",
+                agent_id=str(self._agent_id),
+                dropped_in_burst=self._agent_status_overflow_dropped,
+            )
+            self._agent_status_overflow_active = False
+            self._agent_status_overflow_dropped = 0
+        window.append(now_mono)
+
+        from z4j_brain.persistence.repositories import (
+            AgentStatusHistoryRepository,
+        )
+
+        # Use the frame's ``ts`` if present; fall back to now() for
+        # the rare case where an agent omits ts (Pydantic allows it
+        # to be None on _FrameBase). datetime.now(UTC) keeps the row
+        # roughly aligned with the brain's clock so dashboards still
+        # render something reasonable.
+        captured_at = frame.ts or datetime.now(UTC)
+
+        # ``model_dump(mode="json")`` renders datetimes as ISO strings
+        # (matches what the agent sent on the wire) so the JSONB
+        # column round-trips through JSON cleanly. Without mode="json"
+        # SQLAlchemy's JSON serialiser hits a ``datetime is not JSON
+        # serializable`` TypeError on the SQLite path.
+        payload_dict = frame.payload.model_dump(mode="json")
+
+        try:
+            async with self._db.session() as session:
+                await AgentStatusHistoryRepository(session).insert(
+                    project_id=self._project_id,
+                    agent_id=self._agent_id,
+                    captured_at=captured_at,
+                    payload=payload_dict,
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "z4j frame_router: agent_status persist failed; "
+                "snapshot dropped, connection survives",
+                agent_id=str(self._agent_id),
+                project_id=str(self._project_id),
+            )
 
     # ------------------------------------------------------------------
     # command_ack / command_result
@@ -573,13 +799,13 @@ class FrameRouter:
     ) -> None:
         """Fire per-user notification subscriptions for task state changes.
 
-        As of v1.0.14 (audit P-4) each evaluation runs in a detached
-        background task instead of blocking the WS receive loop.
-        Pre-1.0.14 this method awaited each ``evaluate_and_dispatch``
-        in series, which itself awaits up to 16 concurrent HTTP
-        deliveries with 10s timeouts - a 50-event burst with email
-        subscriptions could pin the WS frame handler for tens of
-        seconds, dropping the agent's heartbeat clock.
+        Each evaluation runs in a detached background task
+        instead of blocking the WS receive loop. Awaiting each
+        ``evaluate_and_dispatch`` in series would pin the WS
+        frame handler: each call awaits up to 16 concurrent HTTP
+        deliveries with 10s timeouts, so a 50-event burst with
+        email subscriptions could block the WS frame handler for
+        tens of seconds and drop the agent's heartbeat clock.
 
         The detached tasks each open their own DB session (sessions
         are not safe to share across tasks). A class-level set holds
@@ -616,7 +842,7 @@ class FrameRouter:
             seen.add((trigger, task_id))
 
             data = raw_event.get("data") or {}
-            # Backpressure cap (audit P-4): if too many notification
+            # Backpressure cap: if too many notification
             # tasks are already in flight we drop new ones rather than
             # let the FrameRouter's pending set grow unbounded under
             # an event flood from a misbehaving agent.
@@ -666,13 +892,13 @@ class FrameRouter:
         """Single notification dispatch with its own DB session.
 
         Designed to be called from ``asyncio.create_task`` from
-        ``_evaluate_notifications`` (audit P-4). Each task owns its
-        own DB session because sessions are not safe to share across
-        tasks. Errors are logged in the done-callback, not raised.
+        ``_evaluate_notifications``. Each task owns its own DB
+        session because sessions are not safe to share across
+        tasks. Errors are logged in the done-callback, not
+        raised.
         """
         try:
-            # Round-8 audit fix R8-Async-H4 (Apr 2026): hold a
-            # semaphore slot before opening the DB session so the
+            # Hold a semaphore slot before opening the DB session so the
             # 256-task ceiling can't translate into 256 concurrent
             # sessions. Excess tasks queue here; the
             # ``_MAX_PENDING_NOTIFICATION_TASKS`` cap upstream is

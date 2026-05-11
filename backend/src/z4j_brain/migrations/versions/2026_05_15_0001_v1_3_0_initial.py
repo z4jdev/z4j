@@ -180,7 +180,22 @@ def upgrade() -> None:
     # column, single + multi-column index declared via
     # ``__table_args__``, and FK constraint. SQLAlchemy emits the
     # right CREATE TABLE per dialect.
-    Base.metadata.create_all(bind=bind)
+    #
+    # 1.5+ note: tables introduced by later migrations are excluded
+    # from this initial create. ``Base.metadata`` accumulates every
+    # model registered in the ORM tree (including future-version
+    # additions that ship in the same brain code), so we filter
+    # explicitly to keep the 1.3.0 baseline true to its name. The
+    # 1.5 ``agent_status_history`` migration creates that table
+    # additively. See ``2026_05_20_0002_v1_5_agent_status_history.py``.
+    _post_1_3_0_tables: frozenset[str] = frozenset({
+        "agent_status_history",
+    })
+    initial_tables = [
+        t for t in Base.metadata.sorted_tables
+        if t.name not in _post_1_3_0_tables
+    ]
+    Base.metadata.create_all(bind=bind, tables=initial_tables)
 
     if is_postgres:
         _install_postgres_only_features(bind)

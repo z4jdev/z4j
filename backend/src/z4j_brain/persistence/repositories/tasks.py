@@ -116,14 +116,14 @@ class TaskRepository(BaseRepository[Task]):
         common case via SELECT-then-update - production data
         volumes do not justify a real upsert until B5.
 
-        Round-7 audit fix R7-HIGH (perf) (Apr 2026): callers that
-        have already loaded the row via ``get_by_engine_task_id``
-        (e.g. ``EventIngestor._project_task`` for the
+        Callers that have already loaded the row via
+        ``get_by_engine_task_id`` (e.g.
+        ``EventIngestor._project_task`` for the
         out-of-order-state-transition guard) can pass it as
-        ``existing`` + ``existing_loaded=True`` to skip a redundant
-        SELECT. With the 1000-event frame cap this halves the
-        SELECTs in the dominant write path (~3000 → ~1500 round
-        trips for a saturated batch).
+        ``existing`` + ``existing_loaded=True`` to skip a
+        redundant SELECT. With the 1000-event frame cap this
+        halves the SELECTs in the dominant write path (~3000 →
+        ~1500 round trips for a saturated batch).
         """
         from sqlalchemy.exc import IntegrityError
 

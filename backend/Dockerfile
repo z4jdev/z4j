@@ -276,58 +276,14 @@ RUN printf '%s\n' \
     'datefmt = %%Y-%%m-%%d %%H:%%M:%%S' \
     > /app/alembic.ini
 
-# Entrypoint shim: handle SQLite defaults, run migrations, then exec.
-# We use exec so the brain inherits PID 1 (under tini) and gets
-# signals correctly on `docker stop`.
-RUN printf '%s\n' \
-    '#!/bin/sh' \
-    'set -e' \
-    '' \
-    '# SQLite mode: if no DATABASE_URL is set, use SQLite in /data.' \
-    '# Also set dev-friendly defaults for quick evaluation.' \
-    'if [ -z "$Z4J_DATABASE_URL" ]; then' \
-    '  mkdir -p /data' \
-    '  export Z4J_DATABASE_URL="sqlite+aiosqlite:////data/z4j.db"' \
-    '  export Z4J_REGISTRY_BACKEND="${Z4J_REGISTRY_BACKEND:-local}"' \
-    '  export Z4J_ENVIRONMENT="${Z4J_ENVIRONMENT:-dev}"' \
-    '  export Z4J_ALLOWED_HOSTS="${Z4J_ALLOWED_HOSTS:-[\"localhost\",\"127.0.0.1\"]}"' \
-    '  echo "[z4j] using SQLite at /data/z4j.db (dev mode)"' \
-    'fi' \
-    '' \
-    '# Secret handling - persist across restarts so an evaluation' \
-    '# `docker run` that mints an agent token and sets up an admin' \
-    '# user does not lose both on the next `docker restart`.' \
-    '# Precedence:' \
-    '#   1. explicit env (op-provided) - use as-is' \
-    '#   2. /data/secret.env exists - source it (persisted from' \
-    '#      a previous boot) so tokens/sessions remain valid' \
-    '#   3. neither - mint fresh + persist to /data/secret.env' \
-    'if [ -z "$Z4J_SECRET" ]; then' \
-    '  if [ -f /data/secret.env ]; then' \
-    '    # shellcheck disable=SC1091' \
-    '    . /data/secret.env' \
-    '    echo "[z4j] loaded persisted Z4J_SECRET from /data/secret.env"' \
-    '  else' \
-    '    mkdir -p /data' \
-    '    Z4J_SECRET=$(python -c "import secrets; print(secrets.token_urlsafe(48))")' \
-    '    Z4J_SESSION_SECRET=$(python -c "import secrets; print(secrets.token_urlsafe(48))")' \
-    '    {' \
-    '      printf "export Z4J_SECRET=%s\\n" "$Z4J_SECRET";' \
-    '      printf "export Z4J_SESSION_SECRET=%s\\n" "$Z4J_SESSION_SECRET";' \
-    '    } > /data/secret.env' \
-    '    chmod 600 /data/secret.env' \
-    '    echo "[z4j] minted fresh Z4J_SECRET + Z4J_SESSION_SECRET, persisted to /data/secret.env"' \
-    '    echo "[z4j] WARNING: evaluation mode - set Z4J_SECRET via env and back /data up for production"' \
-    '  fi' \
-    '  export Z4J_SECRET Z4J_SESSION_SECRET' \
-    'fi' \
-    '' \
-    'echo "[z4j] running migrations"' \
-    'z4j-brain migrate upgrade head' \
-    'echo "[z4j] starting server"' \
-    'exec "$@"' \
-    > /app/entrypoint.sh \
-    && chmod +x /app/entrypoint.sh
+# 1.5: Z4J_HOME=/data routes every state file (DB, secrets, PKI,
+# allowed-hosts, agent buffers if a host process runs in this image)
+# under /data, which is the volume-mounted directory. Pre-1.5 the
+# entrypoint shell duplicated Python's atomic-mint logic and only
+# covered /data/secret.env + /data/z4j.db; /app/.z4j/embedded-pki/
+# and /app/.z4j/allowed-hosts leaked outside the volume. 1.5 collapses
+# to a single Python code path.
+ENV Z4J_HOME=/data
 
 # Create /data for SQLite mode. Volume-mount this for persistence.
 RUN mkdir -p /data && chown z4j:z4j /data
@@ -336,7 +292,7 @@ VOLUME /data
 # Make sure z4j owns its writable surfaces.
 RUN chown -R z4j:z4j /app
 
-WORKDIR /app
+WORKDIR /data
 USER z4j
 
 EXPOSE 7700
@@ -345,8 +301,13 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; \
 sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7700/api/v1/health',timeout=3).status==200 else 1)"
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
-CMD ["z4j-brain", "serve"]
+# `z4j serve` itself handles SQLite-by-default, atomic secret mint
+# (mode 0o600, O_CREAT|O_EXCL|O_NOFOLLOW), and auto-migration via
+# Z4J_AUTO_MIGRATE=true (the default). Identical code path runs on
+# bare metal, in containers, and in CI. The legacy `z4j-brain`
+# console script was retired in 1.4.0 in favor of the unified `z4j`.
+ENTRYPOINT ["/usr/bin/tini", "--", "z4j"]
+CMD ["serve"]
 
 
 # ---------------------------------------------------------------------------

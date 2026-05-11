@@ -126,14 +126,15 @@ class RetryTaskRequest(BaseModel):
     @field_validator("override_args", "override_kwargs")
     @classmethod
     def _cap_overrides(cls, v: object) -> object:
-        """Round-8 audit fix R8-Pyd-H3 (Apr 2026): cap override size.
+        """Cap override size.
 
-        Pre-fix a 50 MB ``override_kwargs`` was parsed, persisted
-        into ``commands.payload`` JSONB, HMAC-signed, and pushed
-        over the wire to the agent, a single retry request could
-        OOM the brain or wedge the WS frame cap downstream. The
-        64 KiB ceiling matches the ``_validate_args_kwargs_size``
-        cap already used on schedule create/update.
+        Without this cap a 50 MB ``override_kwargs`` would be
+        parsed, persisted into ``commands.payload`` JSONB,
+        HMAC-signed, and pushed over the wire to the agent; a
+        single retry request could OOM the brain or wedge the
+        WS frame cap downstream. The 64 KiB ceiling matches the
+        ``_validate_args_kwargs_size`` cap already used on
+        schedule create/update.
         """
         if v is None:
             return v
@@ -301,7 +302,7 @@ async def list_commands(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
 
@@ -353,7 +354,7 @@ async def get_command(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.VIEWER,
     )
     cmd = await CommandRepository(db_session).get(command_id)
@@ -407,7 +408,7 @@ async def issue_retry_task(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.OPERATOR,
     )
     task_repo = TaskRepository(db_session)
@@ -538,7 +539,7 @@ async def issue_bulk_retry(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.OPERATOR,
     )
     raw_ids = (body.filter or {}).get("task_ids")
@@ -605,12 +606,12 @@ async def issue_purge_queue(
     """DESTRUCTIVE - requires admin role.
 
     Removes every pending task from the named queue. The agent's
-    purge action refuses the destructive ``queue_delete`` fallback
-    (B3 audit fix), so this is bounded to ``queue_purge`` semantics.
+    purge action refuses the destructive ``queue_delete``
+    fallback, so this is bounded to ``queue_purge`` semantics.
 
     The caller must pass either ``confirm_token`` (HMAC of
-    ``queue_name + observed_depth``) or ``force=True``. Without one
-    of these the agent refuses to act (audit 2026-04-24 Medium-3).
+    ``queue_name + observed_depth``) or ``force=True``. Without
+    one of these the agent refuses to act.
     """
     return await _issue_generic_command(
         slug=slug,
@@ -905,7 +906,7 @@ async def _issue_generic_command(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=require_role,
     )
 

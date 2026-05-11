@@ -1,11 +1,11 @@
 """Per-worker leader-lock helper.
 
-Round-4 audit fix (Apr 2026). Pre-fix every brain replica that
-booted with ``scheduler_grpc_enabled=True`` ran its own
+Without leader-locking, every brain replica that boots with
+``scheduler_grpc_enabled=True`` runs its own
 ``PendingFiresReplayWorker``, ``ScheduleCircuitBreakerWorker``,
 and ``ScheduleFiresPruneWorker`` on the same cadence. With three
-replicas behind a load balancer, every tick fired three times -
-duplicate audit rows, duplicate dispatcher calls (now deduped via
+replicas behind a load balancer, every tick fires three times -
+duplicate audit rows, duplicate dispatcher calls (deduped via
 ``commands.idempotency_key`` but still wasted work), and the
 circuit breaker / prune workers contending for the same
 schedule_fires rows.
@@ -117,4 +117,73 @@ async def acquire_per_worker_lock(
                 await session.rollback()
 
 
-__all__ = ["acquire_per_worker_lock"]
+async def try_acquire_singleton_lock(
+    db: DatabaseManager,
+    name: str,
+) -> bool:
+    """Acquire a SESSION-scoped advisory lock, leaving it held.
+
+    Unlike :func:`acquire_per_worker_lock`, this helper does NOT
+    release the lock when the with-block exits. The lock stays
+    held for the lifetime of the underlying connection (or until
+    the brain process dies, at which point Postgres releases it
+    on connection close).
+
+    Use this for singleton resources that must be claimed for the
+    entire lifespan of a brain worker process. Concrete example:
+    the embedded scheduler subprocess. With ``--workers=4``,
+    every uvicorn worker runs the brain lifespan and would
+    otherwise spawn its own ``z4j-scheduler`` subprocess; all
+    four race for the same port and three crashloop. Gating the
+    spawn on this lock ensures only the worker that wins the
+    advisory lock spawns the subprocess; the others log and skip.
+
+    SQLite path: no advisory locks. Returns True unconditionally
+    (single-writer DB; multi-worker uvicorn over SQLite is not a
+    supported deployment shape anyway).
+
+    Returns ``True`` if the lock was acquired (or we are on a
+    SQLite backend), ``False`` if another worker holds it.
+    """
+    if db.engine.dialect.name != "postgresql":
+        return True
+
+    from sqlalchemy import text  # noqa: PLC0415
+
+    lock_id = _lock_id_for(name)
+    # Use the engine's raw connection pool so the lock persists
+    # across SQLAlchemy session boundaries. The connection is
+    # checked out once and stays in the pool's leaked-checkout
+    # state for the process lifetime; when the brain exits, the
+    # connection closes and Postgres releases the lock.
+    conn = await db.engine.connect()
+    try:
+        result = await conn.execute(
+            text("SELECT pg_try_advisory_lock(:lock_id)").bindparams(
+                lock_id=lock_id,
+            ),
+        )
+        got_it = bool(result.scalar())
+        if not got_it:
+            await conn.close()
+            logger.info(
+                "z4j.brain.workers: %r singleton lock held by another "
+                "worker; skipping",
+                name,
+            )
+            return False
+        # Intentionally do NOT close the connection: keeping it open
+        # holds the session-scoped advisory lock for the process
+        # lifetime. Postgres releases it on connection close (brain
+        # exit / SIGKILL) so no manual unlock is needed.
+        logger.info(
+            "z4j.brain.workers: acquired %r singleton lock (id=%d)",
+            name, lock_id,
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        await conn.close()
+        raise
+
+
+__all__ = ["acquire_per_worker_lock", "try_acquire_singleton_lock"]

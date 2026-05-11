@@ -121,7 +121,7 @@ _SESSION_HEADER = "X-Z4J-Session-Nonce"
 
 #: Per-agent session cap. Without this, one valid bearer can flood
 #: 4 096 distinct nonces and LRU-evict every legitimate agent's
-#: session across the whole brain (R3 finding M2). Capping per-
+#: Session across the whole brain. Capping per-
 #: agent means at worst the malicious agent evicts ITSELF, never
 #: another agent. 16 simultaneous sessions per agent is generous
 #: - a healthy agent has 1 active session at a time.
@@ -130,7 +130,7 @@ _SESSION_PER_AGENT_MAX = 16
 #: Sentinel for "agent did not send the session-nonce header"
 #: (legacy / out-of-tree client). A unique object instance -
 #: not a string - so a malicious agent cannot forge it by sending
-#: a literal string header value (R3 finding M1). Module-private
+#: A literal string header value. Module-private
 #: identity-equality is the safety property here.
 _LEGACY_NONCE_SENTINEL = object()
 
@@ -189,8 +189,8 @@ async def _get_or_create_session(
     # safe under the GIL, and ``OrderedDict.get`` is atomic. The
     # vast majority of long-poll requests hit this path (the
     # session was created on a previous request) so we skip the
-    # asyncio.Lock contention entirely (R3 finding M6). The
-    # ``move_to_end`` MRU touch is racy with concurrent inserts
+    # ``asyncio.Lock`` contention entirely. The ``move_to_end``
+    # MRU touch is racy with concurrent inserts
     # but a missed re-order can at worst cause an extra eviction
     # - never corruption - so we accept the race for the perf win.
     cached = _sessions.get(key)
@@ -205,8 +205,7 @@ async def _get_or_create_session(
             _sessions.move_to_end(key)  # MRU
             return existing
         project_secret = derive_project_secret(master_secret, agent.project_id)
-        # Round-9 audit fix R9-Wire-H1+H2 (Apr 2026): bind the
-        # caller-supplied session nonce into the HMAC envelope.
+        # Bind the caller-supplied session nonce into the HMAC envelope.
         # For long-poll the nonce IS the session identity (the
         # registry is keyed on it). Without binding, a captured
         # frame from session-nonce A could be replayed inside
@@ -235,10 +234,9 @@ async def _get_or_create_session(
         _sessions[key] = (signer, verifier)
         _sessions_per_agent[agent.id] = _sessions_per_agent.get(agent.id, 0) + 1
         # Per-agent cap: a malicious agent flooding nonces can only
-        # evict ITS OWN previous sessions, never another agent's
-        # (R3 finding M2). Walk the LRU order popping entries
-        # belonging to this agent until the agent is back under
-        # the cap.
+        # evict ITS OWN previous sessions, never another agent's.
+        # Walk the LRU order popping entries belonging to this
+        # agent until the agent is back under the cap.
         if _sessions_per_agent[agent.id] > _SESSION_PER_AGENT_MAX:
             for victim_key in list(_sessions):
                 if victim_key == key:
@@ -293,13 +291,13 @@ class FrameUploadBody(BaseModel):
     @field_validator("frames")
     @classmethod
     def _cap_per_frame_size(cls, v: list[str]) -> list[str]:
-        """Round-8 audit fix R8-Pyd-MED (Apr 2026): per-frame size cap.
+        """Per-frame size cap.
 
-        Pre-fix the 500-element list cap was the only bound, each
-        string was unlimited, so a single request could carry
-        500 × 100 MB and OOM the brain before any downstream
-        validator ran. Per-frame ceiling matches the wire frame
-        cap (default 1 MiB).
+        Without this, the 500-element list cap is the only
+        bound and each string is unlimited, so a single request
+        could carry 500 × 100 MB and OOM the brain before any
+        downstream validator ran. Per-frame ceiling matches the
+        wire frame cap (default 1 MiB).
         """
         max_per_frame = 1 * 1024 * 1024  # 1 MiB
         for idx, frame in enumerate(v):
@@ -475,17 +473,14 @@ async def agent_commands(
     # Inner helper that does ONE pass over the commands table for
     # this agent. Returns the list of pending Command rows or [].
     #
-    # Round-6 audit fix WS-HIGH-2 (Apr 2026): also include
-    # recently-DISPATCHED commands. Pre-fix, if the HTTP response
-    # never reached the agent (network drop after the brain
-    # committed mark_dispatched), the command sat in DISPATCHED
-    # state with no agent ever seeing it - recoverable only via
-    # CommandTimeoutWorker (minutes later, surfaced as a generic
-    # timeout to the user).
-    #
-    # Now: include commands dispatched within
-    # ``Z4J_AGENT_LONGPOLL_REDISPATCH_SECONDS`` (default 60s) so a
-    # quickly-reconnecting agent gets the same command re-sent.
+    # Also include recently-DISPATCHED commands within
+    # ``Z4J_AGENT_LONGPOLL_REDISPATCH_SECONDS`` (default 60s) so
+    # a quickly-reconnecting agent gets the same command re-sent.
+    # If the HTTP response never reached the agent (network drop
+    # after the brain committed mark_dispatched), the command
+    # would otherwise sit in DISPATCHED state with no agent ever
+    # seeing it - recoverable only via CommandTimeoutWorker
+    # minutes later, surfaced as a generic timeout to the user.
     # The agent's in-memory ``_seen_commands`` dedup (300s TTL)
     # silently absorbs duplicates that reach a still-running
     # process. The redispatch only re-fires for commands the
@@ -572,8 +567,7 @@ async def agent_commands(
         for cmd in pending:
             claimed = False
             try:
-                # Round-6 audit fix WS-HIGH-2 (Apr 2026): two
-                # paths now feed this loop:
+                # Two paths now feed this loop:
                 #
                 # 1. PENDING command → standard claim-then-sign.
                 # 2. DISPATCHED command in the recovery window

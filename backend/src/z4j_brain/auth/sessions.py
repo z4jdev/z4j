@@ -88,7 +88,7 @@ class SessionCookieCodec:
             settings.session_secret.get_secret_value(),
             salt=_SESSION_SALT,
         )
-        # Round-6 audit fix SR-HIGH (Apr 2026): verify-side accepts
+        # Verify-side accepts
         # any secret in the rotation window so a Z4J_SESSION_SECRET
         # rotation does not log every active operator out at once.
         self._verify_serializers: list[URLSafeTimedSerializer] = []

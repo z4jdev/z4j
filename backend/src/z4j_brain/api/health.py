@@ -49,14 +49,13 @@ async def health_ready(
     Returns ``200 OK`` if the database is reachable, ``503`` if it
     is not. Never raises - the response object is mutated in place.
 
-    Round-8 audit fix R8-Bootstrap-MED (Apr 2026): also gate on
-    ``app.state.lifespan_ready``. Pre-fix the brain returned 200
-    the moment uvicorn bound the port, but lifespan startup
-    (run_first_boot_check, registry.start, supervisor.start)
-    runs AFTER the routes are mounted, so a k8s readiness probe
-    flipped "ready" while the brain was still pre-bootstrap. The
-    flag is set at the END of the lifespan startup phase in
-    main.py.
+    Also gates on ``app.state.lifespan_ready``. Without this gate
+    the brain would return 200 the moment uvicorn bound the
+    port, but lifespan startup (run_first_boot_check,
+    registry.start, supervisor.start) runs AFTER the routes are
+    mounted, so a k8s readiness probe would flip "ready" while
+    the brain was still pre-bootstrap. The flag is set at the
+    END of the lifespan startup phase in main.py.
     """
     if not getattr(request.app.state, "lifespan_ready", False):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

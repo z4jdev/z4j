@@ -68,13 +68,13 @@ def run_migrations_offline() -> None:
 
 def do_run_migrations(connection: Connection) -> None:
     """Sync callback executed inside the async connection."""
-    # Round-6 audit fix Mig-HIGH-2 (Apr 2026): per-migration
-    # transaction is required so individual migrations can opt into
-    # ``op.get_context().autocommit_block()`` for ``CREATE INDEX
-    # CONCURRENTLY`` and other statements that Postgres refuses
-    # inside a transaction. Without this each ``with autocommit_block``
-    # exits then re-enters the SAME enclosing transaction; CONCURRENTLY
-    # still errors and silently downgrades to a blocking lock.
+    # Per-migration transaction is required so individual
+    # migrations can opt into ``op.get_context().autocommit_block()``
+    # for ``CREATE INDEX CONCURRENTLY`` and other statements
+    # that Postgres refuses inside a transaction. Without this
+    # each ``with autocommit_block`` exits then re-enters the
+    # SAME enclosing transaction; CONCURRENTLY still errors and
+    # silently downgrades to a blocking lock.
     context.configure(
         connection=connection,
         target_metadata=target_metadata,

@@ -256,7 +256,7 @@ class TestRestKindEnum:
             ScheduleCreateIn,
         )
 
-        for k in ("cron", "interval", "one_shot", "solar"):
+        for k in ("cron", "interval", "clocked", "solar"):
             s = ScheduleCreateIn(
                 name="x", engine="celery", kind=k,
                 expression="0 * * * *",

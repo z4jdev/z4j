@@ -123,7 +123,7 @@ async def list_memberships(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 
@@ -166,7 +166,7 @@ async def grant_membership(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
     role = _coerce_role(body.role)
@@ -253,7 +253,7 @@ async def update_membership(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
     role = _coerce_role(body.role)
@@ -329,7 +329,7 @@ async def revoke_membership(
     await policy.require_member(
         memberships,
         user=user,
-        project_id=project.id,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 

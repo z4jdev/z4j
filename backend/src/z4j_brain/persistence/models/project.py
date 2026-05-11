@@ -81,7 +81,7 @@ class Project(PKMixin, TimestampsMixin, Base):
         server_default="z4j-scheduler",
     )
 
-    # ``allowed_schedulers`` (1.2.2+, audit fix MED-13): optional
+    # ``allowed_schedulers`` (1.2.2+): optional
     # JSON array of scheduler names this project may assign on
     # schedule create/update/import. ``NULL`` = unrestricted
     # (backwards-compat default, existing operators see no

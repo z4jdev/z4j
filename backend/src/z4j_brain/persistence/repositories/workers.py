@@ -40,9 +40,9 @@ _UPSERT_VARIABLE_COLS = (
 #: SQLAlchemy's reserved ``Base.metadata``). The dialect-level
 #: ``insert(Worker).values(...)`` and ``stmt.excluded.<col>`` paths
 #: BOTH key off DB column names, so we translate before either
-#: touches SQL. Bug fixed in 1.3.1: pre-1.3.1 the bulk-upsert path
-#: passed the attribute name straight through, hitting
-#: ``AttributeError: worker_metadata`` on every worker heartbeat.
+#: touches SQL. Without the translation the bulk-upsert path would
+#: hit ``AttributeError: worker_metadata`` on every worker
+#: heartbeat.
 _ATTR_TO_COL = {
     "worker_metadata": "metadata",
 }
@@ -162,7 +162,7 @@ class WorkerRepository(BaseRepository[Worker]):
         self,
         rows: list[dict[str, Any]],
     ) -> int:
-        """Bulk upsert N worker rows in one statement (v1.0.15 P-1).
+        """Bulk upsert N worker rows in one statement.
 
         Each ``rows`` entry must include ``project_id``, ``engine``,
         ``name``; any of the columns in :data:`_UPSERT_VARIABLE_COLS`
@@ -314,13 +314,12 @@ class WorkerRepository(BaseRepository[Worker]):
         the dashboard can render Total / Succeeded / Failed /
         Retried columns separately.
 
-        Round-7 audit fix R7-HIGH (perf) (Apr 2026): the prior
-        version had no ``since`` bound and no LIMIT, so every
-        Workers tab refresh did a full GROUP BY across the entire
-        partitioned ``events`` history. Defaults to a 24-hour
-        window now (matches dashboard intent: "what's each worker
-        done recently"). Callers wanting all-time totals must pass
-        ``since=datetime.min`` explicitly so the cost is opt-in.
+        Defaults to a 24-hour window so a Workers tab refresh
+        doesn't do a full GROUP BY across the entire partitioned
+        ``events`` history (matches dashboard intent: "what's
+        each worker done recently"). Callers wanting all-time
+        totals must pass ``since=datetime.min`` explicitly so
+        the cost is opt-in.
         """
         worker_expr = Event.payload["worker"].astext.label("worker_name")
         succeeded_sum = func.sum(

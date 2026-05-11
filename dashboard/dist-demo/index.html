@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>z4j</title>
+    <script>
+      // Apply the user's theme preference before paint to avoid flash.
+      (function () {
+        try {
+          var stored = localStorage.getItem("z4j-theme");
+          var prefersDark = window.matchMedia(
+            "(prefers-color-scheme: dark)",
+          ).matches;
+          var theme = stored || (prefersDark ? "dark" : "light");
+          document.documentElement.classList.toggle(
+            "dark",
+            theme === "dark",
+          );
+        } catch (_e) {
+          // ignore - html was rendered with `class="dark"` as the
+          // safe default for an enterprise control plane.
+        }
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-DGFKaqR_.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-jpDsebLB.js">
+    <link rel="modulepreload" crossorigin href="/assets/preload-helper-rov5CBGT.js">
+    <link rel="modulepreload" crossorigin href="/assets/query-D2jtzWuf.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-2G9LHef2.js">
+    <link rel="modulepreload" crossorigin href="/assets/react-D60AwLVq.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-D6VpHVgx.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-CeyCCNgD.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-CH8ki2EP.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-Ddhmc_X6.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-Dz5-BkS9.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-B6MRaHKG.js">
+    <link rel="modulepreload" crossorigin href="/assets/utils-DX2Li6io.js">
+    <link rel="modulepreload" crossorigin href="/assets/tooltip--L1qFd4v.js">
+    <link rel="modulepreload" crossorigin href="/assets/router-BmO-cTww.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-DUdlIwHt.js">
+    <link rel="modulepreload" crossorigin href="/assets/theme-provider-D-G3_9Tx.js">
+    <link rel="modulepreload" crossorigin href="/assets/api-Ce9JuhPW.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.agents-BLjaDKok.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.audit-DNz0jOFO.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.commands-DaR4gcmP.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.index-BsCp3ou0.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.queues-CYuXzrKT.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-4JTQmo6Q.js">
+    <link rel="modulepreload" crossorigin href="/assets/badge-BEQxlEO8.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.schedules-2_cbKUMs.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.schedules_._scheduleId-q8ilp6oZ.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.schedules_.reconcile-D_iHs5CG.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.settings.members-Li3f4T0r.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.settings.notifications.channels-BubDWkgx.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.settings.notifications.deliveries-DjcpeJYO.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.settings.notifications.subscriptions-CSed5lxF.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.settings.notifications-DRcRGjPo.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.settings-B78SaiBB.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.tasks-vqo1G_oN.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.tasks_._engine._taskId-DWCHJ9My.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.trends-CzGMbjNP.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug-PLgMdNxM.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.workers-C7attVfU.js">
+    <link rel="modulepreload" crossorigin href="/assets/_authenticated.projects._slug.workers_._workerId-DbsURoNb.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-BBKiDpVS.css">
+  </head>
+  <body class="bg-background text-foreground antialiased">
+    <div id="root"></div>
+  </body>
+</html>

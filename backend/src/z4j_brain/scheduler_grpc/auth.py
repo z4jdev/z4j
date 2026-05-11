@@ -287,11 +287,11 @@ def _normalise_cn(cn: str) -> str:
     its leading characters and fail the allow-list. Pinned by
     ``tests/unit/test_scheduler_grpc.py::TestNormaliseCnDoesNotMangle``.
 
-    Round-9 audit fix R9-Sched-MED (Apr 2026): also strip ``IP:``,
-    ``URI:``, ``email:`` general-name prefixes. Pre-fix the embedded
-    server's IP-SAN (``127.0.0.1``, ``::1``) was returned as the
-    literal string ``"IP:127.0.0.1"`` so allow-list operators had
-    to list the prefixed form, undocumented and a footgun.
+    Also strips ``IP:``, ``URI:``, ``email:`` general-name
+    prefixes. Otherwise the embedded server's IP-SAN
+    (``127.0.0.1``, ``::1``) would surface as the literal string
+    ``"IP:127.0.0.1"`` and allow-list operators would have to
+    list the prefixed form - undocumented and a footgun.
     """
     bare = cn
     for prefix in ("DNS:", "IP:", "URI:", "email:"):

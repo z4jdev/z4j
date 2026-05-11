@@ -88,7 +88,7 @@ _TOUCH_LAST_USED_MAX_KEYS: int = 10_000
 #: yields the event loop, and never deadlocks. If a future edit
 #: introduces an ``await`` inside the ``with _touch_lock:`` block
 #: this invariant breaks and the lock MUST migrate to
-#: ``asyncio.Lock`` (R3 finding M5).
+#: ``asyncio.Lock``.
 _touch_lock = threading.Lock()
 #: ``key_id -> monotonic timestamp of last successful claim``.
 #: Monotonic (not wall-clock) so an NTP step backwards cannot
@@ -304,7 +304,7 @@ async def get_optional_session(
     resolved = await auth_service.resolve_session(
         users=users, sessions=sessions, session_id=sid,
     )
-    # Audit fix HIGH (1.2.2 fourth-pass): mark the auth winner as
+    # Mark the auth winner as
     # "session" so ``resolve_api_key_id`` can correctly distinguish
     # cookie-authenticated calls from bearer-authenticated calls.
     # Without this, a request that authenticates via cookie but
@@ -512,8 +512,8 @@ async def _resolve_bearer_user(
             _release_touch_slot(key_row.id)
 
     request.state.api_key = key_row
-    # Audit fix HIGH-3 (1.2.2 fifth-pass): cookie wins over bearer
-    # for auth attribution. If ``get_optional_session`` already
+    # Cookie wins over bearer for auth attribution. If
+    # ``get_optional_session`` already
     # resolved a cookie session and set ``auth_kind = "session"``,
     # don't overwrite it, the audit trail should show the cookie
     # user as the actor, with the bearer header as a defense-in-
@@ -540,20 +540,19 @@ def resolve_api_key_id(request: Request) -> UUID | None:
     this request, or None if the call came in via cookie session
     (or another non-bearer path).
 
-    1.2.2 audit fix HIGH-11 (second pass): every privileged write
-    endpoint that records an audit row should pass the result of
-    this helper into ``AuditService.record(api_key_id=...)`` so
-    the audit trail can distinguish a CI-triggered action from a
-    dashboard-session admin who happens to share the same human
-    user_id.
+    Every privileged write endpoint that records an audit row
+    should pass the result of this helper into
+    ``AuditService.record(api_key_id=...)`` so the audit trail
+    can distinguish a CI-triggered action from a dashboard-session
+    admin who happens to share the same human user_id.
 
-    1.2.2 audit fix HIGH-2 (third pass): only return the key when
-    ``request.state.auth_kind == "api_key"``. Without this
-    cross-check, a request that authenticated via cookie but ALSO
-    carried a valid bearer header would attribute the audit row
-    to the bearer key, even though cookie was the auth winner.
-    Misattribution. We want the key id only when bearer auth was
-    the path that produced the current ``user_id``.
+    Returns the key only when ``request.state.auth_kind ==
+    "api_key"``. Without this cross-check, a request that
+    authenticated via cookie but ALSO carried a valid bearer
+    header would attribute the audit row to the bearer key, even
+    though cookie was the auth winner. We want the key id only
+    when bearer auth was the path that produced the current
+    ``user_id``.
     """
     auth_kind = getattr(request.state, "auth_kind", None)
     if auth_kind != "api_key":

@@ -1,12 +1,12 @@
 """Bounded async queue for denial-audit writes.
 
-Round-4 audit fix (Apr 2026). The error middleware writes a
-tamper-evident audit row for every denial / validation failure on
-schedule-endpoint mutations (round-2 audit-on-denial fix). Pre-fix
-the write opened a NEW DB session synchronously inside the request
-scope, under attack (IDOR enumeration), every 4xx doubled the
-per-request connection demand and starved the connection pool,
-turning the audit safety net into a self-DoS amplifier.
+The error middleware writes a tamper-evident audit row for every
+denial / validation failure on schedule-endpoint mutations.
+Doing the write from a NEW DB session synchronously inside the
+request scope would, under attack (IDOR enumeration), double the
+per-request connection demand on every 4xx and starve the
+connection pool, turning the audit safety net into a self-DoS
+amplifier.
 
 This module gives the middleware a fire-and-forget enqueue path.
 A single background drain task owns its own session and processes
@@ -147,8 +147,8 @@ class AuditQueue:
                 continue
             except asyncio.CancelledError:
                 return
-            # Round-8 audit fix R8-Async-H2 (Apr 2026): if the drain
-            # is cancelled BETWEEN ``queue.get()`` and ``_write_one``
+            # If the drain is cancelled BETWEEN ``queue.get()`` and
+            # ``_write_one``
             # the event we just pulled is lost. Wrap the write in
             # ``shield`` so a cancel doesn't interrupt mid-INSERT,
             # and on cancel re-enqueue the event before re-raising

@@ -118,7 +118,7 @@ class UserRepository(BaseRepository[User]):
         requests can both pass ``verify(current_password)``, both
         ``revoke_all_for_user``, both ``sessions.create`` - and
         the user ends with two live, post-rotation sessions
-        instead of one (R3 finding H6).
+        instead of one.
 
         Caller MUST be inside an open transaction and MUST commit
         (or rollback) before releasing. SQLite ignores FOR UPDATE

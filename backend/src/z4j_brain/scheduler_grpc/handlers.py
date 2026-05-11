@@ -115,8 +115,8 @@ _DEFAULT_LIST_PAGE_SIZE = 100
 # is already an extreme outlier; tens of pages of 1000 are still
 # milliseconds at brain-side latency) while bounding the worst case.
 #
-# Audit fix S001 (1.4.0): pre-fix the caller-supplied page_size
-# went straight into ``stmt.limit(page_size)`` with no upper bound.
+# Without this cap the caller-supplied page_size would go
+# straight into ``stmt.limit(page_size)`` with no upper bound.
 _MAX_LIST_PAGE_SIZE = 1000
 
 # Sentinel scheduler-name brain expects in the ``schedules.scheduler``
@@ -127,7 +127,7 @@ _MAX_LIST_PAGE_SIZE = 1000
 _SCHEDULER_NAME = "z4j-scheduler"
 
 
-#: Round-8 audit fix R8-Async-H3 (Apr 2026): per-process bound on
+#: Per-process bound on
 #: in-flight FireSchedule handlers. Each holds a DB session across
 #: with_for_update + agent lookup + dispatcher.issue + commit; an
 #: unbounded burst exhausts the pool and starves unrelated REST
@@ -190,18 +190,18 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         # ready for that optimisation; each stream still polls
         # independently.
         self._watch_lock = asyncio.Lock()
-        # Audit fix (Apr 2026 follow-up): bounded WatchSchedules
-        # concurrency. Pre-fix every WatchSchedules RPC opened its
-        # own asyncpg LISTEN connection with no cap - a misbehaving
-        # scheduler that opened+dropped streams in a loop drained
-        # Postgres ``max_connections`` and killed brain's main pool.
-        # Two locks: a global semaphore caps total streams across
-        # the brain process; a per-CN counter caps any single cert
-        # from monopolising the global cap.
-        # Round-10 audit fix R10-Sched-H1 (Apr 2026): replace the
-        # ``asyncio.Semaphore`` + ``wait_for(..., timeout=0)`` pattern
-        # with a plain counter under a lock. The semaphore approach
-        # had two leak vectors:
+        # Bounded WatchSchedules concurrency. Without this cap,
+        # every WatchSchedules RPC would open its own asyncpg
+        # LISTEN connection with no bound - a misbehaving
+        # scheduler that opened+dropped streams in a loop would
+        # drain Postgres ``max_connections`` and kill brain's
+        # main pool. Two locks: a global counter caps total
+        # streams across the brain process; a per-CN counter
+        # caps any single cert from monopolising the global cap.
+        #
+        # The counter-under-lock pattern is used instead of
+        # ``asyncio.Semaphore`` + ``wait_for(..., timeout=0)``
+        # because the semaphore approach has two leak vectors:
         #
         # 1. ``asyncio.wait_for(sem.acquire(), 0)`` is documented as
         #    racy when the awaitable completes synchronously: the
@@ -244,7 +244,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
 
         bindings = self._settings.scheduler_grpc_cn_project_bindings
 
-        # Audit fix S001 (1.4.0): clamp caller-supplied page_size to
+        # Clamp caller-supplied page_size to
         # ``_MAX_LIST_PAGE_SIZE``. A missing/zero value falls back to
         # the default; a too-large value is silently capped (we do
         # not abort -- legitimate schedulers asking for "as much as
@@ -267,7 +267,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                         f"invalid project_id {request.project_id!r}",
                     )
                     return
-                # Audit fix M-5 (Apr 2026): enforce per-cert project
+                # Enforce per-cert project
                 # binding. Bound CNs can only see schedules for their
                 # bound project list; no-op when bindings is empty or
                 # the peer's CN isn't in the map.
@@ -345,7 +345,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 )
                 return
 
-        # Audit fix M-5 (Apr 2026): per-cert project binding. For an
+        # Per-cert project binding. For an
         # explicit project_id, enforce binding. For "all projects"
         # mode (project_id=None), narrow to the peer's bound set.
         from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
@@ -380,7 +380,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         else:
             project_filter = bound_project_ids  # may be None
 
-        # Audit fix (Apr 2026 follow-up): bounded WatchSchedules
+        # Bounded WatchSchedules
         # concurrency. Acquire a global semaphore + bump the per-CN
         # counter; release both on stream end. RESOURCE_EXHAUSTED on
         # cap so the scheduler client retries with backoff (its
@@ -408,11 +408,10 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 )
                 return
             self._watch_per_cert_count[cert_cn] = current + 1
-        # Acquire the global concurrency slot via the counter-under-
-        # lock pattern. Round-10 audit fix R10-Sched-H1 (Apr 2026):
-        # the prior implementation used
-        # ``asyncio.wait_for(self._watch_global_sem.acquire(), 0)``
-        # which has TWO leak vectors:
+        # Acquire the global concurrency slot via the counter-
+        # under-lock pattern. An ``asyncio.wait_for(self.
+        # _watch_global_sem.acquire(), 0)`` shape would have TWO
+        # leak vectors:
         #
         # 1. ``asyncio.wait_for(coro, 0)`` is documented as racy
         #    when ``coro`` completes synchronously. ``Semaphore.
@@ -487,21 +486,21 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 ):
                     yield event
         finally:
-            # R10-Sched-H1: shield BOTH decrements so a
-            # cancellation landing on the lock-acquire await
-            # doesn't strand the slot. The shielded coroutine
-            # below holds two locks back-to-back; on cancel the
-            # inner work runs to completion, the cancellation
-            # then propagates to whatever was awaiting us.
+            # Shield BOTH decrements so a cancellation landing
+            # on the lock-acquire await doesn't strand the slot.
+            # The shielded coroutine below holds two locks
+            # back-to-back; on cancel the inner work runs to
+            # completion, the cancellation then propagates to
+            # whatever was awaiting us.
             await asyncio.shield(
                 self._release_watch_slot(cert_cn),
             )
 
     async def _release_watch_slot(self, cert_cn: str) -> None:
-        """Round-10 audit fix R10-Sched-H1 (Apr 2026): symmetric
-        decrement of both the global counter and the per-cert
-        counter. Wrapped in ``asyncio.shield`` by the caller so a
-        cancel landing on the lock-acquire await can't strand
+        """Symmetric decrement of both the global counter and
+        the per-cert counter. Wrapped in ``asyncio.shield`` by
+        the caller so a cancel landing on the lock-acquire await
+        can't strand
         either slot. Both locks are short-held (no I/O), so the
         shielded window is bounded to microseconds.
         """
@@ -735,14 +734,14 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             )
             return None
 
-        # Audit fix L-2 (Apr 2026): trust ONLY ``data["id"]`` from the
-        # NOTIFY payload. Pre-fix the project_id filter ran against
-        # the payload's own project_id field, which a Postgres role
-        # with NOTIFY privilege on z4j_schedules_changed could
-        # forge. We still load the row by id and read its REAL
-        # project_id below; using the payload value as a pre-filter
-        # is fine for performance but the authoritative check has
-        # to be on the row, not on the wire.
+        # Trust ONLY ``data["id"]`` from the NOTIFY payload. The
+        # project_id filter must NOT run against the payload's
+        # own project_id field, because a Postgres role with
+        # NOTIFY privilege on z4j_schedules_changed could forge
+        # it. We load the row by id and read its REAL project_id
+        # below; using the payload value as a pre-filter is fine
+        # for performance but the authoritative check has to be
+        # on the row, not on the wire.
         try:
             row_id = UUID(str(data["id"]))
         except (KeyError, ValueError):
@@ -887,7 +886,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 error_message=str(exc),
             )
 
-        # Audit fix (Apr 2026 follow-up): per-cert FireSchedule rate
+        # Per-cert FireSchedule rate
         # limit. Bucket is keyed by the peer's primary CN; an empty
         # bucket -> RESOURCE_EXHAUSTED (gRPC standard for rate
         # limiting). The limiter is a no-op when
@@ -934,8 +933,8 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             else datetime.now(UTC)
         )
 
-        # Round-8 audit fix R8-Async-H3 (Apr 2026): bound the number
-        # of in-flight FireSchedule handlers that hold a DB session.
+        # Bound the number of in-flight FireSchedule handlers that
+        # hold a DB session.
         # The handler holds one session across with_for_update +
         # agent lookup + dispatcher.issue + commit; a 100-fire
         # burst with slow agent lookup wedges every connection in
@@ -962,17 +961,16 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             from z4j_brain.persistence.models import Schedule  # noqa: PLC0415
 
             schedules = ScheduleRepository(session)
-            # Round-3 audit fix (Apr 2026): mirror the
-            # ``scheduler == _SCHEDULER_NAME`` filter that List/
-            # Watch already apply. Pre-fix, a z4j-scheduler peer
-            # could call FireSchedule against a schedule_id that
-            # belonged to a different scheduling surface (e.g.
-            # ``celery-beat`` rows the operator manages
-            # separately). Brain's dispatcher does not check the
-            # schedule's ``scheduler`` field before minting a
-            # Command, so a cross-scheduler fire would silently
-            # land an extra dispatch outside celery-beat's
-            # scheduling surface. The fix returns
+            # Mirror the ``scheduler == _SCHEDULER_NAME`` filter
+            # that List/Watch already apply. Otherwise a
+            # z4j-scheduler peer could call FireSchedule against
+            # a schedule_id that belonged to a different
+            # scheduling surface (e.g. ``celery-beat`` rows the
+            # operator manages separately). Brain's dispatcher
+            # does not check the schedule's ``scheduler`` field
+            # before minting a Command, so a cross-scheduler
+            # fire would silently land an extra dispatch outside
+            # celery-beat's scheduling surface. We return
             # ``schedule_not_found`` (same code as a missing row)
             # so a hostile peer can't enumerate "is this UUID a
             # celery-beat row?" via the error-code split.
@@ -986,8 +984,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             )
             schedule = result.scalar_one_or_none()
             if schedule is None:
-                # Round-4 audit fix (Apr 2026): refund the
-                # rate-limit token we already charged. The fire
+                # Refund the rate-limit token we already charged. The fire
                 # never landed; counting it would over-charge the
                 # cert's bucket and could cause spurious 429s
                 # during operational events (e.g. a schedule
@@ -1001,7 +998,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                         f"schedule {schedule_id} not in brain"
                     ),
                 )
-            # Audit fix M-5 (Apr 2026): per-cert project binding.
+            # Per-cert project binding.
             # Bound CNs cannot fire schedules for projects outside
             # their binding list - even if the row exists. Run the
             # check before the is_enabled gate so a bound peer that
@@ -1022,7 +1019,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             if not schedule.is_enabled:
                 # Scheduler should have skipped this on its side, but
                 # defend against a race between disable + tick.
-                # Round-4 audit fix (Apr 2026): refund the token.
+                # Refund the token.
                 if cert_cn:
                     await self._rate_limiter.refund(cert_cn=cert_cn)
                 return pb.FireScheduleResponse(
@@ -1137,8 +1134,8 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 # fire-history row so the dashboard shows "we tried
                 # and failed" instead of silence. status="failed"
                 # means brain didn't even reach an agent.
-                # Audit fix L-3 (Apr 2026): sanitize the exception
-                # text before persisting / returning to the wire so
+                # Sanitize the exception text before persisting /
+                # returning to the wire so
                 # SQL fragments / file paths / tracebacks don't leak.
                 safe_error = _sanitize_error_message(str(exc))
                 try:
@@ -1223,15 +1220,16 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         from z4j_brain.persistence.models import Schedule, ScheduleFire
 
         async with self._db.session() as session:
-            # Audit fix I-1 (Apr 2026): authoritative correlation by
+            # Authoritative correlation by
             # ``schedule_fires.fire_id`` (which is UNIQUE) instead
-            # of ``Schedule.last_fire_id`` (which is a moving target
-            # overwritten on every fire). Pre-fix, two back-to-back
-            # fires in flight raced: the second fire's FireSchedule
-            # would overwrite ``last_fire_id`` BEFORE the first
-            # fire's ack landed - the first ack then either
-            # silently no-op'd (lookup miss) or, worse, updated the
-            # WRONG schedule's last_run_at + total_runs. Joining via
+            # of ``Schedule.last_fire_id`` (which is a moving
+            # target overwritten on every fire). Without this,
+            # two back-to-back fires in flight could race: the
+            # second fire's FireSchedule would overwrite
+            # ``last_fire_id`` BEFORE the first fire's ack
+            # landed, and the first ack would then either silently
+            # no-op (lookup miss) or, worse, update the WRONG
+            # schedule's last_run_at + total_runs. Joining via
             # schedule_fires makes the lookup unambiguous and
             # idempotent across concurrent fires.
             result = await session.execute(
@@ -1252,7 +1250,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 )
                 return pb.AcknowledgeFireResultResponse()
 
-            # Audit fix M-5 (Apr 2026): per-cert project binding.
+            # Per-cert project binding.
             # A bound CN cannot ack fires belonging to projects
             # outside its binding list. Critical because ack writes
             # ``last_run_at`` + ``total_runs`` AND triggers
@@ -1270,18 +1268,18 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             )
 
             now = datetime.now(UTC)
-            # Round-4 audit fix (Apr 2026): atomic SQL-side
-            # increment for ``total_runs``. Pre-fix:
-            #     updates["total_runs"] = (schedule.total_runs or 0) + 1
-            # was a Python-side read-modify-write. Two concurrent
-            # acks for two distinct fires of the same schedule both
-            # read ``total_runs=5``, both compute 6, both wrote 6
+            # Atomic SQL-side increment for ``total_runs``. A
+            # Python-side read-modify-write
+            # (``updates["total_runs"] = (schedule.total_runs or
+            # 0) + 1``) would race: two concurrent acks for two
+            # distinct fires of the same schedule both read
+            # ``total_runs=5``, both compute 6, both write 6
             # → silent lost increment. At enterprise scale (100s
             # of fires/sec across many schedules) the lifetime
-            # counter drifted low. Using a SQL expression
+            # counter would drift low. Using a SQL expression
             # ``Schedule.total_runs + 1`` makes the increment
-            # atomic in Postgres without needing FOR UPDATE on the
-            # schedule row.
+            # atomic in Postgres without needing FOR UPDATE on
+            # the schedule row.
             updates: dict[str, Any] = {
                 "last_run_at": now,
                 "updated_at": now,
@@ -1289,7 +1287,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             if request.status == "success":
                 updates["total_runs"] = Schedule.total_runs + 1
 
-            # Audit fix I-1 (Apr 2026): conditionally clear
+            # Conditionally clear
             # ``last_fire_id`` only if it still points at THIS
             # fire. Concurrently-in-flight fires would otherwise
             # have their pointer wiped by a late ack of an earlier
@@ -1322,7 +1320,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 if request.status == "success"
                 else "acked_failed"
             )
-            # Audit fix M-3 (Apr 2026): sanitize scheduler-supplied
+            # Sanitize scheduler-supplied
             # error text before persisting + dispatching downstream.
             # The scheduler is a trusted peer but its error string
             # ultimately came from the agent → engine → task path
@@ -1333,7 +1331,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             safe_error_code = _sanitize_error_message(
                 request.error, max_chars=_ERROR_CODE_MAX_CHARS,
             )
-            # Round-4 audit fix (Apr 2026): capture
+            # Capture
             # ``was_first_ack`` so we only fan out notifications
             # for the FIRST ack of a given fire_id. Duplicate acks
             # (HA scheduler retry, network duplicate) skip the
@@ -1348,12 +1346,13 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 error_message=safe_error,
             )
 
-            # Audit fix M-2 (Apr 2026): write an audit row for every
-            # ack. Pre-fix the AcknowledgeFireResult handler mutated
-            # ``schedules.last_run_at`` + ``total_runs`` and dispatched
-            # notifications without leaving an audit breadcrumb. Any
-            # alert-injection attempt (a rogue scheduler ACKing as
-            # ``failed`` to trigger pages) was forensically invisible.
+            # Write an audit row for every ack. Without this,
+            # the AcknowledgeFireResult handler would mutate
+            # ``schedules.last_run_at`` + ``total_runs`` and
+            # dispatch notifications without leaving an audit
+            # breadcrumb. Any alert-injection attempt (a rogue
+            # scheduler ACKing as ``failed`` to trigger pages)
+            # would be forensically invisible.
             from z4j_brain.persistence.repositories import (  # noqa: PLC0415
                 AuditLogRepository,
             )
@@ -1421,7 +1420,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         # should block for. Best-effort - failures here must NOT
         # bubble up (the ack succeeded; missed notification is a
         # secondary concern).
-        # Round-4 audit fix (Apr 2026): skip notification fan-out
+        # Skip notification fan-out
         # for duplicate acks. Two acks for the same fire_id (HA
         # scheduler retry, network duplicate) would otherwise
         # produce two pages for the same fire.
@@ -1456,7 +1455,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                         engine=schedule.engine,
                         state=request.status,
                         queue=schedule.queue,
-                        # Audit fix M-3 (Apr 2026): sanitised error,
+                        # Sanitised error,
                         # not the raw scheduler-supplied string. The
                         # notification template + delivery channels
                         # render this verbatim into emails / Slack /
