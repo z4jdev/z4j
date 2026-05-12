@@ -396,7 +396,11 @@ class TestReplayWorker:
             db, catch_up="fire_one_missed",
         )
         await _seed_online_agent(db, project_id=project_id)
-        base = datetime(2026, 4, 27, 10, 0, tzinfo=UTC)
+        # Anchor relative to now so the test does not rot past its
+        # expires_at horizon (an absolute date like 2026-04-27 would
+        # age past + sweep all rows on a later test run).
+        now = datetime.now(UTC)
+        base = now - timedelta(hours=1)
         async with db.session() as s:
             for offset in (0, 15, 30, 45):
                 await PendingFiresRepository(s).buffer(
@@ -406,7 +410,7 @@ class TestReplayWorker:
                     engine="celery",
                     payload={"offset": offset},
                     scheduled_for=base + timedelta(minutes=offset),
-                    expires_at=base + timedelta(days=7),
+                    expires_at=now + timedelta(days=7),
                 )
             await s.commit()
 
@@ -432,7 +436,10 @@ class TestReplayWorker:
             db, catch_up="fire_all_missed",
         )
         await _seed_online_agent(db, project_id=project_id)
-        base = datetime(2026, 4, 27, 10, 0, tzinfo=UTC)
+        # Anchor relative to now so the expires_at horizon stays in
+        # the future and the worker does not sweep before replaying.
+        now = datetime.now(UTC)
+        base = now - timedelta(hours=2)
         async with db.session() as s:
             for offset in (30, 0, 60, 15):  # insert out of order
                 await PendingFiresRepository(s).buffer(
@@ -442,7 +449,7 @@ class TestReplayWorker:
                     engine="celery",
                     payload={"offset": offset},
                     scheduled_for=base + timedelta(minutes=offset),
-                    expires_at=base + timedelta(days=7),
+                    expires_at=now + timedelta(days=7),
                 )
             await s.commit()
 

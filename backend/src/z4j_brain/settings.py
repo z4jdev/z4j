@@ -301,6 +301,46 @@ class Settings(BaseSettings):
     asyncpg_close_timeout: float = Field(default=5.0, ge=1.0, le=30.0)
 
     # ------------------------------------------------------------------
+    # 1.5.1: asyncpg connection-level memory tuning.
+    # ------------------------------------------------------------------
+    # Round 19 memray profile (docs/perf/1.5.1-round17-gate-result.md
+    # follow-up) showed Python heap peak at 58 MB while process RSS
+    # grew 1.5 GB under sustained 100+ t/s burst. The delta is
+    # C-level memory in asyncpg's per-connection state -- chiefly the
+    # prepared-statement cache. asyncpg's default
+    # ``statement_cache_size=100`` × ~30 connections × diverse query
+    # set (events INSERT, agents UPDATE, workers upsert, schedules
+    # SELECT, audit_log INSERT, partition mgmt, ...) accumulates
+    # 300 MB - 1.5 GB depending on plan complexity.
+    #
+    # ``database_statement_cache_size``: per-connection cap. 0
+    # disables the cache (every query re-prepares, costs a small
+    # round-trip but bounds memory tightly). 50 is a small bounded
+    # cache that keeps the prepare-once speedup for hot queries
+    # while bounding worst-case growth.
+    #
+    # ``database_max_inactive_connection_lifetime_seconds``: asyncpg
+    # closes a connection that has been idle in the pool longer
+    # than this. Default 300s; we lower to 60s so caches naturally
+    # rotate under sustained load instead of sticking until pool
+    # recycle.
+    database_statement_cache_size: int = Field(
+        default=50, ge=0, le=10_000,
+        description=(
+            "Cap on asyncpg per-connection prepared-statement cache. "
+            "Set to 0 to disable. See 1.5.1 leak fix notes."
+        ),
+    )
+    database_max_inactive_connection_lifetime_seconds: float = Field(
+        default=60.0, ge=1.0, le=3600.0,
+        description=(
+            "Seconds an idle asyncpg connection lives in the pool "
+            "before being closed + reopened. Shorter = better memory "
+            "hygiene under sustained load."
+        ),
+    )
+
+    # ------------------------------------------------------------------
     # Observability
     # ------------------------------------------------------------------
     metrics_enabled: bool = True

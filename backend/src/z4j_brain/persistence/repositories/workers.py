@@ -258,6 +258,19 @@ class WorkerRepository(BaseRepository[Worker]):
                 present_update_cols.add("state")
             prepared.append(row_payload)
 
+        # 1.5.1: sort by the conflict-target key so concurrent
+        # sessions acquire row-level locks in the SAME order. Round 17
+        # apples-to-apples surfaced 140 deadlocks on this INSERT under
+        # sustained 200/s burst (docs/perf/1.5.1-round17-gate-result.md).
+        # Two heartbeats from different agents could carry overlapping
+        # (project_id, engine, name) triples in opposite orders; the
+        # ON CONFLICT row-lock window then opens a deadlock cycle.
+        # Sorting eliminates that cycle by making every session walk
+        # the same lock-acquisition path. Costs O(N log N) on tiny N
+        # (~20 rows per heartbeat); negligible vs the deadlock-retry
+        # penalty it removes.
+        prepared.sort(key=lambda r: (r["project_id"], r["engine"], r["name"]))
+
         stmt = _ins(Worker).values(prepared)
 
         # Build ON CONFLICT DO UPDATE set_ from the union of columns

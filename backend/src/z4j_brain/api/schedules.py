@@ -350,10 +350,10 @@ async def get_schedule(
 # 1. **DoS via unbounded args/kwargs**: an admin (or compromised
 #    admin token) could POST a 100MB JSON payload that OOM'd the
 #    brain on parse + bloated the JSONB column. Fixed via
-#    A serialised-size cap enforced at the boundary.
+#    a serialised-size cap enforced at the boundary.
 # 2. **Unconstrained kind values**: ``kind: str`` accepted any
 #    string at the API; OpenAPI docs lied about allowed values
-#    And the wire was looser than the underlying enum.
+#    and the wire was looser than the underlying enum.
 # 3. **Name corruption**: control characters in ``name`` flowed
 #    into audit metadata, dashboard, and gRPC payloads. Operators
 #    could break log-line parsing; the dashboard had to render

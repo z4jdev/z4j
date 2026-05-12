@@ -164,19 +164,109 @@ z4j_ws_connections = Gauge(
     registry=registry,
 )
 
-# -- Database pool --
+# -- Database pool + connection-level health (1.5.1 leak-fix visibility) --
+#
+# These gauges let operators verify the asyncpg memory hygiene in
+# their own deployments after upgrading from 1.5.0. The same signals
+# we used to find the leak in the lab are exposed here so a Grafana
+# panel can replicate the diagnosis. See docs/perf/1.5.1-grafana-
+# dashboard.json for an importable dashboard.
 
 z4j_db_pool_size = Gauge(
     "z4j_db_pool_size",
-    "Configured size of the SQLAlchemy connection pool.",
+    "Configured size of the SQLAlchemy connection pool. "
+    "Rises only when ``pool_size`` setting changes; useful baseline.",
     registry=registry,
 )
 
 z4j_db_pool_checked_out = Gauge(
     "z4j_db_pool_checked_out",
-    "Number of pool connections currently checked out.",
+    "Number of pool connections currently checked out (in active "
+    "use by handlers/workers). Steady-state under burst load is a "
+    "key indicator of contention; should be << pool_size.",
     registry=registry,
 )
+
+z4j_brain_rss_bytes = Gauge(
+    "z4j_brain_rss_bytes",
+    "Brain process RSS in bytes, sampled at scrape time from "
+    "/proc/self/status. 0 on non-Linux. Watch the slope under "
+    "sustained load -- a flat line or slow growth means the 1.5.1 "
+    "leak fix is working; rapid growth indicates either an unbounded "
+    "cache (tune ``Z4J_DATABASE_STATEMENT_CACHE_SIZE``) or a regression.",
+    registry=registry,
+)
+
+#: Counter incremented when a Postgres deadlock surfaces through
+#: asyncpg/SQLAlchemy. Populated via a SQLAlchemy
+#: ``handle_error`` event listener registered at engine creation.
+#: A sustained non-zero rate under load indicates lock-order races
+#: on write paths -- see 1.5.1 workers/queues sort fixes for the
+#: pattern. Pre-1.5.1 brains under sustained 200 t/s saw ~140
+#: deadlocks per 5min burst; post-1.5.1 with cache=50 default this
+#: should be ~0.
+z4j_postgres_deadlocks_total = Counter(
+    "z4j_postgres_deadlocks_total",
+    "Total Postgres DeadlockDetectedError instances observed via "
+    "asyncpg/SQLAlchemy in this brain process lifetime.",
+    registry=registry,
+)
+
+
+def _read_linux_rss_bytes() -> int:
+    """Sample brain process RSS from /proc/self/status.
+
+    Returns 0 on non-Linux (Windows dev machines, macOS) so the
+    gauge is harmless to scrape there. Linux containers (the
+    production target) always have /proc; the read is sub-millisecond.
+    """
+    try:
+        with open("/proc/self/status", "r") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    # "VmRSS:    123456 kB"
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+    return 0
+
+
+#: Provider for pool gauges. Populated by ``main.py`` once the
+#: ``DatabaseManager`` exists. Returns ``(pool_size, checked_out)``.
+_pool_gauge_provider: "Callable[[], tuple[int, int]] | None" = None
+
+
+def register_pool_gauge_provider(
+    provider: "Callable[[], tuple[int, int]]",
+) -> None:
+    """Register the callable that reports pool size + checked-out count."""
+    global _pool_gauge_provider
+    _pool_gauge_provider = provider
+
+
+def _refresh_leak_visibility_gauges() -> None:
+    """1.5.1: refresh the leak-visibility gauges at scrape time.
+
+    All four gauges are cheap to sample (one /proc read + one
+    pool-attribute read). Errors are swallowed via
+    ``record_swallowed`` so a transient hiccup never breaks the
+    ``/metrics`` response.
+    """
+    # RSS gauge -- pure file read, no DB hit.
+    try:
+        z4j_brain_rss_bytes.set(_read_linux_rss_bytes())
+    except Exception:  # noqa: BLE001
+        record_swallowed("metrics", "rss_gauge")
+    # Pool gauges -- read in-memory pool state via the registered provider.
+    if _pool_gauge_provider is not None:
+        try:
+            size, checked_out = _pool_gauge_provider()
+            z4j_db_pool_size.set(size)
+            z4j_db_pool_checked_out.set(checked_out)
+        except Exception:  # noqa: BLE001
+            record_swallowed("metrics", "pool_gauges")
 
 # -- Notifications --
 
@@ -452,6 +542,7 @@ async def metrics_endpoint(
     _check_metrics_auth(request, settings)
     _refresh_inmemory_gauges()
     _refresh_self_watch_gauges()
+    _refresh_leak_visibility_gauges()
     body = generate_latest(registry)
     return Response(content=body, media_type=CONTENT_TYPE_LATEST)
 
@@ -459,6 +550,7 @@ async def metrics_endpoint(
 __all__ = [
     "record_swallowed",
     "register_inmemory_subsystem",
+    "register_pool_gauge_provider",
     "register_self_watch_provider",
     "registry",
     "router",
@@ -467,10 +559,12 @@ __all__ = [
     "z4j_audit_retention_last_run_timestamp",
     "z4j_audit_retention_pruned_total",
     "z4j_background_task_error_active",
+    "z4j_brain_rss_bytes",
     "z4j_command_late_results_total",
     "z4j_commands_total",
     "z4j_db_pool_checked_out",
     "z4j_db_pool_size",
+    "z4j_postgres_deadlocks_total",
     "z4j_events_ingested_total",
     "z4j_inmemory_state_items",
     "z4j_notifications_cooldown_skipped_total",

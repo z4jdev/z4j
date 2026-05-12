@@ -14,7 +14,7 @@
     "created_at_offset_s": -10368000,
     "is_outdated": false,
     "host_name": "scheduler-leader.tasks.example.com",
-    "agent_version": "1.4.0",
+    "agent_version": "1.5.0",
     "version_status": "current"
   },
   {
@@ -32,7 +32,7 @@
     "created_at_offset_s": -10368000,
     "is_outdated": false,
     "host_name": "scheduler-follower-1.tasks.example.com",
-    "agent_version": "1.4.0",
+    "agent_version": "1.5.0",
     "version_status": "current"
   },
   {
@@ -50,7 +50,7 @@
     "created_at_offset_s": -10368000,
     "is_outdated": false,
     "host_name": "celery-worker-1.tasks.example.com",
-    "agent_version": "1.4.0",
+    "agent_version": "1.5.0",
     "version_status": "current"
   },
   {
@@ -68,7 +68,7 @@
     "created_at_offset_s": -10368000,
     "is_outdated": false,
     "host_name": "rq-worker-1.tasks.example.com",
-    "agent_version": "1.4.0",
+    "agent_version": "1.5.0",
     "version_status": "current"
   },
   {
@@ -86,7 +86,7 @@
     "created_at_offset_s": -10368000,
     "is_outdated": false,
     "host_name": "dramatiq-worker-1.tasks.example.com",
-    "agent_version": "1.4.0",
+    "agent_version": "1.5.0",
     "version_status": "current"
   }
 ]

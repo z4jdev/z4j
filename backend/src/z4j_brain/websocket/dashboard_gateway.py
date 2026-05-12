@@ -109,7 +109,7 @@ async def ws_dashboard(websocket: WebSocket) -> None:
         )
     except RuntimeError:
         # Hub stopped between accept and register, OR per-user
-        # Subscription cap reached. Tell the
+        # subscription cap reached. Tell the
         # client to reconnect later / close existing tabs.
         await _safe_close(websocket, code=4402)
         return

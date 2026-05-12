@@ -14,7 +14,7 @@
     "created_at_offset_s": -15552000,
     "is_outdated": false,
     "host_name": "api-1.fastapi.example.com",
-    "agent_version": "1.4.0",
+    "agent_version": "1.5.0",
     "version_status": "current"
   },
   {
@@ -32,7 +32,7 @@
     "created_at_offset_s": -15552000,
     "is_outdated": false,
     "host_name": "api-2.fastapi.example.com",
-    "agent_version": "1.4.0",
+    "agent_version": "1.5.0",
     "version_status": "current"
   },
   {
@@ -50,7 +50,7 @@
     "created_at_offset_s": -15552000,
     "is_outdated": false,
     "host_name": "worker-1.fastapi.example.com",
-    "agent_version": "1.4.0",
+    "agent_version": "1.5.0",
     "version_status": "current"
   },
   {
@@ -68,7 +68,7 @@
     "created_at_offset_s": -15552000,
     "is_outdated": false,
     "host_name": "worker-2.fastapi.example.com",
-    "agent_version": "1.4.0",
+    "agent_version": "1.5.0",
     "version_status": "current"
   }
 ]

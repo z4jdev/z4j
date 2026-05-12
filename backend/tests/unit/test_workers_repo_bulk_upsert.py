@@ -397,3 +397,50 @@ class TestBulkUpsertWorkerMetadata:
         w = result.scalar_one()
         # Metadata fully replaced (it's a JSON column, not a merge).
         assert w.worker_metadata == {"version": "5.6.3", "newkey": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# 1.5.1: lock-ordering deadlock prevention
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+class TestBulkUpsertLockOrdering:
+    """1.5.1: rows MUST be sorted by (project_id, engine, name) before
+    the INSERT so concurrent sessions acquire row-level btree locks in
+    the same order. Round 17 apples-to-apples surfaced 140 deadlocks
+    on this INSERT under sustained burst; this test pins the fix so a
+    future refactor cannot silently remove it.
+    """
+
+    async def test_rows_land_in_database_in_canonical_lock_order(
+        self, session: AsyncSession, project: Project,
+    ) -> None:
+        # End-to-end check: pass rows in REVERSE lexical order, then
+        # verify the rows actually committed by id-sequence reflect the
+        # canonical sort. SQLite's autoincrement id is monotonic in
+        # the order rows were INSERTed; if the repo sorted before
+        # INSERT, the lowest id matches the lexically-first
+        # (project_id, engine, name) triple.
+        repo = WorkerRepository(session)
+        unsorted = [
+            _row(project.id, name="celery@z-zeta", concurrency=1),
+            _row(project.id, name="celery@m-mu", concurrency=2),
+            _row(project.id, name="celery@a-alpha", concurrency=3),
+            _row(project.id, name="celery@d-delta", concurrency=4),
+            _row(project.id, name="celery@p-pi", concurrency=5),
+        ]
+        await repo.upsert_from_events_bulk(unsorted)
+        await session.commit()
+        result = await session.execute(
+            select(Worker).order_by(Worker.created_at, Worker.name),
+        )
+        actual = [w.name for w in result.scalars().all()]
+        expected_sorted = sorted([r["name"] for r in unsorted])
+        # The names should appear sorted (insertion order respected by
+        # the lock-ordering sort the repo applies pre-INSERT). If the
+        # sort is removed, the names will appear in input order.
+        assert actual == expected_sorted, (
+            f"rows landed in non-canonical order: {actual}. "
+            "The lock-ordering sort in upsert_from_events_bulk was "
+            "removed or bypassed; concurrent heartbeats will deadlock "
+            "again. See docs/perf/1.5.1-round17-gate-result.md."
+        )

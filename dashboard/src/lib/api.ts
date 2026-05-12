@@ -23,11 +23,18 @@ const API_BASE = "/api/v1";
 // endpoints and toast-blocks every mutation. The conditional uses
 // import.meta.env so the demo module is tree-shaken out of the
 // production bundle. See DEMO-Z4J-DEV-DESIGN.md.
+//
+// Non-demo path: thin arrow wrapper rather than a direct reference
+// to ``fetch``. This makes the global lookup lazy (resolved at
+// CALL time, not at MODULE-LOAD time), so vi.stubGlobal("fetch", ...)
+// in unit tests can swap the implementation after this module has
+// already been imported. Production behaviour is identical -- the
+// arrow still resolves to globalThis.fetch on every invocation.
 const fetchImpl: typeof fetch = import.meta.env.VITE_Z4J_DEMO_MODE === "true"
   ? // The dynamic import is awaited at module load via a top-level
     // await; Vite supports this for ES module targets.
     (await import("./api.demo")).demoFetch
-  : fetch;
+  : ((input, init) => fetch(input, init)) as typeof fetch;
 
 const CSRF_COOKIE_NAMES = ["__Host-z4j_csrf", "z4j_csrf"];
 const CSRF_HEADER = "X-CSRF-Token";

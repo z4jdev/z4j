@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.5.0"
+version = "1.5.1"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -65,7 +65,7 @@ classifiers = [
 #   pip install z4j-celery            # SDK + Celery adapter only
 #
 dependencies = [
-    "z4j-core>=1.4.0,<2",
+    "z4j-core>=1.5.1,<2",
     # Server runtime (was in z4j-brain pre-1.4.0).
     "fastapi>=0.136",
     "uvicorn[standard]>=0.45",

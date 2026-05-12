@@ -436,7 +436,18 @@ class FrameRouter:
                                     list(depths.items())[:_QUEUE_DEPTHS_CAP],
                                 )
                             queue_repo = QueueRepository(session)
-                            for queue_name, depth in depths.items():
+                            # 1.5.1: sort by queue name so concurrent
+                            # heartbeats walk the row-lock acquisition
+                            # path in the same order. Round 18 surfaced
+                            # 6 ``UPDATE queues`` deadlocks under 200/s
+                            # burst (docs/perf/1.5.1-round17-gate-result.md);
+                            # different agents send depths.items() in
+                            # different dict-insertion orders, opening
+                            # a deadlock cycle on overlapping queue
+                            # rows. Sorting the iteration eliminates
+                            # that cycle. Cost: O(N log N) on N ~= 10
+                            # queues; negligible vs deadlock-retry cost.
+                            for queue_name, depth in sorted(depths.items()):
                                 engine_name = key.split(".")[0]
                                 q_depth = int(depth)
                                 # Savepoint per queue so one bad row
