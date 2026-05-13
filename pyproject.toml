@@ -65,7 +65,7 @@ classifiers = [
 #   pip install z4j-celery            # SDK + Celery adapter only
 #
 dependencies = [
-    "z4j-core>=1.5.1,<2",
+    "z4j-core>=1.6.0,<2",
     # Server runtime (was in z4j-brain pre-1.4.0).
     "fastapi>=0.136",
     "uvicorn[standard]>=0.45",
@@ -87,6 +87,13 @@ dependencies = [
     # dispatcher uses so DNS-pinned delivery still verifies the
     # original hostname against the server cert.
     "aiosmtplib>=3.0",
+    # AES-GCM for the v1.6.0 MFA TOTP-secret-at-rest encryption.
+    # The brain imports ``z4j_brain.domain.mfa.crypto`` at module
+    # load (auth router init), so this is a core dep -- not an
+    # optional extra. Promoted out of [scheduler-grpc] in 1.6.0
+    # to fix a release-day smoke regression. ``cryptography``
+    # ships pre-built wheels for every supported (cp311+) platform.
+    "cryptography>=44",
     # Tasks-page xlsx export. Pure Python, write-only, ~1 MB, no
     # native deps.
     "xlsxwriter>=3.2.9",
