@@ -33,6 +33,18 @@ from z4j_core.errors import (
 )
 
 
+class MfaReverifyRequiredError(AuthorizationError):
+    """Raised by ``require_fresh_mfa`` when a sensitive action is
+    attempted from a session whose ``mfa_verified_at`` is stale (or
+    NULL) and the user has MFA enrolled.
+
+    Distinct ``code`` so the dashboard can branch on it cleanly and
+    prompt for a fresh TOTP code (then retry the original request).
+    """
+
+    code = "mfa_reverify_required"
+
+
 _STATUS_MAP: dict[type[Z4JError], HTTPStatus] = {
     ValidationError: HTTPStatus.UNPROCESSABLE_ENTITY,
     InvalidFrameError: HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -73,6 +85,7 @@ __all__ = [
     "ConfigError",
     "ConflictError",
     "InvalidFrameError",
+    "MfaReverifyRequiredError",
     "NotFoundError",
     "ProtocolError",
     "RateLimitExceeded",

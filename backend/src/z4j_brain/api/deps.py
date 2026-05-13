@@ -39,6 +39,7 @@ from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.errors import (
     AuthenticationError,
     AuthorizationError,
+    MfaReverifyRequiredError,
 )
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.repositories import (
@@ -46,8 +47,10 @@ from z4j_brain.persistence.repositories import (
     FirstBootTokenRepository,
     InvitationRepository,
     MembershipRepository,
+    MfaRecoveryCodeRepository,
     ProjectRepository,
     SessionRepository,
+    TrustedDeviceRepository,
     UserRepository,
 )
 from z4j_brain.settings import Settings
@@ -254,6 +257,18 @@ def get_audit_log_repo(
     session: AsyncSession = Depends(get_session),
 ) -> AuditLogRepository:
     return AuditLogRepository(session)
+
+
+def get_mfa_recovery_codes_repo(
+    session: AsyncSession = Depends(get_session),
+) -> MfaRecoveryCodeRepository:
+    return MfaRecoveryCodeRepository(session)
+
+
+def get_trusted_device_repo(
+    session: AsyncSession = Depends(get_session),
+) -> TrustedDeviceRepository:
+    return TrustedDeviceRepository(session)
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +631,70 @@ async def require_admin(
     return user
 
 
+async def require_fresh_mfa(
+    user: "User" = Depends(get_current_user),
+    session_row: "SessionRow" = Depends(get_current_session),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Sensitive-action gate: caller must have verified MFA recently.
+
+    Three branches:
+
+    * User has no MFA enrolled. The gate is a no-op; the action
+      proceeds. (Operators who want MFA universally required can
+      flip ``Z4J_MFA_ENFORCE_FOR_ALL=true`` and the login flow will
+      refuse new sessions for un-enrolled users.)
+    * User has MFA and the current session has ``mfa_verified_at``
+      within the last ``Z4J_MFA_VERIFICATION_TTL_SECONDS``. Pass.
+    * User has MFA but no recent verify. Raise ``403`` with
+      ``error="mfa_reverify_required"``. The dashboard catches this
+      response and prompts for a fresh TOTP code, then retries.
+
+    Bearer-authenticated callers (API keys) are exempt: API keys are
+    themselves a separate credential factor and are minted with
+    explicit scopes; MFA enforcement on the user's session does not
+    apply to their tokens.
+    """
+    # Bearer / API key path -- no session row binding.
+    if session_row is None:
+        return
+
+    has_mfa = (
+        user.mfa_secret_encrypted is not None
+        and user.mfa_enrolled_at is not None
+    )
+    if not has_mfa:
+        return
+
+    verified_at = session_row.mfa_verified_at
+    if verified_at is None:
+        raise MfaReverifyRequiredError(
+            "fresh MFA verification required",
+            details={
+                "ttl_seconds": settings.mfa_verification_ttl_seconds,
+            },
+        )
+
+    from datetime import UTC, datetime, timedelta
+
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=settings.mfa_verification_ttl_seconds,
+    )
+    # Normalise naive datetimes from SQLite to UTC for comparison.
+    verified_at_aware = (
+        verified_at
+        if verified_at.tzinfo is not None
+        else verified_at.replace(tzinfo=UTC)
+    )
+    if verified_at_aware < cutoff:
+        raise MfaReverifyRequiredError(
+            "fresh MFA verification required",
+            details={
+                "ttl_seconds": settings.mfa_verification_ttl_seconds,
+            },
+        )
+
+
 # ---------------------------------------------------------------------------
 # CSRF
 # ---------------------------------------------------------------------------
@@ -686,6 +765,7 @@ __all__ = [
     "get_first_boot_token_repo",
     "get_invitation_repo",
     "get_membership_repo",
+    "get_mfa_recovery_codes_repo",
     "get_optional_user",
     "get_password_hasher",
     "get_project_repo",
@@ -693,7 +773,9 @@ __all__ = [
     "get_session_repo",
     "get_settings",
     "get_setup_service",
+    "get_trusted_device_repo",
     "get_user_repo",
     "require_admin",
     "require_csrf",
+    "require_fresh_mfa",
 ]

@@ -90,7 +90,14 @@ class WorkerRepository(BaseRepository[Worker]):
         result = await self.session.execute(
             select(Worker)
             .where(Worker.project_id == project_id)
-            .order_by(Worker.last_heartbeat.desc().nulls_last(), Worker.name)
+            # Worker.id breaks ORDER BY ties on exact-equal heartbeats
+            # and identical names so cursor pagination cannot skip or
+            # duplicate rows under churn. (1.6.0 round-2 audit Low-1.)
+            .order_by(
+                Worker.last_heartbeat.desc().nulls_last(),
+                Worker.name,
+                Worker.id,
+            )
             .limit(limit),
         )
         return list(result.scalars().all())
@@ -163,6 +170,15 @@ class WorkerRepository(BaseRepository[Worker]):
         rows: list[dict[str, Any]],
     ) -> int:
         """Bulk upsert N worker rows in one statement.
+
+        SECURITY: ``project_id`` MUST come from the caller's
+        authenticated context (e.g. ``self._project_id`` in
+        ``frame_router``). Do NOT take ``project_id`` from a value
+        on the wire / inside a frame payload, otherwise an attacker
+        who controls a signed agent could upsert into another
+        tenant's worker rows. The repository trusts the caller
+        deliberately; the boundary lives in the API/WS layer.
+        (1.6.0 round-2 audit Medium-3.)
 
         Each ``rows`` entry must include ``project_id``, ``engine``,
         ``name``; any of the columns in :data:`_UPSERT_VARIABLE_COLS`

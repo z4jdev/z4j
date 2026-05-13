@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import {
   DiscordIcon,
+  MicrosoftTeamsIcon,
   PagerDutyIcon,
   SlackIcon,
   TelegramIcon,
@@ -53,6 +54,7 @@ const CHANNEL_ICONS = {
   telegram: TelegramIcon,
   pagerduty: PagerDutyIcon,
   discord: DiscordIcon,
+  teams: MicrosoftTeamsIcon,
 } as const;
 
 const PAGE_SIZE = 50;

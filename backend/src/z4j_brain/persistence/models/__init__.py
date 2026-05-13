@@ -27,6 +27,7 @@ from z4j_brain.persistence.models.first_boot_token import FirstBootToken
 from z4j_brain.persistence.models.invitation import Invitation
 from z4j_brain.persistence.models.kv_store import ExtensionStore, ProjectConfig, UserPreference
 from z4j_brain.persistence.models.membership import Membership
+from z4j_brain.persistence.models.mfa_recovery_code import MfaRecoveryCode
 from z4j_brain.persistence.models.password_reset_token import (
     PasswordResetToken,
 )
@@ -49,6 +50,7 @@ from z4j_brain.persistence.models.meta import Z4JMeta
 from z4j_brain.persistence.models.saved_view import SavedView
 from z4j_brain.persistence.models.task import Task
 from z4j_brain.persistence.models.task_annotation import TaskAnnotation
+from z4j_brain.persistence.models.trusted_device import TrustedDevice
 from z4j_brain.persistence.models.user import User
 from z4j_brain.persistence.models.worker import Worker
 
@@ -67,6 +69,7 @@ __all__ = [
     "ExtensionStore",
     "Invitation",
     "Membership",
+    "MfaRecoveryCode",
     "ProjectConfig",
     "NotificationChannel",
     "NotificationDelivery",
@@ -82,6 +85,7 @@ __all__ = [
     "Session",
     "Task",
     "TaskAnnotation",
+    "TrustedDevice",
     "User",
     "UserChannel",
     "UserNotification",

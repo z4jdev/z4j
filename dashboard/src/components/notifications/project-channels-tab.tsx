@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import {
   DiscordIcon,
+  MicrosoftTeamsIcon,
   PagerDutyIcon,
   SlackIcon,
   TelegramIcon,
@@ -81,7 +82,20 @@ const CHANNEL_ICONS = {
   telegram: TelegramIcon,
   pagerduty: PagerDutyIcon,
   discord: DiscordIcon,
+  teams: MicrosoftTeamsIcon,
 } as const;
+
+function teamsHostSummary(url: string): string {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === "outlook.office.com") return "outlook.office.com (classic)";
+    if (host.endsWith(".webhook.office.com")) return "*.webhook.office.com (workflow)";
+    if (host.endsWith(".logic.azure.com")) return "*.logic.azure.com (power automate)";
+    return host;
+  } catch {
+    return "teams webhook";
+  }
+}
 
 /**
  * The backend masks credential fields in list / get responses with
@@ -201,7 +215,7 @@ export function ProjectChannelsTab({ slug }: { slug: string }) {
         <EmptyState
           icon={Globe}
           title="No channels configured"
-          description="Add a webhook, email, Slack, or Telegram channel to start receiving notifications."
+          description="Add a webhook, email, Slack, Telegram, Discord, PagerDuty, or Microsoft Teams channel to start receiving notifications."
         />
       )}
       {channels && channels.length > 0 && (
@@ -247,6 +261,9 @@ export function ProjectChannelsTab({ slug }: { slug: string }) {
                     {ch.type === "discord" &&
                       typeof ch.config.webhook_url === "string" &&
                       ` · discord.com/api/webhooks/...`}
+                    {ch.type === "teams" &&
+                      typeof ch.config.webhook_url === "string" &&
+                      ` · ${teamsHostSummary(ch.config.webhook_url)}`}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center">
@@ -596,6 +613,7 @@ function ChannelDialog({ slug, mode, channel, onClose }: ChannelDialogProps) {
   const [pdKey, setPdKey] = useState(initial.pdKey);
   const [pdSeverity, setPdSeverity] = useState(initial.pdSeverity);
   const [discordUrl, setDiscordUrl] = useState(initial.discordUrl);
+  const [teamsUrl, setTeamsUrl] = useState(initial.teamsUrl);
 
   // When the user switches channel type in create mode, clear the
   // type-specific state so an abandoned-webhook URL doesn't leak
@@ -615,6 +633,7 @@ function ChannelDialog({ slug, mode, channel, onClose }: ChannelDialogProps) {
     setPdKey("");
     setPdSeverity("warning");
     setDiscordUrl("");
+    setTeamsUrl("");
   }, [type, mode]);
 
   /**
@@ -668,6 +687,8 @@ function ChannelDialog({ slug, mode, channel, onClose }: ChannelDialogProps) {
       }
       case "discord":
         return { webhook_url: discordUrl };
+      case "teams":
+        return { webhook_url: teamsUrl };
       default:
         return {};
     }
@@ -781,6 +802,7 @@ function ChannelDialog({ slug, mode, channel, onClose }: ChannelDialogProps) {
               <SelectItem value="telegram">Telegram</SelectItem>
               <SelectItem value="pagerduty">PagerDuty</SelectItem>
               <SelectItem value="discord">Discord</SelectItem>
+              <SelectItem value="teams">Microsoft Teams</SelectItem>
             </SelectContent>
           </Select>
           {mode === "edit" && (
@@ -1086,6 +1108,34 @@ function ChannelDialog({ slug, mode, channel, onClose }: ChannelDialogProps) {
             </p>
           </div>
         )}
+
+        {type === "teams" && (
+          <div className="space-y-2">
+            <Label htmlFor="new-channel-teams-url">
+              Microsoft Teams webhook URL
+            </Label>
+            <Input
+              id="new-channel-teams-url"
+              type="url"
+              pattern="https://([a-z0-9-]+\.)*(webhook\.office\.com|logic\.azure\.com|outlook\.office\.com).*"
+              placeholder="https://contoso.webhook.office.com/webhookb2/..."
+              title="Must be an official Microsoft Teams webhook URL"
+              value={teamsUrl}
+              onChange={(e) => setTeamsUrl(e.target.value)}
+              required
+            />
+            <p className="text-xs text-muted-foreground">
+              In Teams: open a channel, click ··· → Workflows → Post to a
+              channel when a webhook request is received. Accepts classic
+              outlook.office.com connectors, the current{" "}
+              <span className="font-mono">*.webhook.office.com</span>{" "}
+              workflow webhooks, and Power Automate{" "}
+              <span className="font-mono">*.logic.azure.com</span> URLs.
+              z4j sends an Adaptive Card with the task name, state, and
+              priority colour.
+            </p>
+          </div>
+        )}
       </div>
       {testResult && (
         <Alert
@@ -1186,6 +1236,7 @@ interface FormFields {
   pdKey: string;
   pdSeverity: string;
   discordUrl: string;
+  teamsUrl: string;
 }
 
 function extractFormFields(ch: NotificationChannel | undefined): FormFields {
@@ -1204,6 +1255,7 @@ function extractFormFields(ch: NotificationChannel | undefined): FormFields {
     pdKey: "",
     pdSeverity: "warning",
     discordUrl: "",
+    teamsUrl: "",
   };
   if (!ch) return empty;
   const cfg = ch.config ?? {};
@@ -1217,11 +1269,12 @@ function extractFormFields(ch: NotificationChannel | undefined): FormFields {
     const s = str(v);
     return s === MASK ? "" : s;
   };
-  // Discord and Slack both store their webhook in `webhook_url` -
-  // disambiguate by the channel's `type` so an edit on a Discord
-  // channel doesn't accidentally pre-fill the Slack input.
+  // Discord, Slack, and Teams all store the destination in
+  // `webhook_url` -- disambiguate by the channel's `type` so an
+  // edit on one doesn't accidentally pre-fill another's input.
   const isDiscord = ch.type === "discord";
   const isSlack = ch.type === "slack";
+  const isTeams = ch.type === "teams";
   return {
     name: ch.name,
     url: str(cfg.url),
@@ -1240,5 +1293,6 @@ function extractFormFields(ch: NotificationChannel | undefined): FormFields {
     pdKey: unmask(cfg.integration_key),
     pdSeverity: str(cfg.severity_default) || "warning",
     discordUrl: isDiscord ? str(cfg.webhook_url) : "",
+    teamsUrl: isTeams ? str(cfg.webhook_url) : "",
   };
 }

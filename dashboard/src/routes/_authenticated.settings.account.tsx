@@ -1,34 +1,32 @@
 /**
- * Account settings page - profile, security, and API key management.
+ * Account settings page -- the user's profile.
  *
- * Three tabs:
- *   Profile    - display name, timezone, read-only account info
- *   Security   - change password, manage active sessions
- *   API Keys   - create / revoke personal API keys
+ * Two cards:
+ *   1. Profile  (name, display name, timezone) + read-only account info
+ *   2. Password (one button that opens a Change Password modal)
+ *
+ * MFA, trusted devices, and active sessions used to live on a Security
+ * sub-tab here; in 1.6.0 they moved to /settings/security (their own
+ * sidebar entry) because the second factor is meaningful enough to
+ * deserve a top-level destination rather than being hidden one click
+ * deeper than Account.
  */
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import {
-  Check,
-  Copy,
-  Key,
-  Loader2,
-  Plus,
-  Shield,
-  Trash2,
-  User,
-} from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { KeyRound, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { EmptyState } from "@/components/domain/empty-state";
-import { Badge } from "@/components/ui/badge";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -43,57 +41,15 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
-  TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import { formatAbsolute } from "@/lib/format";
-import { DateCell } from "@/components/domain/date-cell";
 import { PageHeader } from "@/components/domain/page-header";
 import type { UserMePublic } from "@/lib/api-types";
 
 export const Route = createFileRoute("/_authenticated/settings/account")({
   component: AccountPage,
 });
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface Session {
-  id: string;
-  issued_at: string;
-  last_seen_at: string;
-  ip_at_issue: string | null;
-  user_agent_at_issue: string | null;
-  is_current: boolean;
-}
-
-interface ApiKey {
-  id: string;
-  name: string;
-  prefix: string;
-  last_used_at: string | null;
-  expires_at: string | null;
-  created_at: string;
-}
-
-interface CreateApiKeyResponse {
-  token: string;
-}
-
-// ---------------------------------------------------------------------------
-// Common timezones
-// ---------------------------------------------------------------------------
 
 const TIMEZONES = [
   "UTC",
@@ -133,45 +89,24 @@ const TIMEZONES = [
   "Pacific/Auckland",
 ] as const;
 
-// ---------------------------------------------------------------------------
-// Main page
-// ---------------------------------------------------------------------------
-
 function AccountPage() {
   return (
     <div className="space-y-6">
       <PageHeader
         title="Account"
-        description="Your profile, password, and active sessions."
+        description="Your profile and password."
       />
-      <Tabs defaultValue="profile" className="space-y-4">
-        <TabsList>
-        <TabsTrigger value="profile" className="gap-1.5">
-          <User className="size-4" />
-          Profile
-        </TabsTrigger>
-        <TabsTrigger value="security" className="gap-1.5">
-          <Shield className="size-4" />
-          Security
-        </TabsTrigger>
-      </TabsList>
-
-        <TabsContent value="profile">
-          <ProfileTab />
-        </TabsContent>
-        <TabsContent value="security">
-          <SecurityTab />
-        </TabsContent>
-      </Tabs>
+      <ProfileCard />
+      <PasswordCard />
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Profile tab
+// Profile + read-only account info
 // ---------------------------------------------------------------------------
 
-function ProfileTab() {
+function ProfileCard() {
   const { data: user, isLoading } = useQuery<UserMePublic>({
     queryKey: ["auth-me"],
     queryFn: () => api.get<UserMePublic>("/auth/me"),
@@ -186,14 +121,12 @@ function ProfileTab() {
   const [timezone, setTimezone] = useState("");
   const [initialized, setInitialized] = useState(false);
 
-  // Seed form state once user data arrives.
   if (user && !initialized) {
     setFirstName(user.first_name ?? "");
     setLastName(user.last_name ?? "");
-    // If display_name was never explicitly set it comes back derived
-    // from first/last. We only want to prefill the textbox when the
-    // user actually chose a custom display_name, so blank it when
-    // the rendered form opens.
+    // Display name comes back derived from first/last when not
+    // explicitly set; blank the input so the user can see they have
+    // a fresh override slot rather than the auto-derived value.
     setDisplayName("");
     setTimezone(user.timezone ?? "UTC");
     setInitialized(true);
@@ -227,8 +160,7 @@ function ProfileTab() {
   if (!user) return null;
 
   return (
-    <div className="space-y-6">
-      {/* Editable fields */}
+    <>
       <Card className="p-6">
         <h3 className="text-sm font-semibold">Profile</h3>
         <p className="mt-1 text-xs text-muted-foreground">
@@ -258,7 +190,9 @@ function ProfileTab() {
           <div className="space-y-2">
             <Label htmlFor="account-display">
               Display name{" "}
-              <span className="text-xs text-muted-foreground">(optional)</span>
+              <span className="text-xs text-muted-foreground">
+                (optional)
+              </span>
             </Label>
             <Input
               id="account-display"
@@ -300,7 +234,6 @@ function ProfileTab() {
         </form>
       </Card>
 
-      {/* Read-only account info */}
       <Card className="p-6">
         <h3 className="text-sm font-semibold">Account Info</h3>
         <p className="mt-1 text-xs text-muted-foreground">
@@ -329,24 +262,46 @@ function ProfileTab() {
           </Table>
         </div>
       </Card>
-    </div>
+    </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Security tab
+// Password card (button opens a modal)
 // ---------------------------------------------------------------------------
 
-function SecurityTab() {
+function PasswordCard() {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="space-y-6">
-      <PasswordSection />
-      <SessionsSection />
-    </div>
+    <Card className="p-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-sm font-semibold">Password</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Sign-in password. Changing it revokes every other active
+            session and trusted device.
+          </p>
+        </div>
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogTrigger asChild>
+            <Button variant="outline">
+              <KeyRound className="size-4" />
+              Change password
+            </Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Change password</DialogTitle>
+            </DialogHeader>
+            <ChangePasswordForm onDone={() => setOpen(false)} />
+          </DialogContent>
+        </Dialog>
+      </div>
+    </Card>
   );
 }
 
-function PasswordSection() {
+function ChangePasswordForm({ onDone }: { onDone: () => void }) {
   const [currentPw, setCurrentPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
@@ -370,6 +325,7 @@ function PasswordSection() {
           setCurrentPw("");
           setNewPw("");
           setConfirmPw("");
+          onDone();
           setTimeout(() => {
             window.location.href = "/login";
           }, 1500);
@@ -380,52 +336,51 @@ function PasswordSection() {
   };
 
   return (
-    <Card className="p-6">
-      <h3 className="text-sm font-semibold">Change Password</h3>
-      <p className="mt-1 text-xs text-muted-foreground">
-        All sessions are revoked after a password change.
-      </p>
-      <form onSubmit={handleSubmit} className="mt-4 space-y-4">
-        <div className="space-y-2">
-          <Label htmlFor="account-pwd-current">Current password</Label>
-          <Input
-            id="account-pwd-current"
-            type="password"
-            autoComplete="current-password"
-            value={currentPw}
-            onChange={(e) => setCurrentPw(e.target.value)}
-            required
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="account-pwd-new">New password</Label>
-          <Input
-            id="account-pwd-new"
-            type="password"
-            autoComplete="new-password"
-            minLength={8}
-            value={newPw}
-            onChange={(e) => setNewPw(e.target.value)}
-            required
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="account-pwd-confirm">Confirm new password</Label>
-          <Input
-            id="account-pwd-confirm"
-            type="password"
-            autoComplete="new-password"
-            minLength={8}
-            value={confirmPw}
-            onChange={(e) => setConfirmPw(e.target.value)}
-            required
-          />
-          {newPw && confirmPw && newPw !== confirmPw && (
-            <p className="text-xs text-destructive">
-              Passwords do not match.
-            </p>
-          )}
-        </div>
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="account-pwd-current">Current password</Label>
+        <Input
+          id="account-pwd-current"
+          type="password"
+          autoComplete="current-password"
+          value={currentPw}
+          onChange={(e) => setCurrentPw(e.target.value)}
+          required
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="account-pwd-new">New password</Label>
+        <Input
+          id="account-pwd-new"
+          type="password"
+          autoComplete="new-password"
+          minLength={8}
+          value={newPw}
+          onChange={(e) => setNewPw(e.target.value)}
+          required
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="account-pwd-confirm">Confirm new password</Label>
+        <Input
+          id="account-pwd-confirm"
+          type="password"
+          autoComplete="new-password"
+          minLength={8}
+          value={confirmPw}
+          onChange={(e) => setConfirmPw(e.target.value)}
+          required
+        />
+        {newPw && confirmPw && newPw !== confirmPw && (
+          <p className="text-xs text-destructive">
+            Passwords do not match.
+          </p>
+        )}
+      </div>
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onDone}>
+          Cancel
+        </Button>
         <Button type="submit" disabled={changePw.isPending}>
           {changePw.isPending ? (
             <>
@@ -433,148 +388,10 @@ function PasswordSection() {
               Changing...
             </>
           ) : (
-            "Change Password"
+            "Change password"
           )}
         </Button>
-      </form>
-    </Card>
-  );
-}
-
-function SessionsSection() {
-  const qc = useQueryClient();
-
-  const { data: sessions, isLoading } = useQuery<Session[]>({
-    queryKey: ["sessions"],
-    queryFn: () => api.get<Session[]>("/auth/sessions"),
-    staleTime: 30_000,
-  });
-
-  const revokeSession = useMutation({
-    mutationFn: (sessionId: string) =>
-      api.post<void>(`/auth/sessions/${sessionId}/revoke`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["sessions"] });
-      toast.success("Session revoked");
-    },
-    onError: (err) => toast.error(`Failed: ${err.message}`),
-  });
-
-  const revokeAllOther = useMutation({
-    mutationFn: async () => {
-      const others = (sessions ?? []).filter((s) => !s.is_current);
-      await Promise.all(
-        others.map((s) =>
-          api.post<void>(`/auth/sessions/${s.id}/revoke`),
-        ),
-      );
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["sessions"] });
-      toast.success("All other sessions revoked");
-    },
-    onError: (err) => toast.error(`Failed: ${err.message}`),
-  });
-
-  const otherCount = (sessions ?? []).filter((s) => !s.is_current).length;
-
-  return (
-    <Card className="p-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-sm font-semibold">Active Sessions</h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Devices and browsers where you are currently signed in.
-          </p>
-        </div>
-        {otherCount > 0 && (
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={revokeAllOther.isPending}
-            onClick={() => revokeAllOther.mutate()}
-          >
-            {revokeAllOther.isPending ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                Revoking...
-              </>
-            ) : (
-              "Revoke all other sessions"
-            )}
-          </Button>
-        )}
-      </div>
-
-      {isLoading && <Skeleton className="mt-4 h-32 w-full" />}
-
-      {sessions && sessions.length > 0 && (
-        <div className="mt-4 overflow-hidden rounded-md border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Device</TableHead>
-                <TableHead>IP</TableHead>
-                <TableHead>Last active</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="w-10" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sessions.map((session) => (
-                <TableRow
-                  key={session.id}
-                  className={
-                    session.is_current ? "bg-primary/5" : undefined
-                  }
-                >
-                  <TableCell
-                    className="max-w-[250px] truncate text-xs"
-                    title={session.user_agent_at_issue ?? ""}
-                  >
-                    {session.user_agent_at_issue == null ? (
-                      <span className="text-muted-foreground">unknown</span>
-                    ) : session.user_agent_at_issue.length > 80 ? (
-                      session.user_agent_at_issue.slice(0, 80) + "..."
-                    ) : (
-                      session.user_agent_at_issue
-                    )}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {session.ip_at_issue ?? (
-                      <span className="text-muted-foreground">unknown</span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <DateCell value={session.last_seen_at} />
-                  </TableCell>
-                  <TableCell>
-                    {session.is_current ? (
-                      <Badge variant="success">Current</Badge>
-                    ) : (
-                      <Badge variant="muted">Active</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    {!session.is_current && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="text-muted-foreground hover:text-destructive"
-                        disabled={revokeSession.isPending}
-                        onClick={() => revokeSession.mutate(session.id)}
-                        aria-label="Revoke this session"
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
-    </Card>
+      </DialogFooter>
+    </form>
   );
 }

@@ -109,6 +109,15 @@ class Session(Base):
         String(256),
         nullable=True,
     )
+    #: Most recent time MFA was successfully verified inside this
+    #: session. ``NULL`` for sessions issued before the user enrolled
+    #: in MFA or sessions that satisfied login via a trusted-device
+    #: cookie. The sensitive-action gate (see docs/MFA-DESIGN.md) uses
+    #: this to decide whether to prompt for a fresh TOTP code.
+    mfa_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("ix_sessions_user_id", "user_id"),

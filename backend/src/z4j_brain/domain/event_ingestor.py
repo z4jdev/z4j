@@ -75,6 +75,59 @@ if TYPE_CHECKING:
 logger = structlog.get_logger("z4j.brain.event_ingestor")
 
 
+#: Max length of the ``task_name`` label on Prometheus metrics.
+#: Names longer than this are truncated at the label boundary;
+#: the original full string is still recorded in the task table
+#: and audit log.
+_METRIC_TASK_NAME_MAX_LEN: int = 128
+
+#: Max distinct ``task_name`` labels we accept per project before
+#: folding overflow into a single sentinel. With ~50 task_names per
+#: project this is comfortable; 1000 leaves 20x headroom. The bound
+#: prevents a malicious agent from blowing up Prometheus cardinality
+#: with random distinct names. (Round 3 Crit-1.)
+_METRIC_TASK_NAME_PER_PROJECT_CAP: int = 1000
+
+#: Sentinel substituted for the metric label when a project exceeds
+#: the per-project cap. Distinct projects keep distinct overflow
+#: labels (via the project label dimension) so an alerting query
+#: like ``rate(z4j_tasks_total{task_name="__overflow__"}[5m])`` still
+#: tells the operator which project saturated.
+_METRIC_TASK_NAME_OVERFLOW: str = "__overflow__"
+
+# Per-project seen-set of task_names already admitted to the metric.
+# This is a module-level dict keyed by project UUID; entries grow
+# as new task_names appear and are bounded by the cap above. Reset
+# on brain restart (which is fine for a Prometheus counter that
+# also resets on restart).
+_metric_task_name_seen: dict[UUID, set[str]] = {}
+
+
+def _safe_metric_task_name(project_id: UUID, raw: str) -> str:
+    """Return a metric-safe task_name label for the given project.
+
+    Truncates the raw string to ``_METRIC_TASK_NAME_MAX_LEN`` and,
+    once a project's seen-set has reached
+    ``_METRIC_TASK_NAME_PER_PROJECT_CAP`` distinct names, folds any
+    further new names into the overflow sentinel. (Round 3 Crit-1.)
+    """
+    truncated = raw[:_METRIC_TASK_NAME_MAX_LEN] if raw else "unknown"
+    seen = _metric_task_name_seen.setdefault(project_id, set())
+    if truncated in seen:
+        return truncated
+    if len(seen) >= _METRIC_TASK_NAME_PER_PROJECT_CAP:
+        return _METRIC_TASK_NAME_OVERFLOW
+    seen.add(truncated)
+    return truncated
+
+
+def _reset_metric_task_name_seen_for_tests() -> None:
+    """Test hook -- clear the per-project seen-set so a single
+    test's emissions do not affect the next test's overflow check.
+    """
+    _metric_task_name_seen.clear()
+
+
 def _looks_like_deadlock(exc: BaseException) -> bool:
     """Best-effort detection of a Postgres serialisation/deadlock error.
 
@@ -808,10 +861,26 @@ class EventIngestor:
             })
 
         # Prometheus task metrics for terminal states.
+        #
+        # v1.6 Round 3 Crit-1: task_name is an attacker-controlled
+        # string from the agent. Without a cap a malicious agent can
+        # emit unbounded distinct task_names; each new name creates
+        # a fresh Prometheus series and the brain's RSS grows
+        # linearly until OOM. Defence: (a) truncate to
+        # ``_METRIC_TASK_NAME_MAX_LEN`` chars, (b) bound the per-
+        # project set of distinct names accepted into the labels;
+        # overflow folds into the literal sentinel
+        # ``_METRIC_TASK_NAME_OVERFLOW``. The brain's audit / task
+        # tables still record the original task_name in full -- only
+        # the metric label is bounded.
         try:
-            from z4j_brain.api.metrics import z4j_task_duration_seconds, z4j_tasks_total
+            from z4j_brain.api.metrics import (
+                z4j_task_duration_seconds,
+                z4j_tasks_total,
+            )
 
-            task_name = str(data.get("task_name") or "unknown")
+            raw_task_name = str(data.get("task_name") or "unknown")
+            task_name = _safe_metric_task_name(project_id, raw_task_name)
             if kind in (EventKind.TASK_SUCCEEDED, EventKind.TASK_FAILED, EventKind.TASK_REVOKED):
                 z4j_tasks_total.labels(
                     project=str(project_id), task_name=task_name, state=kind.value,

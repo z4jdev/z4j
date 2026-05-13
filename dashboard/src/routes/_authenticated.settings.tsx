@@ -17,6 +17,7 @@ import {
   Palette,
   Send,
   Settings,
+  Shield,
   SlidersHorizontal,
   UserCircle,
   Users,
@@ -50,6 +51,11 @@ function SettingsLayout() {
       title: "User",
       items: [
         { label: "Account", to: "/settings/account", icon: UserCircle },
+        // 1.6.0: Security is its own top-level page (MFA, trusted
+        // devices, active sessions). Previously these lived as a
+        // sub-tab inside Account; the second factor is meaningful
+        // enough to deserve a top-level destination.
+        { label: "Security", to: "/settings/security", icon: Shield },
         { label: "My Memberships", to: "/settings/memberships", icon: Users2 },
         { label: "Appearance", to: "/settings/appearance", icon: Palette },
         { label: "API Keys", to: "/settings/api-keys", icon: KeyRound },

@@ -279,6 +279,31 @@ class UserRepository(BaseRepository[User]):
             await self.session.refresh(user)
         return user
 
+    async def set_mfa_state(
+        self,
+        user_id: UUID,
+        *,
+        secret_encrypted: bytes | None,
+        enrolled_at: datetime | None,
+    ) -> None:
+        """Write the MFA columns on a user row in a single statement.
+
+        Either of ``secret_encrypted`` / ``enrolled_at`` can be ``None``
+        to clear the corresponding column (e.g. when disabling MFA or
+        resetting via ``z4j reset-mfa``). To start a pending enrollment
+        pass ``secret_encrypted=<blob>, enrolled_at=None``; to complete
+        the enrollment, pass both. To rewrite a stored secret after a
+        ``Z4J_SECRET`` rotation pass ``secret_encrypted=<rewrapped>,
+        enrolled_at=<existing value>``.
+        """
+        await self.session.execute(
+            update(User).where(User.id == user_id).values(
+                mfa_secret_encrypted=secret_encrypted,
+                mfa_enrolled_at=enrolled_at,
+                updated_at=datetime.now(UTC),
+            ),
+        )
+
     async def update_password_hash(
         self,
         user_id: UUID,

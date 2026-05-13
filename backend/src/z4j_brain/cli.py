@@ -437,6 +437,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="password on the command line (NOT recommended)",
     )
 
+    # reset-mfa (1.6.0). Shell-only escape hatch for lost-phone /
+    # lost-recovery-codes; clears the user's MFA secret, recovery
+    # codes, and trusted devices in one transaction. Audit row is
+    # written attributed to the OS user invoking the CLI.
+    reset_mfa = sub.add_parser(
+        "reset-mfa",
+        help=(
+            "clear a user's MFA enrollment, recovery codes, and "
+            "trusted devices (lost-phone recovery; shell-only)"
+        ),
+    )
+    reset_mfa.add_argument("email", help="email of the user to reset")
+    reset_mfa.add_argument(
+        "--confirm",
+        action="store_true",
+        help="skip the interactive 'are you sure' prompt",
+    )
+
     # check
     sub.add_parser(
         "check",
@@ -732,6 +750,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "changepassword":
         return _run_changepassword(args)
+
+    if args.command == "reset-mfa":
+        return _run_reset_mfa(args)
 
     if args.command == "check":
         return _run_check(args)
@@ -2712,15 +2733,49 @@ def _run_audit_verify(args: argparse.Namespace) -> int:
         db = DatabaseManager(engine)
         verified = 0
         mismatches: list[str] = []
+        # Streaming chain walk: each row's prev_row_hmac must equal the
+        # PREVIOUS row's row_hmac, and the first row must have
+        # prev_row_hmac IS NULL (the genesis anchor). Without these
+        # checks the verifier silently re-anchors at whatever row is
+        # streamed first, so an operator with DB write access who
+        # truncates the chain prefix produces a "valid" trimmed log.
+        # (1.6.0 round-3 audit High-1: wires the round-2 H3 fix into
+        # the CLI tool operators actually run.)
+        first_row = True
+        prev_hmac: str | None = None
         try:
             async with db.session() as session:
                 repo = AuditLogRepository(session)
                 rows = await repo.stream_for_verify(chunk=args.limit)
                 for row in rows:
+                    if first_row:
+                        first_row = False
+                        if row.prev_row_hmac is not None:
+                            mismatches.append(
+                                f"{row.id} (chain truncation: first "
+                                f"row has non-null prev_row_hmac; "
+                                f"genesis anchor missing)",
+                            )
+                    else:
+                        if row.prev_row_hmac != prev_hmac:
+                            saw = (
+                                row.prev_row_hmac[:12]
+                                if row.prev_row_hmac
+                                else "None"
+                            )
+                            want = (
+                                prev_hmac[:12] if prev_hmac else "None"
+                            )
+                            mismatches.append(
+                                f"{row.id} (chain break: "
+                                f"prev_row_hmac={saw}, "
+                                f"expected={want})",
+                            )
                     if audit.verify_row(row):
                         verified += 1
                     else:
                         mismatches.append(str(row.id))
+                    prev_hmac = row.row_hmac
         finally:
             await db.dispose()
         print(f"verified: {verified}")  # noqa: T201
@@ -3318,6 +3373,138 @@ def _run_changepassword(args: argparse.Namespace) -> int:
                 print(  # noqa: T201
                     f"z4j changepassword: password updated for "
                     f"{user.email}. All existing sessions are now invalid.",
+                )
+                return 0
+        finally:
+            await db.dispose()
+
+    return asyncio.run(_run())
+
+
+def _run_reset_mfa(args: argparse.Namespace) -> int:
+    """Operator escape hatch: clear a user's MFA state from the CLI.
+
+    Sets ``users.mfa_secret_encrypted = NULL`` and
+    ``users.mfa_enrolled_at = NULL``, deletes every row in
+    ``mfa_recovery_codes`` and ``trusted_devices`` for the user, and
+    flips ``sessions.mfa_verified_at = NULL`` for the user's live
+    sessions. The user can log in with their password as usual; the
+    sensitive-action gate treats their session as un-verified until
+    they enroll again.
+
+    Writes a ``user.mfa_reset_by_admin`` audit row attributed to the
+    OS user running the CLI (best-effort: ``os.getlogin()``). There
+    is intentionally no REST surface for this -- an attacker who has
+    only the dashboard cannot trigger it.
+    """
+    import asyncio
+    import getpass
+    import os as _os
+    import sys
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select, update
+
+    settings, engine = _build_settings_from_env()
+    email = args.email.lower()
+
+    if not args.confirm:
+        prompt = (
+            f"Clear MFA + recovery codes + trusted devices for "
+            f"{email!r}? Type the email to confirm: "
+        )
+        try:
+            response = input(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("z4j reset-mfa: aborted", file=sys.stderr)  # noqa: T201
+            return 2
+        if response != email:
+            print(  # noqa: T201
+                "z4j reset-mfa: confirmation did not match; aborted",
+                file=sys.stderr,
+            )
+            return 2
+
+    try:
+        operator_label = getpass.getuser() or "unknown"
+    except (OSError, KeyError):
+        operator_label = _os.environ.get("USER") or "unknown"
+
+    async def _run() -> int:
+        from z4j_brain.domain.audit_service import AuditService
+        from z4j_brain.persistence.database import DatabaseManager
+        from z4j_brain.persistence.models import (
+            MfaRecoveryCode,
+            Session as SessionRow,
+            TrustedDevice,
+            User,
+        )
+        from z4j_brain.persistence.repositories import AuditLogRepository
+
+        db = DatabaseManager(engine)
+        try:
+            async with db.session() as db_session:
+                user = (
+                    await db_session.execute(
+                        select(User).where(User.email == email),
+                    )
+                ).scalars().first()
+                if user is None:
+                    print(  # noqa: T201
+                        f"z4j reset-mfa: no user with email {email!r}",
+                        file=sys.stderr,
+                    )
+                    return 4
+                if user.mfa_secret_encrypted is None and user.mfa_enrolled_at is None:
+                    print(  # noqa: T201
+                        f"z4j reset-mfa: {email} has no MFA enrolled; "
+                        "nothing to do",
+                    )
+                    return 0
+
+                from sqlalchemy import delete
+
+                await db_session.execute(
+                    update(User)
+                    .where(User.id == user.id)
+                    .values(
+                        mfa_secret_encrypted=None,
+                        mfa_enrolled_at=None,
+                        updated_at=datetime.now(UTC),
+                    ),
+                )
+                await db_session.execute(
+                    delete(MfaRecoveryCode).where(
+                        MfaRecoveryCode.user_id == user.id,
+                    ),
+                )
+                await db_session.execute(
+                    delete(TrustedDevice).where(
+                        TrustedDevice.user_id == user.id,
+                    ),
+                )
+                await db_session.execute(
+                    update(SessionRow)
+                    .where(SessionRow.user_id == user.id)
+                    .values(mfa_verified_at=None),
+                )
+
+                await AuditService(settings).record(
+                    AuditLogRepository(db_session),
+                    action="user.mfa_reset_by_admin",
+                    target_type="user",
+                    target_id=str(user.id),
+                    result="success",
+                    outcome="allow",
+                    user_id=user.id,
+                    source_ip="127.0.0.1",
+                    metadata={"reset_via": "cli", "operator": operator_label},
+                )
+                await db_session.commit()
+                print(  # noqa: T201
+                    f"z4j reset-mfa: cleared MFA for {email}. They can "
+                    "log in with their password; the sensitive-action "
+                    "gate will require a fresh enrollment.",
                 )
                 return 0
         finally:

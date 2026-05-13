@@ -16,6 +16,8 @@ import { api } from "@/lib/api";
 import {
   Check,
   Copy,
+  FolderClosed,
+  Globe,
   Key,
   Loader2,
   Plus,
@@ -411,58 +413,82 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
             required
           />
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="apikey-project">Project scope</Label>
-          <Select value={projectId} onValueChange={setProjectId}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__global__">
-                Global (all projects you can see)
-              </SelectItem>
-              {(projects ?? []).map((p) => (
-                <SelectItem key={p.id} value={p.id}>
-                  {p.name} <code className="ml-1 text-xs">{p.slug}</code>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            A project-scoped key only reaches URLs under that project.
-            Global keys are bounded by your memberships.
-          </p>
+        <div
+          className="space-y-2"
+          role="radiogroup"
+          aria-labelledby="apikey-project-heading"
+        >
+          <span
+            id="apikey-project-heading"
+            className="text-sm font-medium leading-none"
+          >
+            Where can this key be used?
+          </span>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <ScopeRadioCard
+              icon={Globe}
+              title="Every project"
+              description="The key reaches every project your account can see. Good for personal scripts, dashboards, dev machines."
+              checked={projectId === "__global__"}
+              onSelect={() => setProjectId("__global__")}
+            />
+            <ScopeRadioCard
+              icon={FolderClosed}
+              title="One project only"
+              description="The key only works under one project's URLs. Good for CI / CD, per-project bots, scoped automation."
+              checked={projectId !== "__global__"}
+              onSelect={() => {
+                // Pick the first project as a sane default the
+                // moment the user clicks "One project only", so
+                // the dropdown is never left in an empty state.
+                if (
+                  projectId === "__global__" &&
+                  (projects ?? []).length > 0
+                ) {
+                  setProjectId(projects![0].id);
+                }
+              }}
+            />
+          </div>
+          {projectId !== "__global__" && (
+            <Select value={projectId} onValueChange={setProjectId}>
+              <SelectTrigger className="mt-2">
+                <SelectValue placeholder="Select a project" />
+              </SelectTrigger>
+              <SelectContent>
+                {(projects ?? []).map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name}{" "}
+                    <code className="ml-1 text-xs text-muted-foreground">
+                      {p.slug}
+                    </code>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
-        <div className="space-y-2" role="group" aria-labelledby="apikey-scopes-heading">
-          <div className="flex items-center justify-between">
+        <div
+          className="space-y-2"
+          role="group"
+          aria-labelledby="apikey-scopes-heading"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
             {/* Section heading for a group of scope checkboxes; not
                 a single-target Label, so we use role/aria-labelledby. */}
             <span
               id="apikey-scopes-heading"
               className="text-sm font-medium leading-none"
             >
-              Scopes
+              Scopes{" "}
+              <span className="font-normal text-muted-foreground">
+                ({scopes.size} of {catalogue?.scopes.length ?? 0} selected)
+              </span>
             </span>
-            <div className="flex gap-2 text-xs">
-              <button
-                type="button"
-                className="text-muted-foreground hover:text-foreground"
-                onClick={() =>
-                  setScopes(new Set(catalogue?.scopes.filter((s) =>
-                    s.endsWith(":read"),
-                  ) ?? []))
-                }
-              >
-                read-only
-              </button>
-              <button
-                type="button"
-                className="text-muted-foreground hover:text-foreground"
-                onClick={() => setScopes(new Set())}
-              >
-                none
-              </button>
-            </div>
+            <ScopePresetBar
+              catalogue={catalogue}
+              setScopes={setScopes}
+            />
           </div>
           <div className="max-h-64 space-y-1 overflow-y-auto rounded-md border p-3">
             {(catalogue?.scopes ?? []).map((s) => {
@@ -490,8 +516,9 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
             })}
           </div>
           <p className="text-xs text-muted-foreground">
-            Grant the least privilege needed. A token with ``tasks:write``
-            automatically gets ``tasks:read``.
+            Grant the least privilege needed. A token with{" "}
+            <code className="font-mono">tasks:write</code> automatically
+            gets <code className="font-mono">tasks:read</code>.
           </p>
         </div>
         <div className="space-y-2">
@@ -523,5 +550,129 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
         </Button>
       </DialogFooter>
     </form>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Subcomponents extracted so the dialog body stays scannable
+// ---------------------------------------------------------------------------
+
+/**
+ * Radio-style card for the "Where can this key be used?" picker.
+ * A plain HTML radio inside a clickable bordered card so the choice
+ * (Global vs single-project) is visible at a glance instead of
+ * hiding inside a dropdown that the user has to open and read.
+ */
+function ScopeRadioCard({
+  icon: Icon,
+  title,
+  description,
+  checked,
+  onSelect,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  description: string;
+  checked: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={checked}
+      onClick={onSelect}
+      className={
+        "flex flex-col items-start gap-1.5 rounded-md border p-3 text-left transition-colors " +
+        (checked
+          ? "border-primary bg-primary/5 ring-1 ring-primary/30"
+          : "border-border hover:bg-accent/40")
+      }
+    >
+      <div className="flex w-full items-center gap-2">
+        <Icon
+          className={
+            "size-4 " +
+            (checked ? "text-primary" : "text-muted-foreground")
+          }
+        />
+        <span className="text-sm font-medium">{title}</span>
+        {checked && (
+          <Check className="ml-auto size-4 text-primary" />
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">{description}</p>
+    </button>
+  );
+}
+
+/**
+ * Preset bar for the scopes section. Four presets so an operator
+ * does not have to tick boxes one at a time:
+ *
+ * - **All read** -- every ``*:read`` scope. Safe default for
+ *   monitoring / observability tokens.
+ * - **All non-admin** -- every scope EXCEPT the ones flagged
+ *   admin-only by the backend. Right shape for a CI / write-only
+ *   automation token that should not be able to mutate users or
+ *   project membership.
+ * - **Everything** -- every scope including admin. Loud red so
+ *   nobody picks it absent-mindedly.
+ * - **Clear** -- reset to none.
+ */
+function ScopePresetBar({
+  catalogue,
+  setScopes,
+}: {
+  catalogue: ScopeCatalogue | undefined;
+  setScopes: React.Dispatch<React.SetStateAction<Set<string>>>;
+}) {
+  const adminSet = new Set(catalogue?.admin_only ?? []);
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-xs">
+      <button
+        type="button"
+        className="rounded border border-border bg-background px-2 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+        onClick={() =>
+          setScopes(
+            new Set(
+              (catalogue?.scopes ?? []).filter((s) =>
+                s.endsWith(":read"),
+              ),
+            ),
+          )
+        }
+      >
+        All read
+      </button>
+      <button
+        type="button"
+        className="rounded border border-border bg-background px-2 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+        onClick={() =>
+          setScopes(
+            new Set(
+              (catalogue?.scopes ?? []).filter((s) => !adminSet.has(s)),
+            ),
+          )
+        }
+      >
+        All non-admin
+      </button>
+      <button
+        type="button"
+        className="rounded border border-destructive/40 bg-destructive/10 px-2 py-0.5 font-medium text-destructive hover:bg-destructive/15"
+        onClick={() => setScopes(new Set(catalogue?.scopes ?? []))}
+        title="Includes admin:* and other admin-only scopes"
+      >
+        Everything (incl. admin)
+      </button>
+      <button
+        type="button"
+        className="rounded border border-border bg-background px-2 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+        onClick={() => setScopes(new Set())}
+      >
+        Clear
+      </button>
+    </div>
   );
 }

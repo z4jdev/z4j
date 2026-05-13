@@ -491,6 +491,15 @@ class FrameRouter:
                             key=key,
                         )
 
+            # SECURITY BOUNDARY: every worker-row dict in this handler
+            # MUST set ``project_id=self._project_id`` (the value the
+            # gateway captured from the authenticated bearer token at
+            # connect time). NEVER read project_id from frame.payload
+            # or anywhere on the wire; an attacker who controls a
+            # signed agent could otherwise upsert rows into a sibling
+            # project's worker table. (1.6.0 round-2 audit Medium-3:
+            # cross-tenant routing boundary made explicit.)
+            #
             # Project worker details from control.inspect() data.
             # The agent sends "celery.worker_details" with a JSON
             # string of {hostname: {stats: {...}, active: [...], ...}}.

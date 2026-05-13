@@ -16,13 +16,57 @@ import { toast } from "sonner";
 import { ApiError } from "./api";
 
 let redirectingToLogin = false;
+let redirectingToReverify = false;
 // Throttle duplicate 403 toasts - a page that fires multiple queries
 // in parallel against the same forbidden resource would otherwise
 // stack the user with identical messages.
 let last403At = 0;
 
+function handleMfaReverifyRequired(error: unknown): boolean {
+  // True iff the error was the sensitive-action MFA gate
+  // (require_fresh_mfa). On match: clear the query cache so the
+  // dashboard doesn't keep showing stale post-mutation state, then
+  // redirect to /login/mfa carrying ``?next=<current path>`` so the
+  // verify page can send the user back where they started. Without
+  // the next param the user always lands on / after re-verifying,
+  // loses any in-progress form context, and has to re-navigate
+  // manually. (1.6.0 audit Medium-4 + UX session follow-up.)
+  if (!(error instanceof ApiError)) return false;
+  if (error.status !== 403) return false;
+  if (error.code !== "mfa_reverify_required") return false;
+  if (redirectingToReverify) return true;
+  redirectingToReverify = true;
+  toast.warning("Re-verify with MFA", {
+    description:
+      "this action requires a fresh MFA code; redirecting...",
+  });
+  queryClient.clear();
+  if (typeof window !== "undefined") {
+    // Capture pathname + search + hash so the verify page can take
+    // the user back to exactly the URL they were on, query-string
+    // and fragment included. Skip the capture when we are already
+    // on /login/mfa to avoid a self-redirect loop on a flapping
+    // gate.
+    const here = window.location;
+    const onMfaPage = here.pathname === "/login/mfa";
+    const next = onMfaPage
+      ? ""
+      : `?next=${encodeURIComponent(
+          here.pathname + here.search + here.hash,
+        )}`;
+    window.location.href = `/login/mfa${next}`;
+  }
+  setTimeout(() => {
+    redirectingToReverify = false;
+  }, 2000);
+  return true;
+}
+
 function handleForbiddenError(error: unknown): void {
   if (!(error instanceof ApiError) || error.status !== 403) return;
+  // MFA re-verify gate is a 403 too; route it before the generic
+  // "Permission denied" toast.
+  if (handleMfaReverifyRequired(error)) return;
   // Silent on mutations that have their own inline toast (the
   // mutation's ``onError`` wins) - here we only surface 403s from
   // background queries, which are otherwise invisible.

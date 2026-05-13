@@ -176,6 +176,19 @@ op can touch up to 10000 rows; rate-limiting prevents a buggy
 script from amplifying DB load + replica lag.
 """
 
+_mfa_verify_bucket = _IPBucket(window_seconds=60, max_hits=10)
+"""Throttle for ``/auth/mfa/verify``.
+
+Tighter than the login bucket because the verify endpoint is a TOTP
+code-brute-force target: only ``10^6`` possible 6-digit codes, so an
+unbounded verifier with a 30s window gives roughly 50% odds of guessing
+the right code in a few thousand attempts. The 10/min cap reduces an
+attacker who has already stolen the password to roughly 0.001% odds
+within the code's 30s validity window. Operators can dial this up via
+``Z4J_MFA_VERIFICATION_RATE_PER_MIN`` if they have a legitimate reason
+(typically: testing). The default tracks the docs/MFA-DESIGN.md.
+"""
+
 
 def _make_dependency(bucket: _IPBucket, name: str) -> Callable[..., Coroutine[Any, Any, None]]:
     async def _check(
@@ -211,6 +224,9 @@ require_bulk_action_throttle = _make_dependency(
 require_agent_connect_throttle = _make_dependency(
     _agent_connect_bucket, "agent-connect",
 )
+require_mfa_verify_throttle = _make_dependency(
+    _mfa_verify_bucket, "mfa-verify",
+)
 
 
 __all__ = [
@@ -222,11 +238,13 @@ __all__ = [
     "_invitation_bucket",
     "_login_bucket",
     "_password_reset_bucket",
+    "_mfa_verify_bucket",
     "require_agent_connect_throttle",
     "require_bulk_action_throttle",
     "require_channel_import_throttle",
     "require_channel_test_throttle",
     "require_invitation_throttle",
     "require_login_throttle",
+    "require_mfa_verify_throttle",
     "require_password_reset_throttle",
 ]

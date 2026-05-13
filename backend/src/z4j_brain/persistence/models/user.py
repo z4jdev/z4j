@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String
+from sqlalchemy import Boolean, DateTime, Index, Integer, LargeBinary, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from z4j_brain.persistence.base import Base
@@ -99,13 +99,32 @@ class User(PKMixin, TimestampsMixin, Base):
     )
 
     # ------------------------------------------------------------------
-    # Future columns (reserved, unused until Phase 2/3)
+    # MFA columns (1.6.0). See docs/MFA-DESIGN.md.
+    # ------------------------------------------------------------------
+    #: TOTP shared secret, AES-GCM encrypted with a key derived from
+    #: ``Z4J_SECRET`` via HKDF. Stored as ``nonce || ciphertext`` in
+    #: a single bytea column. NULL when MFA is not enrolled.
+    mfa_secret_encrypted: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True,
+    )
+    #: Timestamp of successful enrollment. ``NULL`` means MFA is off.
+    #: The presence of a value (with a non-null ``mfa_secret_encrypted``)
+    #: is the canonical "MFA is enabled" predicate.
+    mfa_enrolled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    #: When the enforcement policy was first observed for this user.
+    #: Used to compute the grace-window deadline. Set on the first
+    #: login that finds the user is enforcement-targeted but not yet
+    #: enrolled.
+    mfa_enforcement_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Future columns (reserved, unused).
     # ------------------------------------------------------------------
     avatar_url: Mapped[str | None] = mapped_column(String, nullable=True)
-    mfa_secret: Mapped[str | None] = mapped_column(String, nullable=True)
-    mfa_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="false",
-    )
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sso_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
 

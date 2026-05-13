@@ -38,6 +38,7 @@ from z4j_brain.api.deps import (
     require_csrf,
 )
 from z4j_brain.domain.ip_rate_limit import (
+    require_bulk_action_throttle,
     require_channel_import_throttle,
     require_channel_test_throttle,
 )
@@ -498,6 +499,28 @@ async def _validate_channel_config(
             err = await validate_webhook_url(url)
             if err:
                 raise ConflictError(f"unsafe discord webhook URL: {err}")
+    elif channel_type == "teams":
+        # v1.6 Round 3 Crit-2: the Teams host-allowlist validator
+        # was wired into ``deliver_teams`` but NOT into the create /
+        # update / test channel paths. Without this branch, a
+        # project admin could PERSIST an arbitrary ``https://attacker.example/x``
+        # as a Teams channel config; dispatch would refuse to fan
+        # out (defence-in-depth at runtime), but the row remained in
+        # the DB, the audit log recorded "channel created" with an
+        # attacker URL, and a future refactor removing the dispatch-
+        # time check would silently open the exfil path. The branch
+        # below closes that gap at the API boundary.
+        from z4j_brain.domain.notifications.channels import (
+            validate_teams_config,
+        )
+        err = validate_teams_config(config)
+        if err:
+            raise ConflictError(f"invalid teams config: {err}")
+        url = config.get("webhook_url", "")
+        if url:
+            err = await validate_webhook_url(url)
+            if err:
+                raise ConflictError(f"unsafe teams webhook URL: {err}")
 
 
 async def _resolve_member_project(
@@ -636,7 +659,10 @@ async def list_channels(
     "/channels",
     response_model=ChannelPublic,
     status_code=201,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[
+        Depends(require_csrf),
+        Depends(require_bulk_action_throttle),
+    ],
 )
 async def create_channel(
     slug: str,
@@ -1343,7 +1369,10 @@ async def list_defaults(
     "/defaults",
     response_model=DefaultSubscriptionPublic,
     status_code=201,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[
+        Depends(require_csrf),
+        Depends(require_bulk_action_throttle),
+    ],
 )
 async def create_default(
     slug: str,

@@ -82,6 +82,20 @@ class SessionRepository(BaseRepository[Session]):
             .values(revoked_at=datetime.now(UTC), revocation_reason=reason),
         )
 
+    async def set_mfa_verified(self, session_id: UUID) -> None:
+        """Stamp ``mfa_verified_at = NOW()`` on a session.
+
+        Called by ``POST /auth/mfa/verify`` after a successful TOTP or
+        recovery-code redemption. The sensitive-action gate
+        (phase 5) reads this column to decide whether to prompt for a
+        fresh code on password change / API-key create / etc.
+        """
+        await self.session.execute(
+            update(Session)
+            .where(Session.id == session_id)
+            .values(mfa_verified_at=datetime.now(UTC)),
+        )
+
     async def revoke_all_for_user(
         self,
         user_id: UUID,

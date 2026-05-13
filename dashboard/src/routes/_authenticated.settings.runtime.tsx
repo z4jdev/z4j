@@ -16,7 +16,7 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Copy, Search } from "lucide-react";
+import { Copy, ExternalLink, Info, Search } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -38,6 +38,45 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+
+// Docs URLs. Kept inline rather than centralised because there is no
+// dashboard-wide docs registry; the page that needs a link knows
+// which page it wants. z4j.dev is the canonical operator-docs site.
+const DOCS_ENV_VARS_URL = "https://z4j.dev/reference/env-vars/";
+const DOCS_SETTINGS_URL = "https://z4j.dev/reference/settings/";
+
+// Description of every source label the backend can emit. Kept in
+// sync with `_normalize_source` in api/admin_settings.py.
+const SOURCE_LEGEND: Record<
+  SettingItem["source"],
+  { label: string; description: string }
+> = {
+  env: {
+    label: "env",
+    description:
+      "Set via a Z4J_* environment variable on the brain process at startup.",
+  },
+  "config.env": {
+    label: "config.env",
+    description:
+      "Loaded from ~/.z4j/config.env (the persistent operator-edited file).",
+  },
+  "secret.env": {
+    label: "secret.env",
+    description:
+      "Loaded from ~/.z4j/secret.env (auto-managed credential file with restricted permissions).",
+  },
+  ".env": {
+    label: ".env",
+    description:
+      "Loaded from a .env file in the brain's working directory. Common in dev installs that run from the repo root.",
+  },
+  default: {
+    label: "default",
+    description:
+      "Falling back to the hard-coded default in the Settings model. Not configured by anyone yet.",
+  },
+};
 
 export const Route = createFileRoute("/_authenticated/settings/runtime")({
   component: RuntimeSettingsPage,
@@ -108,16 +147,53 @@ function Header() {
   return (
     <div>
       <div className="flex items-center gap-2">
-        <h2 className="text-lg font-semibold">Settings (read-only)</h2>
+        <h2 className="text-lg font-semibold">Runtime configuration</h2>
         <Badge variant="muted">read-only</Badge>
       </div>
-      <p className="mt-1 max-w-3xl text-xs text-muted-foreground">
-        These values are loaded at brain startup from environment
-        variables, <code className="font-mono">~/.z4j/config.env</code>, or
-        code defaults. Edit{" "}
-        <code className="font-mono">~/.z4j/config.env</code> (or your
-        environment) and restart the brain to change them.
+      <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
+        The full set of <code className="font-mono">Settings</code>{" "}
+        fields the brain is currently using, plus where each value came
+        from. Mirrors the output of{" "}
+        <code className="font-mono">z4j config show</code>. To change a
+        value, edit the right source file (or its env var) and{" "}
+        <em>restart</em> the brain -- there is no live reload.
       </p>
+      <p className="mt-2 max-w-3xl text-xs text-muted-foreground">
+        Sources, in resolution order:{" "}
+        <code className="font-mono">env</code> (a{" "}
+        <code className="font-mono">Z4J_*</code> environment variable),{" "}
+        <code className="font-mono">config.env</code> (
+        <code className="font-mono">~/.z4j/config.env</code>),{" "}
+        <code className="font-mono">secret.env</code> (
+        <code className="font-mono">~/.z4j/secret.env</code>),{" "}
+        <code className="font-mono">.env</code> (a{" "}
+        <code className="font-mono">.env</code> file in the brain's
+        working directory), and{" "}
+        <code className="font-mono">default</code> (the value baked
+        into the Settings model). Hover any badge for a one-line
+        reminder.
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-3 text-xs">
+        <a
+          href={DOCS_ENV_VARS_URL}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex items-center gap-1 text-primary hover:underline"
+        >
+          All Z4J_* environment variables
+          <ExternalLink className="size-3" />
+        </a>
+        <span className="text-muted-foreground">·</span>
+        <a
+          href={DOCS_SETTINGS_URL}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex items-center gap-1 text-primary hover:underline"
+        >
+          Settings reference (grouped by topic)
+          <ExternalLink className="size-3" />
+        </a>
+      </div>
     </div>
   );
 }
@@ -214,8 +290,36 @@ function SettingsTableCard({ settings }: { settings: SettingItem[] }) {
             <TableRow>
               <TableHead className="w-[28%]">Name</TableHead>
               <TableHead className="w-[36%]">Value</TableHead>
-              <TableHead className="w-[14%]">Source</TableHead>
-              <TableHead className="w-[22%]">Description</TableHead>
+              <TableHead className="w-[14%]">
+                <span className="inline-flex items-center gap-1">
+                  Source
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Info className="size-3 cursor-help text-muted-foreground" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-sm whitespace-pre-line text-xs">
+                      {Object.values(SOURCE_LEGEND)
+                        .map((s) => `${s.label}: ${s.description}`)
+                        .join("\n")}
+                    </TooltipContent>
+                  </Tooltip>
+                </span>
+              </TableHead>
+              <TableHead className="w-[22%]">
+                <span className="inline-flex items-center gap-1">
+                  Description
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Info className="size-3 cursor-help text-muted-foreground" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-sm text-xs">
+                      Inline description on the Pydantic field. Most
+                      fields document themselves in the Z4J_* env-vars
+                      reference instead -- follow the docs link above.
+                    </TooltipContent>
+                  </Tooltip>
+                </span>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -260,7 +364,17 @@ function SettingRow({ row }: { row: SettingItem }) {
         )}
       </TableCell>
       <TableCell className="py-2.5">
-        <Badge variant={sourceMeta.variant}>{sourceMeta.label}</Badge>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-block cursor-help">
+              <Badge variant={sourceMeta.variant}>{sourceMeta.label}</Badge>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs text-xs">
+            {SOURCE_LEGEND[row.source]?.description ??
+              "Unknown source label; this row was emitted by an older backend version."}
+          </TooltipContent>
+        </Tooltip>
       </TableCell>
       <TableCell className="py-2.5 text-xs text-muted-foreground">
         {row.description ? (

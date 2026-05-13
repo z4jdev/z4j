@@ -32,9 +32,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from z4j_brain import __version__
 from z4j_brain.api import (
     auth,
+    auth_mfa,
     health,
     setup,
 )
+from z4j_brain.api import activity as activity_api
 from z4j_brain.api import agent_longpoll as agent_longpoll_api
 from z4j_brain.api import agent_workers as agent_workers_api
 from z4j_brain.api import agents as agents_api
@@ -59,6 +61,7 @@ from z4j_brain.api import users as users_api
 from z4j_brain.api import workers as workers_api
 from z4j_brain.auth.ip import TrustedProxyResolver
 from z4j_brain.auth.passwords import PasswordHasher
+from z4j_brain.domain.audit_forwarder import AuditForwarder
 from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.domain.auth_service import AuthService
 from z4j_brain.domain.command_dispatcher import CommandDispatcher
@@ -79,6 +82,8 @@ from z4j_brain.domain.workers.schedule_circuit_breaker import (
     ScheduleFiresPruneWorker,
 )
 from z4j_brain.logging_config import configure_logging
+from z4j_brain.observability.otel import init_otel
+from z4j_brain.observability.sentry import init_sentry
 from z4j_brain.middleware import (
     BodySizeLimitMiddleware,
     ErrorMiddleware,
@@ -120,6 +125,12 @@ def create_app(
     """Build the FastAPI app."""
     settings = settings or Settings()  # type: ignore[call-arg]
     configure_logging(level=settings.log_level, json_output=settings.log_json)
+    # Optional error capture (Sentry). No-op when Z4J_SENTRY_DSN is
+    # unset OR when ``sentry-sdk`` is not installed. Initialised here
+    # -- before DB engine + singletons -- so a failure during the
+    # rest of construction (schema check, audit anchor mint, etc.)
+    # also lands in Sentry rather than disappearing into stderr.
+    init_sentry(settings)
 
     db_engine = engine or create_engine_from_settings(settings)
     install_statement_timeouts(db_engine, settings=settings)
@@ -142,6 +153,21 @@ def create_app(
 
     verify_canonical_fields_emitted()
     audit_service = AuditService(settings)
+    # Optional out-of-band audit-row forwarder. Only constructed
+    # when an URL is set; nothing in the request path runs the
+    # forwarder code otherwise.
+    audit_forwarder: AuditForwarder | None = None
+    if settings.audit_webhook_url is not None and (
+        settings.audit_webhook_url.get_secret_value().strip()
+    ):
+        secret_str = settings.audit_webhook_hmac_secret  # type: ignore[union-attr]
+        audit_forwarder = AuditForwarder(
+            webhook_url=settings.audit_webhook_url.get_secret_value().strip(),
+            hmac_secret=secret_str.get_secret_value().encode("utf-8"),  # type: ignore[union-attr]
+            timeout_seconds=settings.audit_webhook_timeout_seconds,
+            buffer_size=settings.audit_webhook_buffer_size,
+        )
+        audit_service.register_post_write_hook(audit_forwarder.enqueue)
     auth_service = AuthService(
         settings=settings, hasher=hasher, audit=audit_service,
     )
@@ -591,6 +617,69 @@ def create_app(
 
         register_self_watch_provider(_self_watch_provider)
 
+        # v1.6: per-project agent + worker counts for Prometheus.
+        # Sampled at scrape time by ``_refresh_fleet_gauges``; the
+        # registry exposes ``fleet_snapshot`` on both Local and
+        # PostgresNotify variants. Multi-replica deployments see
+        # each process's view; the operator aggregates in PromQL.
+        from z4j_brain.api.metrics import register_fleet_gauge_provider
+
+        def _fleet_provider() -> dict[str, dict[str, int]]:
+            snap = getattr(registry, "fleet_snapshot", None)
+            if snap is None:
+                return {"agents": {}, "workers": {}}
+            try:
+                return snap()
+            except Exception:  # noqa: BLE001
+                return {"agents": {}, "workers": {}}
+
+        register_fleet_gauge_provider(_fleet_provider)
+
+        # v1.6 Round 5 H: surface every new v1.6 in-memory state
+        # surface on the existing ``z4j_inmemory_state_items`` gauge
+        # so operators see queue saturation, rate-limit bucket
+        # growth, and dynamic-host registrations without adding new
+        # metric families.
+        from z4j_brain.api.metrics import register_inmemory_subsystem
+
+        if audit_forwarder is not None:
+            try:
+                register_inmemory_subsystem(
+                    "audit_forwarder_queue",
+                    audit_forwarder.queue_depth,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "z4j main: register_inmemory_subsystem(audit_forwarder) "
+                    "crashed; continuing without the gauge",
+                )
+        try:
+            from z4j_brain.api.activity import _user_bucket
+            register_inmemory_subsystem(
+                "activity_rate_limit_users",
+                lambda: len(_user_bucket),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from z4j_brain.observability.otel import _DYNAMIC_SENSITIVE_HOSTS
+            register_inmemory_subsystem(
+                "otel_dynamic_sensitive_hosts",
+                lambda: len(_DYNAMIC_SENSITIVE_HOSTS),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from z4j_brain.domain.event_ingestor import (
+                _metric_task_name_seen,
+            )
+            register_inmemory_subsystem(
+                "metric_task_name_projects",
+                lambda: len(_metric_task_name_seen),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             await registry.start()
         except Exception:  # noqa: BLE001
@@ -609,6 +698,32 @@ def create_app(
             logger.exception(
                 "z4j worker supervisor start crashed; continuing",
             )
+
+        if audit_forwarder is not None:
+            try:
+                audit_forwarder.start()
+                # Surface obvious-misconfig as a startup WARNING so a
+                # typo'd URL is visible before any rows accumulate.
+                _audit_url = (
+                    settings.audit_webhook_url.get_secret_value().strip()  # type: ignore[union-attr]
+                )
+                from z4j_brain.domain.audit_forwarder import (
+                    validate_audit_webhook_url_at_startup,
+                )
+                _audit_err = await validate_audit_webhook_url_at_startup(
+                    _audit_url,
+                )
+                if _audit_err:
+                    logger.warning(
+                        "z4j audit_forwarder: configured URL fails SSRF "
+                        "validation (%s); every row will be dropped at "
+                        "dispatch. Fix Z4J_AUDIT_WEBHOOK_URL and restart.",
+                        _audit_err,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "z4j audit_forwarder start crashed; continuing",
+                )
 
         if scheduler_grpc_server is not None:
             try:
@@ -750,6 +865,24 @@ def create_app(
                 await supervisor.stop()
             except Exception:  # noqa: BLE001
                 logger.exception("z4j supervisor stop crashed")
+            if audit_forwarder is not None:
+                # v1.6 audit H9: unregister the hook BEFORE stopping
+                # the drain task. Rows that arrive during teardown
+                # (e.g., a final ``shutdown.complete`` audit row)
+                # would otherwise queue into a forwarder whose drain
+                # task is about to be cancelled.
+                try:
+                    audit_service.unregister_post_write_hook(
+                        audit_forwarder.enqueue,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "z4j audit_forwarder hook unregister crashed",
+                    )
+                try:
+                    await audit_forwarder.stop()
+                except Exception:  # noqa: BLE001
+                    logger.exception("z4j audit_forwarder stop crashed")
             try:
                 await dashboard_hub.stop()
             except Exception:  # noqa: BLE001
@@ -786,11 +919,21 @@ def create_app(
             await db.dispose()
             logger.info("z4j stopped")
 
+    # When openapi_docs_enabled is False, register the schema + docs
+    # URLs as None so FastAPI does not mount them and an anonymous
+    # caller gets 404. Operators who do not need the dashboard's
+    # type-introspection convenience (or who run behind a proxy that
+    # already blocks /docs) should disable this to shrink the recon
+    # surface. (1.6.0 round-3 audit Medium-1.)
+    _openapi_url = (
+        "/api/v1/openapi.json" if settings.openapi_docs_enabled else None
+    )
+    _docs_url = "/api/v1/docs" if settings.openapi_docs_enabled else None
     app = FastAPI(
         title="z4j",
         version=__version__,
-        openapi_url="/api/v1/openapi.json",
-        docs_url="/api/v1/docs",
+        openapi_url=_openapi_url,
+        docs_url=_docs_url,
         redoc_url=None,
         lifespan=_lifespan,
     )
@@ -818,6 +961,14 @@ def create_app(
     app.state.versions_snapshot = load_bundled()
     app.state.versions_snapshot_source = "bundled"
     app.state.versions_snapshot_fetched_at = None
+
+    # Optional OpenTelemetry instrumentation. No-op when
+    # Z4J_OTEL_EXPORTER_OTLP_ENDPOINT is unset OR when the
+    # ``opentelemetry`` packages are not installed. Init AFTER the
+    # FastAPI app + engine exist so the auto-instrumentation can
+    # attach; BEFORE middleware registration so the HTTP server
+    # spans wrap the full middleware stack.
+    init_otel(settings, app=app, engine=db_engine)
 
     # ------------------------------------------------------------------
     # Middleware (outermost first)
@@ -854,6 +1005,7 @@ def create_app(
     # ------------------------------------------------------------------
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(auth_mfa.router, prefix="/api/v1")
     app.include_router(setup.router_api, prefix="/api/v1")
     app.include_router(setup.router_html)  # /setup at the root
 
@@ -869,6 +1021,7 @@ def create_app(
     app.include_router(schedules_api.router, prefix="/api/v1")
     app.include_router(schedulers_fleet_api.router, prefix="/api/v1")
     app.include_router(audit_api.router, prefix="/api/v1")
+    app.include_router(activity_api.router, prefix="/api/v1")
     app.include_router(stats_api.router, prefix="/api/v1")
     app.include_router(trends_api.router, prefix="/api/v1")
     app.include_router(home_api.router, prefix="/api/v1")

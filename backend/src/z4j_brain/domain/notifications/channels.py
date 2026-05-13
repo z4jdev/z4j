@@ -165,6 +165,7 @@ async def _post(
     url: str,
     *,
     pin_ip: str | None = None,
+    timeout: float | httpx.Timeout | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """POST ``url`` and return the response with body bounded.
@@ -212,13 +213,30 @@ async def _post(
             timeout=_TIMEOUT,
             follow_redirects=False,
         )
+    # Per-call timeout override (v1.6 R5 fix; the R2 fix tried to
+    # pass a dict via ``extensions["timeout"]`` but httpx 0.28+
+    # silently ignores that shape -- verified at runtime, the
+    # timeout never fired. The correct surface in httpx 0.28+ is
+    # to pass ``httpx.Timeout`` via the ``timeout`` kwarg on
+    # ``build_request`` itself; the client picks it up from the
+    # request's extensions['timeout'] which the SDK populates as
+    # a Timeout object, not a dict.
+    request_extensions: dict[str, Any] = dict(extensions) if extensions else {}
+    build_kwargs: dict[str, Any] = dict(kwargs)
+    if timeout is not None:
+        timeout_obj = (
+            timeout if isinstance(timeout, httpx.Timeout)
+            else httpx.Timeout(float(timeout))
+        )
+        build_kwargs["timeout"] = timeout_obj
+
     try:
         req = client_owner.build_request(
             "POST",
             request_url,
             headers=headers,
-            extensions=extensions or None,
-            **kwargs,
+            extensions=request_extensions or None,
+            **build_kwargs,
         )
         resp = await client_owner.send(req, stream=True)
         try:
@@ -1506,6 +1524,246 @@ async def deliver_discord(
 
 
 # ---------------------------------------------------------------------------
+# Microsoft Teams (Incoming Webhook -- classic O365 connector or
+# the newer Workflows / Power Automate webhook)
+# ---------------------------------------------------------------------------
+#
+# Teams accepts three different webhook URL families today, and
+# Microsoft is mid-transition between them. Operators in the wild
+# will be using any of:
+#
+#   1. Classic O365 Connectors -- ``outlook.office.com/webhook/...``
+#      (being deprecated; some tenants still issue them)
+#   2. Workflow webhooks       -- ``<tenant>.webhook.office.com/...``
+#      (current recommended path for new connectors)
+#   3. Power Automate flows    -- ``prod-NN-<region>.logic.azure.com/...``
+#      (the underlying platform for #2; operators who provision via
+#      Power Automate directly land here)
+#
+# We allow all three rather than host-locking to one (which would
+# break legitimate operators) and rely on the SSRF helpers in
+# :func:`validate_webhook_url` to reject private IPs + bad schemes.
+# The host suffix check below stops a tenant admin from registering
+# a "Teams" channel pointing at an arbitrary HTTPS host and using
+# it as a data-exfil sink that LOOKS like Teams in the audit log
+# (same threat model as the Slack / Discord host locks).
+_TEAMS_ALLOWED_HOST_SUFFIXES: tuple[str, ...] = (
+    ".webhook.office.com",   # workflow webhooks (current)
+    ".logic.azure.com",      # power automate (underlying platform)
+)
+_TEAMS_ALLOWED_HOSTS_EXACT: frozenset[str] = frozenset({
+    "outlook.office.com",    # classic O365 connector (legacy)
+})
+
+
+def _teams_host_allowed(host: str) -> bool:
+    """True iff ``host`` is one of the three official Teams families.
+
+    Suffix-matched so a Microsoft-issued tenant subdomain like
+    ``contoso.webhook.office.com`` is accepted without an explicit
+    enumeration of every customer tenant. A trailing dot in the
+    hostname (legal FQDN form: ``outlook.office.com.``) is stripped
+    before comparison so it is not allowed to bypass the exact-match
+    set; Microsoft owns the underlying zone so blast radius is low,
+    but the stricter check keeps a future regex refactor honest.
+    """
+    lower = host.lower().rstrip(".")
+    if lower in _TEAMS_ALLOWED_HOSTS_EXACT:
+        return True
+    return any(lower.endswith(suffix) for suffix in _TEAMS_ALLOWED_HOST_SUFFIXES)
+
+
+def validate_teams_config(config: dict[str, Any]) -> str | None:
+    """Validate a Teams channel config dict.
+
+    Required: ``webhook_url`` pointing at one of the three official
+    Microsoft webhook families. Returns ``None`` when the config is
+    valid, or a human-readable error string otherwise.
+
+    The host-family check is enforced at config time AND again at
+    dispatch time inside :func:`deliver_teams` -- belt-and-braces
+    so a config edit that bypasses the validator (direct DB write)
+    still cannot fan out to an arbitrary host.
+    """
+    url = config.get("webhook_url", "")
+    if not isinstance(url, str) or not url.strip():
+        return "missing webhook_url"
+    try:
+        host = (urlparse(url).hostname or "").strip()
+    except Exception:  # noqa: BLE001
+        host = ""
+    if not host:
+        return "webhook_url has no resolvable host"
+    if not _teams_host_allowed(host):
+        return (
+            "Teams webhook_url must point at an official Microsoft host "
+            "(outlook.office.com, *.webhook.office.com, or "
+            "*.logic.azure.com). Use the generic webhook channel for "
+            "arbitrary HTTPS targets."
+        )
+    return None
+
+
+async def deliver_teams(
+    config: dict[str, Any],
+    payload: dict[str, Any],
+) -> DeliveryResult:
+    """POST an Adaptive Card message to a Microsoft Teams webhook.
+
+    Adaptive Cards are forward-compatible across both the classic
+    O365 connector endpoint and the newer Workflow / Power Automate
+    endpoints; using them means operators do not have to switch the
+    payload shape when Microsoft retires their classic connector.
+
+    Severity colours mirror the Slack / Discord schemes so a
+    notification feels visually consistent regardless of which
+    destination the operator picked. The card title encodes the
+    same trigger / state pair the other dispatchers surface.
+    """
+    webhook_url = config.get("webhook_url", "").strip()
+    if not webhook_url:
+        return DeliveryResult(
+            success=False,
+            error="Teams webhook URL is empty",
+        )
+
+    # SSRF protection -- same checks the generic webhook dispatcher runs.
+    ssrf_error = await validate_webhook_url(webhook_url)
+    if ssrf_error:
+        return DeliveryResult(
+            success=False,
+            error=f"blocked: {ssrf_error}",
+        )
+
+    # Host-family check (belt-and-braces -- the config validator also
+    # runs this on save).
+    try:
+        teams_host = (urlparse(webhook_url).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        teams_host = ""
+    if not _teams_host_allowed(teams_host):
+        return DeliveryResult(
+            success=False,
+            error=(
+                "teams webhook_url must point at an official Microsoft "
+                "webhook host (outlook.office.com, *.webhook.office.com, "
+                "*.logic.azure.com); use the generic webhook channel for "
+                "arbitrary HTTPS targets"
+            ),
+        )
+
+    trigger = payload.get("trigger", "notification")
+    task_name = payload.get("task_name", "")
+    priority = payload.get("priority", "normal")
+    state = payload.get("state", "")
+    task_id = payload.get("task_id", "")
+    exception = payload.get("exception")
+
+    # Adaptive Card colour scheme. Teams supports "default" /
+    # "accent" / "good" / "warning" / "attention" for container
+    # styles. Map z4j's priority semantics onto Teams' palette so
+    # the card actually carries visual weight in the inbox.
+    style = {
+        "critical": "attention",
+        "high": "warning",
+        "normal": "default",
+        "low": "default",
+    }.get(priority, "default")
+
+    facts: list[dict[str, str]] = []
+    if task_name:
+        facts.append({"title": "Task", "value": task_name})
+    if state:
+        facts.append({"title": "State", "value": str(state)})
+    facts.append({"title": "Priority", "value": priority})
+    if task_id:
+        facts.append({"title": "ID", "value": task_id[:12]})
+
+    card_body: list[dict[str, Any]] = [
+        {
+            "type": "Container",
+            "style": style,
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": f"z4j: {trigger}",
+                    "weight": "Bolder",
+                    "size": "Large",
+                    "wrap": True,
+                },
+            ],
+        },
+        {
+            "type": "FactSet",
+            "facts": facts,
+        },
+    ]
+
+    if exception:
+        # Teams Adaptive Cards render fenced code with a monospaced
+        # font when ``fontType`` is ``Monospace``. Trim long stacks
+        # at 1500 chars so the card stays inside Teams' 28KB body
+        # cap with margin for the rest of the payload.
+        #
+        # Security: an attacker-controlled exception message
+        # containing literal backticks could close the fence and
+        # inject Markdown that renders as links / mentions in the
+        # recipient's Teams client (content-spoofing). Replace
+        # triple-backticks with a visually similar but inert
+        # sequence before embedding.
+        safe_exc = str(exception).replace("```", "'''")[:1500]
+        card_body.append({
+            "type": "TextBlock",
+            "text": f"```\n{safe_exc}\n```",
+            "wrap": True,
+            "fontType": "Monospace",
+            "isSubtle": True,
+        })
+
+    body = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "type": "AdaptiveCard",
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "version": "1.4",
+                    "body": card_body,
+                },
+            },
+        ],
+    }
+
+    try:
+        # Re-validate + pin at dispatch time (same rationale as Slack
+        # / Discord -- DNS could change between save and delivery).
+        err, safe_ip = await resolve_and_pin(webhook_url)
+        if err is not None:
+            return DeliveryResult(
+                success=False,
+                error=f"unsafe teams URL at dispatch: {err}",
+            )
+        resp = await _post(
+            webhook_url,
+            json=body,
+            headers={"Content-Type": "application/json"},
+            pin_ip=safe_ip,
+        )
+        # Classic O365 connector returns 200 with body "1" on success.
+        # Workflow / Power Automate endpoints return 200 or 202 with a
+        # JSON body. Accept the 2xx range and let the caller see the
+        # actual code + body in the delivery log.
+        return DeliveryResult(
+            success=200 <= resp.status_code < 300,
+            status_code=resp.status_code,
+            response_body=resp.text[:500],
+        )
+    except Exception as exc:  # noqa: BLE001
+        return DeliveryResult(success=False, error=str(exc)[:500])
+
+
+# ---------------------------------------------------------------------------
 # Dispatch router
 # ---------------------------------------------------------------------------
 
@@ -1517,6 +1775,7 @@ CHANNEL_DISPATCHERS = {
     "telegram": deliver_telegram,
     "pagerduty": deliver_pagerduty,
     "discord": deliver_discord,
+    "teams": deliver_teams,
 }
 
 
@@ -1527,12 +1786,14 @@ __all__ = [
     "deliver_email",
     "deliver_pagerduty",
     "deliver_slack",
+    "deliver_teams",
     "deliver_telegram",
     "deliver_webhook",
     "set_allow_http_webhooks",
     "set_shared_client",
     "validate_discord_config",
     "validate_pagerduty_config",
+    "validate_teams_config",
     "validate_webhook_headers",
     "validate_webhook_url",
 ]

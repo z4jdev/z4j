@@ -211,6 +211,13 @@ export function AppSidebar() {
                     collapsed={collapsed}
                   />
                 </li>
+                <li>
+                  <NavLink
+                    item={{ label: "Activity", to: "/activity", icon: History }}
+                    slug={fallbackSlug}
+                    collapsed={collapsed}
+                  />
+                </li>
               </ul>
             </>
           )}

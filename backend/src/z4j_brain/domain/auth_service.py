@@ -219,6 +219,7 @@ class AuthService:
         password_raw: str,
         ip: str,
         user_agent: str | None,
+        remember_me: bool = False,
     ) -> SessionRow:
         """Authenticate a user and mint a session.
 
@@ -292,8 +293,18 @@ class AuthService:
         from z4j_brain.auth.sessions import generate_csrf_token
 
         csrf = generate_csrf_token()
+        # "Keep me signed in" picks the longer lifetime and (later,
+        # in is_live()) skips the idle timeout. Homelab installs
+        # behind a trusted internal IP get to stop logging in every
+        # 30 minutes; standard installs keep the default 7 days +
+        # 30-minute idle.
+        lifetime_seconds = (
+            self._settings.session_remember_me_lifetime_seconds
+            if remember_me
+            else self._settings.session_absolute_lifetime_seconds
+        )
         expires_at = datetime.now(UTC) + timedelta(
-            seconds=self._settings.session_absolute_lifetime_seconds,
+            seconds=lifetime_seconds,
         )
         session_row = await sessions.create(
             user_id=user.id,
@@ -430,10 +441,32 @@ class AuthService:
         if not user.is_active:
             await sessions.revoke(session_row.id, reason="deactivated")
             return None
+        # "Keep me signed in" sessions get an idle-check bypass:
+        # the row's expires_at - issued_at picks the remember-me
+        # lifetime instead of the standard absolute lifetime, so we
+        # can detect them here without adding a DB column. For
+        # those, set the effective idle timeout to the full session
+        # lifetime so the idle predicate cannot trip before the
+        # absolute expiry does. Absolute lifetime still wins.
+        lifetime_seconds = int(
+            (
+                aware_utc(session_row.expires_at)
+                - aware_utc(session_row.issued_at)
+            ).total_seconds(),
+        )
+        remember_me_seconds = (
+            self._settings.session_remember_me_lifetime_seconds
+        )
+        is_remembered = lifetime_seconds >= remember_me_seconds
+        effective_idle = (
+            lifetime_seconds + 1
+            if is_remembered
+            else self._settings.session_idle_timeout_seconds
+        )
         if not is_session_live(
             session_row,
             now=datetime.now(UTC),
-            idle_timeout_seconds=self._settings.session_idle_timeout_seconds,
+            idle_timeout_seconds=effective_idle,
             user_password_changed_at=user.password_changed_at,
         ):
             return None

@@ -29,10 +29,97 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import event as _sa_event
+from sqlalchemy.orm import Session as _SyncSession
+
+logger = logging.getLogger("z4j.brain.domain.audit_service")
+
+
+#: Session.info key under which AuditService stages pending forwarder
+#: payloads. The dict-of-(payload, hooks) tuples is drained by the
+#: ``after_commit`` listener installed at module-load below; an
+#: ``after_rollback`` listener clears the staging so a rolled-back
+#: transaction never forwards. (v1.6 audit C6.)
+_PENDING_KEY: str = "_z4j_pending_audit_forwards"
+
+
+def _fire_pending_audit_forwards(session: _SyncSession) -> None:
+    """Drain the session's pending-forward list and fire hooks."""
+    items = session.info.pop(_PENDING_KEY, None) or []
+    for payload, hooks in items:
+        for hook in hooks:
+            try:
+                hook(payload)
+            except Exception:  # noqa: BLE001
+                # v1.6 Round 5 I: route the failure through the
+                # swallowed-exceptions counter so the Grafana alert
+                # picks it up alongside the other audit-fwd sites.
+                try:
+                    from z4j_brain.api.metrics import record_swallowed
+                    record_swallowed("audit_service", "post_commit_hook")
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "z4j audit_service: post-commit hook raised; "
+                    "audit row written, mirror dropped",
+                    exc_info=True,
+                )
+
+
+def _drop_pending_audit_forwards(
+    session: _SyncSession, *_unused: Any,
+) -> None:
+    """Clear the pending-forward list on rollback so phantom rows
+    are never forwarded. (v1.6 audit C6.)
+
+    Accepts ``*_unused`` because SQLAlchemy's ``after_soft_rollback``
+    event passes ``(session, previous_transaction)`` while
+    ``after_rollback`` passes only ``(session,)``. Both fire on the
+    same listener; the extra positional is silently ignored.
+    """
+    session.info.pop(_PENDING_KEY, None)
+
+
+# Register once at import time. Idempotent: registering the same
+# listener twice on the Session class raises, so guard via a module
+# flag.
+_AUDIT_EVENT_LISTENERS_REGISTERED: bool = False
+
+
+def _ensure_session_listeners_registered() -> None:
+    global _AUDIT_EVENT_LISTENERS_REGISTERED
+    if _AUDIT_EVENT_LISTENERS_REGISTERED:
+        return
+    _sa_event.listen(_SyncSession, "after_commit", _fire_pending_audit_forwards)
+    _sa_event.listen(_SyncSession, "after_rollback", _drop_pending_audit_forwards)
+    # Some async test setups create + close sessions in the same
+    # tick; ``after_soft_rollback`` covers nested-savepoint paths.
+    _sa_event.listen(
+        _SyncSession, "after_soft_rollback", _drop_pending_audit_forwards,
+    )
+    _AUDIT_EVENT_LISTENERS_REGISTERED = True
+
+
+_ensure_session_listeners_registered()
+
+
+def _build_forward_payload(row: Any) -> dict[str, Any]:
+    """Eagerly snapshot an :class:`AuditLog` row into the wire shape
+    audit_forwarder expects. Called INSIDE the writing transaction
+    so ORM attribute access does not trigger lazy-load from inside
+    a post-commit hook. (v1.6 audit H11.)
+    """
+    # Import locally to avoid a domain<->infrastructure import cycle
+    # (audit_forwarder imports notifications.channels for _post).
+    from z4j_brain.domain.audit_forwarder import row_to_payload
+    return row_to_payload(row)
+
 
 if TYPE_CHECKING:
     from z4j_brain.persistence.models import AuditLog
@@ -117,7 +204,7 @@ class AuditService:
     for both compliance and debugging.
     """
 
-    __slots__ = ("_secret", "_verify_secrets")
+    __slots__ = ("_secret", "_verify_secrets", "_post_write_hooks")
 
     def __init__(self, settings: Settings) -> None:
         self._secret: bytes = settings.secret.get_secret_value().encode("utf-8")
@@ -126,6 +213,46 @@ class AuditService:
         self._verify_secrets: list[bytes] = list(
             settings.all_secrets_for_verification(),
         )
+        # Post-commit hooks fire AFTER a committed transaction
+        # successfully writes audit rows (via the SQLAlchemy
+        # ``after_commit`` listener installed at module load). Each
+        # hook receives an eagerly-materialised dict payload (see
+        # ``_build_forward_payload``), NOT the ORM row, so the hook
+        # cannot accidentally trigger an out-of-transaction lazy
+        # load. Hooks must be non-blocking; an exception is caught
+        # and logged + ``record_swallowed("audit_service",
+        # "post_commit_hook")`` so the existing Grafana alert
+        # surfaces the failure.
+        self._post_write_hooks: list[Any] = []
+
+    def register_post_write_hook(self, hook: Any) -> None:
+        """Add a callable invoked after a committing transaction
+        successfully writes an audit row.
+
+        ``hook`` is called as ``hook(payload_dict)`` from the
+        SQLAlchemy ``after_commit`` event listener. The payload is
+        an eagerly-materialised dict (no ORM lazy-load can fire
+        from inside the hook), and the hook is only called when
+        the writing transaction actually commits -- a rollback
+        clears the staged payload and the hook is NEVER called for
+        that row. (v1.6 audit C6 + H11.)
+
+        Hooks must be non-blocking and must never raise; exceptions
+        are caught and logged at WARNING.
+        """
+        self._post_write_hooks.append(hook)
+
+    def unregister_post_write_hook(self, hook: Any) -> bool:
+        """Drop a previously-registered hook. Returns True if a hook
+        was removed. Used at lifespan teardown so rows written
+        DURING shutdown teardown do not get queued into a forwarder
+        whose drain task is about to be cancelled. (v1.6 audit H9.)
+        """
+        try:
+            self._post_write_hooks.remove(hook)
+            return True
+        except ValueError:
+            return False
 
     async def record(
         self,
@@ -183,7 +310,7 @@ class AuditService:
             prev_row_hmac=prev_row_hmac,
         )
         row_hmac = self._compute_hmac(entry)
-        return await repo.insert(
+        inserted = await repo.insert(
             id=row_id,
             action=entry.action,
             target_type=entry.target_type,
@@ -201,6 +328,34 @@ class AuditService:
             prev_row_hmac=prev_row_hmac,
             occurred_at=entry.occurred_at,
         )
+        # Stage the row for post-COMMIT fan-out to registered hooks.
+        # Two-step design (v1.6 audit C6 + H11):
+        #   1. eagerly materialise the row into a plain dict so no
+        #      ORM lazy-load can fire from inside the hook;
+        #   2. push the dict onto ``session.info`` keyed under
+        #      ``_PENDING_KEY``. The module-level ``after_commit``
+        #      listener drains and fires hooks ONLY on successful
+        #      commit; the ``after_rollback`` listener drops the
+        #      staged dict so a rolled-back transaction never
+        #      forwards.
+        if self._post_write_hooks:
+            try:
+                payload = _build_forward_payload(inserted)
+                # ``repo.session`` is the AsyncSession; its
+                # ``sync_session`` is the SQLAlchemy Session the
+                # event listeners are bound to.
+                async_session = getattr(repo, "session", None)
+                sync_session = getattr(async_session, "sync_session", None)
+                if sync_session is not None:
+                    pending = sync_session.info.setdefault(_PENDING_KEY, [])
+                    pending.append((payload, list(self._post_write_hooks)))
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "z4j audit_service: failed to stage post-commit "
+                    "hook payload; audit row written, mirror dropped",
+                    exc_info=True,
+                )
+        return inserted
 
     def verify_row(self, row: AuditLog) -> bool:
         """Recompute the HMAC for ``row`` and compare it constant-time.
@@ -243,17 +398,30 @@ class AuditService:
         """Walk a sequence of rows and verify the HMAC chain.
 
         Expects rows ordered by insert order (``id`` UUIDv7 or
-        ``occurred_at`` ascending). Returns ``(ok, reasons)``
-        where ``reasons`` is a list of human-readable descriptions
-        of any chain break, "row X: prev_row_hmac mismatch" or
-        "row X: bad row_hmac".
+        ``occurred_at`` ascending). The input MUST start at the
+        genesis row (the first row ever written, which has
+        ``prev_row_hmac IS NULL``); otherwise a prefix-deletion
+        attack would pass silently because the chain would simply
+        re-anchor at whatever the caller fed in. Returns
+        ``(ok, reasons)`` where ``reasons`` is a list of human-
+        readable descriptions of any chain break.
 
-        A clean chain returns ``(True, [])``. A single deleted row
-        produces a visible mismatch at the next chained row -
-        that's the tamper-evidence the chain is designed to surface.
+        A clean, fully-anchored chain returns ``(True, [])``.
         """
         reasons: list[str] = []
         prev_hmac: str | None = None
+        # Genesis-row anchor: the FIRST row in the input must have
+        # prev_row_hmac=None. Without this check, an operator with
+        # DB write access who deletes the first N rows would produce
+        # a "valid" trimmed chain because the verifier silently
+        # re-anchors at whatever row is fed in first. (1.6.0
+        # round-2 audit High-3.)
+        if rows and rows[0].prev_row_hmac is not None:
+            reasons.append(
+                f"row {rows[0].id}: input does not start at the "
+                f"genesis row (prev_row_hmac is not NULL); the "
+                f"chain prefix may have been truncated",
+            )
         for row in rows:
             if not self.verify_row(row):
                 reasons.append(

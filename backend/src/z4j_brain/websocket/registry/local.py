@@ -173,6 +173,29 @@ class LocalRegistry:
             agent_was_known=True,
         )
 
+    def fleet_snapshot(self) -> dict[str, dict[str, int]]:
+        """Return per-project agent + worker counts for this process.
+
+        Synchronous + lock-free (reads dict snapshots without taking
+        ``self._lock``). The result is point-in-time and slightly
+        racy under heavy register/unregister churn, which is fine
+        for a Prometheus scrape-time sampler. Multi-process
+        deployments (PostgresNotifyRegistry) only see this process's
+        view; the operator sums across replicas in PromQL.
+        """
+        # Copy under no lock; dict iteration on CPython is GIL-safe
+        # enough for a metrics snapshot where slight skew is OK.
+        agents_by_project: dict[str, int] = {}
+        workers_by_project: dict[str, int] = {}
+        for agent_id, workers in list(self._connections.items()):
+            project_id = self._project_for_agent.get(agent_id)
+            if project_id is None:
+                continue
+            key = str(project_id)
+            agents_by_project[key] = agents_by_project.get(key, 0) + 1
+            workers_by_project[key] = workers_by_project.get(key, 0) + len(workers)
+        return {"agents": agents_by_project, "workers": workers_by_project}
+
     async def start(self) -> None:
         # No background tasks. The lifespan call still goes through
         # so the brain factory can treat the two registries

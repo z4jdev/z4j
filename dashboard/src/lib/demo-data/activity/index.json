@@ -1,0 +1,137 @@
+{
+  "items": [
+    {
+      "id": "01900000-0000-4001-a000-000000000001",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "project_slug": "django.example.com",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "task.failed",
+      "target_type": "task",
+      "target_id": "celery-task-d4f2a91c",
+      "result": "success",
+      "outcome": "allow",
+      "metadata": {
+        "task_name": "emails.send_scheduled_campaigns",
+        "exception": "ConnectionError: smtp.example.com:587 connection refused"
+      },
+      "source_ip": "203.0.113.10",
+      "occurred_at": "2026-05-13T10:42:18.000000+00:00"
+    },
+    {
+      "id": "01900000-0000-4001-a000-000000000002",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "project_slug": "fastapi.example.com",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "user.mfa_verified",
+      "target_type": "user",
+      "target_id": "admin@example.com",
+      "result": "success",
+      "outcome": "allow",
+      "metadata": {"method": "totp"},
+      "source_ip": "203.0.113.10",
+      "occurred_at": "2026-05-13T10:39:01.000000+00:00"
+    },
+    {
+      "id": "01900000-0000-4001-a000-000000000003",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "project_slug": "default",
+      "user_id": "00000000-0000-4000-8000-000000000002",
+      "action": "subscription.created",
+      "target_type": "subscription",
+      "target_id": "00000000-0000-4000-7000-000000000010",
+      "result": "success",
+      "outcome": "allow",
+      "metadata": {
+        "trigger": "task.failed",
+        "channel_type": "teams",
+        "channel_name": "Ops on-call"
+      },
+      "source_ip": "203.0.113.42",
+      "occurred_at": "2026-05-13T10:35:44.000000+00:00"
+    },
+    {
+      "id": "01900000-0000-4001-a000-000000000004",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "project_slug": "django.example.com",
+      "user_id": "00000000-0000-4000-8000-000000000003",
+      "action": "command.issued",
+      "target_type": "command",
+      "target_id": "00000000-0000-4000-6000-000000000aaa",
+      "result": "success",
+      "outcome": "allow",
+      "metadata": {
+        "action": "retry",
+        "task_id": "celery-task-d4f2a91c",
+        "by_user": "ops@example.com"
+      },
+      "source_ip": "203.0.113.42",
+      "occurred_at": "2026-05-13T10:33:55.000000+00:00"
+    },
+    {
+      "id": "01900000-0000-4001-a000-000000000005",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "project_slug": "fastapi.example.com",
+      "user_id": "00000000-0000-4000-8000-000000000003",
+      "action": "notification.dispatched",
+      "target_type": "notification_delivery",
+      "target_id": "00000000-0000-4000-6000-000000000ddd",
+      "result": "success",
+      "outcome": "allow",
+      "metadata": {
+        "trigger": "agent.offline",
+        "channel_type": "slack",
+        "response_code": 200
+      },
+      "source_ip": "203.0.113.10",
+      "occurred_at": "2026-05-13T10:30:12.000000+00:00"
+    },
+    {
+      "id": "01900000-0000-4001-a000-000000000006",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "project_slug": "django.example.com",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "channel.created",
+      "target_type": "notification_channel",
+      "target_id": "00000000-0000-4000-6000-000000000eee",
+      "result": "success",
+      "outcome": "allow",
+      "metadata": {
+        "type": "teams",
+        "name": "Ops on-call",
+        "destination_summary": "contoso.webhook.office.com (workflow)"
+      },
+      "source_ip": "203.0.113.42",
+      "occurred_at": "2026-05-13T10:25:48.000000+00:00"
+    },
+    {
+      "id": "01900000-0000-4001-a000-000000000007",
+      "project_id": null,
+      "project_slug": null,
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "auth.login",
+      "target_type": "session",
+      "target_id": "00000000-0000-4000-5000-000000000001",
+      "result": "success",
+      "outcome": "allow",
+      "metadata": {"method": "password+mfa"},
+      "source_ip": "203.0.113.10",
+      "occurred_at": "2026-05-13T10:24:00.000000+00:00"
+    },
+    {
+      "id": "01900000-0000-4001-a000-000000000008",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "project_slug": "default",
+      "user_id": "00000000-0000-4000-8000-000000000002",
+      "action": "schedule.fired",
+      "target_type": "schedule",
+      "target_id": "00000000-0000-4000-4000-000000000abc",
+      "result": "success",
+      "outcome": "allow",
+      "metadata": {"task_name": "reports.daily_rollup", "kind": "cron"},
+      "source_ip": "203.0.113.42",
+      "occurred_at": "2026-05-13T10:00:00.000000+00:00"
+    }
+  ],
+  "next_before_cursor": null,
+  "newest_cursor": "2026-05-13T10:42:18.000000+00:00|01900000-0000-4001-a000-000000000001"
+}

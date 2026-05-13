@@ -150,6 +150,17 @@ const ROUTES: RouteHandler[] = [
   { method: "GET", pattern: /^\/api\/v1\/home\/summary$/, handler: serveJson("home/summary.json") },
   { method: "GET", pattern: /^\/api\/v1\/home\/recent-failures/, handler: serveJson("home/recent-failures.json") },
 
+  // v1.6: Live Activity Feed. Cross-project audit-log timeline.
+  // Demo data is a seeded snapshot; live polling on demo.z4j.dev
+  // returns the same N rows on every refresh which is fine because
+  // the visitor's session is short and the page renders rich content
+  // immediately. (Round 4 Frontend H1.)
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/activity/,
+    handler: serveJson("activity/index.json"),
+  },
+
   // Projects (collection + per-project detail)
   { method: "GET", pattern: /^\/api\/v1\/projects$/, handler: serveJson("projects/index.json") },
   {

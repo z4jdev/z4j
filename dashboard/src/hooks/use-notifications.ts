@@ -41,7 +41,8 @@ export type ChannelType =
   | "slack"
   | "telegram"
   | "pagerduty"
-  | "discord";
+  | "discord"
+  | "teams";
 
 export type TriggerType =
   | "task.failed"

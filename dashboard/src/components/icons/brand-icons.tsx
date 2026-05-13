@@ -126,3 +126,23 @@ export function PagerDutyIcon({
     </svg>
   );
 }
+
+export function MicrosoftTeamsIcon({
+  size = 16,
+  className,
+  colored = false,
+}: IconProps) {
+  // Microsoft Teams' stylized "T" mark.
+  return (
+    <svg
+      {...svgProps(size)}
+      className={className}
+      fill={colored ? undefined : "currentColor"}
+    >
+      <path
+        d="M20.625 9.094a3.469 3.469 0 1 0 0-6.938 3.469 3.469 0 0 0 0 6.938zm-4.875 1.687a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zm5.531 1.219h-4.594v6.844c.005.434-.097.863-.297 1.25l-.094.187h2.953a2.156 2.156 0 0 0 2.156-2.156V13.97c0-.532-.43-.969-.969-.969h-.156zm-5.531 0H1.969A.97.97 0 0 0 1 13v8.625c0 1.193.969 2.156 2.156 2.156h8.875a2.156 2.156 0 0 0 2.156-2.156V13a.97.97 0 0 0-.969-.969h-.469zM10.5 16.281H8.094v6.281H6.422v-6.281H4.031V14.75H10.5v1.531z"
+        fill={colored ? "#5059C9" : undefined}
+      />
+    </svg>
+  );
+}

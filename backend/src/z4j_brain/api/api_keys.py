@@ -23,6 +23,7 @@ from z4j_brain.api.deps import (
     get_session,
     get_settings,
     require_csrf,
+    require_fresh_mfa,
 )
 
 if TYPE_CHECKING:
@@ -239,7 +240,7 @@ async def list_api_keys(
     "",
     response_model=ApiKeyCreated,
     status_code=201,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def create_api_key(
     body: CreateApiKeyRequest,

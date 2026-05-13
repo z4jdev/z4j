@@ -463,12 +463,32 @@ async def ws_agent(websocket: WebSocket) -> None:
                 finally:
                     ingest_queue.task_done()
 
-        ingest_tasks: list[asyncio.Task[None]] = [
-            asyncio.create_task(
-                _ingest_worker(),
-                name=f"z4j_ingest_{agent_id}",
-            ),
-        ]
+        def _log_ingest_task_failure(t: "asyncio.Task[None]") -> None:
+            # Without this, a silent crash inside _ingest_worker leaves
+            # the recv loop happily filling the queue while no one
+            # drains it, wedging the connection until idle timeout
+            # fires. Surfacing the exception in the gateway log gives
+            # operators a fighting chance of noticing. (1.6.0 round-2
+            # audit Medium-2.)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is None:
+                return
+            logger.error(
+                "websocket.ingest_task_crashed",
+                agent_id=str(agent_id),
+                error=type(exc).__name__,
+                error_message=str(exc),
+                exc_info=exc,
+            )
+
+        _ingest_task = asyncio.create_task(
+            _ingest_worker(),
+            name=f"z4j_ingest_{agent_id}",
+        )
+        _ingest_task.add_done_callback(_log_ingest_task_failure)
+        ingest_tasks: list[asyncio.Task[None]] = [_ingest_task]
 
         try:
             while True:

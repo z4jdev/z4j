@@ -6,16 +6,9 @@ import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { useLogin } from "@/hooks/use-auth";
 import { api, ApiError } from "@/lib/api";
 import type { SetupStatusResponse } from "@/lib/api-types";
@@ -107,6 +100,7 @@ function LoginPage() {
   const [email, setEmail] = useState(IS_DEMO ? DEMO_EMAIL : "");
   const [password, setPassword] = useState(IS_DEMO ? DEMO_PASSWORD : "");
   const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState<{
     title: string;
     description: string;
@@ -119,7 +113,19 @@ function LoginPage() {
     // running.
     setError(null);
     try {
-      await login.mutateAsync({ email, password });
+      const result = await login.mutateAsync({
+        email,
+        password,
+        remember_me: rememberMe,
+      });
+      // If MFA is required, the brain has minted the session but
+      // sessions.mfa_verified_at is NULL. Route to the second-step
+      // page; the sensitive-action gate blocks any other endpoint
+      // until /auth/mfa/verify is called.
+      if ((result as { mfa_required?: boolean }).mfa_required) {
+        navigate({ to: "/login/mfa" });
+        return;
+      }
       toast.success("welcome back");
       navigate({ to: "/" });
     } catch (err) {
@@ -128,100 +134,138 @@ function LoginPage() {
   }
 
   return (
-    <div className="relative grid min-h-screen w-full place-items-center bg-background p-6">
+    <div className="relative grid min-h-screen w-full place-items-center bg-muted/30 p-6">
       <div className="absolute right-4 top-4">
         <ThemeToggle />
       </div>
-      <div className="w-full max-w-sm space-y-6">
+
+      <div className="w-full max-w-sm space-y-8">
+        {/* Brand mark above the card. Same horizontal layout the
+            authenticated sidebar uses (logo box on the left, name
+            stacked on the right) so the user does not feel like
+            they crossed into a different app between login and
+            the dashboard. Size is a step up from the sidebar so
+            it has presence on an otherwise empty page. */}
         <div className="flex items-center justify-center gap-3">
-          <div className="flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-lg shadow-primary/20">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
             <Z4jMark className="size-6" />
           </div>
-          <div>
-            <h1 className="text-xl font-semibold leading-none">z4j</h1>
-            <p className="text-xs text-muted-foreground">control plane</p>
+          <div className="flex min-w-0 flex-col leading-tight">
+            <span className="text-sm font-semibold">z4j</span>
+            <span className="text-xs text-muted-foreground">
+              control plane
+            </span>
           </div>
         </div>
 
-        <Card className="border-border/60 shadow-xl shadow-black/5">
-          <CardHeader className="pb-4">
-            <CardTitle>Sign in</CardTitle>
-            <CardDescription>
-              Use your dashboard credentials to access the control plane.
-            </CardDescription>
-          </CardHeader>
-          <form onSubmit={onSubmit}>
-            <CardContent className="space-y-4">
-              {error && (
-                <Alert variant="destructive" role="alert" aria-live="polite">
-                  <AlertCircle />
-                  <AlertTitle>{error.title}</AlertTitle>
-                  <AlertDescription>
-                    <p>{error.description}</p>
-                  </AlertDescription>
-                </Alert>
-              )}
-              <div className="space-y-2">
-                <Label htmlFor="email">Email</Label>
+        <div className="rounded-xl border border-border bg-card p-8 shadow-sm">
+          <div className="mb-6 space-y-1.5">
+            <h1 className="text-xl font-semibold tracking-tight">
+              Welcome back
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              Sign in to continue to your dashboard.
+            </p>
+          </div>
+
+          <form onSubmit={onSubmit} className="space-y-5">
+            {error && (
+              <Alert variant="destructive" role="alert" aria-live="polite">
+                <AlertCircle />
+                <AlertTitle>{error.title}</AlertTitle>
+                <AlertDescription>
+                  <p>{error.description}</p>
+                </AlertDescription>
+              </Alert>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                type="email"
+                autoComplete="email"
+                required
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  // Editing either field is an implicit "I know,
+                  // I'm trying again" - drop the stale banner so
+                  // the form looks clean while the user re-types.
+                  if (error) setError(null);
+                }}
+                placeholder="you@example.com"
+                className="h-11"
+                aria-invalid={error ? true : undefined}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              {/* No "Forgot password?" link on purpose. A legitimate
+                  operator who has lost their admin password already
+                  has shell on the brain host and runs
+                  ``z4j changepassword``; signposting the reset path
+                  on the login screen mostly helps attackers
+                  reconnoitre the recovery surface. Quiet is safer. */}
+              <div className="relative">
                 <Input
-                  id="email"
-                  type="email"
-                  autoComplete="email"
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
                   required
-                  value={email}
+                  value={password}
                   onChange={(e) => {
-                    setEmail(e.target.value);
-                    // Editing either field is an implicit "I know,
-                    // I'm trying again" - drop the stale banner so
-                    // the form looks clean while the user re-types.
+                    setPassword(e.target.value);
                     if (error) setError(null);
                   }}
-                  placeholder="you@example.com"
+                  placeholder="enter your password"
+                  className="h-11 pr-10"
                   aria-invalid={error ? true : undefined}
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+                  aria-label={
+                    showPassword ? "Hide password" : "Show password"
+                  }
+                >
+                  {showPassword ? (
+                    <EyeOff className="size-4" />
+                  ) : (
+                    <Eye className="size-4" />
+                  )}
+                </button>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="password">Password</Label>
-                <div className="relative">
-                  <Input
-                    id="password"
-                    type={showPassword ? "text" : "password"}
-                    autoComplete="current-password"
-                    required
-                    value={password}
-                    onChange={(e) => {
-                      setPassword(e.target.value);
-                      if (error) setError(null);
-                    }}
-                    placeholder="enter your password"
-                    className="pr-10"
-                    aria-invalid={error ? true : undefined}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                    aria-label={showPassword ? "Hide password" : "Show password"}
-                  >
-                    {showPassword ? (
-                      <EyeOff className="size-4" />
-                    ) : (
-                      <Eye className="size-4" />
-                    )}
-                  </button>
-                </div>
-              </div>
-            </CardContent>
-            <CardFooter className="pt-2">
-              <Button type="submit" className="w-full" disabled={login.isPending}>
-                {login.isPending && (
-                  <Loader2 className="size-4 animate-spin" />
-                )}
-                Sign in
-              </Button>
-            </CardFooter>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="remember-me"
+                checked={rememberMe}
+                onCheckedChange={(v) => setRememberMe(v === true)}
+              />
+              <Label
+                htmlFor="remember-me"
+                className="text-sm font-normal text-muted-foreground"
+              >
+                Keep me signed in for 30 days
+              </Label>
+            </div>
+
+            <Button
+              type="submit"
+              className="mt-1 h-11 w-full text-sm font-medium"
+              disabled={login.isPending}
+            >
+              {login.isPending && (
+                <Loader2 className="size-4 animate-spin" />
+              )}
+              Sign in
+            </Button>
           </form>
-        </Card>
+        </div>
 
         {IS_DEMO && (
           <div
@@ -229,8 +273,8 @@ function LoginPage() {
             className="rounded-lg border border-yellow-300/60 bg-yellow-50 px-4 py-3 text-xs leading-relaxed text-yellow-950 dark:border-yellow-400/40 dark:bg-yellow-400/10 dark:text-yellow-100"
           >
             <p>
-              <strong className="font-semibold">DEMO MODE</strong> -- credentials
-              are pre-filled (
+              <strong className="font-semibold">DEMO MODE</strong> --
+              credentials are pre-filled (
               <code className="rounded bg-yellow-200/60 px-1 font-mono dark:bg-yellow-400/20">
                 demo@example.com
               </code>{" "}
@@ -238,7 +282,8 @@ function LoginPage() {
               <code className="rounded bg-yellow-200/60 px-1 font-mono dark:bg-yellow-400/20">
                 demo
               </code>
-              ). Click Sign in to continue. No real account, no real services.{" "}
+              ). Click Sign in to continue. No real account, no real
+              services.{" "}
               <a
                 href="https://z4j.com/install/"
                 target="_blank"
@@ -251,7 +296,6 @@ function LoginPage() {
             </p>
           </div>
         )}
-
       </div>
     </div>
   );

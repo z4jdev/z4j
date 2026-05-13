@@ -47,6 +47,9 @@ export interface UserMePublic extends UserPublic {
 export interface LoginRequest {
   email: string;
   password: string;
+  /** When true the brain mints a long-lived session (30 days) and
+   * skips the idle timeout for it. Default false. */
+  remember_me?: boolean;
 }
 
 export interface LoginResponse {

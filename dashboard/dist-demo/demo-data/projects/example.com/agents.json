@@ -4,7 +4,7 @@
     "project_id": "00000000-0000-4000-9000-000000000001",
     "name": "web-1",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": ["celery"],
     "scheduler_adapters": ["celery-beat"],
@@ -14,7 +14,7 @@
     "created_at_offset_s": -7776000,
     "is_outdated": false,
     "host_name": "web-1.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   },
   {
@@ -22,7 +22,7 @@
     "project_id": "00000000-0000-4000-9000-000000000001",
     "name": "worker-1",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": ["celery"],
     "scheduler_adapters": [],
@@ -32,7 +32,7 @@
     "created_at_offset_s": -7776000,
     "is_outdated": false,
     "host_name": "worker-1.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   },
   {
@@ -40,7 +40,7 @@
     "project_id": "00000000-0000-4000-9000-000000000001",
     "name": "beat-1",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "bare",
     "engine_adapters": [],
     "scheduler_adapters": ["celery-beat"],
@@ -50,7 +50,7 @@
     "created_at_offset_s": -7776000,
     "is_outdated": false,
     "host_name": "beat-1.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   }
 ]

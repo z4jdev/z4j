@@ -147,6 +147,52 @@ z4j_workers_online = Gauge(
     registry=registry,
 )
 
+
+#: Provider for the agents/workers gauges. Registered by ``main.py``
+#: once the BrainRegistry exists. Returns
+#: ``{"agents": {project_id_str: count, ...},
+#:    "workers": {project_id_str: count, ...}}``.
+#: Sampled at scrape time so per-WS connect/disconnect does not need
+#: a hot-path metric update.
+_fleet_gauge_provider: "Callable[[], dict[str, dict[str, int]]] | None" = None
+
+
+def register_fleet_gauge_provider(
+    provider: "Callable[[], dict[str, dict[str, int]]]",
+) -> None:
+    """Register the callable that reports current agent + worker
+    counts per project. The provider is invoked at every Prometheus
+    scrape; it should be cheap (read in-memory registry state, not a
+    DB query)."""
+    global _fleet_gauge_provider
+    _fleet_gauge_provider = provider
+
+
+def _refresh_fleet_gauges() -> None:
+    """Sample agents/workers per project at scrape time.
+
+    Clears prior labels first so a project that goes from N agents
+    to zero shows up as zero rather than the stale N. ``Gauge.clear``
+    drops every label permutation, then the loop re-sets only the
+    projects with current activity.
+    """
+    if _fleet_gauge_provider is None:
+        return
+    try:
+        snapshot = _fleet_gauge_provider()
+    except Exception:  # noqa: BLE001
+        record_swallowed("metrics", "fleet_gauges")
+        return
+    try:
+        z4j_agents_online.clear()
+        z4j_workers_online.clear()
+        for project, count in snapshot.get("agents", {}).items():
+            z4j_agents_online.labels(project=project).set(int(count))
+        for project, count in snapshot.get("workers", {}).items():
+            z4j_workers_online.labels(project=project).set(int(count))
+    except Exception:  # noqa: BLE001
+        record_swallowed("metrics", "fleet_gauges_apply")
+
 # -- Queues --
 
 z4j_queue_depth = Gauge(
@@ -543,12 +589,14 @@ async def metrics_endpoint(
     _refresh_inmemory_gauges()
     _refresh_self_watch_gauges()
     _refresh_leak_visibility_gauges()
+    _refresh_fleet_gauges()
     body = generate_latest(registry)
     return Response(content=body, media_type=CONTENT_TYPE_LATEST)
 
 
 __all__ = [
     "record_swallowed",
+    "register_fleet_gauge_provider",
     "register_inmemory_subsystem",
     "register_pool_gauge_provider",
     "register_self_watch_provider",

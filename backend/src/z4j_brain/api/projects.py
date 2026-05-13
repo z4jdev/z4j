@@ -26,6 +26,7 @@ from z4j_brain.api.deps import (
     get_settings,
     require_admin,
     require_csrf,
+    require_fresh_mfa,
 )
 from z4j_brain.errors import ConflictError, NotFoundError
 from z4j_brain.persistence.enums import ProjectRole
@@ -475,7 +476,7 @@ async def update_project(
 @router.delete(
     "/{slug}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def archive_project(
     slug: str,

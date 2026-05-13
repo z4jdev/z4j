@@ -45,6 +45,7 @@ from z4j_brain.api.deps import (
     get_settings,
     get_user_repo,
     require_csrf,
+    require_fresh_mfa,
 )
 from z4j_brain.domain.ip_rate_limit import (
     require_login_throttle,
@@ -53,6 +54,7 @@ from z4j_brain.domain.ip_rate_limit import (
 from z4j_brain.auth.csrf import csrf_cookie_kwargs, csrf_cookie_name
 from z4j_brain.auth.sessions import (
     SessionCookieCodec,
+    aware_utc,
     cookie_kwargs,
     cookie_name,
 )
@@ -91,6 +93,18 @@ class LoginRequest(BaseModel):
     # test fixtures.
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=256)
+    remember_me: bool = Field(
+        default=False,
+        description=(
+            "When True the minted session uses "
+            "``session_remember_me_lifetime_seconds`` (default 30 "
+            "days) instead of the standard absolute lifetime, and "
+            "the idle timeout is skipped. Intended for homelab and "
+            "single-operator installs where the dashboard sits on "
+            "a trusted internal IP and re-authenticating every 30 "
+            "minutes of idle is friction without security gain."
+        ),
+    )
 
     @field_validator("email")
     @classmethod
@@ -150,6 +164,15 @@ class UserMePublic(UserPublic):
 
 class LoginResponse(BaseModel):
     user: UserPublic
+    mfa_required: bool = Field(
+        default=False,
+        description=(
+            "True when the user has MFA enrolled AND a valid trust "
+            "cookie was NOT presented. The dashboard should route "
+            "to the MFA-verify page and POST /auth/mfa/verify before "
+            "calling any other endpoint."
+        ),
+    )
 
 
 class UpdateProfileRequest(BaseModel):
@@ -221,20 +244,32 @@ def _set_session_cookies(
     settings: "Settings",
     session_id: uuid.UUID,
     csrf_token: str,
+    max_age_seconds: int | None = None,
 ) -> None:
     """Set the session + csrf cookies on the response.
 
     Both cookies use the ``__Host-`` prefix in production for the
     secure-by-default cookie attributes. The csrf cookie is NOT
     HttpOnly so dashboard JS can read it and echo it as a header.
+
+    ``max_age_seconds`` overrides the default
+    ``session_absolute_lifetime_seconds`` so the cookie lifetime
+    tracks the actual session row (e.g. when the user checked
+    "Keep me signed in" at login the row's expires_at is 30 days
+    out and the cookie should match, not still report 7 days).
     """
     codec = SessionCookieCodec(settings)
+    cookie_max_age = (
+        max_age_seconds
+        if max_age_seconds is not None
+        else settings.session_absolute_lifetime_seconds
+    )
     response.set_cookie(
         cookie_name(environment=settings.environment),
         codec.encode(session_id),
         **cookie_kwargs(
             environment=settings.environment,
-            max_age_seconds=settings.session_absolute_lifetime_seconds,
+            max_age_seconds=cookie_max_age,
             samesite=settings.session_cookie_samesite,
         ),
     )
@@ -243,7 +278,7 @@ def _set_session_cookies(
         csrf_token,
         **csrf_cookie_kwargs(
             environment=settings.environment,
-            max_age_seconds=settings.session_absolute_lifetime_seconds,
+            max_age_seconds=cookie_max_age,
         ),
     )
 
@@ -318,6 +353,7 @@ async def login(
             password_raw=request_body.password,
             ip=ip,
             user_agent=user_agent or None,
+            remember_me=request_body.remember_me,
         )
     except _AuthErr:
         await db_session.commit()
@@ -327,13 +363,86 @@ async def login(
     user = await users.get(session_row.user_id)
     assert user is not None  # auth_service guarantees the row exists
 
+    # Cookie max_age tracks the session row's actual lifetime so a
+    # remember-me session does not expire from the browser earlier
+    # than the server still considers it valid. Coerce both
+    # datetimes through aware_utc because SQLite returns naive
+    # datetimes from the TIMESTAMPTZ columns; subtracting a naive
+    # from an aware datetime raises TypeError.
+    cookie_max_age = int(
+        (
+            aware_utc(session_row.expires_at)
+            - aware_utc(session_row.issued_at)
+        ).total_seconds(),
+    )
     _set_session_cookies(
         response,
         settings=settings,
         session_id=session_row.id,
         csrf_token=session_row.csrf_token,
+        max_age_seconds=cookie_max_age,
     )
-    return LoginResponse(user=_user_payload(user))
+
+    # MFA gate: if the user has MFA enrolled, the new session is NOT
+    # MFA-verified yet. The dashboard sees mfa_required=True and
+    # routes to /auth/mfa/verify. If the user already presented a
+    # valid z4j_mfa_trust cookie, we mark the session MFA-verified
+    # immediately and skip the second step.
+    from z4j_brain.auth.trusted_device import (
+        cookie_name as trust_cookie_name,
+    )
+    from z4j_brain.auth.trusted_device import hash_cookie_id
+    from z4j_brain.persistence.repositories import TrustedDeviceRepository
+
+    has_mfa = (
+        user.mfa_secret_encrypted is not None
+        and user.mfa_enrolled_at is not None
+    )
+    mfa_required = False
+    if has_mfa:
+        trust_cookie = request.cookies.get(
+            trust_cookie_name(environment=settings.environment),
+        )
+        trust_matched = False
+        if trust_cookie:
+            tdr = TrustedDeviceRepository(db_session)
+            device = await tdr.find_active(
+                user_id=user.id,
+                cookie_id_hash=hash_cookie_id(trust_cookie),
+            )
+            if device is not None:
+                await tdr.touch(device.id)
+                await sessions.set_mfa_verified(session_row.id)
+                # Audit the MFA-skipped login so a stolen trust cookie
+                # leaves a trail in the HMAC-chained log. Without this
+                # row, an attacker with a valid z4j_mfa_trust cookie can
+                # log in with only the password and produce a session
+                # marked mfa_verified_at with no MFA-flavored audit
+                # entry to alert on. (1.6.0 audit Critical-3.)
+                from z4j_brain.domain.audit_service import AuditService
+
+                await AuditService(settings).record(
+                    audit_log,
+                    action="user.mfa_trusted_device_used",
+                    target_type="user",
+                    target_id=str(user.id),
+                    result="success",
+                    outcome="allow",
+                    user_id=user.id,
+                    source_ip=ip,
+                    metadata={
+                        "trusted_device_id": str(device.id),
+                        "trusted_device_label": device.label,
+                    },
+                )
+                await db_session.commit()
+                trust_matched = True
+        mfa_required = not trust_matched
+
+    return LoginResponse(
+        user=_user_payload(user),
+        mfa_required=mfa_required,
+    )
 
 
 @router.post(
@@ -439,7 +548,7 @@ class ChangePasswordRequest(BaseModel):
 @router.post(
     "/change-password",
     response_model=LoginResponse,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def change_password(
     request: Request,
@@ -508,6 +617,26 @@ async def change_password(
     await sessions.revoke_all_for_user(
         user.id, reason="password_changed",
     )
+    # Drop every "remember this device" row. The cookie continues to
+    # send from the browser but the server-side row is gone so the
+    # next login attempt requires a fresh MFA verify. Industry-
+    # standard behaviour (matches GitHub etc.).
+    from z4j_brain.persistence.repositories import TrustedDeviceRepository
+
+    tdr = TrustedDeviceRepository(db_session)
+    # Count first so the audit row records what was wiped; forensics
+    # needs to know whether the password change destroyed 0 or 50
+    # active trust rows. (1.6.0 audit High-5.)
+    revoked_trust_count = await tdr.count_active_for_user(user.id)
+    await tdr.delete_all_for_user(user.id)
+    # Clear the trust cookie on this response too. Without this, the
+    # caller's browser keeps mailing a now-orphaned cookie until it
+    # expires; harmless but noisy.
+    from z4j_brain.auth.trusted_device import (
+        clear_trust_cookie as _clear_trust_cookie,
+    )
+
+    _clear_trust_cookie(response, environment=settings.environment)
 
     # Mint a fresh session for the caller. ``issued_at`` is after
     # ``password_changed_at`` so the new session passes the live
@@ -543,7 +672,10 @@ async def change_password(
         outcome="allow",
         user_id=user.id,
         source_ip=ip,
-        metadata={"revoked_previous_session_id": str(session_row.id)},
+        metadata={
+            "revoked_previous_session_id": str(session_row.id),
+            "revoked_trusted_devices": revoked_trust_count,
+        },
     )
     await db_session.commit()
 

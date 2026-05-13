@@ -37,6 +37,9 @@ from z4j_brain.persistence.repositories.first_boot_tokens import (
 )
 from z4j_brain.persistence.repositories.invitations import InvitationRepository
 from z4j_brain.persistence.repositories.memberships import MembershipRepository
+from z4j_brain.persistence.repositories.mfa_recovery_codes import (
+    MfaRecoveryCodeRepository,
+)
 from z4j_brain.persistence.repositories.notifications import (
     NotificationChannelRepository,
     NotificationDeliveryRepository,
@@ -59,6 +62,9 @@ from z4j_brain.persistence.repositories.schedules import (
 )
 from z4j_brain.persistence.repositories.sessions import SessionRepository
 from z4j_brain.persistence.repositories.tasks import TaskRepository
+from z4j_brain.persistence.repositories.trusted_devices import (
+    TrustedDeviceRepository,
+)
 from z4j_brain.persistence.repositories.users import UserRepository
 from z4j_brain.persistence.repositories.workers import WorkerRepository
 
@@ -74,6 +80,7 @@ __all__ = [
     "FirstBootTokenRepository",
     "InvitationRepository",
     "MembershipRepository",
+    "MfaRecoveryCodeRepository",
     "NotificationChannelRepository",
     "NotificationDeliveryRepository",
     "PendingFiresRepository",
@@ -84,6 +91,7 @@ __all__ = [
     "ScheduleRepository",
     "SessionRepository",
     "TaskRepository",
+    "TrustedDeviceRepository",
     "UserChannelRepository",
     "UserNotificationRepository",
     "UserRepository",

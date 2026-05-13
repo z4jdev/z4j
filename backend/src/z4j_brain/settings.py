@@ -359,6 +359,132 @@ class Settings(BaseSettings):
     #: default - see :func:`z4j_brain.api.metrics._check_metrics_auth`
     #: for the policy rationale.
     metrics_public: bool = False
+    #: Whether the FastAPI auto-generated docs (``/api/v1/docs``) and
+    #: schema (``/api/v1/openapi.json``) are reachable. Default True
+    #: matches historical behaviour; production operators who do not
+    #: want to expose the full endpoint surface to anonymous callers
+    #: can set ``Z4J_OPENAPI_DOCS_ENABLED=false`` so the brain registers
+    #: those routes as None (FastAPI returns 404). The schema also
+    #: leaks internal type structure beyond what is strictly needed
+    #: for the dashboard, so disabling it tightens the recon surface.
+    #: (1.6.0 round-3 audit Medium-1.)
+    openapi_docs_enabled: bool = True
+
+    # ------------------------------------------------------------------
+    # Sentry (optional error capture; off by default)
+    # ------------------------------------------------------------------
+    #: Sentry DSN. Empty / unset disables Sentry entirely; even when
+    #: ``sentry-sdk`` is installed the brain runs unchanged without a
+    #: DSN. SecretStr so the value never lands in startup logs or in a
+    #: Pydantic ``ValidationError`` reproduction. See
+    #: ``observability/sentry.py`` for the init contract and the
+    #: ``before_send`` scrubber that strips Authorization headers,
+    #: cookies, and OAuth-style query tokens before any event leaves
+    #: the brain.
+    sentry_dsn: SecretStr | None = None
+    #: Override the Sentry ``environment`` tag. Defaults to
+    #: :attr:`environment` so a brain running with ``Z4J_ENVIRONMENT=
+    #: production`` shows up under that name in Sentry without a
+    #: second knob. Set this when the deployment label and the Sentry
+    #: project layout disagree (e.g. multiple staging brains routing
+    #: into one Sentry project distinguished by ``staging-eu`` vs
+    #: ``staging-us``).
+    sentry_environment: str | None = Field(default=None, max_length=64)
+    #: Sentry tracing sample rate, 0.0 .. 1.0. Default 0.0: only
+    #: unhandled exceptions ship; no performance spans are created.
+    #: Flip to a small positive value (0.05 is a good starting point)
+    #: to capture transaction performance on a fraction of requests.
+    sentry_traces_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    #: Sentry profiling sample rate, 0.0 .. 1.0. Defaults to 0.0.
+    #: Profiling only fires inside transactions, so this is bounded
+    #: above by :attr:`sentry_traces_sample_rate`. Leave at 0 unless
+    #: you have already enabled traces.
+    sentry_profiles_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    #: Forward identifying data (IPs, usernames) to Sentry. Default
+    #: False -- the brain's :func:`scrub_event` hook also strips
+    #: Authorization / cookie / OAuth-token surfaces regardless of
+    #: this flag, so flipping it on still leaves credentials redacted.
+    sentry_send_default_pii: bool = False
+
+    # ------------------------------------------------------------------
+    # OpenTelemetry (optional distributed tracing; off by default)
+    # ------------------------------------------------------------------
+    #: OTLP exporter endpoint. Empty / unset disables OTel completely;
+    #: even when the SDK is installed an unset endpoint is a no-op.
+    #: SecretStr so an endpoint containing a bearer-style API key in
+    #: the path (some commercial collectors do this) does not land in
+    #: startup logs or in a Pydantic ValidationError reproduction.
+    #: Standard Honeycomb / Lightstep / Tempo / Jaeger Collector all
+    #: expose an OTLP HTTP endpoint at ``/v1/traces``.
+    otel_exporter_otlp_endpoint: SecretStr | None = None
+    #: OTLP transport protocol. ``http/protobuf`` is the default
+    #: (simpler operational target; works through plain HTTPS); set
+    #: to ``grpc`` if your collector exposes only gRPC and you have
+    #: installed ``opentelemetry-exporter-otlp-proto-grpc``.
+    otel_protocol: Literal["http/protobuf", "http", "grpc"] = "http/protobuf"
+    #: Comma-separated ``key=value`` pairs forwarded to the OTLP
+    #: exporter as ``OTEL_EXPORTER_OTLP_HEADERS``. The standard place
+    #: to put an x-honeycomb-team / authorization header. SecretStr
+    #: for the same reason as the endpoint.
+    otel_exporter_otlp_headers: SecretStr | None = None
+    #: Override the OTel ``service.name`` resource attribute. Default
+    #: ``z4j-brain`` for the brain process. Multi-brain deployments
+    #: (e.g. ``z4j-brain-eu`` vs ``z4j-brain-us``) set this to
+    #: distinguish them on the collector side.
+    otel_service_name: str = Field(default="z4j-brain", max_length=128)
+    #: Override the OTel ``service.namespace`` resource attribute.
+    #: Default ``z4j`` so all z4j services group in the collector UI.
+    otel_service_namespace: str = Field(default="z4j", max_length=128)
+    #: Override the OTel ``deployment.environment`` resource
+    #: attribute. Defaults to :attr:`environment` so a brain running
+    #: with ``Z4J_ENVIRONMENT=production`` shows up under that name
+    #: in the collector without a second knob.
+    otel_environment: str | None = Field(default=None, max_length=64)
+    #: Trace sampler argument, 0.0 .. 1.0. Default 0.0 = drop every
+    #: trace (errors-only effectively, since the brain still exports
+    #: span structure but the sampler keeps none). Set to a small
+    #: positive value to capture a fraction of requests. The sampler
+    #: is ParentBased(TraceIdRatioBased(arg)) so an inbound trace
+    #: context from an upstream service is always honoured.
+    otel_traces_sampler_arg: float = Field(default=0.0, ge=0.0, le=1.0)
+    #: When False (default), tracing for ``/health*`` and ``/metrics``
+    #: is suppressed via the FastAPI instrumentation's ``excluded_urls``
+    #: list. Those endpoints carry too much background traffic for
+    #: any sample budget to be meaningful and the spans add nothing
+    #: an operator wants to see. Flip to True if you specifically
+    #: want health-check latency tracing.
+    otel_include_health: bool = False
+    #: Comma-separated additional URL substrings to exclude from
+    #: tracing. Layered on top of :attr:`otel_include_health`.
+    otel_excluded_url_patterns: str = Field(default="", max_length=512)
+
+    # ------------------------------------------------------------------
+    # Audit webhook forwarding (optional out-of-band SIEM mirror)
+    # ------------------------------------------------------------------
+    #: Receiver URL for the audit-forwarder. Empty / unset disables
+    #: the forwarder entirely; even with the URL set, the brain's
+    #: primary audit log remains the source of truth and forwarding
+    #: is best-effort. SecretStr so a path-embedded token (Splunk HEC,
+    #: Datadog logs intake) does not land in startup logs.
+    audit_webhook_url: SecretStr | None = None
+    #: HMAC-SHA256 secret used to sign forwarded audit-row bodies.
+    #: REQUIRED when ``audit_webhook_url`` is set; the brain refuses
+    #: to start otherwise (see ``_enforce_security_invariants``).
+    #: Receivers verify by recomputing
+    #: ``hmac.new(secret, body, sha256).hexdigest()`` and comparing
+    #: constant-time to the value in ``X-Z4J-Audit-Signature``.
+    audit_webhook_hmac_secret: SecretStr | None = None
+    #: Per-row POST timeout in seconds. Default 10s matches the
+    #: notification dispatcher. A slow receiver does not block the
+    #: brain's audit write path because the forwarder runs in a
+    #: background drain task.
+    audit_webhook_timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
+    #: In-memory queue size between the audit-write hook and the
+    #: drain task. Spikes above this cause rows to be dropped with
+    #: a WARNING + a swallowed-exception metric bump. Raise on
+    #: high-volume brains; the buffer is shared across all
+    #: AuditService writers in this process.
+    audit_webhook_buffer_size: int = Field(default=1000, ge=10, le=100_000)
 
     # ------------------------------------------------------------------
     # Auth - passwords
@@ -379,6 +505,16 @@ class Settings(BaseSettings):
     #: the session is rejected even if the absolute lifetime has not
     #: elapsed. Default: 30 minutes.
     session_idle_timeout_seconds: int = Field(default=1_800, ge=60)
+    #: Absolute lifetime for sessions where the user opted into
+    #: "Keep me signed in" at login. Replaces (not extends)
+    #: :attr:`session_absolute_lifetime_seconds` for that session.
+    #: Default 30 days; the idle timeout is also bypassed for
+    #: remembered sessions so a homelab operator who pokes the
+    #: dashboard once a week is not kicked back to the login screen.
+    session_remember_me_lifetime_seconds: int = Field(
+        default=2_592_000,
+        ge=60,
+    )
     #: When True, the resolved client user-agent at session-issue time
     #: is enforced on every subsequent request - change of UA voids
     #: the session. Default OFF: too many false positives on mobile
@@ -425,6 +561,49 @@ class Settings(BaseSettings):
     #: log row regardless. Default OFF - emails in stdout logs are a
     #: PII liability for shipped log streams.
     log_login_email: bool = False
+
+    # ------------------------------------------------------------------
+    # MFA (TOTP). See docs/MFA-DESIGN.md.
+    # ------------------------------------------------------------------
+    #: Require every user with global ``is_admin=true`` to enroll in
+    #: MFA within the grace window. Existing admins who upgrade to a
+    #: brain with this flag set get the grace clock starting from the
+    #: first login that observes the policy.
+    mfa_enforce_for_admins: bool = False
+    #: Require every user (admins and non-admins) to enroll in MFA
+    #: within the grace window. Stricter superset of
+    #: :attr:`mfa_enforce_for_admins`.
+    mfa_enforce_for_all: bool = False
+    #: Days an enforcement-targeted user has to enroll before login
+    #: is blocked with ``mfa_enrollment_required``.
+    mfa_enrollment_grace_days: int = Field(default=7, ge=1, le=90)
+    #: Number of single-use recovery codes minted at enrollment time.
+    mfa_recovery_code_count: int = Field(default=10, ge=5, le=50)
+    #: How long a successful MFA verify is valid for the sensitive-
+    #: action gate (password change, API key create, project delete,
+    #: admin promote). Default 60 minutes -- matches GitHub's "sudo
+    #: mode" window, which is what most operators have already
+    #: internalised. High-stakes enterprise installs that want a
+    #: shorter window set this explicitly via env var; 1Password
+    #: and Stripe both use 30 min as their default.
+    mfa_verification_ttl_seconds: int = Field(
+        default=3_600,
+        ge=60,
+        le=86_400,
+    )
+    #: Lifetime of the ``z4j_mfa_trust`` "remember this device" cookie.
+    #: Hard upper bound of 90 days; longer windows trade away too much
+    #: of the second factor.
+    mfa_remember_device_days: int = Field(default=30, ge=1, le=90)
+    #: Per-IP cap on ``POST /auth/mfa/verify`` attempts per minute.
+    #: Tighter than the login bucket because the verify endpoint is
+    #: a code-brute-force target.
+    mfa_verification_rate_per_min: int = Field(default=10, ge=1, le=300)
+    #: Max active "remember this device" rows a single user can hold.
+    #: Stops an attacker who briefly compromises a session from
+    #: minting thousands of trust rows. When the cap is hit, the
+    #: oldest active row is revoked to make room.
+    mfa_trusted_devices_max_per_user: int = Field(default=20, ge=1, le=200)
 
     # ------------------------------------------------------------------
     # First-boot
@@ -1052,6 +1231,38 @@ class Settings(BaseSettings):
                 raise ConfigError(
                     "database_url must include sslmode=require (or "
                     "stricter) when require_db_ssl is True",
+                )
+
+        # Audit forwarder: URL without an HMAC secret would leave
+        # the receiver unable to authenticate the source of a row.
+        # The forwarder is an authenticated mirror; an unauthenticated
+        # one is worse than no mirror because a downstream parser
+        # might trust it implicitly. Fail fast at startup.
+        # (v1.6 audit C4: simplified from a brittle double-negative
+        # conditional to a single readable truthiness check.)
+        audit_url_value: str = ""
+        if self.audit_webhook_url is not None:
+            audit_url_value = self.audit_webhook_url.get_secret_value().strip()
+        if audit_url_value:
+            audit_hmac_value: str = ""
+            if self.audit_webhook_hmac_secret is not None:
+                audit_hmac_value = (
+                    self.audit_webhook_hmac_secret.get_secret_value().strip()
+                )
+            if not audit_hmac_value:
+                raise ConfigError(
+                    "audit_webhook_url is set but "
+                    "audit_webhook_hmac_secret is not. Forwarding audit "
+                    "rows without an HMAC signature would leave the "
+                    "receiver unable to authenticate the source; set "
+                    "Z4J_AUDIT_WEBHOOK_HMAC_SECRET to a >=32 byte "
+                    "random string.",
+                )
+            if len(audit_hmac_value.encode("utf-8")) < 32:
+                raise ConfigError(
+                    "audit_webhook_hmac_secret must be at least 32 bytes "
+                    "(use `python -c \"import secrets; "
+                    "print(secrets.token_urlsafe(48))\"`).",
                 )
 
     # ------------------------------------------------------------------

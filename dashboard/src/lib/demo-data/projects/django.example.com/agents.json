@@ -4,7 +4,7 @@
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "web-1",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": ["celery"],
     "scheduler_adapters": ["django-celery-beat"],
@@ -14,7 +14,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "web-1.django.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   },
   {
@@ -22,7 +22,7 @@
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "web-2",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": ["celery"],
     "scheduler_adapters": [],
@@ -32,7 +32,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "web-2.django.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   },
   {
@@ -40,7 +40,7 @@
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "web-3",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": ["celery"],
     "scheduler_adapters": [],
@@ -50,7 +50,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "web-3.django.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   },
   {
@@ -58,7 +58,7 @@
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "worker-default-1",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": ["celery"],
     "scheduler_adapters": [],
@@ -68,7 +68,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "worker-default-1.django.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   },
   {
@@ -76,7 +76,7 @@
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "worker-default-2",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": ["celery"],
     "scheduler_adapters": [],
@@ -86,7 +86,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "worker-default-2.django.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   },
   {
@@ -94,7 +94,7 @@
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "worker-billing-1",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": ["celery"],
     "scheduler_adapters": [],
@@ -104,7 +104,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "worker-billing-1.django.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   },
   {
@@ -112,7 +112,7 @@
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "worker-emails-1",
     "state": "offline",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": ["celery"],
     "scheduler_adapters": [],
@@ -122,7 +122,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "worker-emails-1.django.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   },
   {
@@ -130,7 +130,7 @@
     "project_id": "00000000-0000-4000-9000-000000000003",
     "name": "beat-1",
     "state": "online",
-    "protocol_version": "v1",
+    "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": [],
     "scheduler_adapters": ["django-celery-beat"],
@@ -140,7 +140,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "beat-1.django.example.com",
-    "agent_version": "1.5.0",
+    "agent_version": "1.5.1",
     "version_status": "current"
   }
 ]

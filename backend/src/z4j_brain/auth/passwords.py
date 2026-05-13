@@ -125,17 +125,31 @@ class PasswordHasher:
         # accepted ``Summer24`` or ``qwertyui1`` - both in the top
         # 1k of breach lists. Three-class minimum knocks out the
         # long tail of dictionary-plus-one-digit passwords.
-        has_lower = any(c.islower() for c in plaintext)
-        has_upper = any(c.isupper() for c in plaintext)
-        has_digit = any(c.isdigit() for c in plaintext)
-        has_symbol = any(not c.isalnum() for c in plaintext)
-        classes = sum([has_lower, has_upper, has_digit, has_symbol])
-        if classes < 3:
-            raise PasswordError(
-                "password_too_simple",
-                "password must contain at least 3 of: lowercase, "
-                "uppercase, digits, symbols",
+        #
+        # Length escape hatch: passwords of 16+ chars get the
+        # breach-list check only. NIST SP 800-63B deprecates strict
+        # composition rules in favour of length + breach detection,
+        # and a long passphrase ("correct horse battery staple 9")
+        # is high-entropy even with only two classes. Round-2 audit
+        # Medium-1 caught a 12-char hole where space-as-symbol let
+        # low-entropy strings like "Aa 1 . . ." satisfy 3-of-4;
+        # excluding whitespace from "symbol" closes that hole for
+        # short passwords without rejecting passphrases.
+        if len(plaintext) < 16:
+            has_lower = any(c.islower() for c in plaintext)
+            has_upper = any(c.isupper() for c in plaintext)
+            has_digit = any(c.isdigit() for c in plaintext)
+            has_symbol = any(
+                not c.isalnum() and not c.isspace() for c in plaintext
             )
+            classes = sum([has_lower, has_upper, has_digit, has_symbol])
+            if classes < 3:
+                raise PasswordError(
+                    "password_too_simple",
+                    "password must contain at least 3 of: lowercase, "
+                    "uppercase, digits, symbols (or use a 16+ "
+                    "character passphrase)",
+                )
         if is_common_password(plaintext):
             raise PasswordError(
                 "password_in_breach_list",

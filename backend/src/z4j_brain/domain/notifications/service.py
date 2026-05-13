@@ -416,9 +416,45 @@ class NotificationService:
                 from z4j_brain.domain.notifications.sanitize import (
                     sanitize_audit_text,
                 )
+                # Best-effort Prometheus counter. Imported inline so a
+                # broken metrics module never breaks dispatch.
+                try:
+                    from z4j_brain.api.metrics import (
+                        z4j_notifications_sent_total,
+                    )
+                except Exception:  # noqa: BLE001
+                    z4j_notifications_sent_total = None  # type: ignore[assignment]
 
                 for outcome in outcomes:
                     p = outcome.pending
+                    # Prometheus: count every dispatch by channel_type +
+                    # status so the v1.6 Grafana panels show real data.
+                    # The status taxonomy here MUST match the dashboard
+                    # filters: `success` / `failed` / `blocked` (the
+                    # last is SSRF/host-lock rejection, surfaced by
+                    # outcome.error containing `block`).
+                    if z4j_notifications_sent_total is not None:
+                        if outcome.success:
+                            _status = "success"
+                        else:
+                            err_lower = (outcome.error or "").lower()
+                            _status = (
+                                "blocked"
+                                if (
+                                    "block" in err_lower
+                                    or "unsafe" in err_lower
+                                    or "ssrf" in err_lower
+                                )
+                                else "failed"
+                            )
+                        try:
+                            z4j_notifications_sent_total.labels(
+                                project=str(p.project_id) if p.project_id else "",
+                                channel_type=p.channel_type or "unknown",
+                                status=_status,
+                            ).inc()
+                        except Exception:  # noqa: BLE001
+                            pass
                     # Sanitize error + response_body before persistence
                     # (audit H-1 / H-2 / H-3): the dispatcher's raw
                     # error / body text can carry the channel's
