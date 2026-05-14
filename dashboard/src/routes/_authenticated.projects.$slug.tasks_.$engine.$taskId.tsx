@@ -44,6 +44,7 @@ import {
 import { useCan } from "@/hooks/use-memberships";
 import { formatAbsolute, formatDuration, formatRelative } from "@/lib/format";
 import { ApiError } from "@/lib/api";
+import { PageShell } from "@/components/domain/page-shell";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/tasks_/$engine/$taskId",
@@ -153,7 +154,7 @@ function TaskDetailPage() {
   }
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
         <div className="flex items-center gap-2">
           <Button asChild variant="ghost" size="sm">
             <Link
@@ -416,7 +417,7 @@ function TaskDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </PageShell>
   );
 }
 

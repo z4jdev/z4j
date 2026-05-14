@@ -7,18 +7,19 @@
  */
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw } from "lucide-react";
+import { Activity, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SectionCard } from "@/components/domain/section-card";
 import {
   Table,
   TableBody,
   TableCell,
   TableRow,
 } from "@/components/ui/table";
+import { PageHeader } from "@/components/domain/page-header";
 
 export const Route = createFileRoute("/_authenticated/settings/system")({
   component: SystemPage,
@@ -45,69 +46,69 @@ function SystemPage() {
     staleTime: 60_000,
   });
 
-  if (isLoading) return <Skeleton className="h-64 w-full" />;
-  if (!data) return null;
-
   return (
     <div className="space-y-6">
-      <Card className="p-6">
-        <h3 className="text-sm font-semibold">Brain Server</h3>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Core runtime information for z4j process.
-        </p>
-        <div className="mt-4">
-          <StatusTable
-            rows={[
-              ["z4j version", data.z4j_version],
-              ["Python", `${data.python_version} (${data.python_implementation})`],
-              ["OS", data.os],
-              ["Architecture", data.architecture],
-              ["PID", String(data.pid)],
-            ]}
-          />
-        </div>
-      </Card>
+      <PageHeader
+        icon={Activity}
+        title="System"
+        description="Brain process, database, and installed-package versions."
+      />
 
-      <Card className="p-6">
-        <h3 className="text-sm font-semibold">Database</h3>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Connected database information and health.
-        </p>
-        <div className="mt-4">
-          <StatusTable
-            rows={[
-              ["Type", data.database_type],
-              ...(data.database_version
-                ? [["Version", data.database_version] as [string, string]]
-                : []),
-              ...(data.database_size_mb !== undefined
-                ? [["Size", `${data.database_size_mb} MB`] as [string, string]]
-                : []),
-              ...(data.database_connections !== undefined
-                ? [["Active connections", String(data.database_connections)] as [string, string]]
-                : []),
-            ]}
-          />
-        </div>
-      </Card>
+      {isLoading && <Skeleton className="h-64 w-full" />}
+
+      {!isLoading && data && (
+      <>
+      <SectionCard
+        title="Brain Server"
+        description="Core runtime information for z4j process."
+      >
+        <StatusTable
+          rows={[
+            ["z4j version", data.z4j_version],
+            ["Python", `${data.python_version} (${data.python_implementation})`],
+            ["OS", data.os],
+            ["Architecture", data.architecture],
+            ["PID", String(data.pid)],
+          ]}
+        />
+      </SectionCard>
+
+      <SectionCard
+        title="Database"
+        description="Connected database information and health."
+      >
+        <StatusTable
+          rows={[
+            ["Type", data.database_type],
+            ...(data.database_version
+              ? [["Version", data.database_version] as [string, string]]
+              : []),
+            ...(data.database_size_mb !== undefined
+              ? [["Size", `${data.database_size_mb} MB`] as [string, string]]
+              : []),
+            ...(data.database_connections !== undefined
+              ? [["Active connections", String(data.database_connections)] as [string, string]]
+              : []),
+          ]}
+        />
+      </SectionCard>
 
       {data.packages && Object.keys(data.packages).length > 0 && (
-        <Card className="p-6">
-          <h3 className="text-sm font-semibold">Installed Packages</h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Key Python package versions in z4j environment.
-          </p>
-          <div className="mt-4">
-            <StatusTable
-              rows={Object.entries(data.packages)
-                .sort(([a], [b]) => a.localeCompare(b))
-                .map(([name, version]) => [name, version])}
-            />
-          </div>
-        </Card>
+        <SectionCard
+          title="Installed Packages"
+          description="Key Python package versions in z4j environment."
+        >
+          <StatusTable
+            rows={Object.entries(data.packages)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([name, version]) => [name, version])}
+          />
+        </SectionCard>
       )}
 
       <VersionsCheckCard />
+      </>
+      )}
     </div>
   );
 }
@@ -168,39 +169,10 @@ function VersionsCheckCard() {
   const buttonDisabled = !data.check_for_updates_url || refresh.isPending;
 
   return (
-    <Card className="p-6">
-      <h3 className="text-sm font-semibold">Update checks</h3>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Brain ships with a snapshot of the latest known z4j package
-        versions. Click to fetch a fresher snapshot from GitHub. No
-        automatic polling, no telemetry.
-      </p>
-      <div className="mt-4">
-        <StatusTable
-          rows={[
-            ["Snapshot generated", data.generated_at || "(unknown)"],
-            ["Snapshot built by", data.generated_by || "(unknown)"],
-            [
-              "Source",
-              data.source === "remote"
-                ? `remote · last fetched ${data.fetched_at ?? "unknown"}`
-                : "bundled with brain wheel",
-            ],
-            ...(data.source === "remote" && data.fetched_from
-              ? [
-                  ["Fetched from", data.fetched_from] as [string, string],
-                ]
-              : []),
-            [
-              "Check URL",
-              data.check_for_updates_url ||
-                "(disabled - set Z4J_VERSION_CHECK_URL to enable)",
-            ],
-            ["Packages tracked", String(Object.keys(data.packages).length)],
-          ]}
-        />
-      </div>
-      <div className="mt-4">
+    <SectionCard
+      title="Update checks"
+      description="Brain ships with a snapshot of the latest known z4j package versions. Click to fetch a fresher snapshot from GitHub. No automatic polling, no telemetry."
+      actions={
         <Button
           size="sm"
           onClick={() => refresh.mutate()}
@@ -211,14 +183,36 @@ function VersionsCheckCard() {
           />
           Check for updates
         </Button>
-        {!data.check_for_updates_url ? (
-          <p className="mt-2 text-xs text-muted-foreground">
-            Remote update checks are disabled (Z4J_VERSION_CHECK_URL is
-            empty). z4j is using the bundled snapshot only.
-          </p>
-        ) : null}
-      </div>
-    </Card>
+      }
+    >
+      <StatusTable
+        rows={[
+          ["Snapshot generated", data.generated_at || "(unknown)"],
+          ["Snapshot built by", data.generated_by || "(unknown)"],
+          [
+            "Source",
+            data.source === "remote"
+              ? `remote · last fetched ${data.fetched_at ?? "unknown"}`
+              : "bundled with brain wheel",
+          ],
+          ...(data.source === "remote" && data.fetched_from
+            ? [["Fetched from", data.fetched_from] as [string, string]]
+            : []),
+          [
+            "Check URL",
+            data.check_for_updates_url ||
+              "(disabled - set Z4J_VERSION_CHECK_URL to enable)",
+          ],
+          ["Packages tracked", String(Object.keys(data.packages).length)],
+        ]}
+      />
+      {!data.check_for_updates_url ? (
+        <p className="mt-3 text-xs text-muted-foreground">
+          Remote update checks are disabled (Z4J_VERSION_CHECK_URL is
+          empty). z4j is using the bundled snapshot only.
+        </p>
+      ) : null}
+    </SectionCard>
   );
 }
 

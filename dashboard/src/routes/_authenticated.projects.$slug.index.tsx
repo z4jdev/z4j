@@ -13,9 +13,12 @@ import {
   Terminal,
 } from "lucide-react";
 import { PageHeader } from "@/components/domain/page-header";
+import { RefreshButton } from "@/components/domain/refresh-button";
+import { PageShell } from "@/components/domain/page-shell";
 import { QueryError } from "@/components/domain/query-error";
 import { StatCard } from "@/components/domain/stat-card";
 import { TaskStateBadge } from "@/components/domain/state-badges";
+import { TimeRangeSelect } from "@/components/domain/time-range-select";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -24,13 +27,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   useStats,
@@ -56,42 +52,25 @@ function OverviewPage() {
     .toLowerCase();
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       <PageHeader
         title="Overview"
         icon={LayoutDashboard}
         description={`live state of project ${slug}`}
         actions={
           <div className="flex items-center gap-2">
-            <Select
+            <TimeRangeSelect
               value={timeRange}
-              onValueChange={(v) => setTimeRange(v as TimeRange)}
-            >
-              <SelectTrigger className="h-9 w-36">
-                <Clock className="size-4 opacity-60" />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(Object.entries(TIME_RANGE_LABELS) as [TimeRange, string][]).map(
-                  ([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ),
-                )}
-              </SelectContent>
-            </Select>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => refetch()}
-              disabled={isFetching}
-            >
-              <RefreshCw
-                className={isFetching ? "size-4 animate-spin" : "size-4"}
-              />
-              Refresh
-            </Button>
+              onValueChange={setTimeRange}
+              options={(Object.entries(TIME_RANGE_LABELS) as [TimeRange, string][]).map(
+                ([value, label]) => ({ value, label }),
+              )}
+              aria-label="Time range"
+            />
+            <RefreshButton
+              onRefresh={() => refetch()}
+              pending={isFetching}
+            />
           </div>
         }
       />
@@ -274,6 +253,6 @@ function OverviewPage() {
           </CardContent>
         </Card>
       </div>
-    </div>
+    </PageShell>
   );
 }

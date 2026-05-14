@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { DateCell } from "@/components/domain/date-cell";
 import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
 import { QueryError } from "@/components/domain/query-error";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -84,7 +85,7 @@ function ActivityPage() {
   );
 
   return (
-    <div className="flex flex-1 flex-col gap-6 p-6">
+    <PageShell>
       <PageHeader
         icon={History}
         title="Activity"
@@ -195,7 +196,7 @@ function ActivityPage() {
           </div>
         )}
       </div>
-    </div>
+    </PageShell>
   );
 }
 

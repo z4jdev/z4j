@@ -28,6 +28,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { DateCell } from "@/components/domain/date-cell";
+import { PageShell } from "@/components/domain/page-shell";
 import { QueryError } from "@/components/domain/query-error";
 import { TaskPriorityBadge } from "@/components/domain/state-badges";
 import { Badge } from "@/components/ui/badge";
@@ -161,11 +162,15 @@ function HomePage() {
   }, [summary]);
 
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-8 p-4 md:p-6">
-      {/* Greeting */}
-      <section className="flex items-center gap-3">
-        <Home className="size-6 shrink-0 text-muted-foreground" />
-        <div className="min-w-0">
+    <PageShell>
+      {/* Greeting -- matches the canonical PageHeader icon-in-soft-square
+       * shape, but with a larger title since this is a personalized
+       * landing page (the "Good evening, X" copy carries weight). */}
+      <section className="flex items-start gap-3">
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted/60 text-muted-foreground">
+          <Home className="size-5" aria-hidden="true" />
+        </div>
+        <div className="min-w-0 flex-1">
           {summary ? (
             <>
               <h1 className="truncate text-2xl font-semibold leading-tight">
@@ -264,7 +269,7 @@ function HomePage() {
 
       {/* Recent failures */}
       <RecentFailuresFeed />
-    </div>
+    </PageShell>
   );
 }
 

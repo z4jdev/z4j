@@ -8,7 +8,7 @@
  * inside each project separately.
  */
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Users } from "lucide-react";
+import { Users2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/domain/page-header";
 import { RoleBadge } from "@/components/domain/role-badge";
@@ -24,11 +24,11 @@ function MembershipsPage() {
   const memberships = me?.memberships ?? [];
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-6">
       <PageHeader
-        title="My memberships"
-        icon={Users}
-        description="every project you belong to, and the role you have on each"
+        icon={Users2}
+        title="My Memberships"
+        description="Every project you belong to and the role you have on each."
       />
 
       {isLoading && <Skeleton className="h-48 w-full" />}

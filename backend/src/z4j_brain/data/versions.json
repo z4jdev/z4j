@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-05-13T19:00:19Z",
-  "generated_by": "z4j@1.6.1",
+  "generated_at": "2026-05-14T05:16:04Z",
+  "generated_by": "z4j@1.6.2",
   "canonical_url": "https://raw.githubusercontent.com/z4jdev/z4j/main/versions.json",
   "packages": {
-    "z4j": "1.6.1",
+    "z4j": "1.6.2",
     "z4j-apscheduler": "1.6.0",
     "z4j-arq": "1.6.0",
     "z4j-arqcron": "1.6.0",

@@ -33,6 +33,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { PageHeader } from "@/components/domain/page-header";
+import { RefreshButton } from "@/components/domain/refresh-button";
 import { EmptyState } from "@/components/domain/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -49,6 +50,7 @@ import {
 import { useSchedulersFleet } from "@/hooks/use-schedulers-fleet";
 import type { FleetEntry } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
+import { PageShell } from "@/components/domain/page-shell";
 
 export const Route = createFileRoute("/_authenticated/admin/schedulers")({
   component: SchedulersFleetPage,
@@ -58,23 +60,16 @@ function SchedulersFleetPage() {
   const { data, isLoading, isFetching, refetch } = useSchedulersFleet();
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       <PageHeader
         title="Schedulers"
         icon={Server}
         description="Operator-fleet view across every enrolled z4j-scheduler instance"
         actions={
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => refetch()}
-            disabled={isFetching}
-          >
-            <RefreshCw
-              className={isFetching ? "size-4 animate-spin" : "size-4"}
+          <RefreshButton
+              onRefresh={() => refetch()}
+              pending={isFetching}
             />
-            Refresh
-          </Button>
         }
       />
 
@@ -138,7 +133,7 @@ function SchedulersFleetPage() {
           </CardContent>
         </Card>
       )}
-    </div>
+    </PageShell>
   );
 }
 

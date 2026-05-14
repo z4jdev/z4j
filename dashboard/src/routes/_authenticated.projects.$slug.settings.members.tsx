@@ -18,7 +18,7 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Trash2, X } from "lucide-react";
+import { Check, Trash2, Users, X } from "lucide-react";
 import { toast } from "sonner";
 import { useConfirm } from "@/components/domain/confirm-dialog";
 import { api, ApiError } from "@/lib/api";
@@ -42,6 +42,7 @@ import {
 } from "@/components/ui/table";
 import { DateCell } from "@/components/domain/date-cell";
 import { InviteDialog } from "@/components/domain/invite-dialog";
+import { PageHeader } from "@/components/domain/page-header";
 import { PendingInvitations } from "@/components/domain/pending-invitations";
 import { RoleBadge } from "@/components/domain/role-badge";
 import { useCan, useCurrentUserRole } from "@/hooks/use-memberships";
@@ -166,23 +167,19 @@ function MembersPage() {
   return (
     <div className="space-y-6">
       {confirmDialog}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold">Project Members</h3>
-            {myRole && (
-              <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                your role:
-                <RoleBadge role={myRole} />
-              </span>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Users who have access to this project and their roles.
-          </p>
-        </div>
-        {canInvite && <InviteDialog slug={slug} />}
-      </div>
+      <PageHeader
+        icon={Users}
+        title="Members"
+        description="Users with access to this project and their roles."
+        badges={
+          myRole ? (
+            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+              your role: <RoleBadge role={myRole} />
+            </span>
+          ) : undefined
+        }
+        actions={canInvite ? <InviteDialog slug={slug} /> : undefined}
+      />
 
       {isLoading && <Skeleton className="h-32 w-full" />}
 

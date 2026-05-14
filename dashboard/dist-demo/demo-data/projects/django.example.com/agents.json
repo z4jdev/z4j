@@ -14,7 +14,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "web-1.django.example.com",
-    "agent_version": "1.5.1",
+    "agent_version": "1.6.0",
     "version_status": "current"
   },
   {
@@ -32,7 +32,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "web-2.django.example.com",
-    "agent_version": "1.5.1",
+    "agent_version": "1.6.0",
     "version_status": "current"
   },
   {
@@ -50,7 +50,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "web-3.django.example.com",
-    "agent_version": "1.5.1",
+    "agent_version": "1.6.0",
     "version_status": "current"
   },
   {
@@ -68,7 +68,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "worker-default-1.django.example.com",
-    "agent_version": "1.5.1",
+    "agent_version": "1.6.0",
     "version_status": "current"
   },
   {
@@ -86,7 +86,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "worker-default-2.django.example.com",
-    "agent_version": "1.5.1",
+    "agent_version": "1.6.0",
     "version_status": "current"
   },
   {
@@ -104,7 +104,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "worker-billing-1.django.example.com",
-    "agent_version": "1.5.1",
+    "agent_version": "1.6.0",
     "version_status": "current"
   },
   {
@@ -122,7 +122,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "worker-emails-1.django.example.com",
-    "agent_version": "1.5.1",
+    "agent_version": "1.6.0",
     "version_status": "current"
   },
   {
@@ -140,7 +140,7 @@
     "created_at_offset_s": -31536000,
     "is_outdated": false,
     "host_name": "beat-1.django.example.com",
-    "agent_version": "1.5.1",
+    "agent_version": "1.6.0",
     "version_status": "current"
   }
 ]

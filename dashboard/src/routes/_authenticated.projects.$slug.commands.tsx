@@ -1,14 +1,15 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import type { ColumnDef } from "@tanstack/react-table";
-import { RefreshCw, Search, Terminal, X } from "lucide-react";
+import { RefreshCw, Terminal } from "lucide-react";
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
+import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
 import { CommandStatusBadge } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
 import { DataTable } from "@/components/ui/data-table";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -20,7 +21,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCommands } from "@/hooks/use-commands";
 import { DateCell } from "@/components/domain/date-cell";
 import type { CommandPublic, CommandStatus } from "@/lib/api-types";
-import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_authenticated/projects/$slug/commands")(
   {
@@ -74,77 +74,51 @@ function CommandsPage() {
 
   const columns = useCommandColumns();
 
-  // Compact filter toolbar - search input + status dropdown on one row
   const filterToolbar = (
-    <div className="flex items-center gap-3">
-      <div className="relative flex-1">
-        <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          placeholder="Search commands..."
-          value={searchQuery}
-          onChange={(e) => {
-            setSearchQuery(e.target.value);
+    <FilterToolbar
+      searchValue={searchQuery}
+      onSearchChange={(v) => {
+        setSearchQuery(v);
+        setCursor(null);
+      }}
+      searchPlaceholder="Search commands..."
+      activeFilterCount={activeFilterCount}
+      onClear={clearFilters}
+      filters={
+        <Select
+          value={status}
+          onValueChange={(v) => {
+            setStatus(v as CommandStatus | "all");
             setCursor(null);
           }}
-          className="h-9 pl-9"
-        />
-      </div>
-      <Select
-        value={status}
-        onValueChange={(v) => {
-          setStatus(v as CommandStatus | "all");
-          setCursor(null);
-        }}
-      >
-        <SelectTrigger className="h-9 w-36 shrink-0">
-          <SelectValue placeholder="Status" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">All statuses</SelectItem>
-          {STATUSES.filter((s) => s !== "all").map((s) => (
-            <SelectItem key={s} value={s}>
-              {s}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      {/* Always reserve space - invisible when no filters active */}
-      <Button
-        variant="ghost"
-        size="sm"
-        className={cn(
-          "h-9 shrink-0 gap-1 text-xs text-muted-foreground",
-          activeFilterCount === 0 && "pointer-events-none invisible",
-        )}
-        onClick={clearFilters}
-      >
-        <X className="size-3" />
-        Clear
-        <Badge variant="secondary" className="ml-0.5 px-1.5 py-0 text-[10px]">
-          {activeFilterCount}
-        </Badge>
-      </Button>
-    </div>
+        >
+          <SelectTrigger className="w-36 shrink-0">
+            <SelectValue placeholder="Status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All statuses</SelectItem>
+            {STATUSES.filter((s) => s !== "all").map((s) => (
+              <SelectItem key={s} value={s}>
+                {s}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      }
+    />
   );
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       <PageHeader
         title="Commands"
         icon={Terminal}
         description="trail of all operator-initiated actions"
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            disabled={isFetching}
-          >
-            <RefreshCw
-              className={isFetching ? "size-4 animate-spin" : "size-4"}
+          <RefreshButton
+              onRefresh={() => refetch()}
+              pending={isFetching}
             />
-            Refresh
-          </Button>
         }
       />
 
@@ -156,22 +130,18 @@ function CommandsPage() {
         </div>
       )}
       {data && filteredItems.length === 0 && (
-        <div>
-          <div className="flex h-[52px] items-center">
-            <div className="w-full">{filterToolbar}</div>
-          </div>
-          <div className="mt-2 overflow-hidden rounded-lg border">
-            <EmptyState
-              icon={Terminal}
-              title="no commands yet"
-              description={
-                activeFilterCount > 0
-                  ? "try adjusting your filters or search query"
-                  : "commands appear here when an operator clicks retry / cancel / restart"
-              }
-            />
-          </div>
-        </div>
+        <>
+          {filterToolbar}
+          <EmptyState
+            icon={Terminal}
+            title="no commands yet"
+            description={
+              activeFilterCount > 0
+                ? "try adjusting your filters or search query"
+                : "commands appear here when an operator clicks retry / cancel / restart"
+            }
+          />
+        </>
       )}
       {data && filteredItems.length > 0 && (
         <DataTable
@@ -186,7 +156,7 @@ function CommandsPage() {
           toolbar={() => filterToolbar}
         />
       )}
-    </div>
+    </PageShell>
   );
 }
 

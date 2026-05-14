@@ -19,11 +19,11 @@ import {
   Plus,
   RefreshCcwDot,
   RefreshCw,
-  Search,
   Trash2,
-  X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
+import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
 import { TaskPriorityBadge } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
@@ -32,7 +32,6 @@ import { ScheduleFormDialog } from "@/components/domain/schedule-form-dialog";
 import { DataTable } from "@/components/ui/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -54,6 +53,7 @@ import { DateCell } from "@/components/domain/date-cell";
 import { ApiError } from "@/lib/api";
 import type { ScheduleKind, SchedulePublic } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
+import { PageShell } from "@/components/domain/page-shell";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/schedules",
@@ -299,70 +299,53 @@ function SchedulesPage() {
     canManage,
   });
 
-  // Filter toolbar - rendered inside the DataTable toolbar slot
   const filterToolbar = (
-    <div className="flex items-center gap-3">
-      <div className="relative flex-1">
-        <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          placeholder="Search schedules..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="h-9 pl-9"
-        />
-      </div>
-      <Select
-        value={kindFilter}
-        onValueChange={(v) => setKindFilter(v as ScheduleKind | "all")}
-      >
-        <SelectTrigger className="h-9 w-36 shrink-0">
-          <SelectValue placeholder="Kind" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">All kinds</SelectItem>
-          {SCHEDULE_KINDS.map((k) => (
-            <SelectItem key={k} value={k}>
-              {k}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Select
-        value={enabledFilter}
-        onValueChange={(v) =>
-          setEnabledFilter(v as "all" | "enabled" | "disabled")
-        }
-      >
-        <SelectTrigger className="h-9 w-36 shrink-0">
-          <SelectValue placeholder="Status" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">All</SelectItem>
-          <SelectItem value="enabled">Enabled</SelectItem>
-          <SelectItem value="disabled">Disabled</SelectItem>
-        </SelectContent>
-      </Select>
-      {/* Always reserve space - invisible when no filters active */}
-      <Button
-        variant="ghost"
-        size="sm"
-        className={cn(
-          "h-9 shrink-0 gap-1 text-xs text-muted-foreground",
-          activeFilterCount === 0 && "pointer-events-none invisible",
-        )}
-        onClick={clearFilters}
-      >
-        <X className="size-3" />
-        Clear
-        <Badge variant="secondary" className="ml-0.5 px-1.5 py-0 text-[10px]">
-          {activeFilterCount}
-        </Badge>
-      </Button>
-    </div>
+    <FilterToolbar
+      searchValue={searchQuery}
+      onSearchChange={setSearchQuery}
+      searchPlaceholder="Search schedules..."
+      activeFilterCount={activeFilterCount}
+      onClear={clearFilters}
+      filters={
+        <>
+          <Select
+            value={kindFilter}
+            onValueChange={(v) => setKindFilter(v as ScheduleKind | "all")}
+          >
+            <SelectTrigger className="w-36 shrink-0">
+              <SelectValue placeholder="Kind" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All kinds</SelectItem>
+              {SCHEDULE_KINDS.map((k) => (
+                <SelectItem key={k} value={k}>
+                  {k}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={enabledFilter}
+            onValueChange={(v) =>
+              setEnabledFilter(v as "all" | "enabled" | "disabled")
+            }
+          >
+            <SelectTrigger className="w-36 shrink-0">
+              <SelectValue placeholder="Status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="enabled">Enabled</SelectItem>
+              <SelectItem value="disabled">Disabled</SelectItem>
+            </SelectContent>
+          </Select>
+        </>
+      }
+    />
   );
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       <PageHeader
         title="Schedules"
         icon={History}
@@ -407,17 +390,10 @@ function SchedulesPage() {
                 </Link>
               </Button>
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => refetch()}
-              disabled={isFetching}
-            >
-              <RefreshCw
-                className={isFetching ? "size-4 animate-spin" : "size-4"}
-              />
-              Refresh
-            </Button>
+            <RefreshButton
+              onRefresh={() => refetch()}
+              pending={isFetching}
+            />
           </div>
         }
       />
@@ -430,22 +406,18 @@ function SchedulesPage() {
         </div>
       )}
       {schedules && filteredSchedules.length === 0 && (
-        <div>
-          <div className="flex h-[52px] items-center">
-            <div className="w-full">{filterToolbar}</div>
-          </div>
-          <div className="mt-2 overflow-hidden rounded-lg border">
-            <EmptyState
-              icon={History}
-              title="no schedules match"
-              description={
-                activeFilterCount > 0 || searchQuery
-                  ? "try adjusting your filters or search query"
-                  : "schedules your scheduler has published (celery-beat, rq-scheduler, etc.) will sync here once the agent observes them"
-              }
-            />
-          </div>
-        </div>
+        <>
+          {filterToolbar}
+          <EmptyState
+            icon={History}
+            title="no schedules match"
+            description={
+              activeFilterCount > 0 || searchQuery
+                ? "try adjusting your filters or search query"
+                : "schedules your scheduler has published (celery-beat, rq-scheduler, etc.) will sync here once the agent observes them"
+            }
+          />
+        </>
       )}
       {schedules && filteredSchedules.length > 0 && (
         <DataTable
@@ -478,7 +450,7 @@ function SchedulesPage() {
         existing={editing}
       />
       {confirmDialog}
-    </div>
+    </PageShell>
   );
 }
 

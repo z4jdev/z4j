@@ -7,16 +7,17 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { ExternalLink, Info } from "lucide-react";
+import { ExternalLink, Info, Settings } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SectionCard } from "@/components/domain/section-card";
 import {
   Table,
   TableBody,
   TableCell,
   TableRow,
 } from "@/components/ui/table";
+import { PageHeader } from "@/components/domain/page-header";
 
 export const Route = createFileRoute("/_authenticated/settings/general")({
   component: GeneralSettingsPage,
@@ -79,18 +80,25 @@ function GeneralSettingsPage() {
     staleTime: 60_000,
   });
 
-  if (isLoading) {
-    return (
-      <div className="space-y-6">
-        <Skeleton className="h-48 w-full" />
-        <Skeleton className="h-48 w-full" />
-        <Skeleton className="h-48 w-full" />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6">
+      <PageHeader
+        icon={Settings}
+        title="General"
+        description="Brain-wide retention, limits, and session policies."
+        badges={<Badge variant="muted">read-only</Badge>}
+      />
+
+      {isLoading && (
+        <>
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-48 w-full" />
+        </>
+      )}
+
+      {!isLoading && (
+      <>
       {/* Read-only notice */}
       <div className="flex items-start gap-2 rounded-md border border-border bg-muted/50 p-3">
         <Info className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
@@ -102,154 +110,130 @@ function GeneralSettingsPage() {
       </div>
 
       {/* Retention */}
-      <Card className="p-6">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold">Retention</h3>
-          <Badge variant="muted">read-only</Badge>
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          How long z4j keeps event and audit data before automatic cleanup.
-        </p>
-        <div className="mt-4">
-          <SettingsTable
-            rows={[
-              [
-                "Event retention",
-                data?.event_retention_days
-                  ? `${data.event_retention_days} days`
-                  : "30 days (default)",
-              ],
-              [
-                "Audit retention",
-                data?.audit_retention_days
-                  ? `${data.audit_retention_days} days`
-                  : "90 days (default)",
-              ],
-            ]}
-          />
-        </div>
-      </Card>
+      <SectionCard
+        title="Retention"
+        description="How long z4j keeps event and audit data before automatic cleanup."
+        readOnly
+      >
+        <SettingsTable
+          rows={[
+            [
+              "Event retention",
+              data?.event_retention_days
+                ? `${data.event_retention_days} days`
+                : "30 days (default)",
+            ],
+            [
+              "Audit retention",
+              data?.audit_retention_days
+                ? `${data.audit_retention_days} days`
+                : "90 days (default)",
+            ],
+          ]}
+        />
+      </SectionCard>
 
       {/* Limits */}
-      <Card className="p-6">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold">Limits</h3>
-          <Badge variant="muted">read-only</Badge>
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Size and rate constraints enforced by z4j.
-        </p>
-        <div className="mt-4">
-          <SettingsTable
-            rows={[
-              [
-                "Max payload size",
-                data?.max_payload_bytes
-                  ? formatBytes(data.max_payload_bytes)
-                  : "1 MB (default)",
-              ],
-              [
-                "Max WebSocket frame size",
-                data?.max_ws_frame_bytes
-                  ? formatBytes(data.max_ws_frame_bytes)
-                  : "64 KB (default)",
-              ],
-              [
-                "Rate limit",
-                data?.rate_limit_rpm
-                  ? `${data.rate_limit_rpm} requests/min`
-                  : "600 requests/min (default)",
-              ],
-            ]}
-          />
-        </div>
-      </Card>
+      <SectionCard
+        title="Limits"
+        description="Size and rate constraints enforced by z4j."
+        readOnly
+      >
+        <SettingsTable
+          rows={[
+            [
+              "Max payload size",
+              data?.max_payload_bytes
+                ? formatBytes(data.max_payload_bytes)
+                : "1 MB (default)",
+            ],
+            [
+              "Max WebSocket frame size",
+              data?.max_ws_frame_bytes
+                ? formatBytes(data.max_ws_frame_bytes)
+                : "64 KB (default)",
+            ],
+            [
+              "Rate limit",
+              data?.rate_limit_rpm
+                ? `${data.rate_limit_rpm} requests/min`
+                : "600 requests/min (default)",
+            ],
+          ]}
+        />
+      </SectionCard>
 
       {/* Session */}
-      <Card className="p-6">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold">Session</h3>
-          <Badge variant="muted">read-only</Badge>
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Authentication and session management policies.
-        </p>
-        <div className="mt-4">
-          <SettingsTable
-            rows={[
-              [
-                "Session lifetime",
-                data?.session_lifetime_hours
-                  ? `${data.session_lifetime_hours} hours`
-                  : "24 hours (default)",
-              ],
-              [
-                "Idle timeout",
-                data?.idle_timeout_minutes
-                  ? `${data.idle_timeout_minutes} minutes`
-                  : "60 minutes (default)",
-              ],
-              [
-                "Login lockout threshold",
-                data?.login_lockout_threshold
-                  ? `${data.login_lockout_threshold} failed attempts`
-                  : "5 failed attempts (default)",
-              ],
-            ]}
-          />
-        </div>
-      </Card>
+      <SectionCard
+        title="Session"
+        description="Authentication and session management policies."
+        readOnly
+      >
+        <SettingsTable
+          rows={[
+            [
+              "Session lifetime",
+              data?.session_lifetime_hours
+                ? `${data.session_lifetime_hours} hours`
+                : "24 hours (default)",
+            ],
+            [
+              "Idle timeout",
+              data?.idle_timeout_minutes
+                ? `${data.idle_timeout_minutes} minutes`
+                : "60 minutes (default)",
+            ],
+            [
+              "Login lockout threshold",
+              data?.login_lockout_threshold
+                ? `${data.login_lockout_threshold} failed attempts`
+                : "5 failed attempts (default)",
+            ],
+          ]}
+        />
+      </SectionCard>
 
       {/* System info */}
       {data && (
-        <Card className="p-6">
-          <h3 className="text-sm font-semibold">System</h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Core runtime information for z4j process.
-          </p>
-          <div className="mt-4">
-            <SettingsTable
-              rows={[
-                ["z4j version", data.z4j_version],
-                [
-                  "Python",
-                  `${data.python_version} (${data.python_implementation})`,
-                ],
-                ["OS", data.os],
-                ["Architecture", data.architecture],
-                ["Database", data.database_type],
-                ...(data.database_version
-                  ? [["Database version", data.database_version] as [string, string]]
-                  : []),
-                ...(data.database_size_mb !== undefined
-                  ? [["Database size", `${data.database_size_mb} MB`] as [string, string]]
-                  : []),
-              ]}
-            />
-          </div>
-        </Card>
+        <SectionCard
+          title="System"
+          description="Core runtime information for z4j process."
+        >
+          <SettingsTable
+            rows={[
+              ["z4j version", data.z4j_version],
+              [
+                "Python",
+                `${data.python_version} (${data.python_implementation})`,
+              ],
+              ["OS", data.os],
+              ["Architecture", data.architecture],
+              ["Database", data.database_type],
+              ...(data.database_version
+                ? [["Database version", data.database_version] as [string, string]]
+                : []),
+              ...(data.database_size_mb !== undefined
+                ? [["Database size", `${data.database_size_mb} MB`] as [string, string]]
+                : []),
+            ]}
+          />
+        </SectionCard>
       )}
 
       {/* About */}
-      <Card className="p-6">
-        <h3 className="text-sm font-semibold">About</h3>
-        <p className="mt-1 text-xs text-muted-foreground">
-          License and project resources.
-        </p>
-        <div className="mt-4">
-          <SettingsTable
-            rows={[["License", "AGPL-3.0-or-later"]]}
-          />
-        </div>
+      <SectionCard
+        title="About"
+        description="License and project resources."
+      >
+        <SettingsTable rows={[["License", "AGPL-3.0-or-later"]]} />
         <div className="mt-4 flex flex-wrap gap-2">
           <ResourceLink href="https://z4j.com" label="z4j.com" />
           <ResourceLink href="https://z4j.dev" label="Documentation" />
-          <ResourceLink
-            href="https://github.com/z4jdev"
-            label="GitHub"
-          />
+          <ResourceLink href="https://github.com/z4jdev" label="GitHub" />
         </div>
-      </Card>
+      </SectionCard>
+      </>
+      )}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { Download, Filter, Shield } from "lucide-react";
+import { Download, Shield } from "lucide-react";
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
 import { PageHeader } from "@/components/domain/page-header";
 import { EmptyState } from "@/components/domain/empty-state";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +13,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -31,6 +31,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { buildAuditExportUrl, useAudit } from "@/hooks/use-audit";
 import { DateCell } from "@/components/domain/date-cell";
+import { PageShell } from "@/components/domain/page-shell";
 
 export const Route = createFileRoute("/_authenticated/projects/$slug/audit")({
   component: AuditPage,
@@ -52,103 +53,111 @@ function AuditPage() {
 
   return (
     <>
-      <div className="space-y-6 p-4 md:p-6">
+      <PageShell>
         <PageHeader
           title="Audit log"
           icon={Shield}
           description="filter by action prefix or outcome - admin-only"
+          actions={
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm">
+                  <Download className="size-4" aria-hidden="true" />
+                  Export
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem asChild>
+                  <a
+                    href={buildAuditExportUrl(slug, "csv", {
+                      action_prefix: actionPrefix || undefined,
+                      outcome: outcome === "all" ? undefined : outcome,
+                    })}
+                    download
+                  >
+                    CSV
+                  </a>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <a
+                    href={buildAuditExportUrl(slug, "xlsx", {
+                      action_prefix: actionPrefix || undefined,
+                      outcome: outcome === "all" ? undefined : outcome,
+                    })}
+                    download
+                  >
+                    Excel (xlsx)
+                  </a>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <a
+                    href={buildAuditExportUrl(slug, "json", {
+                      action_prefix: actionPrefix || undefined,
+                      outcome: outcome === "all" ? undefined : outcome,
+                    })}
+                    download
+                  >
+                    JSON
+                  </a>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          }
         />
 
-        <div className="flex flex-col gap-3 sm:flex-row">
-          <Input
-            placeholder="action prefix (e.g. command.)"
-            value={actionPrefix}
-            onChange={(e) => {
-              setActionPrefix(e.target.value);
-              setCursor(null);
-            }}
-            className="flex-1"
-          />
-          <Select
-            value={outcome}
-            onValueChange={(v) => {
-              setOutcome(v as (typeof OUTCOMES)[number]);
-              setCursor(null);
-            }}
-          >
-            <SelectTrigger className="w-44">
-              <Filter className="size-4 opacity-60" />
-              <SelectValue placeholder="outcome" />
-            </SelectTrigger>
-            <SelectContent>
-              {OUTCOMES.map((o) => (
-                <SelectItem key={o} value={o}>
-                  {o}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="gap-2">
-                <Download className="size-4" aria-hidden="true" />
-                Export
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem asChild>
-                <a
-                  href={buildAuditExportUrl(slug, "csv", {
-                    action_prefix: actionPrefix || undefined,
-                    outcome: outcome === "all" ? undefined : outcome,
-                  })}
-                  download
-                >
-                  CSV
-                </a>
-              </DropdownMenuItem>
-              <DropdownMenuItem asChild>
-                <a
-                  href={buildAuditExportUrl(slug, "xlsx", {
-                    action_prefix: actionPrefix || undefined,
-                    outcome: outcome === "all" ? undefined : outcome,
-                  })}
-                  download
-                >
-                  Excel (xlsx)
-                </a>
-              </DropdownMenuItem>
-              <DropdownMenuItem asChild>
-                <a
-                  href={buildAuditExportUrl(slug, "json", {
-                    action_prefix: actionPrefix || undefined,
-                    outcome: outcome === "all" ? undefined : outcome,
-                  })}
-                  download
-                >
-                  JSON
-                </a>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+        <FilterToolbar
+          searchValue={actionPrefix}
+          onSearchChange={(v) => {
+            setActionPrefix(v);
+            setCursor(null);
+          }}
+          searchPlaceholder="action prefix (e.g. command.)"
+          activeFilterCount={
+            (actionPrefix ? 1 : 0) + (outcome !== "all" ? 1 : 0)
+          }
+          onClear={() => {
+            setActionPrefix("");
+            setOutcome("all");
+            setCursor(null);
+          }}
+          filters={
+            <Select
+              value={outcome}
+              onValueChange={(v) => {
+                setOutcome(v as (typeof OUTCOMES)[number]);
+                setCursor(null);
+              }}
+            >
+              <SelectTrigger className="w-36 shrink-0">
+                <SelectValue placeholder="outcome" />
+              </SelectTrigger>
+              <SelectContent>
+                {OUTCOMES.map((o) => (
+                  <SelectItem key={o} value={o}>
+                    {o}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          }
+        />
 
-        <Card className="overflow-hidden">
-          {isLoading && (
-            <div className="space-y-2 p-4">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <Skeleton key={i} className="h-10 w-full" />
-              ))}
-            </div>
-          )}
-          {data && data.items.length === 0 && (
-            <EmptyState
-              icon={Shield}
-              title="no audit entries match"
-              description="commands and admin actions write here automatically"
-            />
-          )}
-          {data && data.items.length > 0 && (
+        {isLoading && (
+          <div className="space-y-2">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-12 w-full" />
+            ))}
+          </div>
+        )}
+        {data && data.items.length === 0 && (
+          <EmptyState
+            icon={Shield}
+            title="no audit entries match"
+            description="commands and admin actions write here automatically"
+          />
+        )}
+        {data && data.items.length > 0 && (
+          <Card className="overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -198,8 +207,8 @@ function AuditPage() {
                 ))}
               </TableBody>
             </Table>
-          )}
-        </Card>
+          </Card>
+        )}
 
         {data && data.next_cursor && (
           <div className="flex justify-end gap-2">
@@ -216,7 +225,7 @@ function AuditPage() {
             </Button>
           </div>
         )}
-      </div>
+      </PageShell>
     </>
   );
 }

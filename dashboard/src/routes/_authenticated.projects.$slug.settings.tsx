@@ -13,10 +13,10 @@
  * own subscriptions in Global Notifications under their account.
  */
 import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
-import { BellRing, Settings2, Users } from "lucide-react";
+import { BellRing, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { PageHeader } from "@/components/domain/page-header";
 import { useIsProjectAdmin } from "@/hooks/use-memberships";
+import { PageShell } from "@/components/domain/page-shell";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/settings",
@@ -70,12 +70,10 @@ function ProjectSettingsLayout() {
   }));
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
-      <PageHeader
-        title="Project Settings"
-        icon={Settings2}
-        description={`configuration for project ${slug}`}
-      />
+    <PageShell>
+      {/* Each child route renders its own PageHeader. The shell only
+       * provides the navigation. Project scope is conveyed by the
+       * project switcher in the workspace sidebar. */}
 
       {/* Mobile navigation (horizontal scroll) */}
       <div className="flex gap-1 overflow-x-auto border-b pb-3 md:hidden">
@@ -140,6 +138,6 @@ function ProjectSettingsLayout() {
           <Outlet />
         </div>
       </div>
-    </div>
+    </PageShell>
   );
 }

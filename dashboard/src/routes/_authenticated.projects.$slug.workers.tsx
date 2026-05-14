@@ -15,20 +15,32 @@
  *
  * Worker name links to the 6-tab detail page.
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import type { ColumnDef } from "@tanstack/react-table";
 import { Cpu, RefreshCw } from "lucide-react";
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
+import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
 import { WorkerStateBadge } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
 import { DataTable } from "@/components/ui/data-table";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkers } from "@/hooks/use-workers";
 import { DateCell } from "@/components/domain/date-cell";
 import { formatCompact } from "@/lib/format";
-import type { WorkerPublic } from "@/lib/api-types";
+import type { WorkerPublic, WorkerState } from "@/lib/api-types";
+import { PageShell } from "@/components/domain/page-shell";
+
+const WORKER_STATES: WorkerState[] = ["online", "offline", "draining", "unknown"];
 
 export const Route = createFileRoute("/_authenticated/projects/$slug/workers")({
   component: WorkersPage,
@@ -40,7 +52,29 @@ function WorkersPage() {
 
   const columns = useWorkerColumns(slug);
 
-  // Compute totals for the summary row + the in-table Total row.
+  // Filter / search state. Client-side filtering since the workers
+  // list is loaded into memory anyway for the summary calculations.
+  const [searchQuery, setSearchQuery] = useState("");
+  const [stateFilter, setStateFilter] = useState<WorkerState | "all">("all");
+  const activeFilterCount =
+    (searchQuery ? 1 : 0) + (stateFilter !== "all" ? 1 : 0);
+
+  const filteredWorkers = useMemo(() => {
+    if (!workers) return [];
+    const q = searchQuery.toLowerCase();
+    return workers.filter((w) => {
+      if (stateFilter !== "all" && w.state !== stateFilter) return false;
+      if (!q) return true;
+      return (
+        w.name.toLowerCase().includes(q) ||
+        w.id.toLowerCase().includes(q)
+      );
+    });
+  }, [workers, searchQuery, stateFilter]);
+
+  // Totals always reflect the FULL fleet, not the filtered view.
+  // The summary bar is a "what's actually running" snapshot, so
+  // applying the user's filter to it would lie about the cluster.
   const totals = useMemo(() => {
     if (!workers || workers.length === 0) return null;
     return {
@@ -54,24 +88,48 @@ function WorkersPage() {
     };
   }, [workers]);
 
+  function clearFilters() {
+    setSearchQuery("");
+    setStateFilter("all");
+  }
+
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       <PageHeader
         title="Workers"
         icon={Cpu}
         description="every worker process the agent has observed"
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            disabled={isFetching}
-          >
-            <RefreshCw
-              className={isFetching ? "size-4 animate-spin" : "size-4"}
+          <RefreshButton
+              onRefresh={() => refetch()}
+              pending={isFetching}
             />
-            Refresh
-          </Button>
+        }
+      />
+
+      <FilterToolbar
+        searchValue={searchQuery}
+        onSearchChange={setSearchQuery}
+        searchPlaceholder="Search workers..."
+        activeFilterCount={activeFilterCount}
+        onClear={clearFilters}
+        filters={
+          <Select
+            value={stateFilter}
+            onValueChange={(v) => setStateFilter(v as WorkerState | "all")}
+          >
+            <SelectTrigger className="w-36 shrink-0">
+              <SelectValue placeholder="State" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All states</SelectItem>
+              {WORKER_STATES.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         }
       />
 
@@ -82,14 +140,20 @@ function WorkersPage() {
           ))}
         </div>
       )}
-      {workers && workers.length === 0 && (
+      {workers && filteredWorkers.length === 0 && (
         <EmptyState
           icon={Cpu}
-          title="no workers seen yet"
-          description="workers will appear here once they connect through the z4j agent (Celery, RQ, or Dramatiq)"
+          title={
+            activeFilterCount > 0 ? "no workers match" : "no workers seen yet"
+          }
+          description={
+            activeFilterCount > 0
+              ? "try adjusting your filters or search query"
+              : "workers will appear here once they connect through the z4j agent (Celery, RQ, or Dramatiq)"
+          }
         />
       )}
-      {workers && workers.length > 0 && (
+      {workers && filteredWorkers.length > 0 && (
         <>
           {/* Summary bar */}
           {totals && (
@@ -133,9 +197,13 @@ function WorkersPage() {
           )}
           <DataTable
             columns={columns}
-            data={workers}
+            data={filteredWorkers}
             enableSorting
-            totalLabel={`${workers.length} worker${workers.length === 1 ? "" : "s"}`}
+            totalLabel={
+              activeFilterCount > 0 && workers.length !== filteredWorkers.length
+                ? `${filteredWorkers.length} of ${workers.length} workers`
+                : `${filteredWorkers.length} worker${filteredWorkers.length === 1 ? "" : "s"}`
+            }
           />
           {/* In-table Total row. Lives outside <DataTable> so the
               column layout matches without forcing the table
@@ -154,7 +222,7 @@ function WorkersPage() {
           )}
         </>
       )}
-    </div>
+    </PageShell>
   );
 }
 

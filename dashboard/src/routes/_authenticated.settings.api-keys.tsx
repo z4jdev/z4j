@@ -19,6 +19,7 @@ import {
   FolderClosed,
   Globe,
   Key,
+  KeyRound,
   Loader2,
   Plus,
   Trash2,
@@ -53,7 +54,6 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { formatAbsolute } from "@/lib/format";
 import { DateCell } from "@/components/domain/date-cell";
 import { PageHeader } from "@/components/domain/page-header";
 import { useConfirm } from "@/components/domain/confirm-dialog";
@@ -124,6 +124,7 @@ function ApiKeysPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={KeyRound}
         title="API Keys"
         description="Personal tokens for authenticating with the z4j API."
         actions={
@@ -214,10 +215,10 @@ function ApiKeysPage() {
                       ? <DateCell value={key.last_used_at} />
                       : "Never"}
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
+                  <TableCell>
                     {key.expires_at
-                      ? formatAbsolute(key.expires_at)
-                      : "Never"}
+                      ? <DateCell value={key.expires_at} />
+                      : <span className="text-xs text-muted-foreground">Never</span>}
                   </TableCell>
                   <TableCell>
                     <DateCell value={key.created_at} />

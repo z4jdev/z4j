@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { Copy, Network, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { useConfirm } from "@/components/domain/confirm-dialog";
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
 import { PageHeader } from "@/components/domain/page-header";
 import { AgentStateBadge } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
@@ -18,6 +19,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -35,6 +43,10 @@ import {
 import { useCan } from "@/hooks/use-memberships";
 import { DateCell } from "@/components/domain/date-cell";
 import { ApiError } from "@/lib/api";
+import type { AgentState } from "@/lib/api-types";
+import { PageShell } from "@/components/domain/page-shell";
+
+const AGENT_STATES: AgentState[] = ["online", "offline", "unknown"];
 
 export const Route = createFileRoute("/_authenticated/projects/$slug/agents")({
   component: AgentsPage,
@@ -52,6 +64,32 @@ function AgentsPage() {
   const [mintedToken, setMintedToken] = useState<string | null>(null);
   const [mintedHmacSecret, setMintedHmacSecret] = useState<string | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
+
+  // Filter / search state. Client-side filtering since the agents
+  // list is typically small.
+  const [searchQuery, setSearchQuery] = useState("");
+  const [stateFilter, setStateFilter] = useState<AgentState | "all">("all");
+  const activeFilterCount =
+    (searchQuery ? 1 : 0) + (stateFilter !== "all" ? 1 : 0);
+
+  const filteredAgents = useMemo(() => {
+    if (!agents) return [];
+    const q = searchQuery.toLowerCase();
+    return agents.filter((a) => {
+      if (stateFilter !== "all" && a.state !== stateFilter) return false;
+      if (!q) return true;
+      return (
+        a.name.toLowerCase().includes(q) ||
+        a.id.toLowerCase().includes(q) ||
+        (a.host_name ?? "").toLowerCase().includes(q)
+      );
+    });
+  }, [agents, searchQuery, stateFilter]);
+
+  function clearFilters() {
+    setSearchQuery("");
+    setStateFilter("all");
+  }
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -117,7 +155,7 @@ function AgentsPage() {
   return (
     <>
       {confirmDialog}
-      <div className="space-y-6 p-4 md:p-6">
+      <PageShell>
         <PageHeader
           title="Agents"
           icon={Network}
@@ -125,6 +163,7 @@ function AgentsPage() {
           actions={
             canManageAgents ? (
               <Button
+                size="sm"
                 onClick={() => {
                   setCreateOpen(true);
                   setMintedToken(null);
@@ -138,6 +177,32 @@ function AgentsPage() {
           }
         />
 
+        <FilterToolbar
+          searchValue={searchQuery}
+          onSearchChange={setSearchQuery}
+          searchPlaceholder="Search agents..."
+          activeFilterCount={activeFilterCount}
+          onClear={clearFilters}
+          filters={
+            <Select
+              value={stateFilter}
+              onValueChange={(v) => setStateFilter(v as AgentState | "all")}
+            >
+              <SelectTrigger className="w-36 shrink-0">
+                <SelectValue placeholder="State" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All states</SelectItem>
+                {AGENT_STATES.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          }
+        />
+
         <Card className="overflow-hidden">
           {isLoading && (
             <div className="space-y-2 p-4">
@@ -146,14 +211,22 @@ function AgentsPage() {
               ))}
             </div>
           )}
-          {agents && agents.length === 0 && (
+          {agents && filteredAgents.length === 0 && (
             <EmptyState
               icon={Network}
-              title="no agents registered"
-              description="click 'new agent' to mint a token, then add it to your worker (Celery, RQ, or Dramatiq)"
+              title={
+                activeFilterCount > 0
+                  ? "no agents match"
+                  : "no agents registered"
+              }
+              description={
+                activeFilterCount > 0
+                  ? "try adjusting your filters or search query"
+                  : "click 'new agent' to mint a token, then add it to your worker (Celery, RQ, or Dramatiq)"
+              }
             />
           )}
-          {agents && agents.length > 0 && (
+          {agents && filteredAgents.length > 0 && (
             <>
             <Table>
               <TableHeader>
@@ -169,7 +242,7 @@ function AgentsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {agents.map((agent) => (
+                {filteredAgents.map((agent) => (
                   <TableRow key={agent.id}>
                     <TableCell>
                       <div className="font-medium">{agent.name}</div>
@@ -219,12 +292,16 @@ function AgentsPage() {
               </TableBody>
             </Table>
             <div className="border-t px-4 py-2 text-xs text-muted-foreground">
-              {agents.length} agent{agents.length === 1 ? "" : "s"}
+              {filteredAgents.length} agent
+              {filteredAgents.length === 1 ? "" : "s"}
+              {activeFilterCount > 0 && agents.length !== filteredAgents.length
+                ? ` of ${agents.length}`
+                : ""}
             </div>
             </>
           )}
         </Card>
-      </div>
+      </PageShell>
 
       {/* Mint dialog */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>

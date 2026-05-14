@@ -1,5 +1,8 @@
+import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { Layers, RefreshCw } from "lucide-react";
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
+import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
 import { EmptyState } from "@/components/domain/empty-state";
 import { Button } from "@/components/ui/button";
@@ -15,6 +18,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { useQueues } from "@/hooks/use-queues";
 import { DateCell } from "@/components/domain/date-cell";
+import { PageShell } from "@/components/domain/page-shell";
 
 export const Route = createFileRoute("/_authenticated/projects/$slug/queues")({
   component: QueuesPage,
@@ -23,26 +27,40 @@ export const Route = createFileRoute("/_authenticated/projects/$slug/queues")({
 function QueuesPage() {
   const { slug } = Route.useParams();
   const { data: queues, isLoading, isFetching, refetch } = useQueues(slug);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const filteredQueues = useMemo(() => {
+    if (!queues) return [];
+    if (!searchQuery) return queues;
+    const q = searchQuery.toLowerCase();
+    return queues.filter(
+      (row) =>
+        row.name.toLowerCase().includes(q) ||
+        row.engine.toLowerCase().includes(q) ||
+        (row.broker_type && row.broker_type.toLowerCase().includes(q)),
+    );
+  }, [queues, searchQuery]);
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       <PageHeader
         title="Queues"
         icon={Layers}
         description="every queue the agent has touched in the recent past"
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            disabled={isFetching}
-          >
-            <RefreshCw
-              className={isFetching ? "size-4 animate-spin" : "size-4"}
+          <RefreshButton
+              onRefresh={() => refetch()}
+              pending={isFetching}
             />
-            Refresh
-          </Button>
         }
+      />
+
+      <FilterToolbar
+        searchValue={searchQuery}
+        onSearchChange={setSearchQuery}
+        searchPlaceholder="Search queues..."
+        activeFilterCount={searchQuery ? 1 : 0}
+        onClear={() => setSearchQuery("")}
       />
 
       {isLoading && (
@@ -52,14 +70,18 @@ function QueuesPage() {
           ))}
         </div>
       )}
-      {queues && queues.length === 0 && (
+      {queues && filteredQueues.length === 0 && (
         <EmptyState
           icon={Layers}
-          title="no queues yet"
-          description="queues will appear once tasks start flowing through the agent"
+          title={searchQuery ? "no queues match" : "no queues yet"}
+          description={
+            searchQuery
+              ? "try adjusting your search query"
+              : "queues will appear once tasks start flowing through the agent"
+          }
         />
       )}
-      {queues && queues.length > 0 && (
+      {queues && filteredQueues.length > 0 && (
         <Card className="overflow-hidden">
           <Table>
             <TableHeader>
@@ -71,7 +93,7 @@ function QueuesPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {queues.map((q) => (
+              {filteredQueues.map((q) => (
                 <TableRow key={q.id}>
                   <TableCell className="font-medium">{q.name}</TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">
@@ -88,10 +110,13 @@ function QueuesPage() {
             </TableBody>
           </Table>
           <div className="border-t px-4 py-2 text-xs text-muted-foreground">
-            {queues.length} queue{queues.length === 1 ? "" : "s"}
+            {filteredQueues.length} queue{filteredQueues.length === 1 ? "" : "s"}
+            {searchQuery && queues.length !== filteredQueues.length
+              ? ` of ${queues.length}`
+              : ""}
           </div>
         </Card>
       )}
-    </div>
+    </PageShell>
   );
 }

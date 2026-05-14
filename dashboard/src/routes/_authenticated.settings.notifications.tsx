@@ -21,6 +21,7 @@
  * admin-only and follows the same path-based tab structure.
  */
 import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { Bell } from "lucide-react";
 import { PageHeader } from "@/components/domain/page-header";
 import { cn } from "@/lib/utils";
 
@@ -48,8 +49,9 @@ function GlobalNotificationsLayout() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Global Notifications"
-        description="Personal notification settings that follow you across every project, your channels, your subscriptions, and the full log of notifications that landed in your inbox."
+        icon={Bell}
+        title="Notifications"
+        description="Your personal channels, subscriptions, and delivery log across every project."
       />
       <div className="border-b">
         <nav className="-mb-px flex gap-4" aria-label="Notification settings">

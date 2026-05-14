@@ -16,7 +16,7 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Copy, ExternalLink, Info, Search } from "lucide-react";
+import { Copy, ExternalLink, Info, Search, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -38,6 +38,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { PageHeader } from "@/components/domain/page-header";
 
 // Docs URLs. Kept inline rather than centralised because there is no
 // dashboard-wide docs registry; the page that needs a link knows
@@ -130,7 +131,13 @@ function RuntimeSettingsPage() {
   return (
     <TooltipProvider>
       <div className="space-y-6">
-        <Header />
+        <PageHeader
+          icon={SlidersHorizontal}
+          title="Runtime config"
+          description="Effective Settings fields the brain is currently using, with the source each value came from. Mirrors `z4j config show`."
+          badges={<Badge variant="muted">read-only</Badge>}
+        />
+        <RuntimeNotice />
         <Z4jHomeCard z4jHome={data.z4j_home} />
         <SettingsTableCard settings={data.settings} />
         <ActionsCard settings={data.settings} z4jHome={data.z4j_home} />
@@ -140,25 +147,15 @@ function RuntimeSettingsPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Header
+// Notice block (sources legend) - used to live inline in the page header,
+// pulled into its own card-shaped notice so the PageHeader stays uniform
+// with every other settings page.
 // ---------------------------------------------------------------------------
 
-function Header() {
+function RuntimeNotice() {
   return (
-    <div>
-      <div className="flex items-center gap-2">
-        <h2 className="text-lg font-semibold">Runtime configuration</h2>
-        <Badge variant="muted">read-only</Badge>
-      </div>
-      <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
-        The full set of <code className="font-mono">Settings</code>{" "}
-        fields the brain is currently using, plus where each value came
-        from. Mirrors the output of{" "}
-        <code className="font-mono">z4j config show</code>. To change a
-        value, edit the right source file (or its env var) and{" "}
-        <em>restart</em> the brain -- there is no live reload.
-      </p>
-      <p className="mt-2 max-w-3xl text-xs text-muted-foreground">
+    <div className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+      <p className="max-w-3xl">
         Sources, in resolution order:{" "}
         <code className="font-mono">env</code> (a{" "}
         <code className="font-mono">Z4J_*</code> environment variable),{" "}

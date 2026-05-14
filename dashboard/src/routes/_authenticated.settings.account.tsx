@@ -14,7 +14,7 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Loader2 } from "lucide-react";
+import { KeyRound, Loader2, UserCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -93,6 +93,7 @@ function AccountPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={UserCircle}
         title="Account"
         description="Your profile and password."
       />

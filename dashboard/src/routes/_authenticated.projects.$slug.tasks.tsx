@@ -22,10 +22,10 @@ import {
   FileText,
   RefreshCw,
   RotateCcw,
-  Search,
   Trash2,
-  X,
 } from "lucide-react";
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
+import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
 import {
   TaskPriorityBadge,
@@ -34,9 +34,7 @@ import {
 import { EmptyState } from "@/components/domain/empty-state";
 import { QueryError } from "@/components/domain/query-error";
 import { DataTable } from "@/components/ui/data-table";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -68,6 +66,7 @@ import {
 } from "@/lib/format";
 import type { TaskPriority, TaskPublic, TaskState } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
+import { PageShell } from "@/components/domain/page-shell";
 
 interface TasksSearch {
   state?: TaskState | "all";
@@ -288,83 +287,64 @@ function TasksPage() {
     [slug, queryClient],
   );
 
-  // Filter toolbar (default state) - rendered inside the DataTable toolbar slot.
-  // The Clear button always reserves its space (invisible when no filters)
-  // to prevent layout shift.
   const filterToolbar = (
-    <div className="flex items-center gap-3">
-      <div className="relative flex-1">
-        <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          placeholder="Search tasks..."
-          value={searchQuery}
-          onChange={(e) => {
-            setSearchQuery(e.target.value);
-            setCursor(null);
-          }}
-          className="h-9 pl-9"
-        />
-      </div>
-      <Select
-        value={stateFilter}
-        onValueChange={(v) => updateStateFilter(v as TaskState | "all")}
-      >
-        <SelectTrigger className="h-9 w-36 shrink-0">
-          <SelectValue placeholder="State" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">All states</SelectItem>
-          {TASK_STATES.map((s) => (
-            <SelectItem key={s} value={s}>
-              {s}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Select
-        value={priorityFilter.length === 1 ? priorityFilter[0] : "all"}
-        onValueChange={(v) => {
-          if (v === "all") {
-            setPriorityFilter([]);
-          } else {
-            setPriorityFilter([v as TaskPriority]);
-          }
-          setCursor(null);
-        }}
-      >
-        <SelectTrigger className="h-9 w-36 shrink-0">
-          <SelectValue placeholder="Priority" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">All priorities</SelectItem>
-          {PRIORITIES.map((p) => (
-            <SelectItem key={p} value={p}>
-              {p}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      {/* Always reserve space - invisible when no filters active */}
-      <Button
-        variant="ghost"
-        size="sm"
-        className={cn(
-          "h-9 shrink-0 gap-1 text-xs text-muted-foreground",
-          activeFilterCount === 0 && "pointer-events-none invisible",
-        )}
-        onClick={clearFilters}
-      >
-        <X className="size-3" />
-        Clear
-        <Badge variant="secondary" className="ml-0.5 px-1.5 py-0 text-[10px]">
-          {activeFilterCount}
-        </Badge>
-      </Button>
-    </div>
+    <FilterToolbar
+      searchValue={searchQuery}
+      onSearchChange={(v) => {
+        setSearchQuery(v);
+        setCursor(null);
+      }}
+      searchPlaceholder="Search tasks..."
+      activeFilterCount={activeFilterCount}
+      onClear={clearFilters}
+      filters={
+        <>
+          <Select
+            value={stateFilter}
+            onValueChange={(v) => updateStateFilter(v as TaskState | "all")}
+          >
+            <SelectTrigger className="w-36 shrink-0">
+              <SelectValue placeholder="State" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All states</SelectItem>
+              {TASK_STATES.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={priorityFilter.length === 1 ? priorityFilter[0] : "all"}
+            onValueChange={(v) => {
+              if (v === "all") {
+                setPriorityFilter([]);
+              } else {
+                setPriorityFilter([v as TaskPriority]);
+              }
+              setCursor(null);
+            }}
+          >
+            <SelectTrigger className="w-36 shrink-0">
+              <SelectValue placeholder="Priority" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All priorities</SelectItem>
+              {PRIORITIES.map((p) => (
+                <SelectItem key={p} value={p}>
+                  {p}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </>
+      }
+    />
   );
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       <PageHeader
         title="Tasks"
         icon={ClipboardList}
@@ -372,17 +352,10 @@ function TasksPage() {
         actions={
           <div className="flex items-center gap-2">
             <ExportMenu slug={slug} filters={filters} />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => refetch()}
-              disabled={isFetching}
-            >
-              <RefreshCw
-                className={isFetching ? "size-4 animate-spin" : "size-4"}
-              />
-              Refresh
-            </Button>
+            <RefreshButton
+              onRefresh={() => refetch()}
+              pending={isFetching}
+            />
           </div>
         }
       />
@@ -399,22 +372,18 @@ function TasksPage() {
         </div>
       )}
       {data && data.items.length === 0 && (
-        <div>
-          <div className="flex h-[52px] items-center">
-            <div className="w-full">{filterToolbar}</div>
-          </div>
-          <div className="mt-2 overflow-hidden rounded-lg border">
-            <EmptyState
-              icon={ClipboardList}
-              title="no tasks match"
-              description={
-                activeFilterCount > 0 || searchQuery
-                  ? "try adjusting your filters or search query"
-                  : "connect a z4j agent in your worker (Celery, RQ, or Dramatiq) to see tasks here"
-              }
-            />
-          </div>
-        </div>
+        <>
+          {filterToolbar}
+          <EmptyState
+            icon={ClipboardList}
+            title="no tasks match"
+            description={
+              activeFilterCount > 0 || searchQuery
+                ? "try adjusting your filters or search query"
+                : "connect a z4j agent in your worker (Celery, RQ, or Dramatiq) to see tasks here"
+            }
+          />
+        </>
       )}
       {data && data.items.length > 0 && (
         <DataTable
@@ -533,7 +502,7 @@ function TasksPage() {
           }
         />
       )}
-    </div>
+    </PageShell>
   );
 }
 

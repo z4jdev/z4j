@@ -116,6 +116,7 @@ function UsersPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={Users}
         title="Users"
         description="Manage user accounts, roles, and access."
         actions={

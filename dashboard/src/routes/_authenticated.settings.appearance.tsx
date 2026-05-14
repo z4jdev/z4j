@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useTheme } from "@/components/layout/theme-provider";
-import { Check, Monitor, Moon, Sun } from "lucide-react";
+import { Check, Monitor, Moon, Palette, Sun } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { PageHeader } from "@/components/domain/page-header";
 
@@ -85,6 +85,7 @@ function AppearancePage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={Palette}
         title="Appearance"
         description="Theme and accent color."
       />

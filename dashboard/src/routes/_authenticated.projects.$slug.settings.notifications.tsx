@@ -21,6 +21,7 @@
  * own admin-only EmptyState.
  */
 import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { BellRing } from "lucide-react";
 import { PageHeader } from "@/components/domain/page-header";
 import { cn } from "@/lib/utils";
 
@@ -47,8 +48,9 @@ function ProjectNotificationsLayout() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Project Notifications"
-        description="What this project announces, through which channels, and to whom by default. Members can wire their own personal subscriptions in Global Notifications under their account."
+        icon={BellRing}
+        title="Notifications"
+        description="What this project announces, through which channels, and to whom by default."
       />
       <div className="border-b">
         <nav

@@ -70,6 +70,7 @@ function SecurityPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={Shield}
         title="Security"
         description="Two-factor authentication, trusted devices, and active sessions."
       />

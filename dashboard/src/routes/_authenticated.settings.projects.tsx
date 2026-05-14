@@ -91,6 +91,7 @@ function ProjectsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={FolderKanban}
         title="Projects"
         description="Create, edit, and archive projects."
         actions={

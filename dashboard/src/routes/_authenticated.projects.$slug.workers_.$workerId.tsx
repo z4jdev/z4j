@@ -10,6 +10,7 @@ import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ArrowLeft, Minus, Plus, RefreshCw, Server, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { PageShell } from "@/components/domain/page-shell";
 import { WorkerStateBadge } from "@/components/domain/state-badges";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -182,18 +183,18 @@ function WorkerDetailPage() {
 
   if (isLoading) {
     return (
-      <div className="space-y-4 p-4 md:p-6">
+      <PageShell spacing="sm">
         <Skeleton className="h-10 w-64" />
         <Skeleton className="h-96 w-full" />
-      </div>
+      </PageShell>
     );
   }
 
   if (!worker) {
     return (
-      <div className="p-4 md:p-6">
+      <PageShell>
         <p className="text-muted-foreground">Worker not found.</p>
-      </div>
+      </PageShell>
     );
   }
 
@@ -211,7 +212,7 @@ function WorkerDetailPage() {
 
   return (
     <>
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       {/* Header */}
       <div className="flex items-center gap-3">
         <Button asChild variant="ghost" size="sm">
@@ -540,7 +541,7 @@ function WorkerDetailPage() {
           </Card>
         </TabsContent>
       </Tabs>
-    </div>
+    </PageShell>
 
     {/* Add Queue dialog */}
     <Dialog open={addQueueOpen} onOpenChange={setAddQueueOpen}>

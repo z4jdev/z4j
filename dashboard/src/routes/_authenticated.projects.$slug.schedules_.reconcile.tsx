@@ -54,6 +54,7 @@ import type {
   ScheduleDiffResponse,
 } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
+import { PageShell } from "@/components/domain/page-shell";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/schedules_/reconcile",
@@ -199,7 +200,7 @@ function ReconcilePage() {
   }
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       <Link
         to="/projects/$slug/schedules"
         params={{ slug }}
@@ -306,7 +307,7 @@ function ReconcilePage() {
         />
       )}
       {confirmDialog}
-    </div>
+    </PageShell>
   );
 }
 

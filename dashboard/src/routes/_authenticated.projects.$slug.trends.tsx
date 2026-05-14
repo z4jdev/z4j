@@ -1,9 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { LineChart, RefreshCw } from "lucide-react";
+import { LineChart } from "lucide-react";
 import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
+import { RefreshButton } from "@/components/domain/refresh-button";
+import { StatCard } from "@/components/domain/stat-card";
+import { TimeRangeSelect } from "@/components/domain/time-range-select";
 import { TrendChart } from "@/components/domain/trend-chart";
-import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -12,13 +15,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   useTrends,
   type TrendBucketSize,
@@ -65,54 +61,35 @@ function TrendsPage() {
   const failureRate = total > 0 ? totals.failure / total : 0;
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       <PageHeader
         title="Trends"
         icon={LineChart}
         description="task outcomes over time"
         actions={
           <div className="flex items-center gap-2">
-            <Select
+            <TimeRangeSelect
               value={window}
-              onValueChange={(v) => setWindow(v as TrendWindow)}
-            >
-              <SelectTrigger className="w-40">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {WINDOWS.map((w) => (
-                  <SelectItem key={w.value} value={w.value}>
-                    {w.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => refetch()}
-              disabled={isFetching}
-            >
-              <RefreshCw
-                className={isFetching ? "size-4 animate-spin" : "size-4"}
-              />
-              Refresh
-            </Button>
+              onValueChange={setWindow}
+              options={WINDOWS}
+              aria-label="Trend window"
+            />
+            <RefreshButton
+              onRefresh={() => refetch()}
+              pending={isFetching}
+            />
           </div>
         }
       />
 
       <div className="grid gap-4 md:grid-cols-4">
-        <StatTile label="Succeeded" value={totals.success.toLocaleString()} />
-        <StatTile label="Failed" value={totals.failure.toLocaleString()} />
-        <StatTile
+        <StatCard label="Succeeded" value={totals.success.toLocaleString()} />
+        <StatCard label="Failed" value={totals.failure.toLocaleString()} />
+        <StatCard
           label="Failure rate"
           value={total === 0 ? "-" : `${(failureRate * 100).toFixed(1)}%`}
         />
-        <StatTile
-          label="Retries"
-          value={totals.retry.toLocaleString()}
-        />
+        <StatCard label="Retries" value={totals.retry.toLocaleString()} />
       </div>
 
       <Card>
@@ -130,19 +107,7 @@ function TrendsPage() {
           )}
         </CardContent>
       </Card>
-    </div>
+    </PageShell>
   );
 }
 
-function StatTile({ label, value }: { label: string; value: string }) {
-  return (
-    <Card>
-      <CardContent className="pt-6">
-        <div className="text-xs uppercase tracking-wider text-muted-foreground">
-          {label}
-        </div>
-        <div className="mt-1 font-mono text-2xl">{value}</div>
-      </CardContent>
-    </Card>
-  );
-}

@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useMe } from "@/hooks/use-auth";
+import { PageShell } from "@/components/domain/page-shell";
 
 export const Route = createFileRoute("/_authenticated/settings")({
   component: SettingsLayout,
@@ -85,7 +86,7 @@ function SettingsLayout() {
   ];
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <PageShell>
       {/* Mobile navigation (horizontal scroll) */}
       <div className="flex gap-1 overflow-x-auto border-b pb-3 md:hidden">
         {sections
@@ -151,6 +152,6 @@ function SettingsLayout() {
           <Outlet />
         </div>
       </div>
-    </div>
+    </PageShell>
   );
 }
