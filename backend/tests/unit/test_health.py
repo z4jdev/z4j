@@ -12,7 +12,17 @@ class TestHealth:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "ok"
-        assert "version" in body
+
+    async def test_liveness_does_not_leak_version(self, client) -> None:
+        """1.6.3 security advisory: /health is publicly reachable
+        (by design for liveness probes) so leaking the brain version
+        lets attackers pin specific CVEs. Version disclosure moved
+        to /health/system (auth-gated).
+        """
+        response = await client.get("/api/v1/health")
+        assert response.status_code == 200
+        body = response.json()
+        assert "version" not in body
 
     async def test_readiness_returns_200_on_sqlite(self, client) -> None:
         # SQLite is reachable in our test fixture, so /ready is happy.
@@ -20,6 +30,12 @@ class TestHealth:
         assert response.status_code == 200
         assert response.json()["status"] == "ready"
 
-    async def test_readiness_includes_version(self, client) -> None:
+    async def test_readiness_does_not_leak_version(self, client) -> None:
+        """1.6.3 security advisory: /health/ready is publicly reachable
+        (k8s readiness probe) so leaking the brain version invites
+        the same CVE-pin attacks as /health. Same fix.
+        """
         response = await client.get("/api/v1/health/ready")
-        assert "version" in response.json()
+        assert response.status_code == 200
+        body = response.json()
+        assert "version" not in body

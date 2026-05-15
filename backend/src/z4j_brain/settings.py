@@ -359,16 +359,44 @@ class Settings(BaseSettings):
     #: default - see :func:`z4j_brain.api.metrics._check_metrics_auth`
     #: for the policy rationale.
     metrics_public: bool = False
-    #: Whether the FastAPI auto-generated docs (``/api/v1/docs``) and
-    #: schema (``/api/v1/openapi.json``) are reachable. Default True
-    #: matches historical behaviour; production operators who do not
-    #: want to expose the full endpoint surface to anonymous callers
-    #: can set ``Z4J_OPENAPI_DOCS_ENABLED=false`` so the brain registers
-    #: those routes as None (FastAPI returns 404). The schema also
-    #: leaks internal type structure beyond what is strictly needed
-    #: for the dashboard, so disabling it tightens the recon surface.
-    #: (1.6.0 round-3 audit Medium-1.)
-    openapi_docs_enabled: bool = True
+    #: DEPRECATED in 1.6.3. Read for backwards compat with a WARN
+    #: log; use :attr:`openapi_visibility` instead. Mapped on
+    #: :meth:`model_post_init`: ``true`` -> ``"private"``,
+    #: ``false`` -> ``"disabled"``. Leave unset on new deployments.
+    #:
+    #: Pre-1.6.3 the boolean defaulted to True with NO authentication
+    #: requirement on the schema or Swagger UI -- which made every
+    #: route, every Pydantic model, every field name and type, and
+    #: every docstring readable to any anonymous caller. The 1.6.0
+    #: round-3 audit Medium-1 flagged this; 1.6.3 closes it properly
+    #: by replacing the boolean with a three-mode visibility setting
+    #: defaulting to ``private``.
+    openapi_docs_enabled: bool | None = None
+
+    #: Visibility of the OpenAPI schema (``/api/v1/openapi.json``)
+    #: and Swagger UI (``/api/v1/docs``). Three modes:
+    #:
+    #: - ``"public"`` -- reachable by any anonymous caller. Use when
+    #:   the brain intentionally exposes its API surface (demo
+    #:   sites, public API products, marketing endpoints).
+    #: - ``"private"`` -- requires session cookie OR API key. Default;
+    #:   appropriate for every self-hosted production deployment.
+    #:   Returns 401 to anonymous callers with a generic
+    #:   ``WWW-Authenticate: Bearer realm="z4j"``.
+    #: - ``"disabled"`` -- not mounted. Returns 404 to everyone.
+    #:   Use for compliance-bound or regulated deployments where
+    #:   even authenticated discovery is not desired.
+    #:
+    #: Layered defenses apply regardless of mode: per-IP rate limit,
+    #: ``Cache-Control`` headers, ``ETag`` round-tripping, audit-log
+    #: entries on every access, and a build watermark in the schema.
+    #: See :mod:`z4j_brain.api.openapi_route` for the implementation.
+    #:
+    #: Set via ``Z4J_OPENAPI_VISIBILITY=public|private|disabled``.
+    #: (1.6.3 security advisory: replaces the boolean
+    #: ``Z4J_OPENAPI_DOCS_ENABLED``; old setting kept as deprecated
+    #: alias with a startup WARN log.)
+    openapi_visibility: Literal["public", "private", "disabled"] = "private"
 
     # ------------------------------------------------------------------
     # Sentry (optional error capture; off by default)
@@ -1136,6 +1164,44 @@ class Settings(BaseSettings):
         db_url = data.get("database_url") or ""
         if isinstance(db_url, str) and db_url.startswith("sqlite"):
             data["registry_backend"] = "local"
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_openapi_setting(cls, data: Any) -> Any:
+        """Map deprecated ``Z4J_OPENAPI_DOCS_ENABLED`` to the new
+        ``Z4J_OPENAPI_VISIBILITY`` setting (1.6.3 security advisory).
+
+        The pre-1.6.3 boolean exposed the schema to any anonymous
+        caller when True (the default). 1.6.3 introduces a three-mode
+        setting that defaults to ``"private"`` and gates the schema
+        behind authentication. Operators who explicitly set the old
+        boolean are honored with a translated value AND an annotation
+        consumed by ``main.py`` to emit a deprecation WARN at startup.
+
+        Mapping:
+        - ``Z4J_OPENAPI_DOCS_ENABLED=true``  -> ``openapi_visibility="private"``
+        - ``Z4J_OPENAPI_DOCS_ENABLED=false`` -> ``openapi_visibility="disabled"``
+        - Unset (the new default path) -> use ``openapi_visibility`` directly
+
+        The annotation is a sentinel stored on the model under
+        ``_openapi_legacy_setting_used`` (private, not a field) so
+        ``main.py._build_app`` can log a single WARN line at startup.
+        """
+        if not isinstance(data, dict):
+            return data
+        legacy = data.get("openapi_docs_enabled")
+        if legacy is None:
+            return data
+        # If the operator set BOTH, prefer the new explicit setting
+        # and log the conflict so they know to drop the deprecated one.
+        explicit_new = "openapi_visibility" in data
+        if not explicit_new:
+            data["openapi_visibility"] = "private" if legacy else "disabled"
+        # Mark for main.py startup logging. Pydantic does not preserve
+        # arbitrary keys but we encode the marker via the visibility
+        # value AND check for the deprecated env var presence on
+        # startup anyway; see ``main.py`` for the WARN call site.
         return data
 
     def __init__(self, **values: Any) -> None:

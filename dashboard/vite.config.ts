@@ -87,13 +87,16 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     target: "es2022",
-    // Source maps in production would expose full TypeScript
-    // source + internal comments to any unauthenticated visitor
-    // (the brain serves /app/dashboard/dist verbatim). "hidden"
-    // still emits the .map files for our own profiling, but
-    // strips the //# sourceMappingURL pointer so browsers don't
-    // fetch them by default. Dev keeps inline maps for DX.
-    sourcemap: process.env.NODE_ENV === "production" ? "hidden" : true,
+    // 1.6.3 security advisory: never emit source maps in production
+    // builds. Pre-1.6.3 used ``"hidden"`` which still emitted the
+    // .map files (just stripped the //# sourceMappingURL pointer),
+    // leaving them reachable for any attacker who guessed
+    // ``<chunk>.js.map`` against the publicly mounted ``/assets/``
+    // static handler. Source maps reproduce the unminified React
+    // source: every TanStack route definition, every API client
+    // method name, every developer comment - useful recon material
+    // even without credential leakage. Dev keeps inline maps for DX.
+    sourcemap: process.env.NODE_ENV === "production" ? false : true,
     rollupOptions: {
       output: {
         // Vite 8 dropped the record form of manualChunks; rollup

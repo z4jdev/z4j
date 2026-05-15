@@ -176,6 +176,32 @@ op can touch up to 10000 rows; rate-limiting prevents a buggy
 script from amplifying DB load + replica lag.
 """
 
+_openapi_bucket = _IPBucket(window_seconds=60, max_hits=10)
+"""Throttle for ``/api/v1/openapi.json`` and ``/api/v1/docs``
+(added in 1.6.3 alongside the three-mode visibility setting).
+
+10/min/IP. The schema is assembled lazily by FastAPI and is
+expensive (~50ms+) even when cached at the application layer; this
+caps CPU burn from a polling loop even when the caller is
+authenticated. Cheap enough that legitimate SDK codegen tooling
+will never trip it (codegen reads the schema once per generation,
+not in a loop).
+"""
+
+_setup_bucket = _IPBucket(window_seconds=900, max_hits=5)
+"""Throttle for ``POST /api/v1/setup/complete``
+(added in 1.6.3 alongside the security advisory).
+
+5 attempts per 15 minutes per IP. The setup token is 256-bit so
+brute-force success odds are vanishing even without this throttle;
+the value here is breaking the coupling between rate-limiting and
+audit-log queries: pre-1.6.3 the only attempt budget was a
+``SetupService._check_attempt_budget`` that queried the audit log
+on every attempt, which would amplify load under a sustained
+attack. This per-IP bucket short-circuits attempts before they
+ever reach the audit-log query path.
+"""
+
 _mfa_verify_bucket = _IPBucket(window_seconds=60, max_hits=10)
 """Throttle for ``/auth/mfa/verify``.
 
@@ -227,6 +253,12 @@ require_agent_connect_throttle = _make_dependency(
 require_mfa_verify_throttle = _make_dependency(
     _mfa_verify_bucket, "mfa-verify",
 )
+require_openapi_throttle = _make_dependency(
+    _openapi_bucket, "openapi",
+)
+require_setup_throttle = _make_dependency(
+    _setup_bucket, "setup-complete",
+)
 
 
 __all__ = [
@@ -237,8 +269,10 @@ __all__ = [
     "_channel_test_bucket",
     "_invitation_bucket",
     "_login_bucket",
+    "_openapi_bucket",
     "_password_reset_bucket",
     "_mfa_verify_bucket",
+    "_setup_bucket",
     "require_agent_connect_throttle",
     "require_bulk_action_throttle",
     "require_channel_import_throttle",
@@ -246,5 +280,7 @@ __all__ = [
     "require_invitation_throttle",
     "require_login_throttle",
     "require_mfa_verify_throttle",
+    "require_openapi_throttle",
+    "require_setup_throttle",
     "require_password_reset_throttle",
 ]

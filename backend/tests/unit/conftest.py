@@ -61,6 +61,34 @@ async def brain_app(brain_settings: Settings):
     await engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+async def _reset_per_ip_rate_limits() -> None:
+    """Reset every per-IP rate-limit bucket between tests.
+
+    All async-client tests share the loopback IP via ASGITransport,
+    so a test that makes >N requests will exhaust a bucket and
+    cascade spurious 429s into every following test in the same
+    process. Resetting prevents test-order coupling.
+
+    1.6.3 specifically added two new buckets (``_openapi_bucket`` at
+    10/min/IP and ``_setup_bucket`` at 5/15min/IP) that broke the
+    existing ``test_setup_endpoint.py`` and other suites by
+    exhausting after a handful of sequential test posts. This
+    autouse fixture is the structural fix.
+    """
+    from z4j_brain.domain import ip_rate_limit as ipl
+
+    for bucket_attr in (
+        "_invitation_bucket", "_login_bucket", "_password_reset_bucket",
+        "_channel_test_bucket", "_channel_import_bucket",
+        "_agent_connect_bucket", "_bulk_action_bucket",
+        "_mfa_verify_bucket", "_openapi_bucket", "_setup_bucket",
+    ):
+        bucket = getattr(ipl, bucket_attr, None)
+        if bucket is not None:
+            await bucket.prune_idle(idle_seconds=0)
+
+
 @pytest.fixture
 async def client(brain_app) -> AsyncIterator[AsyncClient]:
     """Async HTTPX client wired to the brain app via ASGITransport."""

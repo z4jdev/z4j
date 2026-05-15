@@ -31,11 +31,18 @@ _READINESS_DB_TIMEOUT_S: float = 2.0
 async def health() -> dict[str, str]:
     """Liveness probe. No I/O.
 
-    Returns ``200 OK`` with the build version. The point is to give
-    container runtimes something cheap and reliable to poll: a
-    process that can answer this endpoint is process-alive.
+    Returns ``200 OK``. The point is to give container runtimes
+    something cheap and reliable to poll: a process that can answer
+    this endpoint is process-alive.
+
+    .. note::
+       1.6.3 security advisory: removed the ``version`` field from
+       this response. The endpoint is publicly reachable (by design,
+       for liveness probes) so leaking the brain version let
+       attackers pin specific CVEs to a target. Version disclosure
+       moved to :func:`health_system` (auth-gated).
     """
-    return {"status": "ok", "version": __version__}
+    return {"status": "ok"}
 
 
 @router.get("/health/ready")
@@ -70,7 +77,11 @@ async def health_ready(
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "unready", "reason": "database"}
 
-    return {"status": "ready", "version": __version__}
+    # 1.6.3: no version field -- this endpoint is also publicly
+    # reachable (k8s readiness probe) so leaking version invites
+    # CVE-pin attacks. Version disclosure moved to /health/system
+    # (auth-gated).
+    return {"status": "ready"}
 
 
 @router.get("/health/system")

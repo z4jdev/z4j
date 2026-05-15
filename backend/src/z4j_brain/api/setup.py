@@ -28,6 +28,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
 from z4j_brain.auth.sessions import generate_csrf_token
+from z4j_brain.domain.ip_rate_limit import require_setup_throttle
 from z4j_brain.persistence.repositories import SessionRepository
 
 from z4j_brain.api.auth import (
@@ -128,6 +129,12 @@ async def status_endpoint(
     "/complete",
     response_model=CompleteResponse,
     status_code=status.HTTP_200_OK,
+    # 1.6.3: route-level per-IP throttle (5/15min) so brute-force
+    # attempts against the 256-bit setup token short-circuit before
+    # they reach the audit-log-backed attempt budget. Pre-1.6.3 the
+    # only budget queried the audit log on every attempt, amplifying
+    # load under sustained attack.
+    dependencies=[Depends(require_setup_throttle)],
 )
 async def complete(
     request_body: CompleteRequest,

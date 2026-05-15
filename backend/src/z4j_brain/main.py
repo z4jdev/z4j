@@ -919,24 +919,40 @@ def create_app(
             await db.dispose()
             logger.info("z4j stopped")
 
-    # When openapi_docs_enabled is False, register the schema + docs
-    # URLs as None so FastAPI does not mount them and an anonymous
-    # caller gets 404. Operators who do not need the dashboard's
-    # type-introspection convenience (or who run behind a proxy that
-    # already blocks /docs) should disable this to shrink the recon
-    # surface. (1.6.0 round-3 audit Medium-1.)
-    _openapi_url = (
-        "/api/v1/openapi.json" if settings.openapi_docs_enabled else None
-    )
-    _docs_url = "/api/v1/docs" if settings.openapi_docs_enabled else None
+    # 1.6.3 security advisory: disable FastAPI's auto-mount of the
+    # OpenAPI schema and Swagger UI. Hand-written routes registered
+    # below via ``register_openapi_routes`` enforce the new
+    # ``settings.openapi_visibility`` three-mode setting (public /
+    # private / disabled) and apply per-IP rate limit, Cache-Control,
+    # ETag, audit logging, and a build watermark.
+    #
+    # Pre-1.6.3 the brain mounted these routes WITHOUT authentication
+    # by default (``Z4J_OPENAPI_DOCS_ENABLED=True``), leaking every
+    # route, every Pydantic model, every field name and type, and
+    # every docstring to any anonymous caller. The 1.6.0 round-3
+    # audit Medium-1 flagged the concern; 1.6.3 closes it properly.
     app = FastAPI(
         title="z4j",
         version=__version__,
-        openapi_url=_openapi_url,
-        docs_url=_docs_url,
+        openapi_url=None,
+        docs_url=None,
         redoc_url=None,
         lifespan=_lifespan,
     )
+
+    # Emit a single startup WARN if the operator is still using the
+    # deprecated ``Z4J_OPENAPI_DOCS_ENABLED`` env var. The migration
+    # shim in ``settings._migrate_legacy_openapi_setting`` translates
+    # the old boolean to the new ``openapi_visibility`` value; this
+    # log tells operators where to update their config.
+    if settings.openapi_docs_enabled is not None:
+        logger.warning(
+            "Z4J_OPENAPI_DOCS_ENABLED is deprecated. "
+            "Use Z4J_OPENAPI_VISIBILITY=public|private|disabled instead. "
+            "Mapped value: %s -> %s",
+            settings.openapi_docs_enabled,
+            settings.openapi_visibility,
+        )
 
     # Bind every singleton onto app.state.
     app.state.settings = settings
@@ -1041,6 +1057,15 @@ def create_app(
     # Invitations - two routers (admin project-scoped + public accept).
     app.include_router(invitations_api.admin_router, prefix="/api/v1")
     app.include_router(invitations_api.public_router, prefix="/api/v1")
+
+    # 1.6.3: hand-written OpenAPI schema + Swagger UI routes that
+    # respect ``settings.openapi_visibility`` (public / private /
+    # disabled) with rate-limit, Cache-Control, ETag, audit, and
+    # build watermark. Mounted AFTER all routers so the schema this
+    # serves reflects every route registered above.
+    from z4j_brain.api.openapi_route import register_openapi_routes
+
+    register_openapi_routes(app, settings)
 
     # /metrics is mounted at the root for Prometheus scrapers.
     app.include_router(metrics_api.router)

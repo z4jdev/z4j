@@ -1,1 +1,229 @@
-{"items": [], "next_cursor": null}
+{
+  "items": [
+    {
+      "id": "c0000000-0000-4001-9000-000000000001",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000002",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "retry-task",
+      "target_type": "task",
+      "target_id": "celery-20dc93febc1c",
+      "payload": {
+        "task_id": "celery-7c4f9a2e"
+      },
+      "status": "completed",
+      "result": null,
+      "error": null,
+      "issued_at_offset_s": -180,
+      "dispatched_at_offset_s": -179,
+      "completed_at_offset_s": -177,
+      "timeout_at_offset_s": -120
+    },
+    {
+      "id": "c0000000-0000-4002-9000-000000000002",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000002",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "cancel-task",
+      "target_type": "task",
+      "target_id": "celery-7b74b06bd4fb",
+      "payload": {
+        "task_id": "celery-aa11bb22",
+        "terminate": true
+      },
+      "status": "completed",
+      "result": null,
+      "error": null,
+      "issued_at_offset_s": -1080,
+      "dispatched_at_offset_s": -1078,
+      "completed_at_offset_s": -1075,
+      "timeout_at_offset_s": -1020
+    },
+    {
+      "id": "c0000000-0000-4003-9000-000000000003",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000002",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "pool-resize",
+      "target_type": "worker",
+      "target_id": "worker-1@hostname",
+      "payload": {
+        "delta": 4
+      },
+      "status": "completed",
+      "result": null,
+      "error": null,
+      "issued_at_offset_s": -3600,
+      "dispatched_at_offset_s": -3598,
+      "completed_at_offset_s": -3596,
+      "timeout_at_offset_s": -3540
+    },
+    {
+      "id": "c0000000-0000-4004-9000-000000000004",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "restart-worker",
+      "target_type": "worker",
+      "target_id": "worker-stale@hostname",
+      "payload": {},
+      "status": "failed",
+      "result": null,
+      "error": "worker 'worker-stale@hostname' not found in agent registry",
+      "issued_at_offset_s": -7200,
+      "dispatched_at_offset_s": -7198,
+      "completed_at_offset_s": -7196,
+      "timeout_at_offset_s": -7140
+    },
+    {
+      "id": "c0000000-0000-4005-9000-000000000005",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000003",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "revoke-task",
+      "target_type": "task",
+      "target_id": "celery-a819a510a02a",
+      "payload": {},
+      "status": "failed",
+      "result": null,
+      "error": "task already in 'success' state; revoke is a no-op",
+      "issued_at_offset_s": -2700,
+      "dispatched_at_offset_s": -2699,
+      "completed_at_offset_s": -2697,
+      "timeout_at_offset_s": -2640
+    },
+    {
+      "id": "c0000000-0000-4006-9000-000000000006",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000002",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "add-consumer",
+      "target_type": "worker",
+      "target_id": "worker-1@hostname",
+      "payload": {
+        "queue": "billing.high"
+      },
+      "status": "dispatched",
+      "result": null,
+      "error": null,
+      "issued_at_offset_s": -25,
+      "dispatched_at_offset_s": -24,
+      "completed_at_offset_s": null,
+      "timeout_at_offset_s": 35
+    },
+    {
+      "id": "c0000000-0000-4007-9000-000000000007",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000003",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "trigger-schedule",
+      "target_type": "schedule",
+      "target_id": "sched-30a7916a",
+      "payload": {
+        "schedule_id": "billing-daily-rollup"
+      },
+      "status": "dispatched",
+      "result": null,
+      "error": null,
+      "issued_at_offset_s": -42,
+      "dispatched_at_offset_s": -41,
+      "completed_at_offset_s": null,
+      "timeout_at_offset_s": 18
+    },
+    {
+      "id": "c0000000-0000-4008-9000-000000000008",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": null,
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "cancel-consumer",
+      "target_type": "worker",
+      "target_id": "worker-2@hostname",
+      "payload": {
+        "queue": "low-priority"
+      },
+      "status": "pending",
+      "result": null,
+      "error": null,
+      "issued_at_offset_s": -3,
+      "dispatched_at_offset_s": null,
+      "completed_at_offset_s": null,
+      "timeout_at_offset_s": 57
+    },
+    {
+      "id": "c0000000-0000-4009-9000-000000000009",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "ping-agent",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4003-a000-000000000001",
+      "payload": {},
+      "status": "timeout",
+      "result": null,
+      "error": "no ack from agent within 60s timeout window",
+      "issued_at_offset_s": -340,
+      "dispatched_at_offset_s": -339,
+      "completed_at_offset_s": null,
+      "timeout_at_offset_s": -280
+    },
+    {
+      "id": "c0000000-0000-400a-9000-00000000000a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000002",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "bulk-retry",
+      "target_type": "task",
+      "target_id": null,
+      "payload": {
+        "filter": {
+          "state": "failure"
+        },
+        "max": 500
+      },
+      "status": "cancelled",
+      "result": null,
+      "error": "cancelled by operator before dispatch completed",
+      "issued_at_offset_s": -14400,
+      "dispatched_at_offset_s": -14399,
+      "completed_at_offset_s": -14380,
+      "timeout_at_offset_s": -14340
+    },
+    {
+      "id": "c0000000-0000-400b-9000-00000000000b",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000002",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "clear-failed-tasks",
+      "target_type": "task",
+      "target_id": null,
+      "payload": {
+        "older_than_hours": 24
+      },
+      "status": "completed",
+      "result": null,
+      "error": null,
+      "issued_at_offset_s": -10800,
+      "dispatched_at_offset_s": -10799,
+      "completed_at_offset_s": -10795,
+      "timeout_at_offset_s": -10740
+    },
+    {
+      "id": "c0000000-0000-400c-9000-00000000000c",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "issued_by": "00000000-0000-4000-8000-000000000001",
+      "action": "reload-config",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4003-a000-000000000001",
+      "payload": {},
+      "status": "completed",
+      "result": null,
+      "error": null,
+      "issued_at_offset_s": -19200,
+      "dispatched_at_offset_s": -19199,
+      "completed_at_offset_s": -19198,
+      "timeout_at_offset_s": -19140
+    }
+  ],
+  "next_cursor": null
+}

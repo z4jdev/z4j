@@ -184,13 +184,18 @@ def _key_payload(
 
 
 @router.get("/scopes", response_model=ScopeCatalogue)
-async def list_scopes() -> ScopeCatalogue:
+async def list_scopes(
+    _user: "User" = Depends(get_current_user),
+) -> ScopeCatalogue:
     """Catalogue of scopes the UI can offer at mint time.
 
-    Unauthenticated by design - the shape is static and helps
-    docs/tooling without leaking anything sensitive. Deployments
-    that want to hide this can strip the endpoint at a reverse
-    proxy; the brain does not.
+    1.6.3 security advisory: requires authentication. Pre-1.6.3 this
+    endpoint was public on the rationale that the shape was static.
+    Auth-gating costs nothing (any logged-in dashboard user OR API
+    key qualifies), prevents future scope additions (e.g.
+    ``secrets:write``, ``audit:purge``) from being silently
+    discoverable, and keeps the principle that the brain does not
+    return anything substantive to anonymous callers.
     """
     from z4j_brain.auth.scopes import ADMIN_ONLY_SCOPES, ALL_SCOPES
 
