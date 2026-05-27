@@ -131,6 +131,11 @@ const ROUTES: RouteHandler[] = [
   // half-broken).
   { method: "GET", pattern: /^\/api\/v1\/health$/, handler: serveJson("system/health.json") },
 
+  // Settings > System Info page reads /health/system for version,
+  // Python, DB type, package versions. Added in 1.6.4 demo polish
+  // so the System Info card on the demo doesn't show empty rows.
+  { method: "GET", pattern: /^\/api\/v1\/health\/system$/, handler: serveJson("system/health-system.json") },
+
   // First-boot check used by /login's beforeLoad guard. The demo is
   // never first-boot (a "demo admin" exists), so always return false
   // to keep visitors on the login page rather than redirecting them

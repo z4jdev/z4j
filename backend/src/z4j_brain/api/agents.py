@@ -19,6 +19,7 @@ from z4j_core.transport.hmac import derive_project_secret
 from z4j_brain.api.deps import (
     get_audit_log_repo,
     get_audit_service,
+    get_brain_registry,
     get_client_ip,
     get_current_user,
     get_membership_repo,
@@ -26,6 +27,7 @@ from z4j_brain.api.deps import (
     get_session,
     get_settings,
     require_csrf,
+    require_fresh_mfa,
 )
 from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.websocket.auth import hash_agent_token
@@ -237,7 +239,7 @@ async def list_agents(
     "",
     response_model=CreateAgentResponse,
     status_code=201,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def create_agent(
     slug: str,
@@ -314,7 +316,7 @@ async def create_agent(
 @router.delete(
     "/{agent_id}",
     status_code=204,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def revoke_agent(
     slug: str,
@@ -326,6 +328,7 @@ async def revoke_agent(
     audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
     db_session: "AsyncSession" = Depends(get_session),
     ip: str = Depends(get_client_ip),
+    registry=Depends(get_brain_registry),
 ) -> None:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.errors import NotFoundError
@@ -361,6 +364,28 @@ async def revoke_agent(
         source_ip=ip,
     )
     await db_session.commit()
+
+    # 1.6.5 security advisory F2: terminate any active WebSocket
+    # sessions for this agent. Without this, the revoked agent
+    # could continue sending signed event frames + heartbeats +
+    # command results until natural disconnect, even though the DB
+    # row is gone. ``kick`` is best-effort across replicas (via
+    # Postgres NOTIFY in the multi-replica backend) and idempotent
+    # if no connections are registered.
+    #
+    # Called AFTER the commit so the cluster doesn't kick on a
+    # transaction that ultimately rolls back. Any exception from
+    # ``kick`` is logged but does NOT bubble to the response: the
+    # revoke itself has already committed, and the audit row records
+    # the operator's intent.
+    try:
+        await registry.kick(agent_id)
+    except Exception:  # noqa: BLE001
+        import structlog
+        structlog.get_logger("z4j.brain.api.agents").exception(
+            "z4j: agent kick after revoke failed (revoke itself succeeded)",
+            agent_id=str(agent_id),
+        )
 
 
 __all__ = ["AgentPublic", "router"]

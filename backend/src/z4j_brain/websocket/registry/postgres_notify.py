@@ -81,6 +81,13 @@ def _log_task_exception(task: asyncio.Task[object]) -> None:
 
 _COMMANDS_CHANNEL: str = "z4j_commands"
 _HEARTBEAT_CHANNEL: str = "z4j_heartbeat"
+#: 1.6.5 security advisory F2: cross-replica agent-revocation
+#: broadcast. The agent-revoke route publishes the agent_id; every
+#: replica's listener calls its local kick to close any open WS
+#: for that agent. Without this channel, revocation only deleted
+#: the DB row -- already-connected agents on other replicas kept
+#: forging signed event frames until natural disconnect.
+_AGENT_REVOKED_CHANNEL: str = "z4j_agent_revoked"
 
 #: Backoff schedule for the reconnect loop, in seconds. Caps at
 #: 30s. The list is short because we WANT the listener back fast -
@@ -236,6 +243,74 @@ class PostgresNotifyRegistry:
         # issuing a command.
         workers = self._connections.get(agent_id)
         return bool(workers)
+
+    async def kick(self, agent_id: UUID) -> int:
+        """Close every WS for ``agent_id`` cluster-wide.
+
+        1.6.5 security advisory F2. Three steps:
+
+        1. Close LOCAL connections (this replica's map).
+        2. Publish ``NOTIFY z4j_agent_revoked, '<agent_id>'``.
+        3. Every replica's listener picks up the NOTIFY and runs
+           its own local close.
+
+        Returns the count of LOCAL connections closed. Remote
+        replicas' counts are not surfaced here; the operator's
+        audit-log row records the revoke intent and that's the
+        source of truth for "how many connections existed".
+
+        Idempotent: if no local connections, still publishes the
+        NOTIFY (other replicas might be holding connections).
+        """
+        # Step 1: local kick.
+        local_closed = await self._kick_local(agent_id)
+        # Step 2: broadcast.
+        await self._publish_revoke_notify(agent_id)
+        logger.info(
+            "z4j registry: agent revoked, kick broadcast issued",
+            agent_id=str(agent_id),
+            local_connections_closed=local_closed,
+            worker_id=self._worker_id,
+        )
+        return local_closed
+
+    async def _kick_local(self, agent_id: UUID) -> int:
+        """Close every WS for ``agent_id`` in THIS process's map.
+
+        Used by ``kick`` (operator-initiated) and by the
+        ``_on_agent_revoked`` listener callback (cross-replica
+        broadcast received from another worker).
+        """
+        async with self._lock:
+            workers = self._connections.pop(agent_id, None)
+            self._project_for_agent.pop(agent_id, None)
+        if not workers:
+            return 0
+        closed = 0
+        for ws in list(workers.values()):
+            try:
+                await ws.close(code=4003)
+                closed += 1
+            except Exception:  # noqa: BLE001
+                pass
+        return closed
+
+    async def _publish_revoke_notify(self, agent_id: UUID) -> None:
+        """Fire ``NOTIFY z4j_agent_revoked, '<agent_id>'``.
+
+        Uses the SQLAlchemy session so the NOTIFY participates in
+        the calling request's transaction (the agent-revoke handler
+        commits the DELETE + the NOTIFY atomically -- if the txn
+        rolls back, the cluster doesn't hear a phantom revoke).
+        """
+        from sqlalchemy import text
+
+        async with self._db.session() as session:
+            await session.execute(
+                text("SELECT pg_notify(:channel, :payload)"),
+                {"channel": _AGENT_REVOKED_CHANNEL, "payload": str(agent_id)},
+            )
+            await session.commit()
 
     # ------------------------------------------------------------------
     # BrainRegistry - deliver
@@ -433,6 +508,8 @@ class PostgresNotifyRegistry:
             )
             await conn.add_listener(_COMMANDS_CHANNEL, self._on_notify)
             await conn.add_listener(_HEARTBEAT_CHANNEL, self._on_heartbeat)
+            # 1.6.5 F2: cluster-wide agent revocation kick.
+            await conn.add_listener(_AGENT_REVOKED_CHANNEL, self._on_agent_revoked)
             self._listener_alive.set()
             self._last_heartbeat_round_trip = time.monotonic()
             logger.info(
@@ -564,6 +641,41 @@ class PostgresNotifyRegistry:
         """
         if payload == self._worker_id:
             self._last_heartbeat_round_trip = time.monotonic()
+
+    def _on_agent_revoked(
+        self,
+        connection: asyncpg.Connection,  # noqa: ARG002
+        pid: int,  # noqa: ARG002
+        channel: str,  # noqa: ARG002
+        payload: str,
+    ) -> None:
+        """Handle a ``z4j_agent_revoked`` NOTIFY (1.6.5 F2).
+
+        Parses the agent_id from the payload, schedules a local
+        kick if any connection for that agent lives on THIS replica.
+        Same non-blocking pattern as the command-NOTIFY handler:
+        the asyncpg listener callback runs synchronously inside the
+        read loop and MUST NOT block, so we punt the actual close
+        to a background task.
+        """
+        try:
+            agent_id = UUID(payload)
+        except (ValueError, TypeError):
+            logger.warning(
+                "z4j registry: malformed agent-revoked payload, ignoring",
+                payload_len=len(payload),
+            )
+            return
+
+        # Fast path: not for us.
+        if agent_id not in self._connections:
+            return
+
+        task = asyncio.create_task(
+            self._kick_local(agent_id),
+            name="z4j-registry-kick-revoked",
+        )
+        task.add_done_callback(_log_task_exception)
 
     async def _dispatch_notified_command(
         self,

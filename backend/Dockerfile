@@ -38,8 +38,11 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 WORKDIR /dashboard
 
 # Copy package metadata first so the install layer caches when
-# only source changes.
-COPY packages/z4j-brain/dashboard/package.json packages/z4j-brain/dashboard/pnpm-lock.yaml* ./
+# only source changes. (Path was packages/z4j-brain/dashboard/
+# pre-1.4.0; the consolidation cut moved the dashboard under the
+# z4j package. Fixed in 1.6.5 after the e2e pre-publish harness
+# surfaced a "no such file" failure on the runtime build target.)
+COPY packages/z4j/dashboard/package.json packages/z4j/dashboard/pnpm-lock.yaml* ./
 
 # Audit H22: NO ``|| pnpm install`` fallback. The previous fallback
 # silently accepted a stale lockfile, which means a CVE'd
@@ -51,7 +54,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 
 # Copy the rest of the dashboard source and build.
-COPY packages/z4j-brain/dashboard/ ./
+COPY packages/z4j/dashboard/ ./
 
 RUN pnpm build
 

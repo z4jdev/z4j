@@ -20,6 +20,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useChangePassword } from "@/hooks/use-users";
+import {
+  PASSWORD_POLICY_FALLBACK,
+  usePasswordPolicy,
+} from "@/hooks/use-auth";
 
 export function PasswordChangeDialog() {
   const [open, setOpen] = useState(false);
@@ -27,6 +31,10 @@ export function PasswordChangeDialog() {
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
   const changePassword = useChangePassword();
+  // 1.6.5 F4: read the live policy from the brain instead of
+  // hardcoding minLength. Fallback covers the pre-fetch render.
+  const policy = usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK;
+  const minLength = policy.min_length;
 
   const reset = () => {
     setCurrent("");
@@ -96,7 +104,7 @@ export function PasswordChangeDialog() {
                 id="pwd-new"
                 type="password"
                 autoComplete="new-password"
-                minLength={8}
+                minLength={minLength}
                 value={next}
                 onChange={(e) => setNext(e.target.value)}
                 required
@@ -108,7 +116,7 @@ export function PasswordChangeDialog() {
                 id="pwd-confirm"
                 type="password"
                 autoComplete="new-password"
-                minLength={8}
+                minLength={minLength}
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
                 required

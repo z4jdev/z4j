@@ -36,6 +36,7 @@ from z4j_brain.api.deps import (
     get_project_repo,
     get_session,
     require_csrf,
+    require_fresh_mfa,
 )
 from z4j_brain.domain.ip_rate_limit import (
     require_bulk_action_throttle,
@@ -661,6 +662,7 @@ async def list_channels(
     status_code=201,
     dependencies=[
         Depends(require_csrf),
+        Depends(require_fresh_mfa),
         Depends(require_bulk_action_throttle),
     ],
 )
@@ -724,6 +726,7 @@ async def create_channel(
     status_code=201,
     dependencies=[
         Depends(require_csrf),
+        Depends(require_fresh_mfa),
         Depends(require_channel_import_throttle),
     ],
 )
@@ -837,7 +840,7 @@ async def import_channel_from_user(
 @router.patch(
     "/channels/{channel_id}",
     response_model=ChannelPublic,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def update_channel(
     slug: str,
@@ -919,7 +922,7 @@ async def update_channel(
 @router.delete(
     "/channels/{channel_id}",
     status_code=204,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def delete_channel(
     slug: str,
@@ -1193,6 +1196,7 @@ async def _dispatch_test(
     response_model=ChannelTestResult,
     dependencies=[
         Depends(require_csrf),
+        Depends(require_fresh_mfa),
         Depends(require_channel_test_throttle),
     ],
 )
@@ -1264,6 +1268,7 @@ async def test_channel_config(
     response_model=ChannelTestResult,
     dependencies=[
         Depends(require_csrf),
+        Depends(require_fresh_mfa),
         Depends(require_channel_test_throttle),
     ],
 )
@@ -1371,6 +1376,7 @@ async def list_defaults(
     status_code=201,
     dependencies=[
         Depends(require_csrf),
+        Depends(require_fresh_mfa),
         Depends(require_bulk_action_throttle),
     ],
 )
@@ -1485,15 +1491,18 @@ class DefaultSubscriptionUpdate(BaseModel):
 @router.patch(
     "/defaults/{default_id}",
     response_model=DefaultSubscriptionPublic,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def update_default(
     slug: str,
     default_id: uuid.UUID,
     body: DefaultSubscriptionUpdate,
+    request: Request,
     user: "User" = Depends(get_current_user),
     memberships: "MembershipRepository" = Depends(get_membership_repo),
     projects: "ProjectRepository" = Depends(get_project_repo),
+    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
+    audit: "AuditService" = Depends(get_audit_service),
     db_session: "AsyncSession" = Depends(get_session),
 ) -> DefaultSubscriptionPublic:
     """Partial-update an existing default subscription (admin only).
@@ -1547,6 +1556,10 @@ async def update_default(
                 "one or more channel_ids do not belong to this project",
             )
 
+    # Snapshot fields BEFORE mutation so the audit log records
+    # which keys actually changed, not the full row state.
+    changed: dict[str, object] = {}
+
     # If the trigger is changing, defend the (project_id, trigger)
     # uniqueness invariant so the user gets a clean 409 instead
     # of an opaque IntegrityError on commit.
@@ -1556,18 +1569,50 @@ async def update_default(
                 "default subscription for this trigger already exists",
                 details={"trigger": body.trigger},
             )
+        changed["trigger"] = {"from": default.trigger, "to": body.trigger}
         default.trigger = body.trigger
 
     if body.filters is not None:
+        changed["filters"] = True
         default.filters = body.filters.model_dump(exclude_none=True)
-    if body.in_app is not None:
+    if body.in_app is not None and body.in_app != default.in_app:
+        changed["in_app"] = {"from": default.in_app, "to": body.in_app}
         default.in_app = body.in_app
     if body.project_channel_ids is not None:
+        changed["project_channel_ids"] = {
+            "from_count": len(default.project_channel_ids or []),
+            "to_count": len(body.project_channel_ids),
+        }
         default.project_channel_ids = body.project_channel_ids
-    if body.cooldown_seconds is not None:
+    if (
+        body.cooldown_seconds is not None
+        and body.cooldown_seconds != default.cooldown_seconds
+    ):
+        changed["cooldown_seconds"] = {
+            "from": default.cooldown_seconds,
+            "to": body.cooldown_seconds,
+        }
         default.cooldown_seconds = body.cooldown_seconds
 
     await db_session.flush()
+    # z4j 1.6.5 (audit R4-L1): defaults auto-materialise into every
+    # project member's UserSubscriptions, so mutating one is just as
+    # privileged as create/delete and needs the same forensic trail.
+    # Pre-1.6.5 only the create/delete neighbors recorded; this PATCH
+    # was fresh-MFA gated but silent in the audit log.
+    await audit.record(
+        audit_log,
+        action="notifications.default.update",
+        target_type="project_default_subscription",
+        target_id=str(default.id),
+        result="success",
+        outcome="allow",
+        user_id=user.id,
+        project_id=project_id,
+        source_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        metadata={"changed": changed},
+    )
     try:
         await db_session.commit()
     except IntegrityError:
@@ -1584,7 +1629,7 @@ async def update_default(
 @router.delete(
     "/defaults/{default_id}",
     status_code=204,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def delete_default(
     slug: str,

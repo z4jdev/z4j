@@ -41,17 +41,20 @@ from z4j_brain.api.deps import (
     get_client_ip,
     get_first_boot_token_repo,
     get_membership_repo,
+    get_optional_user,
     get_project_repo,
     get_session,
     get_settings,
     get_setup_service,
     get_user_repo,
 )
+from z4j_brain.errors import AuthenticationError
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from z4j_brain.domain.setup_service import SetupService
+    from z4j_brain.persistence.models import User
     from z4j_brain.persistence.repositories import (
         AuditLogRepository,
         FirstBootTokenRepository,
@@ -116,13 +119,37 @@ class CompleteResponse(BaseModel):
 async def status_endpoint(
     setup_service: "SetupService" = Depends(get_setup_service),
     users: "UserRepository" = Depends(get_user_repo),
+    optional_user: "User | None" = Depends(get_optional_user),
 ) -> StatusResponse:
     """Return whether the brain is in first-boot mode.
 
-    Public - no auth required. The dashboard chrome calls this on
-    every page load to decide whether to show the setup CTA.
+    1.6.4 security tightening: authentication is now required EXCEPT
+    during the legitimate first-boot window. Pre-1.6.4 this endpoint
+    was anonymous-readable on every page load, which let a curious
+    attacker enumerate "this is z4j" + "it has been provisioned"
+    without ever logging in. 1.6.3's route audit flagged it as the
+    last SUSPICIOUS surface; 1.6.4 closes the gap.
+
+    The exception: when there are zero users in the DB (the genuine
+    first-boot window before an admin has been created), this endpoint
+    must respond anonymously so the dashboard chrome can render the
+    setup CTA without an auth loop. After the first admin is created
+    the endpoint returns 401 to anonymous callers and `200 {first_boot:
+    false}` to authenticated callers.
     """
-    return StatusResponse(first_boot=await setup_service.is_first_boot(users))
+    is_first_boot = await setup_service.is_first_boot(users)
+    if is_first_boot:
+        # Legitimate first-boot window: respond anonymously so the
+        # dashboard's pre-login setup chrome can render.
+        return StatusResponse(first_boot=True)
+
+    # Brain is provisioned. Require any authenticated principal
+    # (session OR API key); ``get_optional_user`` returns None for
+    # an anonymous request, in which case we 401.
+    if optional_user is None:
+        raise AuthenticationError("authentication required")
+
+    return StatusResponse(first_boot=False)
 
 
 @router_api.post(

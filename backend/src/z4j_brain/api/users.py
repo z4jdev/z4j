@@ -38,6 +38,7 @@ from z4j_brain.api.deps import (
     get_user_repo,
     require_admin,
     require_csrf,
+    require_fresh_mfa,
 )
 from z4j_brain.errors import ConflictError, NotFoundError
 from z4j_brain.persistence.models import User
@@ -198,7 +199,7 @@ async def list_users(
     "",
     response_model=UserAdminPublic,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def create_user(
     body: CreateUserRequest,
@@ -268,7 +269,7 @@ async def get_user(
 @router.patch(
     "/{user_id}",
     response_model=UserAdminPublic,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def update_user(
     user_id: uuid.UUID,
@@ -375,7 +376,7 @@ async def update_user(
 @router.post(
     "/{user_id}/password",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def reset_password(
     user_id: uuid.UUID,
@@ -426,7 +427,7 @@ async def reset_password(
 @router.delete(
     "/{user_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def delete_user(
     user_id: uuid.UUID,

@@ -224,6 +224,152 @@ class TestPasswordResetRequest:
 
 
 @pytest.mark.asyncio
+class TestPasswordResetConfirmR5M2:
+    """1.6.5 round-5 audit (R5-M2) regression.
+
+    The confirm path must atomically claim the reset token so that
+    two concurrent POST /password-reset/confirm requests with the
+    same valid token cannot both succeed. Pre-1.6.5 the handler
+    did SELECT, checked ``consumed_at`` in memory, updated the
+    password, then assigned ``row.consumed_at = now`` -- a
+    classic check-then-set race. The fix uses
+    ``UPDATE ... WHERE consumed_at IS NULL ... RETURNING`` so the
+    database arbitrates the single-use claim.
+    """
+
+    async def _mint_token_directly(
+        self, brain_app, settings: "Settings", user_id, plaintext: str,
+    ) -> None:
+        """Insert a fresh, unconsumed, unexpired reset token row.
+
+        Bypasses the /password-reset/request flow so the test is
+        focused on the consume race, not the mint flow.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from z4j_brain.api.auth import _hash_reset_token
+        from z4j_brain.persistence.models import PasswordResetToken
+
+        db = brain_app.state.db
+        async with db.session() as s:
+            s.add(
+                PasswordResetToken(
+                    user_id=user_id,
+                    token_hash=_hash_reset_token(plaintext, settings),
+                    expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                ),
+            )
+            await s.commit()
+
+    async def test_replay_after_consume_returns_404(
+        self, client, settings: "Settings", brain_app, seeded_user,
+    ) -> None:
+        """Sequential single-use invariant: consume once, replay 404."""
+        plaintext = "test-token-r5m2-sequential-0123456789abcdef"
+        await self._mint_token_directly(
+            brain_app, settings, seeded_user.id, plaintext,
+        )
+
+        r1 = await client.post(
+            "/api/v1/auth/password-reset/confirm",
+            json={"token": plaintext, "new_password": "new-pw-9chars-long-1!"},
+        )
+        assert r1.status_code == 200, r1.text
+        assert r1.json() == {"success": True}
+
+        r2 = await client.post(
+            "/api/v1/auth/password-reset/confirm",
+            json={"token": plaintext, "new_password": "second-attempt-pw-1!A"},
+        )
+        assert r2.status_code == 404
+        assert r2.json()["message"] == "invalid_or_expired"
+
+    async def test_concurrent_confirm_exactly_one_succeeds(
+        self, client, settings: "Settings", brain_app, seeded_user,
+    ) -> None:
+        """N concurrent confirms with the same token: exactly one
+        wins, the rest get 404. The database UPDATE is the
+        arbitrator, not in-memory state.
+        """
+        import asyncio
+
+        plaintext = "test-token-r5m2-concurrent-0123456789abcdef"
+        await self._mint_token_directly(
+            brain_app, settings, seeded_user.id, plaintext,
+        )
+
+        # Each attempt uses a distinct password so the user-visible
+        # password-of-record reveals WHICH request won. If pre-fix
+        # last-writer-wins were still present, multiple POSTs would
+        # all return 200 and the password would be the last writer's.
+        attempts = [
+            ("test-pw-winner-A-9chars-1!"),
+            ("test-pw-winner-B-9chars-1!"),
+            ("test-pw-winner-C-9chars-1!"),
+            ("test-pw-winner-D-9chars-1!"),
+            ("test-pw-winner-E-9chars-1!"),
+        ]
+
+        async def confirm(pw: str):
+            return await client.post(
+                "/api/v1/auth/password-reset/confirm",
+                json={"token": plaintext, "new_password": pw},
+            )
+
+        results = await asyncio.gather(
+            *(confirm(pw) for pw in attempts),
+            return_exceptions=False,
+        )
+
+        success_count = sum(1 for r in results if r.status_code == 200)
+        failure_count = sum(1 for r in results if r.status_code == 404)
+        assert success_count == 1, (
+            f"R5-M2: expected exactly 1 successful confirm, got "
+            f"{success_count}. Statuses: {[r.status_code for r in results]}"
+        )
+        assert failure_count == len(attempts) - 1, (
+            f"R5-M2: expected {len(attempts) - 1} 404 confirms, got "
+            f"{failure_count}. Statuses: {[r.status_code for r in results]}"
+        )
+
+        # Every failure body must match a fresh /invalid_or_expired
+        # response shape, NOT leak which attempt won or the token state.
+        for r in results:
+            if r.status_code == 404:
+                assert r.json()["message"] == "invalid_or_expired"
+
+    async def test_expired_token_rejected(
+        self, client, settings: "Settings", brain_app, seeded_user,
+    ) -> None:
+        """An already-expired token is rejected by the atomic
+        WHERE clause even before the consumed_at check fires.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from z4j_brain.api.auth import _hash_reset_token
+        from z4j_brain.persistence.models import PasswordResetToken
+
+        plaintext = "test-token-r5m2-expired-0123456789abcdef"
+        db = brain_app.state.db
+        async with db.session() as s:
+            s.add(
+                PasswordResetToken(
+                    user_id=seeded_user.id,
+                    token_hash=_hash_reset_token(plaintext, settings),
+                    expires_at=datetime.now(UTC) - timedelta(minutes=1),
+                ),
+            )
+            await s.commit()
+
+        r = await client.post(
+            "/api/v1/auth/password-reset/confirm",
+            json={"token": plaintext, "new_password": "expired-token-pw-1!A"},
+        )
+        assert r.status_code == 404
+        assert r.json()["message"] == "invalid_or_expired"
+
+
+@pytest.mark.asyncio
 class TestLockout:
     async def test_lockout_triggers_after_threshold(
         self, client, settings: Settings, seeded_user,  # noqa: ARG002

@@ -20,7 +20,7 @@ RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 WORKDIR /dashboard
 
 # Cache install layer.
-COPY packages/z4j-brain/dashboard/package.json packages/z4j-brain/dashboard/pnpm-lock.yaml* ./
+COPY packages/z4j/dashboard/package.json packages/z4j/dashboard/pnpm-lock.yaml* ./
 
 # Audit H22: dev-only image; tolerate a missing lockfile (fresh
 # clone) but still surface other failures. No double-fallback.
@@ -29,7 +29,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 
 # Copy initial source - at runtime this is overlaid by a bind mount
 # from the host so edits hot-reload.
-COPY packages/z4j-brain/dashboard/ ./
+COPY packages/z4j/dashboard/ ./
 
 # Drop root for parity with the production brain image. The
 # official node image ships a non-root ``node`` user (UID 1000).

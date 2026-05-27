@@ -171,6 +171,38 @@ class BrainRegistry(Protocol):
         agent_id: UUID,
     ) -> DeliveryResult: ...
 
+    async def kick(self, agent_id: UUID) -> int:
+        """Close every WebSocket connection registered for ``agent_id``.
+
+        Called by the agent-revoke route (1.6.5 security advisory F2).
+        Before this primitive existed, revoking an agent token only
+        deleted the DB row -- already-connected WebSocket sessions
+        kept accepting signed event frames and command results until
+        the connection naturally disconnected. A compromised agent
+        whose token had been revoked could continue forging events
+        attributed to the (now-deleted) agent_id, undetected.
+
+        Semantics:
+
+        * Local-only backend (``LocalRegistry``): closes every
+          ``WebSocket`` in the local map for ``agent_id``; returns
+          the count of connections closed.
+
+        * Cross-replica backend (``PostgresNotifyRegistry``):
+          publishes a NOTIFY on the ``z4j_agent_revoked`` channel
+          so every replica's listener fires its local close + drops
+          the registry entry; also closes any LOCAL connections on
+          the caller's process. Returns the count of LOCAL
+          connections closed (cross-replica connections are
+          asynchronous and not reflected in the return).
+
+        Idempotent: if the agent has no connections registered,
+        returns 0. Best-effort: a connection that has already been
+        torn down by the time ``kick`` runs is counted as 0 (we do
+        not raise on already-closed WebSockets).
+        """
+        ...
+
     async def start(self) -> None:
         """Start any background tasks the implementation needs.
 

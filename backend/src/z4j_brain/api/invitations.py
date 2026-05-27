@@ -46,6 +46,7 @@ from z4j_brain.api.deps import (
     get_user_repo,
     require_admin,
     require_csrf,
+    require_fresh_mfa,
 )
 from z4j_brain.domain.ip_rate_limit import require_invitation_throttle
 from z4j_brain.errors import ConflictError, NotFoundError
@@ -221,7 +222,7 @@ def _invitation_public(inv) -> InvitationPublic:  # type: ignore[no-untyped-def]
     "",
     response_model=InvitationMintPublic,
     status_code=201,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def mint_invitation(
     slug: str,
@@ -432,7 +433,7 @@ async def list_pending_invitations(
 @admin_router.delete(
     "/{invitation_id}",
     status_code=204,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def revoke_invitation(
     slug: str,

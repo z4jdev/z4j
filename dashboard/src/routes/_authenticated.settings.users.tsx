@@ -52,7 +52,11 @@ import {
 } from "@/hooks/use-users";
 import { useConfirm } from "@/components/domain/confirm-dialog";
 import { QueryError } from "@/components/domain/query-error";
-import { useMe } from "@/hooks/use-auth";
+import {
+  PASSWORD_POLICY_FALLBACK,
+  useMe,
+  usePasswordPolicy,
+} from "@/hooks/use-auth";
 import { DateCell } from "@/components/domain/date-cell";
 import { PageHeader } from "@/components/domain/page-header";
 import { ApiError } from "@/lib/api";
@@ -467,7 +471,7 @@ function CreateUserDialog({ onCreated }: { onCreated: () => void }) {
           <Input
             id="create-user-password"
             type="password"
-            minLength={8}
+            minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
@@ -648,7 +652,7 @@ function ResetPasswordDialog({
           <Input
             id="reset-pwd-new"
             type="password"
-            minLength={8}
+            minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
@@ -659,7 +663,7 @@ function ResetPasswordDialog({
           <Input
             id="reset-pwd-confirm"
             type="password"
-            minLength={8}
+            minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
             required

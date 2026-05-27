@@ -77,7 +77,17 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         host_header = request.headers.get("host", "")
         host = self._strip_port(host_header).lower()
-        if host and host not in self._allowed:
+        # 1.6.5 (audit R5-M1): a present-but-malformed Host header
+        # used to fall through the allow-list. R4-M1 added the
+        # _strip_port hardening that collapses malformed values to
+        # "", but the dispatcher's `if host and host not in allowed`
+        # check skipped rejection on the empty side, meaning
+        # `Host: evil.com/admin:80` or `Host: [::1]extra` reached the
+        # app. Now: any present Host header that does not survive
+        # _strip_port intact (well-formed AND in the allow-list) is
+        # rejected. A truly absent Host header still passes through
+        # (HTTP/1.0 compatibility and the dev-mode default-allow path).
+        if host_header and (not host or host not in self._allowed):
             # Operator-facing log: ALWAYS verbose. The operator runs
             # `z4j serve` (and watches stderr / journalctl / docker
             # logs); leaking detail to that surface is fine because it
@@ -87,17 +97,18 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
             # public DNS pointed at a homelab, scanners probing port
             # 7700 - all of those make the HTTP response a public
             # surface no matter what `environment` we're in.
+            display_host = host or "<malformed>"
             logger.info(
                 "z4j: rejected request - Host header %r is not in the "
                 "allow-list. Persist it via `z4j allowed-hosts add %s` "
                 "or restart with `z4j serve --allowed-host %s`. Current "
                 "allow-list: %s",
                 host_header,
-                host,
-                host,
+                display_host,
+                display_host,
                 list(self._allowed_display),
             )
-            return self._build_rejection(request, host)
+            return self._build_rejection(request, display_host)
         return await call_next(request)
 
     def _build_rejection(self, request: Request, host: str) -> JSONResponse:
@@ -164,18 +175,55 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
     def _strip_port(host: str) -> str:
         """Strip the optional port suffix.
 
-        Handles IPv6 forms (``[::1]:7700`` → ``[::1]``) and the
+        Handles IPv6 forms (``[::1]:7700`` -> ``[::1]``) and the
         plain ``host:port`` form. Returns the host unchanged if no
         port is present.
+
+        z4j 1.6.5 (audit R4-M1 defense-in-depth): a malformed Host
+        header that contains a path separator, whitespace, control
+        character, or a nonnumeric port suffix is collapsed to the
+        empty string. Pre-1.6.5 the parser was permissive enough that
+        ``Host: evil.com/admin:80`` returned ``evil.com/admin`` which
+        could not match any allow-list entry but flowed into other
+        path-based middleware (security_headers, errors). The
+        upstream Starlette CVE (CVE-2026-48710 / PYSEC-2026-161) is
+        fixed by the Starlette >=1.0.1 floor in z4j's pyproject; this
+        is the in-app layer that survives a future regression.
         """
+        if not host or not _is_well_formed_host(host):
+            return ""
         if host.startswith("["):
             end = host.find("]")
             if end == -1:
-                return host
-            return host[: end + 1]
+                return ""
+            bracketed = host[: end + 1]
+            # Reject IPv6 with a port suffix that isn't all digits.
+            suffix = host[end + 1 :]
+            if suffix and not (suffix.startswith(":") and suffix[1:].isdigit()):
+                return ""
+            return bracketed
         if ":" in host:
-            return host.rsplit(":", 1)[0]
+            head, _, tail = host.rpartition(":")
+            if not tail.isdigit():
+                return ""
+            return head
         return host
+
+
+_MALFORMED_HOST_CHARS = frozenset("/\\ \t\r\n\v\f")
+
+
+def _is_well_formed_host(host: str) -> bool:
+    """Return False for hosts that should never be allow-listed.
+
+    Catches the malformed-host class that Starlette CVE-2026-48710
+    surfaced upstream: any path separator, whitespace, or control
+    character in the Host header collapses the host to empty so the
+    allow-list lookup cannot accidentally match a prefix.
+    """
+    if any(ch in _MALFORMED_HOST_CHARS for ch in host):
+        return False
+    return all(ord(ch) >= 0x20 and ord(ch) != 0x7F for ch in host)
 
 
 __all__ = ["HostValidationMiddleware"]

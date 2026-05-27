@@ -89,10 +89,47 @@ class TestStatus:
         assert r.status_code == 200
         assert r.json() == {"first_boot": True}
 
-    async def test_status_no_auth_required(self, client) -> None:
-        # No cookies, no headers - must succeed.
+    async def test_status_anon_ok_during_first_boot(self, client) -> None:
+        """During the first-boot window (no users yet), the endpoint
+        MUST respond anonymously so the dashboard's pre-login setup
+        chrome can render without an auth loop.
+        """
         r = await client.get("/api/v1/setup/status")
         assert r.status_code == 200
+        assert r.json()["first_boot"] is True
+
+    async def test_status_anon_401_after_first_boot(
+        self, client, brain_app, settings, fresh_token,
+    ) -> None:
+        """1.6.4 security tightening: once the brain has been
+        provisioned (at least one user exists), anonymous callers
+        get 401 from /setup/status. Pre-1.6.4 this endpoint
+        anonymously revealed `first_boot: false`, giving a recon
+        signal to any attacker who could reach the port.
+        """
+        # Provision the brain by running setup-complete with the
+        # fresh-boot token. This creates the first user and ends
+        # the first-boot window.
+        body = {
+            "token": fresh_token,
+            "email": "admin@example.com",
+            "password": "ValidPassword123!",
+            "project_name": "Demo",
+        }
+        r = await client.post("/api/v1/setup/complete", json=body)
+        assert r.status_code == 200, r.text
+
+        # Drop any cookies the setup-complete response set so the
+        # follow-up request is truly anonymous.
+        client.cookies.clear()
+
+        # Anonymous request to /setup/status MUST now 401.
+        r = await client.get("/api/v1/setup/status")
+        assert r.status_code == 401, (
+            "After first-boot, anonymous callers MUST get 401 from "
+            "/setup/status per 1.6.4 advisory C1. Got "
+            f"{r.status_code}: {r.text[:200]}"
+        )
 
 
 @pytest.mark.asyncio

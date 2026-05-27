@@ -144,3 +144,117 @@ class TestStop:
         await registry.stop()
         for ws in ws_list:
             assert ws.closed is True
+
+
+@pytest.mark.asyncio
+class TestKick:
+    """1.6.5 advisory F2: ``kick(agent_id)`` MUST close every
+    registered WebSocket for the agent and drop the registry entry.
+
+    Pre-1.6.5 the agent-revoke route only deleted the DB row; the
+    open WebSocket continued accepting signed frames. ``kick`` is
+    the primitive the revoke route now calls to terminate the
+    session promptly.
+    """
+
+    async def test_kick_closes_single_ws(
+        self, registry: LocalRegistry,
+    ) -> None:
+        ws = FakeWebSocket("a")
+        agent_id = uuid.uuid4()
+        await registry.register(
+            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws,
+        )
+        assert registry.is_online(agent_id)
+
+        closed = await registry.kick(agent_id)
+        assert closed == 1
+        assert ws.closed is True
+        assert ws.close_code == 4003, (
+            "kick MUST use close code 4003 (agent revoked) so clients "
+            "can distinguish 'token revoked' from other close codes"
+        )
+        assert not registry.is_online(agent_id), (
+            "kick MUST drop the registry entry; otherwise a stale "
+            "is_online() reads true for a revoked agent"
+        )
+
+    async def test_kick_closes_all_workers_for_agent(
+        self, registry: LocalRegistry,
+    ) -> None:
+        """If an agent has multiple worker connections (1.2.0+
+        multi-worker model), kick closes ALL of them."""
+        ws1 = FakeWebSocket("w1")
+        ws2 = FakeWebSocket("w2")
+        ws3 = FakeWebSocket("w3")
+        agent_id = uuid.uuid4()
+        project_id = uuid.uuid4()
+        await registry.register(
+            project_id=project_id, agent_id=agent_id, ws=ws1,
+            worker_id="worker-1",
+        )
+        await registry.register(
+            project_id=project_id, agent_id=agent_id, ws=ws2,
+            worker_id="worker-2",
+        )
+        await registry.register(
+            project_id=project_id, agent_id=agent_id, ws=ws3,
+            worker_id="worker-3",
+        )
+
+        closed = await registry.kick(agent_id)
+        assert closed == 3
+        for ws in (ws1, ws2, ws3):
+            assert ws.closed is True
+            assert ws.close_code == 4003
+
+    async def test_kick_is_idempotent(
+        self, registry: LocalRegistry,
+    ) -> None:
+        """Calling kick on an unknown agent returns 0, not an error."""
+        result = await registry.kick(uuid.uuid4())
+        assert result == 0
+
+    async def test_kick_does_not_affect_other_agents(
+        self, registry: LocalRegistry,
+    ) -> None:
+        ws_a = FakeWebSocket("a")
+        ws_b = FakeWebSocket("b")
+        agent_a = uuid.uuid4()
+        agent_b = uuid.uuid4()
+        await registry.register(
+            project_id=uuid.uuid4(), agent_id=agent_a, ws=ws_a,
+        )
+        await registry.register(
+            project_id=uuid.uuid4(), agent_id=agent_b, ws=ws_b,
+        )
+
+        closed = await registry.kick(agent_a)
+        assert closed == 1
+        assert ws_a.closed is True
+        assert ws_b.closed is False
+        assert registry.is_online(agent_b), (
+            "kick MUST be scoped to the specified agent only"
+        )
+
+    async def test_kick_tolerates_already_closed_ws(
+        self, registry: LocalRegistry,
+    ) -> None:
+        """A WebSocket that errors on close (already torn down,
+        network gone) MUST NOT raise out of kick. kick is the
+        cleanup primitive of last resort.
+        """
+        class FailingWebSocket(FakeWebSocket):
+            async def close(self, code: int = 1000) -> None:
+                raise RuntimeError("connection already gone")
+
+        ws = FailingWebSocket("failing")
+        agent_id = uuid.uuid4()
+        await registry.register(
+            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws,
+        )
+        # Should not raise; closed count is 0 (the close raised).
+        closed = await registry.kick(agent_id)
+        assert closed == 0
+        # Registry entry is dropped regardless.
+        assert not registry.is_online(agent_id)

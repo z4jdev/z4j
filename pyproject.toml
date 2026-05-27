@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.6.3"
+version = "1.6.5"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -68,6 +68,11 @@ dependencies = [
     "z4j-core>=1.6.0,<2",
     # Server runtime (was in z4j-brain pre-1.4.0).
     "fastapi>=0.136",
+    # 1.6.5 (audit R4-M1): explicit Starlette floor for
+    # CVE-2026-48710 (BadHost). FastAPI re-exports Starlette and
+    # does not yet pin >=1.0.1, so we pin it directly. Drop this
+    # line when fastapi raises its own floor past 1.0.1.
+    "starlette>=1.0.1",
     "uvicorn[standard]>=0.45",
     "pydantic[email]>=2.13.3",
     "pydantic-settings>=2.14",
@@ -78,7 +83,12 @@ dependencies = [
     "argon2-cffi>=25.1",
     "structlog>=25.5",
     "prometheus-client>=0.25",
-    "python-multipart>=0.0.26",
+    # 1.6.5 (audit R5-L1): bumped from >=0.0.26 to fix
+    # CVE-2026-42561 (Form/File parsing). FastAPI re-exports
+    # python-multipart for multipart handling; the brain does
+    # not directly parse multipart bodies but the floor closes
+    # the CVE in case a future route adds File() inputs.
+    "python-multipart>=0.0.27",
     "itsdangerous>=2.2",
     "aiosqlite>=0.22.1",
     # Async SMTP client for the email notification channel. Supports

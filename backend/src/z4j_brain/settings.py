@@ -520,7 +520,14 @@ class Settings(BaseSettings):
     argon2_time_cost: int = Field(default=3, ge=1, le=10)
     argon2_memory_cost: int = Field(default=65_536, ge=8192)
     argon2_parallelism: int = Field(default=4, ge=1, le=16)
-    password_min_length: int = Field(default=8, ge=8, le=128)
+    #: Minimum allowed password length. 1.6.5 advisory F4 raises the
+    #: default from 8 to 12 to match the docs and the password-policy
+    #: page on z4j.dev. Existing passwords are grandfathered; the
+    #: policy only runs on write paths (signup, change-password,
+    #: reset). Operators with strict compliance needs raise this
+    #: further; minimum 8 is the floor (NIST 800-63B floor for
+    #: memorized secrets that pass through a strength check).
+    password_min_length: int = Field(default=12, ge=8, le=128)
 
     # ------------------------------------------------------------------
     # Auth - sessions (server-side, revocable)

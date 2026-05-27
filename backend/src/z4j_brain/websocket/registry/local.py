@@ -173,6 +173,38 @@ class LocalRegistry:
             agent_was_known=True,
         )
 
+    async def kick(self, agent_id: UUID) -> int:
+        """Close every WebSocket for ``agent_id`` and drop the entry.
+
+        1.6.5 security advisory F2 (revoked agent must terminate
+        active connections). Idempotent: if the agent has no
+        registered connections, returns 0.
+
+        Implementation: walks the per-worker slot dict, closes each
+        WebSocket with code ``4003`` ("agent revoked"), and drops
+        the agent's registry entry. Single-process backend, so no
+        cross-worker broadcast is needed.
+        """
+        async with self._lock:
+            workers = self._connections.pop(agent_id, None)
+            self._project_for_agent.pop(agent_id, None)
+        if not workers:
+            return 0
+        closed = 0
+        for ws in list(workers.values()):
+            try:
+                await ws.close(code=4003)
+                closed += 1
+            except Exception:  # noqa: BLE001
+                # Connection may already be torn down; tolerate.
+                pass
+        logger.info(
+            "z4j local registry: kicked revoked agent",
+            agent_id=str(agent_id),
+            connections_closed=closed,
+        )
+        return closed
+
     def fleet_snapshot(self) -> dict[str, dict[str, int]]:
         """Return per-project agent + worker counts for this process.
 

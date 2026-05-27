@@ -774,12 +774,41 @@ async def deliver_webhook(
 
     hmac_secret = config.get("hmac_secret")
     if hmac_secret:
-        sig = hmac.new(
-            hmac_secret.encode("utf-8"),
-            body.encode("utf-8"),
-            hashlib.sha256,
+        # 1.6.5 security advisory F3: signature now includes a
+        # timestamp so receivers can detect replays. Pre-1.6.5 the
+        # signature was HMAC(secret, body) -- a captured (body,
+        # signature) pair was replayable indefinitely. The new
+        # signature is HMAC(secret, "{timestamp}.{body}") matching
+        # the audit-forwarder pattern (already used since 1.6.0).
+        #
+        # Both signatures ship simultaneously during the 1.6.x line
+        # so legacy receivers (verifying the old format) keep
+        # working through the deprecation window. The legacy header
+        # will be removed in 1.7. Receivers should verify the new
+        # ``X-Z4J-Signature`` and reject the request if the
+        # ``X-Z4J-Timestamp`` deviates from the current time by
+        # more than the receiver's chosen window (300s is the
+        # documented default for ``@z4j/webhook-verify``).
+        import time
+
+        secret_bytes = hmac_secret.encode("utf-8")
+        timestamp = str(int(time.time()))
+        signed_payload = f"{timestamp}.{body}".encode("utf-8")
+
+        # v2 (new): timestamp + body. Authoritative signature.
+        sig_v2 = hmac.new(
+            secret_bytes, signed_payload, hashlib.sha256,
         ).hexdigest()
-        headers["X-Z4J-Signature"] = f"sha256={sig}"
+        headers["X-Z4J-Timestamp"] = timestamp
+        headers["X-Z4J-Signature"] = f"sha256={sig_v2}"
+
+        # v1 (legacy): body-only. Ships only during the 1.6.x
+        # backwards-compat window so existing receivers do not
+        # break on the upgrade. Removed in 1.7.
+        sig_v1 = hmac.new(
+            secret_bytes, body.encode("utf-8"), hashlib.sha256,
+        ).hexdigest()
+        headers["X-Z4J-Signature-V1"] = f"sha256={sig_v1}"
 
     try:
         # Re-validate + pin the target IP at dispatch time (M15

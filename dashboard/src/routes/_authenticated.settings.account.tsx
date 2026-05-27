@@ -44,6 +44,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatAbsolute } from "@/lib/format";
+import {
+  PASSWORD_POLICY_FALLBACK,
+  usePasswordPolicy,
+} from "@/hooks/use-auth";
 import { PageHeader } from "@/components/domain/page-header";
 import type { UserMePublic } from "@/lib/api-types";
 
@@ -355,7 +359,7 @@ function ChangePasswordForm({ onDone }: { onDone: () => void }) {
           id="account-pwd-new"
           type="password"
           autoComplete="new-password"
-          minLength={8}
+          minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
           value={newPw}
           onChange={(e) => setNewPw(e.target.value)}
           required
@@ -367,7 +371,7 @@ function ChangePasswordForm({ onDone }: { onDone: () => void }) {
           id="account-pwd-confirm"
           type="password"
           autoComplete="new-password"
-          minLength={8}
+          minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
           value={confirmPw}
           onChange={(e) => setConfirmPw(e.target.value)}
           required

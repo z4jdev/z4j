@@ -475,6 +475,49 @@ async def logout(
     return response
 
 
+class PasswordPolicyPublic(BaseModel):
+    """Public-readable view of the brain's password policy.
+
+    Added in 1.6.5 (advisory F4). The dashboard fetches this at
+    page load so password input fields enforce the correct
+    ``minLength`` instead of hardcoding a value that drifts from
+    the backend. Intentionally exposes ONLY the rules a user
+    needs to compose a valid password; never returns Argon2
+    parameters, secret-related settings, or anything else
+    sensitive.
+    """
+
+    min_length: int
+    required_character_classes: int
+    character_class_names: list[str]
+
+
+@router.get("/policy", response_model=PasswordPolicyPublic)
+async def password_policy(
+    settings: "Settings" = Depends(get_settings),
+) -> PasswordPolicyPublic:
+    """Public password-policy summary for the dashboard's UI hints.
+
+    1.6.5 advisory F4: pre-1.6.5 the dashboard hardcoded
+    ``minLength={8}`` on every password field, but the docs said
+    12 and the backend default was also 8 (drift between docs
+    and code AND code-and-UI). Now the dashboard reads this
+    endpoint at mount and uses the returned ``min_length``
+    directly; backend, dashboard, and docs stay in sync.
+
+    Anonymous-readable by design -- nothing here is sensitive,
+    and the password-reset flow needs it to render the reset
+    form's hint before the user has a session.
+    """
+    return PasswordPolicyPublic(
+        min_length=settings.password_min_length,
+        required_character_classes=3,
+        character_class_names=[
+            "lowercase", "uppercase", "digit", "symbol",
+        ],
+    )
+
+
 @router.get("/me", response_model=UserMePublic)
 async def me(
     user: "User" = Depends(get_current_user),
@@ -1086,17 +1129,27 @@ async def password_reset_confirm(
 ) -> PasswordResetConfirmResponse:
     """Consume a reset token and set a new password.
 
-    Single-use: the token row's ``consumed_at`` is stamped in the
-    same transaction as the password update. Once consumed the
-    token is rejected on replay even though the row stays around
-    for the audit trail.
+    Single-use: the token is *atomically* claimed via an UPDATE ...
+    WHERE consumed_at IS NULL ... RETURNING in the same transaction
+    as the password update. Once claimed the token is rejected on
+    replay even though the row stays around for the audit trail.
 
     Revokes every existing session for the user so an attacker
     who had a session open doesn't survive the reset.
+
+    z4j 1.6.5 (audit R5-M2): pre-1.6.5 this handler did SELECT,
+    checked ``consumed_at`` in memory, updated the password, and
+    then assigned ``row.consumed_at = now``. Two concurrent
+    confirm requests with the same valid token could both pass
+    the in-memory check and both write a password (final state
+    last-writer-wins) before either commit set consumed_at. The
+    atomic-claim pattern below makes exactly one caller win at
+    the database, the other gets the same generic
+    ``invalid_or_expired`` 404 a replayed token would get.
     """
     from datetime import UTC, datetime
 
-    from sqlalchemy import select
+    from sqlalchemy import update as _sa_update
 
     from z4j_brain.auth.passwords import PasswordHasher
     from z4j_brain.domain.audit_service import AuditService
@@ -1108,16 +1161,31 @@ async def password_reset_confirm(
     )
 
     token_hash = _hash_reset_token(body.token, settings)
-    stmt = select(PasswordResetToken).where(
-        PasswordResetToken.token_hash == token_hash,
-    )
-    row = (await db_session.execute(stmt)).scalar_one_or_none()
     now = datetime.now(UTC)
-    if row is None or row.consumed_at is not None or row.expires_at < now:
+
+    # Atomic single-use claim. The UPDATE only matches an
+    # unconsumed, unexpired token with this exact hash; RETURNING
+    # gives us back the row's id + user_id only if WE were the
+    # caller that flipped consumed_at. Any concurrent caller that
+    # raced us gets no row back and falls into the same
+    # ``invalid_or_expired`` branch a replayed token would.
+    claim_stmt = (
+        _sa_update(PasswordResetToken)
+        .where(
+            PasswordResetToken.token_hash == token_hash,
+            PasswordResetToken.consumed_at.is_(None),
+            PasswordResetToken.expires_at >= now,
+        )
+        .values(consumed_at=now)
+        .returning(PasswordResetToken.id, PasswordResetToken.user_id)
+    )
+    claimed = (await db_session.execute(claim_stmt)).first()
+    if claimed is None:
         raise NotFoundError("invalid_or_expired")
+    claimed_token_id, claimed_user_id = claimed
 
     users_repo = UserRepository(db_session)
-    user = await users_repo.get(row.user_id)
+    user = await users_repo.get(claimed_user_id)
     if user is None:
         raise NotFoundError("invalid_or_expired")
 
@@ -1138,7 +1206,6 @@ async def password_reset_confirm(
     await users_repo.update_password_hash(
         user.id, new_hash, password_changed=True,
     )
-    row.consumed_at = now
     # Revoke every existing session for this user - attacker who
     # had a live session must not survive the reset.
     sessions_repo = SessionRepository(db_session)
@@ -1148,13 +1215,12 @@ async def password_reset_confirm(
     # Invalidate any OTHER unconsumed reset tokens for this user
     # so a minted-but-unused token from an earlier request can't
     # second-reset the account.
-    from sqlalchemy import update as _sa_update
     await db_session.execute(
         _sa_update(PasswordResetToken)
         .where(
             PasswordResetToken.user_id == user.id,
             PasswordResetToken.consumed_at.is_(None),
-            PasswordResetToken.id != row.id,
+            PasswordResetToken.id != claimed_token_id,
         )
         .values(consumed_at=now),
     )

@@ -32,6 +32,7 @@ from z4j_brain.api.deps import (
     get_session,
     get_user_repo,
     require_csrf,
+    require_fresh_mfa,
 )
 from z4j_brain.errors import ConflictError, NotFoundError
 from z4j_brain.persistence.enums import ProjectRole
@@ -145,7 +146,7 @@ async def list_memberships(
     "",
     response_model=MembershipPublic,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def grant_membership(
     slug: str,
@@ -231,7 +232,7 @@ async def grant_membership(
 @router.patch(
     "/{membership_id}",
     response_model=MembershipPublic,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def update_membership(
     slug: str,
@@ -309,7 +310,7 @@ async def update_membership(
 @router.delete(
     "/{membership_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def revoke_membership(
     slug: str,
