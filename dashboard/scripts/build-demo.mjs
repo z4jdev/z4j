@@ -25,15 +25,30 @@
  */
 import { spawnSync } from "node:child_process";
 import { cp, mkdir, access, readFile, writeFile } from "node:fs/promises";
+import { readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dashboardRoot = resolve(__dirname, "..");
+const distDemoPath = resolve(dashboardRoot, "dist-demo");
 
 console.log("[build:demo] running vite build with VITE_Z4J_DEMO_MODE=true");
-const env = { ...process.env, VITE_Z4J_DEMO_MODE: "true" };
+// R7-L6: explicitly pin NODE_ENV=production so vite.config.ts's
+// production-only ``sourcemap: false`` branch fires. Without this,
+// build-demo inherits whatever NODE_ENV the operator's shell has
+// (often unset, which means vite's mode-detection falls back to
+// ``development`` for the implicit-mode case and emits .map files
+// alongside every chunk). The 1.6.3 advisory's "no source maps in
+// production" posture covers demo.z4j.dev too -- it's a publicly
+// reachable build and source maps reproduce the unminified React
+// source for any attacker who guesses ``<chunk>.js.map``.
+const env = {
+  ...process.env,
+  VITE_Z4J_DEMO_MODE: "true",
+  NODE_ENV: "production",
+};
 const result = spawnSync(
   "pnpm",
   ["exec", "vite", "build", "--outDir", "dist-demo", "--emptyOutDir"],
@@ -48,6 +63,39 @@ if (result.status !== 0) {
   console.error(`[build:demo] vite build failed with exit code ${result.status}`);
   process.exit(result.status ?? 1);
 }
+
+// R7-L6 backstop: walk dist-demo and fail if any .map file slipped
+// through. The NODE_ENV=production env above is the primary control,
+// but a future vite.config.ts edit, plugin, or operator override
+// could still produce maps -- this catches that at build time rather
+// than at deploy time when the maps would already be reachable on
+// demo.z4j.dev. The check covers ALL nested directories (assets/,
+// etc.), not just the top level.
+function* walkForMaps(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      yield* walkForMaps(p);
+    } else if (entry.name.endsWith(".map")) {
+      yield p;
+    }
+  }
+}
+const stragglerMaps = [...walkForMaps(distDemoPath)];
+if (stragglerMaps.length > 0) {
+  console.error(
+    `[build:demo] FAIL: ${stragglerMaps.length} .map file(s) found in ` +
+      `dist-demo (violates 1.6.3 no-source-maps posture; see R7-L6):`,
+  );
+  for (const m of stragglerMaps.slice(0, 10)) {
+    console.error(`  ${m}`);
+  }
+  if (stragglerMaps.length > 10) {
+    console.error(`  ... and ${stragglerMaps.length - 10} more`);
+  }
+  process.exit(1);
+}
+console.log("[build:demo] OK: 0 .map files in dist-demo (R7-L6 guard)");
 
 const dataSrc = resolve(dashboardRoot, "src/lib/demo-data");
 const dataDst = resolve(dashboardRoot, "dist-demo/demo-data");

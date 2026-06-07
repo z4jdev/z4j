@@ -61,6 +61,57 @@ logger = structlog.get_logger("z4j.brain.frame_router")
 #: subscription fanout.
 _MAX_PENDING_NOTIFICATION_TASKS = 256
 
+# SECURITY: defense-in-depth allowlist for worker_metadata.conf
+# persistence. The CANONICAL source of this list lives at
+# ``packages/z4j-celery/src/z4j_celery/engine.py::_CONF_ALLOWLIST`` and
+# the adapter already filters before shipping. We re-apply the SAME
+# filter here so that a compromised or downgraded agent (or any other
+# adapter version that forgets to filter) cannot smuggle credentialed
+# Celery conf keys (``broker_url``, ``result_backend``,
+# ``broker_transport_options``, ``beat_schedule``, ...) into the brain
+# DB, where they would be exposed to ProjectRole.VIEWER over the worker
+# detail endpoint. Round-7 audit finding R7-H1. Keep the two lists in
+# sync; the audit-suite scans for divergence is a TODO for 1.7.
+_WORKER_CONF_ALLOWLIST: frozenset[str] = frozenset({
+    # Serialization
+    "task_serializer",
+    "result_serializer",
+    "accept_content",
+    # Queue routing
+    "task_default_queue",
+    # Worker concurrency / lifecycle
+    "worker_concurrency",
+    "worker_prefetch_multiplier",
+    "worker_max_tasks_per_child",
+    "worker_max_memory_per_child",
+    # Reliability semantics
+    "task_acks_late",
+    "task_reject_on_worker_lost",
+    # Time limits
+    "task_time_limit",
+    "task_soft_time_limit",
+    # Broker pooling (knobs, not creds; broker_url is excluded)
+    "broker_pool_limit",
+    "broker_heartbeat",
+    # Time zone
+    "timezone",
+    "enable_utc",
+})
+
+
+def _filter_worker_conf(cfg: Any) -> dict[str, Any]:
+    """Strip credentialed keys from inbound worker conf payload.
+
+    Defense-in-depth twin of
+    ``z4j_celery.engine._redact_worker_conf``. Returns a plain ``dict``
+    (empty if input is not dict-like) so the JSONB column write is
+    always safe and non-null. See ``_WORKER_CONF_ALLOWLIST`` doc for
+    threat model.
+    """
+    if not isinstance(cfg, dict):
+        return {}
+    return {k: v for k, v in cfg.items() if k in _WORKER_CONF_ALLOWLIST}
+
 #: Hard cap on the number of notification dispatch tasks that can
 #: hold an OPEN DB session
 #: at once. Each ``_dispatch_notification`` call opens its own
@@ -553,7 +604,18 @@ class FrameRouter:
                                         "active": data.get("active", []),
                                         "active_queues": data.get("active_queues", []),
                                         "registered": data.get("registered", []),
-                                        "conf": data.get("conf", {}),
+                                        # SECURITY R7-H1: re-apply the
+                                        # allowlist defense-in-depth so
+                                        # a misbehaving / downgraded /
+                                        # malicious adapter cannot
+                                        # persist credentialed Celery
+                                        # conf keys into the JSONB
+                                        # column, where they would be
+                                        # exposed to VIEWER role via
+                                        # ``GET /api/v1/projects/{slug}/workers/{worker_id}``.
+                                        "conf": _filter_worker_conf(
+                                            data.get("conf", {}),
+                                        ),
                                     },
                                 }
                                 # Pool info

@@ -1,0 +1,19 @@
+{
+  "z4j_version": "1.6.4",
+  "python_version": "3.14.0",
+  "python_implementation": "CPython",
+  "os": "Linux 6.6.0",
+  "architecture": "x86_64",
+  "pid": 1,
+  "database_type": "postgresql",
+  "database_version": "PostgreSQL 18.3 on x86_64-pc-linux-gnu",
+  "database_size_mb": 1024.4,
+  "database_connections": 12,
+  "packages": {
+    "fastapi": "0.136.0",
+    "uvicorn": "0.45.0",
+    "sqlalchemy": "2.0.49",
+    "pydantic": "2.13.3",
+    "celery": "5.5.3"
+  }
+}

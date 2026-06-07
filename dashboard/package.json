@@ -7,7 +7,7 @@
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && tsc -b --noEmit",
+    "build": "vite build && tsc -b --noEmit && node scripts/check-no-maps.mjs",
     "build:demo": "node scripts/build-demo.mjs",
     "preview": "vite preview",
     "preview:demo": "vite preview --outDir dist-demo --port 4173",

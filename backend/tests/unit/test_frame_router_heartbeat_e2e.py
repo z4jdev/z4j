@@ -229,3 +229,152 @@ class TestFrameRouterHeartbeatE2E:
                 "ON CONFLICT DO UPDATE on (project_id, engine, name) "
                 "must collapse them to one"
             )
+
+
+# ---------------------------------------------------------------------------
+# Round-7 audit, R7-H1: defense-in-depth allowlist at brain side
+# ---------------------------------------------------------------------------
+
+
+def _malicious_celery_worker_details_payload() -> str:
+    """Simulate an adapter that DID NOT filter conf before shipping.
+
+    Could be: a pre-1.6.6 z4j-celery in the wild, a third-party
+    queue-engine adapter that reuses the ``celery.worker_details``
+    key shape, or a compromised agent. The brain must scrub the
+    forbidden keys before they land in workers.metadata.
+    """
+    return json.dumps({
+        "celery@malicious_agent": {
+            "stats": {
+                "pool": {"max-concurrency": 2, "processes": [101, 102]},
+                "rusage": {"utime": 1.0, "stime": 0.1},
+                "pid": 100,
+            },
+            "active": [],
+            "active_queues": [{"name": "celery"}],
+            "registered": ["myapp.tasks.do_thing"],
+            "conf": {
+                # ALL of these MUST be stripped at the brain even
+                # though the (hypothetical) bad adapter shipped them.
+                "broker_url": "redis://:LEAKED_BROKER_PASSWORD@redis.internal:6379/0",
+                "result_backend": "db+postgresql://celery:LEAKED_PG_PW@db.internal/celery",
+                "broker_transport_options": {
+                    "aws_secret_access_key": "LEAKED_AWS_SECRET",
+                },
+                "beat_schedule": {
+                    "weekly": {
+                        "task": "myapp.report",
+                        "kwargs": {"recipient": "PII@example.com"},
+                    },
+                },
+                # Benign keys must survive the filter.
+                "task_serializer": "json",
+                "worker_concurrency": 2,
+                "timezone": "UTC",
+            },
+        },
+    })
+
+
+@pytest.fixture
+def malicious_heartbeat_frame() -> HeartbeatFrame:
+    return HeartbeatFrame(
+        id=str(uuid.uuid4()),
+        ts=datetime.now(UTC),
+        payload=HeartbeatPayload(
+            buffer_size=0,
+            last_flush_at=datetime.now(UTC),
+            dropped_events=0,
+            adapter_health={
+                "celery.broker": "redis",
+                "celery.broker_alive": "True",
+                "celery.worker_details": _malicious_celery_worker_details_payload(),
+                "celery.queue_depths": json.dumps({"celery": 0}),
+            },
+        ),
+    )
+
+
+@pytest.mark.asyncio
+class TestFrameRouterConfScrubR7H1:
+    """R7-H1 defense-in-depth: brain MUST allowlist-filter the conf
+    sub-object even when a (broken or malicious) adapter ships
+    credentialed keys.
+
+    The source-side filter lives at
+    ``z4j_celery.engine._redact_worker_conf``; this test verifies the
+    brain re-applies the same allowlist before the JSONB column write,
+    so a compromised / downgraded / third-party adapter cannot pivot
+    credentials into the worker_metadata blob and from there to
+    ProjectRole.VIEWER over the worker-detail endpoint.
+    """
+
+    async def test_brain_strips_credentialed_conf_from_malicious_adapter_r7_h1(
+        self,
+        db_manager: DatabaseManager,
+        project_and_agent: tuple[uuid.UUID, uuid.UUID],
+        malicious_heartbeat_frame: HeartbeatFrame,
+    ) -> None:
+        project_id, agent_id = project_and_agent
+
+        router = FrameRouter(
+            db=db_manager,
+            ingestor=None,
+            dispatcher=None,
+            project_id=project_id,
+            agent_id=agent_id,
+            dashboard_hub=None,
+            worker_id=None,
+        )
+
+        await router._handle_heartbeat(malicious_heartbeat_frame)
+
+        factory = sessionmaker(
+            db_manager._engine, class_=AsyncSession, expire_on_commit=False,
+        )
+        async with factory() as s:
+            result = await s.execute(
+                select(Worker).where(Worker.project_id == project_id),
+            )
+            workers = list(result.scalars().all())
+            assert len(workers) == 1
+            w = workers[0]
+            persisted_conf = w.worker_metadata.get("conf", {}) if isinstance(
+                w.worker_metadata, dict,
+            ) else {}
+
+            # Forbidden keys MUST NOT have landed in JSONB.
+            for forbidden in (
+                "broker_url",
+                "result_backend",
+                "broker_transport_options",
+                "beat_schedule",
+            ):
+                assert forbidden not in persisted_conf, (
+                    "R7-H1: brain persisted %r into "
+                    "workers.metadata.conf; ProjectRole.VIEWER would "
+                    "read it via GET /api/v1/projects/{slug}/workers/{worker_id}"
+                    % (forbidden,)
+                )
+
+            # And the dumped JSON string must NOT contain the secret
+            # values anywhere (catches the case where a future
+            # refactor moves the dangerous keys into a nested
+            # collision-free position but still ships the bytes).
+            persisted_blob = json.dumps(w.worker_metadata, default=str)
+            for needle in (
+                "LEAKED_BROKER_PASSWORD",
+                "LEAKED_PG_PW",
+                "LEAKED_AWS_SECRET",
+            ):
+                assert needle not in persisted_blob, (
+                    "R7-H1: %r leaked into the persisted worker_metadata "
+                    "JSON blob despite the structural strip" % (needle,)
+                )
+
+            # Benign keys SHOULD have survived the filter so the
+            # dashboard's worker-detail page stays useful.
+            assert persisted_conf.get("task_serializer") == "json"
+            assert persisted_conf.get("worker_concurrency") == 2
+            assert persisted_conf.get("timezone") == "UTC"

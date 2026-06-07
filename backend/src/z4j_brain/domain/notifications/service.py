@@ -72,6 +72,7 @@ class _PendingDelivery:
     channel_id: UUID | None  # project channel id (or None for user channel)
     user_channel_id: UUID | None  # user channel id (or None for project channel)
     channel_type: str  # webhook / email / slack / telegram
+    channel_name: str | None  # snapshot of channel.name at staging time (R7-M1 twin fix)
     config: dict[str, Any]
     # Common context used to build the audit row later:
     project_id: UUID
@@ -349,6 +350,7 @@ class NotificationService:
                                 channel_id=channel.id,
                                 user_channel_id=None,
                                 channel_type=channel.type,
+                                channel_name=channel.name,
                                 config=dict(channel.config or {}),
                                 project_id=project_id,
                                 trigger=trigger,
@@ -369,6 +371,7 @@ class NotificationService:
                                 channel_id=None,
                                 user_channel_id=user_channel.id,
                                 channel_type=user_channel.type,
+                                channel_name=user_channel.name,
                                 config=dict(user_channel.config or {}),
                                 project_id=project_id,
                                 trigger=trigger,
@@ -467,14 +470,22 @@ class NotificationService:
                     raw_body = (
                         outcome.response_body if not outcome.success else None
                     )
+                    # R7-M1: pass the dispatcher's config dict directly
+                    # via ``p.config``. The previous spelling
+                    # ``getattr(p, "channel_config", None)`` silently
+                    # returned None because the dataclass field is
+                    # ``config`` (not ``channel_config``), causing the
+                    # sanitizer to skip URL/token masking on the
+                    # real-delivery path. Test-dispatch was unaffected
+                    # because it passes the dict directly.
                     sanitized_error = sanitize_audit_text(
                         outcome.error,
-                        channel_config=getattr(p, "channel_config", None),
+                        channel_config=p.config,
                         max_len=1024,
                     )
                     sanitized_body = sanitize_audit_text(
                         raw_body,
-                        channel_config=getattr(p, "channel_config", None),
+                        channel_config=p.config,
                         max_len=2048,
                     )
                     session.add(
@@ -496,11 +507,15 @@ class NotificationService:
                             # at insert time so a future channel
                             # rename / delete can't rewrite the audit
                             # row's view of which destination the
-                            # send actually went to. ``channel_name``
-                            # may not be on Pending for older
-                            # codepaths; getattr keeps the write safe.
-                            channel_name=getattr(p, "channel_name", None),
-                            channel_type=getattr(p, "channel_type", None),
+                            # send actually went to. R7-M1 twin fix
+                            # (1.6.6): both fields now read directly
+                            # off the dataclass. Previously
+                            # `channel_name` used getattr against a
+                            # slots dataclass field that was never
+                            # declared, silently writing NULL on
+                            # every row since the code path landed.
+                            channel_name=p.channel_name,
+                            channel_type=p.channel_type,
                         ),
                     )
                     if outcome.success:

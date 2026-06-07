@@ -45,7 +45,15 @@ const vitestConfig = {
   },
 };
 
-export default defineConfig({
+// 1.6.6 (audit R7-L6 follow-up): use the function form of
+// defineConfig so the build mode comes from vite's guaranteed
+// `mode` parameter (always "production" for `vite build` unless
+// the operator overrides) rather than `process.env.NODE_ENV`,
+// which is empty in some shells and leaves the `?` ternary
+// evaluating the wrong branch. The function form is the
+// recommended path for any mode-dependent decision; see
+// https://vite.dev/config/#conditional-config.
+export default defineConfig(({ mode }) => ({
   // Vitest reads ``test`` at runtime; vite's typing doesn't know
   // about it, so we tunnel it through a cast.
   ...({ test: vitestConfig } as object),
@@ -96,7 +104,7 @@ export default defineConfig({
     // source: every TanStack route definition, every API client
     // method name, every developer comment - useful recon material
     // even without credential leakage. Dev keeps inline maps for DX.
-    sourcemap: process.env.NODE_ENV === "production" ? false : true,
+    sourcemap: mode === "production" ? false : true,
     rollupOptions: {
       output: {
         // Vite 8 dropped the record form of manualChunks; rollup
@@ -114,4 +122,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));
