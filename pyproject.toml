@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.6.6"
+version = "1.6.7"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -107,6 +107,16 @@ dependencies = [
     # Tasks-page xlsx export. Pure Python, write-only, ~1 MB, no
     # native deps.
     "xlsxwriter>=3.2.9",
+    # 1.6.7 (R8 audit + pip-audit M-8/P5 closure): explicit transitive
+    # floor pins for two upstream advisories the post-1.6.6 pip-audit
+    # surfaced. Both are pure-Python, ~150 KB combined, and become
+    # direct dependencies only because operators want a single
+    # ``pip install --upgrade z4j`` to lift the floor everywhere these
+    # libraries are pulled in transitively (aiohttp via taskiq, pyjwt
+    # via redis-py). Drop these lines when the upstream transitive
+    # owners raise their own floors past the advisory ceilings.
+    "aiohttp>=3.14.0",
+    "pyjwt>=2.13.0",
 ]
 
 [project.optional-dependencies]

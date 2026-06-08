@@ -397,9 +397,9 @@ RUN printf '%s\n' \
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'set -e' \
-    'echo "[z4j-brain] running alembic upgrade head"' \
-    'z4j-brain migrate upgrade head' \
-    'echo "[z4j-brain] starting dev server with hot-reload"' \
+    'echo "[z4j] running alembic upgrade head"' \
+    'z4j migrate upgrade head' \
+    'echo "[z4j] starting dev server with hot-reload"' \
     'exec "$@"' \
     > /app/entrypoint.sh \
     && chmod +x /app/entrypoint.sh
@@ -414,5 +414,5 @@ EXPOSE 7700
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
 CMD ["uvicorn", "z4j_brain.main:create_app", \
      "--factory", "--host", "0.0.0.0", "--port", "7700", \
-     "--reload", "--reload-dir", "/app/packages/z4j-brain/backend/src", \
+     "--reload", "--reload-dir", "/app/packages/z4j/backend/src", \
      "--reload-dir", "/app/packages/z4j-core/src"]

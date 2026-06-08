@@ -348,6 +348,41 @@ class TaskRepository(BaseRepository[Task]):
                 out[tid] = label
         return out
 
+    async def get_names_for_ids(
+        self,
+        *,
+        project_id: UUID,
+        engine: str,
+        task_ids: list[str],
+    ) -> dict[str, str]:
+        """Bulk-retry companion: ``{task_id: task_name}`` for the input set.
+
+        Added in 1.6.7 for R8 audit H-1. The RQ adapter's bulk retry
+        path requires per-task ``task_name`` so it can call
+        ``queue.enqueue_call(func=task_name, ...)`` without reading
+        ``job.func_name`` (which triggers pickle deserialization of
+        attacker-controlled bytes inside the agent). Ids that don't
+        resolve to a Task row are omitted; the agent-side action then
+        refuses the whole batch with ``missing_task_names`` listing
+        the affected ids.
+        """
+        if not task_ids:
+            return {}
+        stmt = (
+            select(Task.task_id, Task.name)
+            .where(
+                Task.project_id == project_id,
+                Task.engine == engine,
+                Task.task_id.in_(task_ids),
+            )
+        )
+        result = await self.session.execute(stmt)
+        out: dict[str, str] = {}
+        for tid, n in result.all():
+            if n:
+                out[str(tid)] = str(n)
+        return out
+
     async def get_tree(
         self,
         *,

@@ -1,8 +1,8 @@
 # z4j
 
-[![PyPI version](https://img.shields.io/pypi/v/z4j.svg?v=1.6.6)](https://pypi.org/project/z4j/)
-[![Python](https://img.shields.io/pypi/pyversions/z4j.svg?v=1.6.6)](https://pypi.org/project/z4j/)
-[![License](https://img.shields.io/pypi/l/z4j.svg?v=1.6.6)](https://github.com/z4jdev/z4j/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/z4j.svg?v=1.6.7)](https://pypi.org/project/z4j/)
+[![Python](https://img.shields.io/pypi/pyversions/z4j.svg?v=1.6.7)](https://pypi.org/project/z4j/)
+[![License](https://img.shields.io/pypi/l/z4j.svg?v=1.6.7)](https://github.com/z4jdev/z4j/blob/main/LICENSE)
 
 The all-in-one z4j umbrella package. Open-source control plane for
 Python task queues.
@@ -13,6 +13,12 @@ workers need: framework adapters (Django, Flask, FastAPI), engine
 adapters (Celery, RQ, Dramatiq, Huey, arq, TaskIQ), and their
 schedule companions. Every adapter cross-versions to the same z4j
 release line, so the floors stay in sync without manual pinning.
+
+## Compatibility
+
+Brain: Python 3.11+, PostgreSQL 17+ (recommended) or bundled SQLite.
+
+Every adapter pulled through the `[django,celery]` / `[fastapi,arq]` / etc. extras carries its own framework / engine version floor. Full per-adapter matrix at <https://z4j.dev/reference/compatibility/>.
 
 ## What is z4j
 

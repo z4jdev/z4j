@@ -557,13 +557,27 @@ async def issue_bulk_retry(
         # guessing.
         filter_engine = (body.filter or {}).get("engine")
         if filter_engine in KNOWN_ENGINES:
-            priorities = await TaskRepository(db_session).get_priorities_for_ids(
+            task_repo = TaskRepository(db_session)
+            priorities = await task_repo.get_priorities_for_ids(
                 project_id=project.id,
                 engine=str(filter_engine),
                 task_ids=capped_ids,
             )
             if priorities:
                 enriched_filter["task_priorities"] = priorities
+            # R8 H-1: RQ's bulk_retry_action requires per-task
+            # task_name so it can call enqueue_call(func=task_name)
+            # without reading job.func_name (which lazy-loads pickle
+            # from the broker). Look up names alongside priorities so
+            # the agent gets both in one round trip. Other engines
+            # ignore filter["task_names"] safely.
+            task_names = await task_repo.get_names_for_ids(
+                project_id=project.id,
+                engine=str(filter_engine),
+                task_ids=capped_ids,
+            )
+            if task_names:
+                enriched_filter["task_names"] = task_names
 
     return await _issue_generic_command(
         slug=slug,
