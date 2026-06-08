@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 # Engines the brain knows how to dispatch commands to. This is the
@@ -26,6 +26,29 @@ from pydantic import BaseModel, Field, field_validator
 # version reports a newly-added engine) - this list applies only
 # to *dispatch*, where we have to actually have an adapter.
 KNOWN_ENGINES: frozenset[str] = frozenset({"celery", "rq", "dramatiq"})
+
+# R9 H-1 (HIGH): every key in this frozenset is populated by the
+# brain server-side from the Task table; an API client must NOT be
+# able to seed any of them through ``BulkRetryRequest.filter``.
+#
+# Surface impact: ``filter["task_names"]`` is consumed by the RQ
+# adapter's ``bulk_retry_action`` and passed straight to
+# ``queue.enqueue_call(func=...)``; a client-spoofable map would
+# let an authenticated operator retry a known RQ job as an
+# arbitrary importable callable. ``filter["overrides"]`` and
+# ``filter["task_priorities"]`` have analogous server-owned shapes
+# and round through the same dispatcher pathway.
+#
+# The ``issue_bulk_retry`` endpoint strips these keys from the
+# inbound filter before enrichment; the rejected key list is
+# surfaced in the outgoing command payload as
+# ``rejected_client_supplied_filter_keys`` so the audit trail
+# records the attempt rather than silently dropping it.
+SERVER_OWNED_FILTER_KEYS: frozenset[str] = frozenset({
+    "task_names",
+    "task_priorities",
+    "overrides",
+})
 
 from z4j_brain.api._pagination import (
     clamp_limit,
@@ -543,7 +566,19 @@ async def issue_bulk_retry(
         min_role=ProjectRole.OPERATOR,
     )
     raw_ids = (body.filter or {}).get("task_ids")
-    enriched_filter = dict(body.filter or {})
+
+    # R9 H-1 (HIGH): strip every server-owned key from the inbound
+    # filter BEFORE enrichment. See SERVER_OWNED_FILTER_KEYS docstring
+    # at module top for the full rationale.
+    raw_filter = body.filter or {}
+    rejected_client_keys = sorted(
+        k for k in SERVER_OWNED_FILTER_KEYS if k in raw_filter
+    )
+    enriched_filter = {
+        k: v for k, v in raw_filter.items()
+        if k not in SERVER_OWNED_FILTER_KEYS
+    }
+
     if isinstance(raw_ids, list) and raw_ids:
         # Hard cap matches the eventual `max` cap on the agent
         # side - querying more priorities than we'll ever retry
@@ -555,7 +590,7 @@ async def issue_bulk_retry(
         # without an engine, but then we skip the priority lookup
         # (which needs an engine for its WHERE clause) rather than
         # guessing.
-        filter_engine = (body.filter or {}).get("engine")
+        filter_engine = raw_filter.get("engine")
         if filter_engine in KNOWN_ENGINES:
             task_repo = TaskRepository(db_session)
             priorities = await task_repo.get_priorities_for_ids(
@@ -571,6 +606,15 @@ async def issue_bulk_retry(
             # from the broker). Look up names alongside priorities so
             # the agent gets both in one round trip. Other engines
             # ignore filter["task_names"] safely.
+            #
+            # R9 H-1: for RQ specifically, if the DB lookup fails to
+            # resolve ANY of the requested ids, refuse the whole
+            # batch. The agent's bulk_retry_action would otherwise
+            # surface "missing_task_names" for the unresolved ids and
+            # silently retry the resolved ones, which is the wrong
+            # safety posture for RCE-class surfaces -- a client could
+            # cherry-pick which ids to retry by manipulating the input
+            # set against the DB's known coverage. Fail closed instead.
             task_names = await task_repo.get_names_for_ids(
                 project_id=project.id,
                 engine=str(filter_engine),
@@ -578,13 +622,43 @@ async def issue_bulk_retry(
             )
             if task_names:
                 enriched_filter["task_names"] = task_names
+            if (
+                filter_engine == "rq"
+                and len(task_names) != len(capped_ids)
+            ):
+                missing = sorted(
+                    set(capped_ids) - set(task_names.keys())
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "bulk_retry refused: RQ retry requires "
+                        "a brain-known task_name for every targeted id; "
+                        "the DB has no Task row for "
+                        f"{len(missing)} of {len(capped_ids)} ids. "
+                        "Re-enqueue manually with operator-supplied "
+                        "args via the dashboard's 'retry with different "
+                        "inputs' affordance instead.",
+                        "missing_task_names": missing,
+                        "rejected_client_supplied_keys": rejected_client_keys,
+                    },
+                )
+
+    # If the client smuggled server-owned keys, surface the rejection
+    # as a structured warning in the command result so the audit trail
+    # records the attempt. We do NOT silently strip without trace; the
+    # operator's session ought to surface a "your filter was sanitized"
+    # banner so a misuse pattern is observable.
+    cmd_payload: dict[str, Any] = {"filter": enriched_filter, "max": body.max}
+    if rejected_client_keys:
+        cmd_payload["rejected_client_supplied_filter_keys"] = rejected_client_keys
 
     return await _issue_generic_command(
         slug=slug,
         action="bulk_retry",
         target_type="bulk",
         target_id=None,
-        payload={"filter": enriched_filter, "max": body.max},
+        payload=cmd_payload,
         idempotency_key=body.idempotency_key,
         agent_id=body.agent_id,
         user=user,

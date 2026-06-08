@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.6.7"
+version = "1.6.8"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -128,7 +128,14 @@ celery = ["z4j-celery>=1.4.0,<2", "z4j-celerybeat>=1.4.0,<2"]
 django = ["z4j-django>=1.4.0,<2"]
 flask = ["z4j-flask>=1.4.0,<2"]
 fastapi = ["z4j-fastapi>=1.4.0,<2"]
-rq = ["z4j-rq>=1.4.0,<2", "z4j-rqscheduler>=1.4.0,<2"]
+# R9 H-2: z4j-rq floor lifted to >=1.6.7 in the [rq] extra so
+# ``pip install z4j[rq]`` cannot pull a pre-1.6.7 z4j-rq, which
+# would re-open the R8 H-1 pickle RCE on the agent process when
+# paired with the 1.6.8+ z4j-bare dispatcher. Operators on the
+# direct ``pip install z4j-rq`` install path are protected by the
+# dispatcher's explicit RQ-specific fail-closed posture (see
+# packages/z4j-bare/src/z4j_bare/dispatcher.py).
+rq = ["z4j-rq>=1.6.7,<2", "z4j-rqscheduler>=1.6.7,<2"]
 dramatiq = ["z4j-dramatiq>=1.4.0,<2"]
 huey = ["z4j-huey>=1.4.0,<2", "z4j-hueyperiodic>=1.4.0,<2"]
 arq = ["z4j-arq>=1.4.0,<2", "z4j-arqcron>=1.4.0,<2"]
