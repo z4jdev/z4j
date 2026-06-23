@@ -52,24 +52,22 @@ jobs:
 
       - name: Audit the project's declared deps
         run: |
-          # --strict: non-zero exit on any advisory
-          # --progress-spinner off: noise-free CI logs
+          # --strict: NON-ZERO EXIT on any advisory. This exit code IS
+          # the gate -- an un-bumped psycopg / starlette / pydantic CVE
+          # fails the job and blocks merges until triaged. (The prior
+          # version swallowed the failure with `|| echo`, so it never
+          # actually gated, and asked for `--format=sarif`, which
+          # pip-audit does not support -- the missing file then failed
+          # the SARIF upload. Both bugs are fixed by gating on exit code
+          # and printing a human-readable table instead.)
+          # --progress-spinner off: noise-free CI logs.
           # Read from pyproject.toml directly; covers runtime + optional
           # deps without needing a separate requirements file.
           pip-audit \
             --strict \
             --progress-spinner off \
             --disable-pip \
-            --format=sarif \
-            --output=pip-audit.sarif \
-            . || echo "advisories found - see summary"
-
-      - name: Upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: pip-audit.sarif
-          category: pip-audit
+            .
 
   trivy-image:
     name: trivy (container image CVEs)
@@ -81,7 +79,10 @@ jobs:
     if: github.event_name != 'pull_request'
     steps:
       - name: Run Trivy vulnerability scanner on the published image
-        uses: aquasecurity/trivy-action@0.28.0
+        # SHA-pinned per the R8-M1 supply-chain policy (third-party
+        # actions pinned by full commit SHA). The old `@0.28.0` tag does
+        # not exist on the action repo, so every run failed to resolve.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: z4jdev/z4j:latest
           format: sarif
