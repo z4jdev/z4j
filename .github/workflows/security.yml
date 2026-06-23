@@ -63,10 +63,13 @@ jobs:
           # --progress-spinner off: noise-free CI logs.
           # Read from pyproject.toml directly; covers runtime + optional
           # deps without needing a separate requirements file.
+          # NOTE: --disable-pip is ONLY valid with -r <requirements>; with
+          # a project path it errors ("can only be used with --requirement").
+          # Auditing the project (.) lets pip-audit resolve the declared
+          # dependency tree from pyproject and check it against the advisory DB.
           pip-audit \
             --strict \
             --progress-spinner off \
-            --disable-pip \
             .
 
   trivy-image:
