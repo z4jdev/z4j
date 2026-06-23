@@ -539,6 +539,7 @@ async def issue_bulk_retry(
     memberships: "MembershipRepository" = Depends(get_membership_repo),
     projects: "ProjectRepository" = Depends(get_project_repo),
     audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
+    audit_service: "AuditService" = Depends(get_audit_service),
     dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
     db_session: "AsyncSession" = Depends(get_session),
     ip: str = Depends(get_client_ip),
@@ -578,6 +579,35 @@ async def issue_bulk_retry(
         k: v for k, v in raw_filter.items()
         if k not in SERVER_OWNED_FILTER_KEYS
     }
+
+    # R10-L1: the act of an authenticated operator supplying
+    # server-owned filter keys (the R9-H1 confused-deputy attempt) is
+    # a security-relevant event that MUST leave a tamper-evident audit
+    # row regardless of whether the request then succeeds or trips the
+    # partial-resolution 400 fast-path below. The command-issuance
+    # audit row (written later by dispatcher.issue) is not reached on
+    # the 400 path, and it does not carry the rejected keys. Record a
+    # dedicated chained audit row + commit it now so the attempt is
+    # durable independent of the request's eventual outcome. Commit is
+    # clean here: the only prior DB activity is reads (project,
+    # membership), no pending writes to lose.
+    if rejected_client_keys:
+        await audit_service.record(
+            audit_log,
+            action="command.bulk_retry.filter_keys_rejected",
+            target_type="bulk",
+            target_id=None,
+            result="success",
+            outcome="sanitized",
+            user_id=user.id,
+            project_id=project.id,
+            source_ip=ip,
+            metadata={
+                "rejected_client_supplied_filter_keys": rejected_client_keys,
+                "engine": raw_filter.get("engine"),
+            },
+        )
+        await db_session.commit()
 
     if isinstance(raw_ids, list) and raw_ids:
         # Hard cap matches the eventual `max` cap on the agent
@@ -629,6 +659,32 @@ async def issue_bulk_retry(
                 missing = sorted(
                     set(capped_ids) - set(task_names.keys())
                 )
+                # R10-L1: record the refusal as a tamper-evident audit
+                # row + commit BEFORE raising, so the 400 fast-path is
+                # no longer an audit blind spot. Without this commit
+                # the HTTPException would roll the session back and the
+                # refusal would leave no trace.
+                await audit_service.record(
+                    audit_log,
+                    action="command.bulk_retry.refused",
+                    target_type="bulk",
+                    target_id=None,
+                    result="failure",
+                    outcome="deny",
+                    user_id=user.id,
+                    project_id=project.id,
+                    source_ip=ip,
+                    metadata={
+                        "reason": "rq_partial_task_name_resolution",
+                        "engine": str(filter_engine),
+                        "missing_task_names": missing,
+                        "requested_ids": len(capped_ids),
+                        "rejected_client_supplied_filter_keys": (
+                            rejected_client_keys
+                        ),
+                    },
+                )
+                await db_session.commit()
                 raise HTTPException(
                     status_code=400,
                     detail={

@@ -1,8 +1,8 @@
 # z4j
 
-[![PyPI version](https://img.shields.io/pypi/v/z4j.svg?v=1.6.8)](https://pypi.org/project/z4j/)
-[![Python](https://img.shields.io/pypi/pyversions/z4j.svg?v=1.6.8)](https://pypi.org/project/z4j/)
-[![License](https://img.shields.io/pypi/l/z4j.svg?v=1.6.8)](https://github.com/z4jdev/z4j/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/z4j.svg?v=1.6.9)](https://pypi.org/project/z4j/)
+[![Python](https://img.shields.io/pypi/pyversions/z4j.svg?v=1.6.9)](https://pypi.org/project/z4j/)
+[![License](https://img.shields.io/pypi/l/z4j.svg?v=1.6.9)](https://github.com/z4jdev/z4j/blob/main/LICENSE)
 
 The all-in-one z4j umbrella package. Open-source control plane for
 Python task queues.
