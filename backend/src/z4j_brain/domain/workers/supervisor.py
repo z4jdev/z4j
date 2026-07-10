@@ -9,11 +9,11 @@ supervisor and stops it on shutdown.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import structlog
-
 
 logger = structlog.get_logger("z4j.brain.workers")
 
@@ -75,10 +75,8 @@ class WorkerSupervisor:
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
         self._tasks.clear()
         logger.info("z4j worker supervisor stopped")
 
@@ -91,15 +89,13 @@ class WorkerSupervisor:
                 backoff_index = 0  # reset on success
             except asyncio.CancelledError:
                 return
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j worker tick failed; backing off",
                     worker=worker.name,
                     backoff_index=backoff_index,
                 )
-                backoff = backoff_schedule[
-                    min(backoff_index, len(backoff_schedule) - 1)
-                ]
+                backoff = backoff_schedule[min(backoff_index, len(backoff_schedule) - 1)]
                 backoff_index += 1
                 try:
                     await asyncio.wait_for(

@@ -8,10 +8,9 @@ import uuid
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 from z4j_brain.domain.audit_service import AuditService
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.repositories import AuditLogRepository
 from z4j_brain.settings import Settings
 
@@ -45,7 +44,9 @@ def audit(settings: Settings) -> AuditService:
 @pytest.mark.asyncio
 class TestRecord:
     async def test_basic_insert(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         repo = AuditLogRepository(session)
         row = await audit.record(
@@ -62,7 +63,9 @@ class TestRecord:
         assert len(row.row_hmac) == 64  # sha256 hex
 
     async def test_default_outcome_for_success(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         repo = AuditLogRepository(session)
         row = await audit.record(
@@ -74,7 +77,9 @@ class TestRecord:
         assert row.outcome == "allow"
 
     async def test_default_outcome_for_failed(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         """v1.1.0: ``result="failed"`` now defaults to ``outcome="failure"``,
         not ``outcome="deny"``. Pre-1.1 the two were conflated, so a
@@ -93,7 +98,9 @@ class TestRecord:
         assert row.outcome == "failure"
 
     async def test_explicit_outcome_wins(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         repo = AuditLogRepository(session)
         row = await audit.record(
@@ -109,7 +116,9 @@ class TestRecord:
 @pytest.mark.asyncio
 class TestVerify:
     async def test_freshly_inserted_row_verifies(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         repo = AuditLogRepository(session)
         row = await audit.record(
@@ -123,18 +132,25 @@ class TestVerify:
         assert audit.verify_row(row) is True
 
     async def test_tampered_action_fails_verify(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         repo = AuditLogRepository(session)
         row = await audit.record(
-            repo, action="auth.login", target_type="user", result="success",
+            repo,
+            action="auth.login",
+            target_type="user",
+            result="success",
         )
         # Modify the row in-memory to simulate post-insert tampering.
         row.action = "auth.logout"
         assert audit.verify_row(row) is False
 
     async def test_tampered_metadata_fails_verify(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         repo = AuditLogRepository(session)
         row = await audit.record(
@@ -148,7 +164,8 @@ class TestVerify:
         assert audit.verify_row(row) is False
 
     async def test_different_secret_fails_verify(
-        self, session: AsyncSession,
+        self,
+        session: AsyncSession,
     ) -> None:
         s1 = Settings(
             database_url="sqlite+aiosqlite:///:memory:",
@@ -166,7 +183,10 @@ class TestVerify:
         a2 = AuditService(s2)
         repo = AuditLogRepository(session)
         row = await a1.record(
-            repo, action="x", target_type="y", result="success",
+            repo,
+            action="x",
+            target_type="y",
+            result="success",
         )
         # a1 verifies its own row.
         assert a1.verify_row(row) is True
@@ -174,7 +194,9 @@ class TestVerify:
         assert a2.verify_row(row) is False
 
     async def test_uuid_fields_canonicalized(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         repo = AuditLogRepository(session)
         uid = uuid.uuid4()
@@ -195,7 +217,9 @@ class TestApiKeyAttribution:
     """v4 HMAC + ``audit_log.api_key_id`` (1.2.2 audit fix HIGH-11)."""
 
     async def test_api_key_id_persisted(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         repo = AuditLogRepository(session)
         key_id = uuid.uuid4()
@@ -211,7 +235,9 @@ class TestApiKeyAttribution:
         assert audit.verify_row(row) is True
 
     async def test_tampering_with_api_key_id_breaks_hmac(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         """A DBA who swaps api_key_id without re-signing must fail verify."""
         repo = AuditLogRepository(session)
@@ -229,7 +255,9 @@ class TestApiKeyAttribution:
         assert audit.verify_row(row) is False
 
     async def test_pre_1_2_2_row_with_null_api_key_id_verifies(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         """A row written without api_key_id (the common cookie-session
         path AND the pre-1.2.2 historical case) verifies cleanly via
@@ -247,7 +275,9 @@ class TestApiKeyAttribution:
         assert audit.verify_row(row) is True
 
     async def test_tampered_api_key_id_fails_verify(
-        self, audit: AuditService, session: AsyncSession,
+        self,
+        audit: AuditService,
+        session: AsyncSession,
     ) -> None:
         """v1.3.0 baseline: api_key_id is part of the v1 canonical
         form, so swapping it without re-signing must break verify.

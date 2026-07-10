@@ -26,7 +26,6 @@ from typing import Any
 
 import pytest
 from pydantic import SecretStr, ValidationError
-
 from z4j_brain.observability import otel as otel_mod
 from z4j_brain.observability.otel import (
     DEFAULT_EXCLUDED_URL_PATTERNS,
@@ -78,7 +77,8 @@ class TestOtelSettings:
         assert s.otel_excluded_url_patterns == ""
 
     def test_endpoint_is_secretstr(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv(
@@ -88,13 +88,13 @@ class TestOtelSettings:
         s = Settings()  # type: ignore[call-arg]
         assert isinstance(s.otel_exporter_otlp_endpoint, SecretStr)
         assert (
-            s.otel_exporter_otlp_endpoint.get_secret_value()
-            == "https://api.honeycomb.io/v1/traces"
+            s.otel_exporter_otlp_endpoint.get_secret_value() == "https://api.honeycomb.io/v1/traces"
         )
         assert "honeycomb" not in str(s.otel_exporter_otlp_endpoint)
 
     def test_headers_is_secretstr(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv(
@@ -107,7 +107,9 @@ class TestOtelSettings:
 
     @pytest.mark.parametrize("rate", ["-0.1", "1.01", "2.0", "999"])
     def test_traces_sampler_out_of_range_rejected(
-        self, monkeypatch: pytest.MonkeyPatch, rate: str,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        rate: str,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv("Z4J_OTEL_TRACES_SAMPLER_ARG", rate)
@@ -116,7 +118,9 @@ class TestOtelSettings:
 
     @pytest.mark.parametrize("rate", ["0.0", "0.05", "0.5", "1.0"])
     def test_traces_sampler_in_range_accepted(
-        self, monkeypatch: pytest.MonkeyPatch, rate: str,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        rate: str,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv("Z4J_OTEL_TRACES_SAMPLER_ARG", rate)
@@ -124,10 +128,13 @@ class TestOtelSettings:
         assert s.otel_traces_sampler_arg == float(rate)
 
     @pytest.mark.parametrize(
-        "proto", ["http/protobuf", "http", "grpc"],
+        "proto",
+        ["http/protobuf", "http", "grpc"],
     )
     def test_protocol_accepted(
-        self, monkeypatch: pytest.MonkeyPatch, proto: str,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        proto: str,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv("Z4J_OTEL_PROTOCOL", proto)
@@ -135,7 +142,8 @@ class TestOtelSettings:
         assert s.otel_protocol == proto
 
     def test_unknown_protocol_rejected(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv("Z4J_OTEL_PROTOCOL", "wireshark")
@@ -200,12 +208,15 @@ class TestBuildResourceAttributes:
         assert attrs["deployment.environment"] == "unknown"
 
     def test_service_version_attached_when_metadata_present(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The function consults importlib.metadata; pin the contract
         by monkeypatching the helper directly."""
         monkeypatch.setattr(
-            otel_mod, "_detect_service_version", lambda: "1.6.0",
+            otel_mod,
+            "_detect_service_version",
+            lambda: "1.6.0",
         )
         s = SimpleNamespace(
             otel_service_name=None,
@@ -217,10 +228,13 @@ class TestBuildResourceAttributes:
         assert attrs["service.version"] == "1.6.0"
 
     def test_service_version_omitted_when_metadata_missing(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
-            otel_mod, "_detect_service_version", lambda: "",
+            otel_mod,
+            "_detect_service_version",
+            lambda: "",
         )
         s = SimpleNamespace(
             otel_service_name=None,
@@ -273,7 +287,8 @@ class TestExcludedUrlsString:
 
 class TestInitOtel:
     def test_no_endpoint_returns_false(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _base_env(monkeypatch)
         s = Settings()  # type: ignore[call-arg]
@@ -288,7 +303,8 @@ class TestInitOtel:
         assert init_otel(s) is False
 
     def test_missing_sdk_returns_false(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Operator set the endpoint but did not `pip install z4j[otel]`.
         Init logs a warning and returns False; the brain keeps running.
@@ -359,12 +375,13 @@ class TestSensitiveOutboundHostFilter:
             "events.pagerduty.com",
             "discord.com",
             "discordapp.com",
-            "HOOKS.SLACK.COM",                            # case
-            "hooks.slack.com.",                           # trailing dot
+            "HOOKS.SLACK.COM",  # case
+            "hooks.slack.com.",  # trailing dot
         ],
     )
     def test_sensitive_hosts_match(self, host: str) -> None:
         from z4j_brain.observability.otel import _is_sensitive_outbound_host
+
         assert _is_sensitive_outbound_host(host), f"{host} should be sensitive"
 
     @pytest.mark.parametrize(
@@ -373,12 +390,11 @@ class TestSensitiveOutboundHostFilter:
             "api.example.com",
             "siem.internal.example.com",
             "raw.githubusercontent.com",
-            "slack.com.evil.com",                         # suffix smuggle
+            "slack.com.evil.com",  # suffix smuggle
             "hooks.slack.com.evil.com",
         ],
     )
     def test_non_sensitive_hosts_skip(self, host: str) -> None:
         from z4j_brain.observability.otel import _is_sensitive_outbound_host
-        assert not _is_sensitive_outbound_host(host), (
-            f"{host} should NOT be sensitive"
-        )
+
+        assert not _is_sensitive_outbound_host(host), f"{host} should NOT be sensitive"

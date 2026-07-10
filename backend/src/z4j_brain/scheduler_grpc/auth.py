@@ -38,8 +38,9 @@ from __future__ import annotations
 import ipaddress
 import logging
 import secrets
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 import grpc
 from cryptography import x509
@@ -177,7 +178,7 @@ def write_minted_cert(
 
     Returns the (cert_path, key_path) for caller logging.
     """
-    from z4j_brain.utils.fs_safe import (  # noqa: PLC0415
+    from z4j_brain.utils.fs_safe import (
         ensure_dir_secure,
         write_bytes_secure,
     )
@@ -214,7 +215,8 @@ class SchedulerAllowlistInterceptor(grpc.aio.ServerInterceptor):
     async def intercept_service(
         self,
         continuation: Callable[
-            [grpc.HandlerCallDetails], Awaitable[grpc.RpcMethodHandler],
+            [grpc.HandlerCallDetails],
+            Awaitable[grpc.RpcMethodHandler],
         ],
         handler_call_details: grpc.HandlerCallDetails,
     ) -> grpc.RpcMethodHandler:
@@ -344,8 +346,7 @@ async def _enforce_cn(
         # Don't echo the actual rejected CN back to the caller -
         # logs only. The caller gets a generic permission denied.
         logger.warning(
-            "z4j.brain.scheduler_grpc: rejected RPC; "
-            "peer CNs %r not in allow-list",
+            "z4j.brain.scheduler_grpc: rejected RPC; peer CNs %r not in allow-list",
             sorted(normalised),
         )
         await context.abort(

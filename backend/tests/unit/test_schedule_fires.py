@@ -24,15 +24,18 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.enums import ScheduleKind
 from z4j_brain.persistence.models import (
+    Membership,
     Project,
     Schedule,
     ScheduleFire,
+    User,
+    UserNotification,
+    UserSubscription,
 )
 from z4j_brain.persistence.repositories import ScheduleFireRepository
 from z4j_brain.settings import Settings
@@ -87,7 +90,8 @@ async def _seed_project_and_schedule(
                 kind=ScheduleKind.CRON,
                 expression="0 * * * *",
                 timezone="UTC",
-                args=[], kwargs={},
+                args=[],
+                kwargs={},
                 is_enabled=enabled,
             ),
         )
@@ -118,10 +122,15 @@ class TestRecord:
 
     @pytest.mark.asyncio
     async def test_duplicate_fire_id_returns_existing(
-        self, db: DatabaseManager,
+        self,
+        db: DatabaseManager,
     ) -> None:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         fire_id = uuid.uuid4()
+        # scheduled_for is STABLE per fire_id in production (fire_id =
+        # uuid5(schedule_id + scheduled_for)), so both record() calls for the
+        # same fire pass the same value; the upgrade lookup prunes on it.
+        sched_for = datetime.now(UTC)
         async with db.session() as s:
             await ScheduleFireRepository(s).record(
                 fire_id=fire_id,
@@ -129,7 +138,7 @@ class TestRecord:
                 project_id=project_id,
                 command_id=None,
                 status="delivered",
-                scheduled_for=datetime.now(UTC),
+                scheduled_for=sched_for,
             )
             await s.commit()
         async with db.session() as s:
@@ -139,18 +148,79 @@ class TestRecord:
                 project_id=project_id,
                 command_id=None,
                 status="delivered",
-                scheduled_for=datetime.now(UTC),
+                scheduled_for=sched_for,
             )
             assert row2.fire_id == fire_id
         async with db.session() as s:
             count = (await s.execute(select(ScheduleFire))).scalars().all()
             assert len(count) == 1
 
+    @pytest.mark.asyncio
+    async def test_triggered_by_set_and_preserved_on_upgrade(
+        self,
+        db: DatabaseManager,
+    ) -> None:
+        """A5: a triggered fire records triggered_by_user_id, and a later
+        status upgrade that passes None (the replay path) does NOT clobber
+        it back to NULL."""
+        import secrets
+
+        from z4j_brain.persistence.models import User
+
+        project_id, schedule_id = await _seed_project_and_schedule(db)
+        user_id = uuid.uuid4()
+        async with db.session() as s:
+            s.add(
+                User(
+                    id=user_id,
+                    email=f"{uuid.uuid4().hex[:8]}@x.io",
+                    password_hash=secrets.token_hex(8),
+                ),
+            )
+            await s.commit()
+
+        fire_id = uuid.uuid4()
+        sched_for = datetime.now(UTC)  # stable per fire_id (see above)
+        # Triggered fire buffers with the operator's id.
+        async with db.session() as s:
+            await ScheduleFireRepository(s).record(
+                fire_id=fire_id,
+                schedule_id=schedule_id,
+                project_id=project_id,
+                command_id=None,
+                status="buffered",
+                scheduled_for=sched_for,
+                triggered_by_user_id=user_id,
+            )
+            await s.commit()
+        # Replay upgrades buffered -> delivered with NO user id.
+        async with db.session() as s:
+            await ScheduleFireRepository(s).record(
+                fire_id=fire_id,
+                schedule_id=schedule_id,
+                project_id=project_id,
+                command_id=None,
+                status="delivered",
+                scheduled_for=sched_for,
+                triggered_by_user_id=None,
+            )
+            await s.commit()
+
+        async with db.session() as s:
+            row = (
+                await s.execute(
+                    select(ScheduleFire).where(ScheduleFire.fire_id == fire_id),
+                )
+            ).scalar_one()
+        assert row.status == "delivered"
+        assert row.triggered_by_user_id == user_id  # preserved
+
 
 class TestAcknowledge:
     @pytest.mark.asyncio
     async def test_ack_sets_acked_at_and_latency(
-        self, db: DatabaseManager,
+        self,
+        db: DatabaseManager,
     ) -> None:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         fire_id = uuid.uuid4()
@@ -184,7 +254,8 @@ class TestAcknowledge:
 
     @pytest.mark.asyncio
     async def test_ack_unknown_fire_id_returns_none(
-        self, db: DatabaseManager,
+        self,
+        db: DatabaseManager,
     ) -> None:
         async with db.session() as s:
             row, was_first = await ScheduleFireRepository(s).acknowledge(
@@ -198,7 +269,8 @@ class TestAcknowledge:
 class TestListRecent:
     @pytest.mark.asyncio
     async def test_returns_newest_first(
-        self, db: DatabaseManager,
+        self,
+        db: DatabaseManager,
     ) -> None:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         async with db.session() as s:
@@ -216,7 +288,8 @@ class TestListRecent:
 
         async with db.session() as s:
             rows = await ScheduleFireRepository(s).list_recent_for_schedule(
-                schedule_id=schedule_id, project_id=project_id,
+                schedule_id=schedule_id,
+                project_id=project_id,
             )
         # Newest first: first row's fired_at > last row's fired_at.
         assert len(rows) == 3
@@ -241,7 +314,8 @@ class TestListRecent:
         other_project = uuid.uuid4()
         async with db.session() as s:
             rows = await ScheduleFireRepository(s).list_recent_for_schedule(
-                schedule_id=schedule_id, project_id=other_project,
+                schedule_id=schedule_id,
+                project_id=other_project,
             )
         assert rows == []
 
@@ -254,7 +328,9 @@ class TestListRecent:
 class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_disables_after_threshold_consecutive_failures(
-        self, db: DatabaseManager, settings: Settings,
+        self,
+        db: DatabaseManager,
+        settings: Settings,
     ) -> None:
         from z4j_brain.domain.workers.schedule_circuit_breaker import (
             ScheduleCircuitBreakerWorker,
@@ -285,8 +361,79 @@ class TestCircuitBreaker:
         assert row.is_enabled is False
 
     @pytest.mark.asyncio
+    async def test_trip_notifies_circuit_breaker_subscriber(
+        self,
+        db: DatabaseManager,
+        settings: Settings,
+    ) -> None:
+        # The schedule.circuit_breaker.tripped trigger was subscribable
+        # since 1.6 but had no emit site (the same vapor class as the
+        # removed task.slow). A trip must now fan out to project
+        # subscriptions: an in-app subscriber gets exactly one bell row
+        # whose deep-link data resolves to the schedule.
+        from z4j_brain.domain.workers.schedule_circuit_breaker import (
+            ScheduleCircuitBreakerWorker,
+        )
+        from z4j_brain.persistence.enums import ProjectRole
+
+        settings = settings.model_copy(
+            update={"schedule_circuit_breaker_threshold": 3},
+        )
+        project_id, schedule_id = await _seed_project_and_schedule(db)
+        async with db.session() as s:
+            user = User(
+                email=f"{uuid.uuid4().hex[:8]}@x.io",
+                password_hash=secrets.token_hex(8),
+            )
+            s.add(user)
+            await s.flush()
+            s.add(
+                Membership(
+                    user_id=user.id,
+                    project_id=project_id,
+                    role=ProjectRole.OPERATOR,
+                ),
+            )
+            s.add(
+                UserSubscription(
+                    user_id=user.id,
+                    project_id=project_id,
+                    trigger="schedule.circuit_breaker.tripped",
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[],
+                    user_channel_ids=[],
+                    cooldown_seconds=0,
+                ),
+            )
+            for _ in range(3):
+                await ScheduleFireRepository(s).record(
+                    fire_id=uuid.uuid4(),
+                    schedule_id=schedule_id,
+                    project_id=project_id,
+                    command_id=None,
+                    status="acked_failed",
+                    scheduled_for=datetime.now(UTC),
+                )
+            await s.commit()
+
+        await ScheduleCircuitBreakerWorker(db=db, settings=settings).tick()
+
+        async with db.session() as s:
+            row = await s.get(Schedule, schedule_id)
+            assert row.is_enabled is False
+            notes = list(
+                (await s.execute(select(UserNotification))).scalars().all(),
+            )
+        assert len(notes) == 1
+        assert notes[0].trigger == "schedule.circuit_breaker.tripped"
+        assert notes[0].data["task_id"] == str(schedule_id)
+
+    @pytest.mark.asyncio
     async def test_does_not_disable_with_recent_success(
-        self, db: DatabaseManager, settings: Settings,
+        self,
+        db: DatabaseManager,
+        settings: Settings,
     ) -> None:
         # 4 failures + 1 recent success interleaved → NOT a streak.
         from z4j_brain.domain.workers.schedule_circuit_breaker import (
@@ -330,7 +477,9 @@ class TestCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_does_not_disable_below_threshold(
-        self, db: DatabaseManager, settings: Settings,
+        self,
+        db: DatabaseManager,
+        settings: Settings,
     ) -> None:
         # Only 2 failures + threshold 3 → not enough rows to trip.
         from z4j_brain.domain.workers.schedule_circuit_breaker import (
@@ -354,7 +503,8 @@ class TestCircuitBreaker:
             await s.commit()
 
         await ScheduleCircuitBreakerWorker(
-            db=db, settings=settings,
+            db=db,
+            settings=settings,
         ).tick()
 
         async with db.session() as s:
@@ -363,7 +513,9 @@ class TestCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_threshold_zero_disables_breaker(
-        self, db: DatabaseManager, settings: Settings,
+        self,
+        db: DatabaseManager,
+        settings: Settings,
     ) -> None:
         # Operator opt-out: threshold=0 → worker is a no-op.
         from z4j_brain.domain.workers.schedule_circuit_breaker import (
@@ -387,7 +539,8 @@ class TestCircuitBreaker:
             await s.commit()
 
         await ScheduleCircuitBreakerWorker(
-            db=db, settings=settings,
+            db=db,
+            settings=settings,
         ).tick()
 
         async with db.session() as s:
@@ -403,7 +556,9 @@ class TestCircuitBreaker:
 class TestPrune:
     @pytest.mark.asyncio
     async def test_drops_old_rows_only(
-        self, db: DatabaseManager, settings: Settings,
+        self,
+        db: DatabaseManager,
+        settings: Settings,
     ) -> None:
         from z4j_brain.domain.workers.schedule_circuit_breaker import (
             ScheduleFiresPruneWorker,
@@ -415,7 +570,7 @@ class TestPrune:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         now = datetime.now(UTC)
         async with db.session() as s:
-            for delta_days, label in (
+            for delta_days, _label in (
                 (-30, "old"),
                 (-10, "old"),
                 (-3, "fresh"),

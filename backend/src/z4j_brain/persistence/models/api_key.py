@@ -49,23 +49,30 @@ class ApiKey(PKMixin, TimestampsMixin, Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     token_hash: Mapped[str] = mapped_column(
-        String, nullable=False, unique=True,
+        String,
+        nullable=False,
+        unique=True,
     )
     prefix: Mapped[str] = mapped_column(String(8), nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     last_used_ip: Mapped[str | None] = mapped_column(
-        String, nullable=True,
+        String,
+        nullable=True,
     )
     expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     revoked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     revoked_reason: Mapped[str | None] = mapped_column(
-        String(200), nullable=True,
+        String(200),
+        nullable=True,
     )
     # Fine-grained authorization. See :mod:`z4j_brain.auth.scopes`
     # for the full catalogue. Empty list means the token has no
@@ -73,13 +80,16 @@ class ApiKey(PKMixin, TimestampsMixin, Base):
     # hard upper bound - a non-admin cannot grant ``users:write``
     # even if they request it.
     scopes: Mapped[list[str]] = mapped_column(
-        text_array(), nullable=False, default=list, server_default="{}",
+        text_array(),
+        nullable=False,
+        default=list,
+        server_default="{}",
     )
     # Optional per-project scope. When set, every request from this
     # token must hit a URL whose ``{slug}`` maps to this project.
     # When null, the token is bounded only by ``scopes`` + the
     # owner's visible projects.
-    project_id: Mapped["uuid.UUID | None"] = mapped_column(
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=True,

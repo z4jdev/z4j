@@ -111,10 +111,10 @@ def _payload(membership: Membership, *, email: str, display_name: str | None) ->
 @router.get("", response_model=list[MembershipPublic])
 async def list_memberships(
     slug: str,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[MembershipPublic]:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.models import User as UserModel
@@ -137,8 +137,7 @@ async def list_memberships(
         )
     ).all()
     return [
-        _payload(m, email=email, display_name=display_name)
-        for (m, email, display_name) in rows
+        _payload(m, email=email, display_name=display_name) for (m, email, display_name) in rows
     ]
 
 
@@ -151,13 +150,13 @@ async def list_memberships(
 async def grant_membership(
     slug: str,
     body: GrantMembershipRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    users_repo: "UserRepository" = Depends(get_user_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    users_repo: UserRepository = Depends(get_user_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> MembershipPublic:
     from z4j_brain.domain.policy_engine import PolicyEngine
@@ -192,11 +191,24 @@ async def grant_membership(
             details={"user_id": str(target_user.id)},
         )
 
-    membership = await memberships.grant(
-        user_id=target_user.id,
-        project_id=project.id,
-        role=role,
-    )
+    # The pre-check above closes the common case, but two admins
+    # onboarding the same user concurrently both pass it and then race
+    # the INSERT. Catch the uq_memberships_user_project violation and
+    # return the clean 409 instead of a 500 (mirrors create_rule /
+    # create_default).
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        membership = await memberships.grant(
+            user_id=target_user.id,
+            project_id=project.id,
+            role=role,
+        )
+    except IntegrityError as exc:
+        raise ConflictError(
+            "user already has a membership on this project",
+            details={"user_id": str(target_user.id)},
+        ) from exc
 
     # Materialize the project's default subscriptions for the new
     # member so they immediately receive bell notifications for the
@@ -238,13 +250,13 @@ async def update_membership(
     slug: str,
     membership_id: uuid.UUID,
     body: UpdateMembershipRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    users_repo: "UserRepository" = Depends(get_user_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    users_repo: UserRepository = Depends(get_user_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> MembershipPublic:
     from z4j_brain.domain.policy_engine import PolicyEngine
@@ -269,15 +281,11 @@ async def update_membership(
     # Last-admin protection: refuse to demote the only remaining admin.
     # Without this check an admin can accidentally (or maliciously)
     # lock every member out of admin-scoped settings.
-    if (
-        membership.role == ProjectRole.ADMIN
-        and role != ProjectRole.ADMIN
-    ):
+    if membership.role == ProjectRole.ADMIN and role != ProjectRole.ADMIN:
         admin_count = await memberships.count_admins_for_project_for_update(project.id)
         if admin_count <= 1:
             raise ConflictError(
-                "cannot demote the last admin - promote another "
-                "member to admin first",
+                "cannot demote the last admin - promote another member to admin first",
                 details={"project_id": str(project.id)},
             )
 
@@ -315,12 +323,12 @@ async def update_membership(
 async def revoke_membership(
     slug: str,
     membership_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> None:
     from z4j_brain.domain.policy_engine import PolicyEngine
@@ -347,8 +355,7 @@ async def revoke_membership(
         admin_count = await memberships.count_admins_for_project_for_update(project.id)
         if admin_count <= 1:
             raise ConflictError(
-                "cannot remove the last admin - promote another "
-                "member to admin first",
+                "cannot remove the last admin - promote another member to admin first",
                 details={"project_id": str(project.id)},
             )
 
@@ -367,6 +374,17 @@ async def revoke_membership(
         project_id=project.id,
     )
 
+    # Deprovision the user's automation: disable every rule they created so
+    # it stops firing entirely. The runner's fire-time re-check only blocks
+    # DESTRUCTIVE commands from a stale creator; their notify rules would
+    # otherwise keep firing to the remaining members.
+    from z4j_brain.persistence.repositories import AutomationRuleRepository
+
+    disabled_rules = await AutomationRuleRepository(db_session).disable_rules_created_by(
+        user_id=target_user_id,
+        project_id=project.id,
+    )
+
     await audit.record(
         audit_log,
         action="membership.revoked",
@@ -378,6 +396,19 @@ async def revoke_membership(
         project_id=project.id,
         source_ip=ip,
     )
+    if disabled_rules:
+        await audit.record(
+            audit_log,
+            action="automation_rule.auto_disabled",
+            target_type="user",
+            target_id=str(target_user_id),
+            result="success",
+            outcome="allow",
+            user_id=user.id,
+            project_id=project.id,
+            source_ip=ip,
+            metadata={"count": disabled_rules, "reason": "creator_deprovisioned"},
+        )
     await db_session.commit()
 
 

@@ -31,7 +31,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.csrf import csrf_cookie_name
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
@@ -91,45 +90,51 @@ async def _seed(brain_app, settings: Settings):
     default_id = uuid.uuid4()
 
     async with db.session() as s:
-        s.add_all([
-            Project(id=project_id, slug="fragai", name="FragAI"),
-            User(
-                id=user_id,
-                email=f"u-{uuid.uuid4().hex[:8]}@example.com",
-                password_hash=hasher.hash(
-                    "correct horse battery staple 9",
+        s.add_all(
+            [
+                Project(id=project_id, slug="fragai", name="FragAI"),
+                User(
+                    id=user_id,
+                    email=f"u-{uuid.uuid4().hex[:8]}@example.com",
+                    password_hash=hasher.hash(
+                        "correct horse battery staple 9",
+                    ),
+                    is_admin=True,
+                    is_active=True,
                 ),
-                is_admin=True,
-                is_active=True,
-            ),
-            Session(
-                id=session_id,
-                user_id=user_id,
-                csrf_token=csrf,
-                expires_at=datetime.now(UTC) + timedelta(hours=1),
-                ip_at_issue="127.0.0.1",
-                user_agent_at_issue="test",
-            ),
-        ])
+                Session(
+                    id=session_id,
+                    user_id=user_id,
+                    csrf_token=csrf,
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    ip_at_issue="127.0.0.1",
+                    user_agent_at_issue="test",
+                ),
+            ]
+        )
         for i, cid in enumerate(ch_ids):
-            s.add(NotificationChannel(
-                id=cid,
-                project_id=project_id,
-                name=f"channel-{i}",
-                type="webhook",
-                config={"url": f"https://example.test/{i}"},
-                is_active=True,
-            ))
+            s.add(
+                NotificationChannel(
+                    id=cid,
+                    project_id=project_id,
+                    name=f"channel-{i}",
+                    type="webhook",
+                    config={"url": f"https://example.test/{i}"},
+                    is_active=True,
+                )
+            )
         # Existing default - exactly two of the three channels.
-        s.add(ProjectDefaultSubscription(
-            id=default_id,
-            project_id=project_id,
-            trigger="task.failed",
-            filters={},
-            in_app=True,
-            project_channel_ids=[ch_ids[0], ch_ids[1]],
-            cooldown_seconds=300,
-        ))
+        s.add(
+            ProjectDefaultSubscription(
+                id=default_id,
+                project_id=project_id,
+                trigger="task.failed",
+                filters={},
+                in_app=True,
+                project_channel_ids=[ch_ids[0], ch_ids[1]],
+                cooldown_seconds=300,
+            )
+        )
         await s.commit()
 
     return {
@@ -164,7 +169,9 @@ def _client(brain_app, settings: Settings, seed: dict) -> AsyncClient:
 @pytest.mark.asyncio
 class TestUpdateDefaultSubscription:
     async def test_add_third_channel_to_existing_default(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """The exact operator workflow: existing default has 2
         channels, admin wants to add a 3rd. Pre-PATCH the only
@@ -172,17 +179,17 @@ class TestUpdateDefaultSubscription:
         """
         seed = await _seed(brain_app, settings)
         async with _client(brain_app, settings, seed) as client:
-            url = (
-                f"/api/v1/projects/fragai/notifications/defaults/"
-                f"{seed['default_id']}"
+            url = f"/api/v1/projects/fragai/notifications/defaults/{seed['default_id']}"
+            resp = await client.patch(
+                url,
+                json={
+                    "project_channel_ids": [
+                        str(seed["channel_ids"][0]),
+                        str(seed["channel_ids"][1]),
+                        str(seed["channel_ids"][2]),
+                    ],
+                },
             )
-            resp = await client.patch(url, json={
-                "project_channel_ids": [
-                    str(seed["channel_ids"][0]),
-                    str(seed["channel_ids"][1]),
-                    str(seed["channel_ids"][2]),
-                ],
-            })
             assert resp.status_code == 200, resp.text
             body = resp.json()
             assert body["id"] == str(seed["default_id"])
@@ -193,15 +200,14 @@ class TestUpdateDefaultSubscription:
             assert body["cooldown_seconds"] == 300
 
     async def test_partial_update_only_cooldown(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Body containing only cooldown_seconds leaves everything else."""
         seed = await _seed(brain_app, settings)
         async with _client(brain_app, settings, seed) as client:
-            url = (
-                f"/api/v1/projects/fragai/notifications/defaults/"
-                f"{seed['default_id']}"
-            )
+            url = f"/api/v1/projects/fragai/notifications/defaults/{seed['default_id']}"
             resp = await client.patch(url, json={"cooldown_seconds": 30})
             assert resp.status_code == 200
             body = resp.json()
@@ -210,46 +216,48 @@ class TestUpdateDefaultSubscription:
             assert len(body["project_channel_ids"]) == 2
 
     async def test_rename_trigger(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """task.failed -> task.succeeded."""
         seed = await _seed(brain_app, settings)
         async with _client(brain_app, settings, seed) as client:
-            url = (
-                f"/api/v1/projects/fragai/notifications/defaults/"
-                f"{seed['default_id']}"
-            )
+            url = f"/api/v1/projects/fragai/notifications/defaults/{seed['default_id']}"
             resp = await client.patch(url, json={"trigger": "task.succeeded"})
             assert resp.status_code == 200
             assert resp.json()["trigger"] == "task.succeeded"
 
     async def test_rename_trigger_to_already_used_409(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Renaming to a trigger that already has a default -> 409."""
         seed = await _seed(brain_app, settings)
         # Insert a second default so the rename collides.
         async with brain_app.state.db.session() as s:
-            s.add(ProjectDefaultSubscription(
-                project_id=seed["project_id"],
-                trigger="task.succeeded",
-                filters={},
-                in_app=True,
-                project_channel_ids=[],
-                cooldown_seconds=0,
-            ))
+            s.add(
+                ProjectDefaultSubscription(
+                    project_id=seed["project_id"],
+                    trigger="task.succeeded",
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[],
+                    cooldown_seconds=0,
+                )
+            )
             await s.commit()
         async with _client(brain_app, settings, seed) as client:
-            url = (
-                f"/api/v1/projects/fragai/notifications/defaults/"
-                f"{seed['default_id']}"
-            )
+            url = f"/api/v1/projects/fragai/notifications/defaults/{seed['default_id']}"
             resp = await client.patch(url, json={"trigger": "task.succeeded"})
             assert resp.status_code == 409, resp.text
             assert "already exists" in resp.json()["message"]
 
     async def test_channel_not_in_project_409(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """A channel id from a different project is rejected
         before any write hits the DB."""
@@ -261,24 +269,26 @@ class TestUpdateDefaultSubscription:
         other_channel_id = uuid.uuid4()
         async with brain_app.state.db.session() as s:
             s.add(Project(id=other_project_id, slug="other", name="Other"))
-            s.add(NotificationChannel(
-                id=other_channel_id,
-                project_id=other_project_id,
-                name="other-channel",
-                type="webhook",
-                config={"url": "https://example.test/other"},
-                is_active=True,
-            ))
+            s.add(
+                NotificationChannel(
+                    id=other_channel_id,
+                    project_id=other_project_id,
+                    name="other-channel",
+                    type="webhook",
+                    config={"url": "https://example.test/other"},
+                    is_active=True,
+                )
+            )
             await s.commit()
 
         async with _client(brain_app, settings, seed) as client:
-            url = (
-                f"/api/v1/projects/fragai/notifications/defaults/"
-                f"{seed['default_id']}"
+            url = f"/api/v1/projects/fragai/notifications/defaults/{seed['default_id']}"
+            resp = await client.patch(
+                url,
+                json={
+                    "project_channel_ids": [str(other_channel_id)],
+                },
             )
-            resp = await client.patch(url, json={
-                "project_channel_ids": [str(other_channel_id)],
-            })
             assert resp.status_code == 409, resp.text
             assert "do not belong to this project" in resp.json()["message"]
             # No partial write: the original 2-channel list survives.
@@ -294,7 +304,9 @@ class TestUpdateDefaultSubscription:
                 assert len(row.project_channel_ids) == 2
 
     async def test_idor_default_in_other_project_404(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Admin of /fragai cannot PATCH a default in /other even
         if they know the default_id.
@@ -306,38 +318,36 @@ class TestUpdateDefaultSubscription:
         other_default_id = uuid.uuid4()
         async with brain_app.state.db.session() as s:
             s.add(Project(id=other_project_id, slug="other", name="Other"))
-            s.add(ProjectDefaultSubscription(
-                id=other_default_id,
-                project_id=other_project_id,
-                trigger="task.failed",
-                filters={},
-                in_app=True,
-                project_channel_ids=[],
-                cooldown_seconds=0,
-            ))
+            s.add(
+                ProjectDefaultSubscription(
+                    id=other_default_id,
+                    project_id=other_project_id,
+                    trigger="task.failed",
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[],
+                    cooldown_seconds=0,
+                )
+            )
             await s.commit()
 
         async with _client(brain_app, settings, seed) as client:
             # Try PATCHing the OTHER project's default through the
             # FragAI route. The default_id is real but not scoped
             # to /fragai.
-            url = (
-                f"/api/v1/projects/fragai/notifications/defaults/"
-                f"{other_default_id}"
-            )
+            url = f"/api/v1/projects/fragai/notifications/defaults/{other_default_id}"
             resp = await client.patch(url, json={"in_app": False})
             assert resp.status_code == 404, resp.text
 
     async def test_empty_body_is_noop(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Empty PATCH body returns the row unchanged."""
         seed = await _seed(brain_app, settings)
         async with _client(brain_app, settings, seed) as client:
-            url = (
-                f"/api/v1/projects/fragai/notifications/defaults/"
-                f"{seed['default_id']}"
-            )
+            url = f"/api/v1/projects/fragai/notifications/defaults/{seed['default_id']}"
             resp = await client.patch(url, json={})
             assert resp.status_code == 200
             body = resp.json()

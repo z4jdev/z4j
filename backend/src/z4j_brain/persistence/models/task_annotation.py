@@ -39,7 +39,10 @@ class TaskAnnotation(PKMixin, TimestampsMixin, Base):
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     annotation_type: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="note", server_default="note",
+        String(20),
+        nullable=False,
+        default="note",
+        server_default="note",
     )  # note, status_change, escalation, resolution
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -80,7 +81,7 @@ class TaskListResponse(BaseModel):
     next_cursor: str | None
 
 
-def _task_payload(task: "Task") -> TaskPublic:
+def _task_payload(task: Task) -> TaskPublic:
     return TaskPublic(
         id=task.id,
         project_id=task.project_id,
@@ -127,13 +128,13 @@ async def list_tasks(
     until: datetime | None = Query(default=None),
     cursor: str | None = Query(default=None),
     limit: int | None = Query(default=None, ge=1, le=5000),
-    format: str | None = Query(default=None, pattern="^(csv|xlsx|json)$"),
+    format: str | None = Query(default=None, pattern="^(csv|xlsx|json)$"),  # noqa: A002  public query param name
     fields: str | None = Query(default=None, max_length=500),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> Any:
     """List tasks with filtering, search, pagination, and export.
 
@@ -170,11 +171,9 @@ async def list_tasks(
     if priority:
         priority_list = []
         for p in priority.split(","):
-            p = p.strip().lower()
-            try:
+            p = p.strip().lower()  # noqa: PLW2901  normalized in-loop
+            with contextlib.suppress(ValueError):
                 priority_list.append(TaskPriority(p))
-            except ValueError:
-                pass
         if not priority_list:
             priority_list = None
 
@@ -237,10 +236,10 @@ async def get_task(
     slug: str,
     engine: str,
     task_id: str,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> TaskPublic:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import TaskRepository
@@ -305,10 +304,10 @@ async def get_task_tree(
     slug: str,
     engine: str,
     task_id: str,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> TaskTreeResponse:
     """Return the full canvas (chain / group / chord) tree this task belongs to.
 
@@ -406,12 +405,12 @@ class BulkDeleteResponse(BaseModel):
 async def bulk_delete_tasks(
     slug: str,
     body: BulkDeleteRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> BulkDeleteResponse:
     """Delete task records from the brain database.
 
@@ -423,7 +422,6 @@ async def bulk_delete_tasks(
     Requires ADMIN role.
     """
     from sqlalchemy import delete, select
-    from sqlalchemy import func as sql_func
 
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.domain.policy_engine import PolicyEngine
@@ -452,10 +450,8 @@ async def bulk_delete_tasks(
         # Delete by filter (max 10000).
         q = select(Task.id).where(Task.project_id == project.id)
         if body.filter_state:
-            try:
+            with contextlib.suppress(ValueError):
                 q = q.where(Task.state == TaskState(body.filter_state))
-            except ValueError:
-                pass
         if body.filter_name:
             q = q.where(Task.name.ilike(f"%{body.filter_name}%"))
         if body.filter_queue:
@@ -505,7 +501,12 @@ _ALL_EXPORT_FIELDS: list[tuple[str, Any]] = [
     ("task_id", lambda r: r.task_id),
     ("name", lambda r: r.name),
     ("state", lambda r: r.state.value if hasattr(r.state, "value") else r.state),
-    ("priority", lambda r: r.priority.value if hasattr(r.priority, "value") else getattr(r, "priority", "normal")),
+    (
+        "priority",
+        lambda r: (
+            r.priority.value if hasattr(r.priority, "value") else getattr(r, "priority", "normal")
+        ),
+    ),
     ("queue", lambda r: r.queue or ""),
     ("worker", lambda r: r.worker_name or ""),
     ("received_at", lambda r: r.received_at.isoformat() if r.received_at else ""),
@@ -522,7 +523,7 @@ _ALL_EXPORT_FIELDS: list[tuple[str, Any]] = [
 ]
 
 #: Hard cap on rows per xlsx export. ``in_memory=True`` builds the
-#: whole workbook in RAM (~200-400 bytes per cell × 17 cols × N
+#: whole workbook in RAM (~200-400 bytes per cell x 17 cols x N
 #: rows). At 25 000 rows that's ~150 MB of resident memory per
 #: concurrent export - past which we'd rather force operators to
 #: switch to CSV (which streams). The cap sits well below the
@@ -564,7 +565,7 @@ def _resolve_fields(
             for name, fn in _ALL_EXPORT_FIELDS
             if name not in ("traceback", "args", "kwargs", "result", "tags")
         ]
-    all_by_name = {name: fn for name, fn in _ALL_EXPORT_FIELDS}
+    all_by_name = dict(_ALL_EXPORT_FIELDS)
     return [(name, all_by_name[name]) for name in selected if name in all_by_name]
 
 

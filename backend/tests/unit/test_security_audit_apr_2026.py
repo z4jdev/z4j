@@ -12,13 +12,13 @@ that for the full context on each finding.
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 import uuid
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 
 # =====================================================================
 # H-1: gRPC server logs loud warning when CN allow-list is empty
@@ -33,19 +33,18 @@ class TestH1EmptyAllowListWarning:
         pytest.importorskip("grpc")
         pytest.importorskip("cryptography")
 
-        import logging  # noqa: PLC0415
+        import logging
 
-        from sqlalchemy.ext.asyncio import create_async_engine  # noqa: PLC0415
-        from sqlalchemy.pool import StaticPool  # noqa: PLC0415
-
-        from z4j_brain.persistence.base import Base  # noqa: PLC0415
-        from z4j_brain.persistence.database import (  # noqa: PLC0415
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import StaticPool
+        from z4j_brain.persistence.base import Base
+        from z4j_brain.persistence.database import (
             DatabaseManager,
         )
-        from z4j_brain.scheduler_grpc.server import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.server import (
             SchedulerGrpcServer,
         )
-        from z4j_brain.settings import Settings  # noqa: PLC0415
+        from z4j_brain.settings import Settings
 
         async def _go() -> None:
             engine = create_async_engine(
@@ -84,17 +83,14 @@ class TestH1EmptyAllowListWarning:
                 logging.getLogger("z4j.brain.scheduler_grpc.server"),
                 "warning",
             ) as mock_warning:
-                try:
+                # expected - fake TLS material won't load
+                with contextlib.suppress(Exception):
                     await srv.start()
-                except Exception:  # noqa: BLE001
-                    pass  # expected - fake TLS material won't load
                 # Confirm the audit-fix warning fired with the
                 # ``scheduler_grpc_open_ca`` event tag (in either
                 # the message body or the structured ``event``
                 # extra).
-                assert mock_warning.called, (
-                    "empty allow-list must log a warning"
-                )
+                assert mock_warning.called, "empty allow-list must log a warning"
                 msg = mock_warning.call_args.args[0]
                 extras = mock_warning.call_args.kwargs.get("extra", {})
                 assert (
@@ -125,11 +121,14 @@ class TestL1DsnHandling:
         because the fix is a contract: future contributors should
         NOT re-introduce the string rendering.
         """
-        from pathlib import Path  # noqa: PLC0415
+        from pathlib import Path
 
         source = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "scheduler_grpc" / "handlers.py"
+            / "src"
+            / "z4j_brain"
+            / "scheduler_grpc"
+            / "handlers.py"
         ).read_text()
         assert "hide_password=False" not in source, (
             "Found `hide_password=False` in handlers.py - the "
@@ -147,7 +146,7 @@ class TestL1DsnHandling:
 
 class TestErrorSanitizer:
     def test_truncates_long_messages(self) -> None:
-        from z4j_brain.scheduler_grpc.handlers import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.handlers import (
             _sanitize_error_message,
         )
 
@@ -158,7 +157,7 @@ class TestErrorSanitizer:
         assert result.endswith("...")
 
     def test_strips_control_characters(self) -> None:
-        from z4j_brain.scheduler_grpc.handlers import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.handlers import (
             _sanitize_error_message,
         )
 
@@ -172,7 +171,7 @@ class TestErrorSanitizer:
         assert "\x1b" not in result
 
     def test_empty_or_whitespace_returns_none(self) -> None:
-        from z4j_brain.scheduler_grpc.handlers import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.handlers import (
             _sanitize_error_message,
         )
 
@@ -181,7 +180,7 @@ class TestErrorSanitizer:
         assert _sanitize_error_message("   \n\t  ") is None
 
     def test_keeps_normal_text(self) -> None:
-        from z4j_brain.scheduler_grpc.handlers import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.handlers import (
             _sanitize_error_message,
         )
 
@@ -199,8 +198,7 @@ class TestErrorSanitizer:
 class TestRestArgsKwargsSizeCap:
     def test_oversized_kwargs_rejected_at_schema(self) -> None:
         from pydantic import ValidationError as PydanticValidationError
-
-        from z4j_brain.api.schedules import (  # noqa: PLC0415
+        from z4j_brain.api.schedules import (
             ScheduleCreateIn,
         )
 
@@ -209,7 +207,9 @@ class TestRestArgsKwargsSizeCap:
         big_value = "x" * 70_000
         with pytest.raises(PydanticValidationError) as ei:
             ScheduleCreateIn(
-                name="big", engine="celery", kind="cron",
+                name="big",
+                engine="celery",
+                kind="cron",
                 expression="0 * * * *",
                 task_name="t.t",
                 kwargs={"payload": big_value},
@@ -217,12 +217,14 @@ class TestRestArgsKwargsSizeCap:
         assert "64" in str(ei.value) or "exceeds" in str(ei.value)
 
     def test_normal_size_kwargs_accepted(self) -> None:
-        from z4j_brain.api.schedules import (  # noqa: PLC0415
+        from z4j_brain.api.schedules import (
             ScheduleCreateIn,
         )
 
         s = ScheduleCreateIn(
-            name="ok", engine="celery", kind="cron",
+            name="ok",
+            engine="celery",
+            kind="cron",
             expression="0 * * * *",
             task_name="t.t",
             kwargs={"a": 1, "b": "x" * 100},
@@ -238,27 +240,29 @@ class TestRestArgsKwargsSizeCap:
 class TestRestKindEnum:
     def test_unknown_kind_rejected(self) -> None:
         from pydantic import ValidationError as PydanticValidationError
-
-        from z4j_brain.api.schedules import (  # noqa: PLC0415
+        from z4j_brain.api.schedules import (
             ScheduleCreateIn,
         )
 
         with pytest.raises(PydanticValidationError):
             ScheduleCreateIn(
-                name="x", engine="celery",
+                name="x",
+                engine="celery",
                 kind="quantum",  # not in vocab
                 expression="0 * * * *",
                 task_name="t.t",
             )
 
     def test_each_known_kind_accepted(self) -> None:
-        from z4j_brain.api.schedules import (  # noqa: PLC0415
+        from z4j_brain.api.schedules import (
             ScheduleCreateIn,
         )
 
         for k in ("cron", "interval", "clocked", "solar"):
             s = ScheduleCreateIn(
-                name="x", engine="celery", kind=k,
+                name="x",
+                engine="celery",
+                kind=k,
                 expression="0 * * * *",
                 task_name="t.t",
             )
@@ -272,7 +276,7 @@ class TestRestKindEnum:
 
 class TestRestReplaceForSourceAllowList:
     def test_dashboard_source_rejected(self) -> None:
-        from z4j_brain.api.schedules import (  # noqa: PLC0415
+        from z4j_brain.api.schedules import (
             _validate_replace_for_source_label,
         )
 
@@ -282,7 +286,7 @@ class TestRestReplaceForSourceAllowList:
             _validate_replace_for_source_label("dashboard")
 
     def test_empty_source_rejected(self) -> None:
-        from z4j_brain.api.schedules import (  # noqa: PLC0415
+        from z4j_brain.api.schedules import (
             _validate_replace_for_source_label,
         )
 
@@ -292,7 +296,7 @@ class TestRestReplaceForSourceAllowList:
             _validate_replace_for_source_label(None)
 
     def test_typo_source_rejected(self) -> None:
-        from z4j_brain.api.schedules import (  # noqa: PLC0415
+        from z4j_brain.api.schedules import (
             _validate_replace_for_source_label,
         )
 
@@ -306,7 +310,7 @@ class TestRestReplaceForSourceAllowList:
             _validate_replace_for_source_label("Declarative:Django")
 
     def test_each_legitimate_source_accepted(self) -> None:
-        from z4j_brain.api.schedules import (  # noqa: PLC0415
+        from z4j_brain.api.schedules import (
             _validate_replace_for_source_label,
         )
 
@@ -331,15 +335,15 @@ class TestRestReplaceForSourceAllowList:
 class TestEmbeddedPkiPathValidator:
     def test_etc_rejected(self) -> None:
         # POSIX system path - the exploit case.
-        from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
-            _validate_pki_out_dir,
-        )
-
         # On Windows the resolver translates /etc to a relative
         # path; the validator only catches the actual POSIX root.
         # We test with an absolute Windows system path AND a POSIX
         # path that the resolver leaves unmunged.
-        import sys  # noqa: PLC0415
+        import sys
+
+        from z4j_brain.embedded_scheduler import (
+            _validate_pki_out_dir,
+        )
 
         if sys.platform == "win32":
             with pytest.raises(ValueError, match="system path"):
@@ -349,17 +353,18 @@ class TestEmbeddedPkiPathValidator:
                 _validate_pki_out_dir(Path("/etc/z4j"))
 
     def test_root_rejected(self) -> None:
-        from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
+        import sys
+
+        from z4j_brain.embedded_scheduler import (
             _validate_pki_out_dir,
         )
-        import sys  # noqa: PLC0415
 
         if sys.platform != "win32":
             with pytest.raises(ValueError, match="system path"):
                 _validate_pki_out_dir(Path("/usr/lib/z4j"))
 
     def test_legitimate_path_accepted(self, tmp_path: Path) -> None:
-        from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
+        from z4j_brain.embedded_scheduler import (
             _validate_pki_out_dir,
         )
 
@@ -375,9 +380,9 @@ class TestEmbeddedEnvWhitelist:
     def test_supervisor_env_does_not_leak_brain_secrets(self) -> None:
         """Brain secrets (DATABASE_URL, Z4J_SECRET, AWS_*, etc.)
         must NOT be forwarded into the subprocess env."""
-        from unittest.mock import MagicMock  # noqa: PLC0415
+        from unittest.mock import MagicMock
 
-        from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
+        from z4j_brain.embedded_scheduler import (
             EmbeddedSchedulerSupervisor,
             mint_loopback_pki,
         )
@@ -396,7 +401,7 @@ class TestEmbeddedEnvWhitelist:
             "Z4J_SCHEDULER_LOG_LEVEL": "DEBUG",  # passes whitelist
         }
         # Build a real supervisor + PKI to exercise the env builder.
-        import tempfile  # noqa: PLC0415
+        import tempfile
 
         with tempfile.TemporaryDirectory(prefix="z4j-env-test-") as tmp:
             pki = mint_loopback_pki(Path(tmp))
@@ -416,9 +421,7 @@ class TestEmbeddedEnvWhitelist:
                 env = sup._build_subprocess_env()
 
         # Brain secrets MUST NOT be in the subprocess env.
-        assert "Z4J_SECRET" not in env, (
-            "Brain master secret leaked to subprocess env"
-        )
+        assert "Z4J_SECRET" not in env, "Brain master secret leaked to subprocess env"
         assert "Z4J_SESSION_SECRET" not in env
         assert "Z4J_DATABASE_URL" not in env
         assert "AWS_ACCESS_KEY_ID" not in env
@@ -442,10 +445,10 @@ class TestEmbeddedEnvWhitelist:
 
 class TestEmbeddedPermanentlyFailedFlag:
     def test_supervisor_starts_with_flag_false(self) -> None:
-        from unittest.mock import MagicMock  # noqa: PLC0415
-        import tempfile  # noqa: PLC0415
+        import tempfile
+        from unittest.mock import MagicMock
 
-        from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
+        from z4j_brain.embedded_scheduler import (
             EmbeddedSchedulerSupervisor,
             mint_loopback_pki,
         )
@@ -454,17 +457,19 @@ class TestEmbeddedPermanentlyFailedFlag:
             pki = mint_loopback_pki(Path(tmp))
             settings = MagicMock()
             sup = EmbeddedSchedulerSupervisor(
-                settings=settings, pki=pki,
+                settings=settings,
+                pki=pki,
                 brain_grpc_host="127.0.0.1",
-                brain_grpc_port=1, brain_rest_url="http://x:1",
+                brain_grpc_port=1,
+                brain_rest_url="http://x:1",
             )
         assert sup.permanently_failed is False
 
     def test_flag_exposed_via_property(self) -> None:
-        from unittest.mock import MagicMock  # noqa: PLC0415
-        import tempfile  # noqa: PLC0415
+        import tempfile
+        from unittest.mock import MagicMock
 
-        from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
+        from z4j_brain.embedded_scheduler import (
             EmbeddedSchedulerSupervisor,
             mint_loopback_pki,
         )
@@ -473,13 +478,15 @@ class TestEmbeddedPermanentlyFailedFlag:
             pki = mint_loopback_pki(Path(tmp))
             settings = MagicMock()
             sup = EmbeddedSchedulerSupervisor(
-                settings=settings, pki=pki,
+                settings=settings,
+                pki=pki,
                 brain_grpc_host="127.0.0.1",
-                brain_grpc_port=1, brain_rest_url="http://x:1",
+                brain_grpc_port=1,
+                brain_rest_url="http://x:1",
             )
         # Setting the private flag (simulating watchdog give-up)
         # surfaces via the public property.
-        sup._permanently_failed = True  # noqa: SLF001
+        sup._permanently_failed = True
         assert sup.permanently_failed is True
 
 
@@ -505,7 +512,7 @@ class TestEmbeddedPermanentlyFailedFlag:
 
 class TestM5BindingsSettingParser:
     def test_empty_string_yields_empty_dict(self) -> None:
-        from z4j_brain.settings import Settings  # noqa: PLC0415
+        from z4j_brain.settings import Settings
 
         s = Settings(
             database_url="sqlite+aiosqlite:///:memory:",
@@ -518,7 +525,7 @@ class TestM5BindingsSettingParser:
         assert s.scheduler_grpc_cn_project_bindings == {}
 
     def test_json_string_parses_to_dict(self) -> None:
-        from z4j_brain.settings import Settings  # noqa: PLC0415
+        from z4j_brain.settings import Settings
 
         s = Settings(
             database_url="sqlite+aiosqlite:///:memory:",
@@ -533,7 +540,7 @@ class TestM5BindingsSettingParser:
         }
 
     def test_malformed_json_rejected(self) -> None:
-        from z4j_brain.settings import Settings  # noqa: PLC0415
+        from z4j_brain.settings import Settings
 
         with pytest.raises(Exception, match="JSON object"):
             Settings(
@@ -546,7 +553,7 @@ class TestM5BindingsSettingParser:
             )
 
     def test_non_dict_rejected(self) -> None:
-        from z4j_brain.settings import Settings  # noqa: PLC0415
+        from z4j_brain.settings import Settings
 
         with pytest.raises(Exception, match="JSON object"):
             Settings(
@@ -559,7 +566,7 @@ class TestM5BindingsSettingParser:
             )
 
     def test_value_must_be_list_of_strings(self) -> None:
-        from z4j_brain.settings import Settings  # noqa: PLC0415
+        from z4j_brain.settings import Settings
 
         with pytest.raises(Exception, match="list of non-empty"):
             Settings(
@@ -603,14 +610,13 @@ class _BindingAbortError(Exception):
 @pytest.fixture
 def _binding_db():
     """Spin up an in-memory engine + DatabaseManager + one project."""
-    import asyncio  # noqa: PLC0415
+    import asyncio
 
-    from sqlalchemy.ext.asyncio import create_async_engine  # noqa: PLC0415
-    from sqlalchemy.pool import StaticPool  # noqa: PLC0415
-
-    from z4j_brain.persistence.base import Base  # noqa: PLC0415
-    from z4j_brain.persistence.database import DatabaseManager  # noqa: PLC0415
-    from z4j_brain.persistence.models import Project  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from z4j_brain.persistence.base import Base
+    from z4j_brain.persistence.database import DatabaseManager
+    from z4j_brain.persistence.models import Project
 
     async def _setup():
         engine = create_async_engine(
@@ -636,7 +642,7 @@ class TestM5BindingHelper:
     @pytest.mark.asyncio
     async def test_empty_bindings_is_noop(self, _binding_db) -> None:
         """Legacy mode: no bindings -> every CN keeps cross-project authority."""
-        from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.binding import (
             enforce_cn_project_binding,
         )
 
@@ -654,7 +660,7 @@ class TestM5BindingHelper:
     @pytest.mark.asyncio
     async def test_unbound_cn_keeps_authority(self, _binding_db) -> None:
         """Mixed mode: a CN not in the map keeps cross-project auth."""
-        from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.binding import (
             enforce_cn_project_binding,
         )
 
@@ -670,9 +676,10 @@ class TestM5BindingHelper:
 
     @pytest.mark.asyncio
     async def test_bound_cn_with_matching_project_allowed(
-        self, _binding_db,
+        self,
+        _binding_db,
     ) -> None:
-        from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.binding import (
             enforce_cn_project_binding,
         )
 
@@ -688,13 +695,13 @@ class TestM5BindingHelper:
 
     @pytest.mark.asyncio
     async def test_bound_cn_with_unbound_project_rejected(
-        self, _binding_db,
+        self,
+        _binding_db,
     ) -> None:
         """The exploit path: bound CN tries to act on a project NOT
         in its binding list. Must abort PERMISSION_DENIED."""
-        import grpc  # noqa: PLC0415
-
-        from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+        import grpc
+        from z4j_brain.scheduler_grpc.binding import (
             enforce_cn_project_binding,
         )
 
@@ -718,9 +725,8 @@ class TestM5BindingHelper:
         Don't reveal "project doesn't exist" vs "you're not bound to it"
         at the auth boundary.
         """
-        import grpc  # noqa: PLC0415
-
-        from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+        import grpc
+        from z4j_brain.scheduler_grpc.binding import (
             enforce_cn_project_binding,
         )
 
@@ -756,13 +762,12 @@ class TestM5BindingHelper:
 
 @pytest.fixture
 def _rate_db():
-    import asyncio  # noqa: PLC0415
+    import asyncio
 
-    from sqlalchemy.ext.asyncio import create_async_engine  # noqa: PLC0415
-    from sqlalchemy.pool import StaticPool  # noqa: PLC0415
-
-    from z4j_brain.persistence.base import Base  # noqa: PLC0415
-    from z4j_brain.persistence.database import DatabaseManager  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from z4j_brain.persistence.base import Base
+    from z4j_brain.persistence.database import DatabaseManager
 
     async def _setup():
         engine = create_async_engine(
@@ -780,9 +785,12 @@ def _rate_db():
 
 
 def _rate_settings(
-    *, enabled: bool = True, capacity: float = 5.0, rate: float = 1.0,
+    *,
+    enabled: bool = True,
+    capacity: float = 5.0,
+    rate: float = 1.0,
 ):
-    from z4j_brain.settings import Settings  # noqa: PLC0415
+    from z4j_brain.settings import Settings
 
     return Settings(
         database_url="sqlite+aiosqlite:///:memory:",
@@ -799,7 +807,7 @@ def _rate_settings(
 class TestFireScheduleRateLimiter:
     @pytest.mark.asyncio
     async def test_disabled_always_allows(self, _rate_db) -> None:
-        from z4j_brain.domain.scheduler_rate_limiter import (  # noqa: PLC0415
+        from z4j_brain.domain.scheduler_rate_limiter import (
             SchedulerRateLimiter,
         )
 
@@ -813,7 +821,7 @@ class TestFireScheduleRateLimiter:
 
     @pytest.mark.asyncio
     async def test_empty_cn_bypasses_limit(self, _rate_db) -> None:
-        from z4j_brain.domain.scheduler_rate_limiter import (  # noqa: PLC0415
+        from z4j_brain.domain.scheduler_rate_limiter import (
             SchedulerRateLimiter,
         )
 
@@ -826,7 +834,7 @@ class TestFireScheduleRateLimiter:
 
     @pytest.mark.asyncio
     async def test_burst_within_capacity_all_allowed(self, _rate_db) -> None:
-        from z4j_brain.domain.scheduler_rate_limiter import (  # noqa: PLC0415
+        from z4j_brain.domain.scheduler_rate_limiter import (
             SchedulerRateLimiter,
         )
 
@@ -844,7 +852,7 @@ class TestFireScheduleRateLimiter:
     @pytest.mark.asyncio
     async def test_per_cert_isolation(self, _rate_db) -> None:
         """One cert exhausting its bucket must not affect another."""
-        from z4j_brain.domain.scheduler_rate_limiter import (  # noqa: PLC0415
+        from z4j_brain.domain.scheduler_rate_limiter import (
             SchedulerRateLimiter,
         )
 
@@ -866,15 +874,14 @@ class TestFireScheduleRateLimiter:
         allowed again. We verify by manually backdating last_refill
         on the persisted row (otherwise the test would have to sleep
         seconds, which is too brittle for CI)."""
-        import asyncio  # noqa: PLC0415
-        from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+        import asyncio
+        from datetime import UTC, datetime, timedelta
 
-        from sqlalchemy import update  # noqa: PLC0415
-
-        from z4j_brain.domain.scheduler_rate_limiter import (  # noqa: PLC0415
+        from sqlalchemy import update
+        from z4j_brain.domain.scheduler_rate_limiter import (
             SchedulerRateLimiter,
         )
-        from z4j_brain.persistence.models import (  # noqa: PLC0415
+        from z4j_brain.persistence.models import (
             SchedulerRateBucket,
         )
 
@@ -909,7 +916,7 @@ class TestFireScheduleRateLimiter:
     async def test_request_exceeding_capacity_denied(self, _rate_db) -> None:
         """Asking for more tokens than the bucket can ever hold is
         denied immediately rather than seeding at negative."""
-        from z4j_brain.domain.scheduler_rate_limiter import (  # noqa: PLC0415
+        from z4j_brain.domain.scheduler_rate_limiter import (
             SchedulerRateLimiter,
         )
 

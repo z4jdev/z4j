@@ -29,12 +29,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import (
     AuditLog,
     NotificationChannel,
@@ -117,7 +116,6 @@ async def _seed(brain_app, settings: Settings) -> dict:
 
 def _client(brain_app, settings: Settings, seed: dict):
     from httpx import ASGITransport, AsyncClient
-
     from z4j_brain.auth.csrf import csrf_cookie_name
 
     transport = ASGITransport(app=brain_app)
@@ -141,10 +139,14 @@ def _client(brain_app, settings: Settings, seed: dict):
 async def _audit_rows_for(brain_app, action: str) -> list:
     async with brain_app.state.db.session() as s:
         rows = (
-            await s.execute(
-                select(AuditLog).where(AuditLog.action == action),
+            (
+                await s.execute(
+                    select(AuditLog).where(AuditLog.action == action),
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return list(rows)
 
 
@@ -156,7 +158,9 @@ async def _audit_rows_for(brain_app, action: str) -> list:
 class TestChannelCreateAudits:
     @pytest.mark.asyncio
     async def test_audit_row_written(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Use telegram - it's a no-URL channel type, so the
         # SSRF validator doesn't try to resolve a fake hostname.
@@ -192,7 +196,9 @@ class TestChannelCreateAudits:
 class TestChannelUpdateAudits:
     @pytest.mark.asyncio
     async def test_audit_row_with_changed_fields(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed(brain_app, settings)
         # Seed a channel.
@@ -226,7 +232,9 @@ class TestChannelUpdateAudits:
 class TestChannelDeleteAudits:
     @pytest.mark.asyncio
     async def test_audit_includes_deleted_name(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed(brain_app, settings)
         channel_id = uuid.uuid4()
@@ -265,7 +273,9 @@ class TestChannelDeleteAudits:
 class TestDefaultCreateAudits:
     @pytest.mark.asyncio
     async def test_audit_includes_trigger_and_channel_count(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed(brain_app, settings)
         async with _client(brain_app, settings, seed) as client:
@@ -291,7 +301,9 @@ class TestDefaultCreateAudits:
 class TestDefaultDeleteAudits:
     @pytest.mark.asyncio
     async def test_delete_audit_names_trigger(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed(brain_app, settings)
         # Create a default first via the API so it's in the DB.
@@ -337,7 +349,6 @@ class TestEveryWriteRouteImportsAudit:
 
         from z4j_brain.api import notifications
 
-        source = inspect.getsource(notifications)
         # Every mutating route handler should appear in the source
         # AND audit.record should appear in the source. Stronger:
         # for each handler, scan its specific function body.
@@ -354,6 +365,5 @@ class TestEveryWriteRouteImportsAudit:
         for handler in handlers:
             handler_src = inspect.getsource(handler)
             assert "audit.record(" in handler_src, (
-                f"{handler.__name__} does not call audit.record - "
-                "audit-Phase4-1 regression"
+                f"{handler.__name__} does not call audit.record - audit-Phase4-1 regression"
             )

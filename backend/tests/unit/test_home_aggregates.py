@@ -30,9 +30,7 @@ class TestFailureRateClamp:
         purpose so a refactor of ``home.py`` that still produces
         a sensible ratio keeps this test green.
         """
-        return (
-            min(failures / tasks, 1.0) if tasks > 0 else 0.0
-        )
+        return min(failures / tasks, 1.0) if tasks > 0 else 0.0
 
     def test_no_tasks_returns_zero(self) -> None:
         assert self._rate(0, 0) == 0.0
@@ -63,61 +61,79 @@ class TestHealthHeuristic:
     published attention-list contract."""
 
     def test_offline_when_all_agents_down(self) -> None:
-        assert _compute_health(
-            failure_rate_24h=0.0,
-            stuck_commands=0,
-            agents_online=0,
-            agents_total=3,
-            tasks_24h=0,
-            workers_online=0,
-        ) == "offline"
+        assert (
+            _compute_health(
+                failure_rate_24h=0.0,
+                stuck_commands=0,
+                agents_online=0,
+                agents_total=3,
+                tasks_24h=0,
+                workers_online=0,
+            )
+            == "offline"
+        )
 
     def test_degraded_on_high_failure_rate(self) -> None:
-        assert _compute_health(
-            failure_rate_24h=0.10,  # > 5%
-            stuck_commands=0,
-            agents_online=3,
-            agents_total=3,
-            tasks_24h=200,
-            workers_online=3,
-        ) == "degraded"
+        assert (
+            _compute_health(
+                failure_rate_24h=0.10,  # > 5%
+                stuck_commands=0,
+                agents_online=3,
+                agents_total=3,
+                tasks_24h=200,
+                workers_online=3,
+            )
+            == "degraded"
+        )
 
     def test_degraded_on_stuck_commands(self) -> None:
-        assert _compute_health(
-            failure_rate_24h=0.0,
-            stuck_commands=1,
-            agents_online=3,
-            agents_total=3,
-            tasks_24h=10,
-            workers_online=3,
-        ) == "degraded"
+        assert (
+            _compute_health(
+                failure_rate_24h=0.0,
+                stuck_commands=1,
+                agents_online=3,
+                agents_total=3,
+                tasks_24h=10,
+                workers_online=3,
+            )
+            == "degraded"
+        )
 
     def test_degraded_on_partial_agents(self) -> None:
-        assert _compute_health(
-            failure_rate_24h=0.0,
-            stuck_commands=0,
-            agents_online=2,
-            agents_total=3,
-            tasks_24h=10,
-            workers_online=3,
-        ) == "degraded"
+        assert (
+            _compute_health(
+                failure_rate_24h=0.0,
+                stuck_commands=0,
+                agents_online=2,
+                agents_total=3,
+                tasks_24h=10,
+                workers_online=3,
+            )
+            == "degraded"
+        )
 
     def test_idle_when_quiet(self) -> None:
-        assert _compute_health(
-            failure_rate_24h=0.0,
-            stuck_commands=0,
-            agents_online=0,
-            agents_total=0,
-            tasks_24h=0,
-            workers_online=0,
-        ) == "idle"
+        assert (
+            _compute_health(
+                failure_rate_24h=0.0,
+                stuck_commands=0,
+                agents_online=0,
+                agents_total=0,
+                tasks_24h=0,
+                workers_online=0,
+            )
+            == "idle"
+        )
 
     def test_healthy_when_busy_and_all_up(self) -> None:
-        assert _compute_health(
-            failure_rate_24h=0.02,
-            stuck_commands=0,
-            agents_online=3,
-            agents_total=3,
-            tasks_24h=500,
-            workers_online=3,
-        ) == "healthy"
+        assert (
+            _compute_health(
+                failure_rate_24h=0.02,
+                stuck_commands=0,
+                agents_online=3,
+                agents_total=3,
+                tasks_24h=500,
+                workers_online=3,
+            )
+            == "healthy"
+        )

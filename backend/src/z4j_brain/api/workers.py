@@ -57,7 +57,7 @@ class WorkerDetailPublic(WorkerPublic):
 
 
 def _worker_payload(
-    worker: "Worker",
+    worker: Worker,
     counts: dict[str, int] | None = None,
 ) -> WorkerPublic:
     """Build the dashboard-facing worker row.
@@ -95,7 +95,7 @@ def _worker_payload(
 
 
 def _worker_detail_payload(
-    worker: "Worker",
+    worker: Worker,
     counts: dict[str, int] | None = None,
 ) -> WorkerDetailPublic:
     base = _worker_payload(worker, counts)
@@ -108,10 +108,10 @@ def _worker_detail_payload(
 @router.get("", response_model=list[WorkerPublic])
 async def list_workers(
     slug: str,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[WorkerPublic]:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import WorkerRepository
@@ -134,10 +134,10 @@ async def list_workers(
 async def get_worker_detail(
     slug: str,
     worker_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> WorkerDetailPublic:
     """Get detailed worker info including inspect() data.
 

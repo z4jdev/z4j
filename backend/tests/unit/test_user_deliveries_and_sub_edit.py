@@ -26,13 +26,13 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.csrf import csrf_cookie_name
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.persistence.models import (
     Membership,
     NotificationChannel,
@@ -42,7 +42,6 @@ from z4j_brain.persistence.models import (
     User,
     UserSubscription,
 )
-from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.settings import Settings
 
 
@@ -91,85 +90,87 @@ async def _seed_basic(brain_app, settings: Settings):
     alpha_channel_id = uuid.uuid4()
 
     async with db.session() as s:
-        s.add_all([
-            Project(id=alpha_id, slug="alpha", name="Alpha"),
-            Project(id=beta_id, slug="beta", name="Beta"),
-            User(
-                id=user_id,
-                email=f"u-{uuid.uuid4().hex[:8]}@example.com",
-                password_hash=hasher.hash(
-                    "correct horse battery staple 9",
+        s.add_all(
+            [
+                Project(id=alpha_id, slug="alpha", name="Alpha"),
+                Project(id=beta_id, slug="beta", name="Beta"),
+                User(
+                    id=user_id,
+                    email=f"u-{uuid.uuid4().hex[:8]}@example.com",
+                    password_hash=hasher.hash(
+                        "correct horse battery staple 9",
+                    ),
+                    is_admin=False,
+                    is_active=True,
                 ),
-                is_admin=False,
-                is_active=True,
-            ),
-            Session(
-                id=session_id,
-                user_id=user_id,
-                csrf_token=csrf,
-                expires_at=datetime.now(UTC) + timedelta(hours=1),
-                ip_at_issue="127.0.0.1",
-                user_agent_at_issue="test",
-            ),
-            Membership(
-                user_id=user_id, project_id=alpha_id,
-                role=ProjectRole.VIEWER,
-            ),
-            Membership(
-                user_id=user_id, project_id=beta_id,
-                role=ProjectRole.VIEWER,
-            ),
-            NotificationChannel(
-                id=alpha_channel_id,
-                project_id=alpha_id,
-                name="alpha-webhook",
-                type="webhook",
-                config={"url": "https://example.test/alpha"},
-                is_active=True,
-            ),
-            UserSubscription(
-                id=sub_alpha_id,
-                user_id=user_id,
-                project_id=alpha_id,
-                trigger="task.failed",
-                filters={},
-                in_app=True,
-                project_channel_ids=[alpha_channel_id],
-                user_channel_ids=[],
-                cooldown_seconds=0,
-                is_active=True,
-            ),
-            UserSubscription(
-                id=sub_beta_id,
-                user_id=user_id,
-                project_id=beta_id,
-                trigger="task.failed",
-                filters={},
-                in_app=True,
-                project_channel_ids=[],
-                user_channel_ids=[],
-                cooldown_seconds=0,
-                is_active=True,
-            ),
-        ])
+                Session(
+                    id=session_id,
+                    user_id=user_id,
+                    csrf_token=csrf,
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    ip_at_issue="127.0.0.1",
+                    user_agent_at_issue="test",
+                ),
+                Membership(
+                    user_id=user_id,
+                    project_id=alpha_id,
+                    role=ProjectRole.VIEWER,
+                ),
+                Membership(
+                    user_id=user_id,
+                    project_id=beta_id,
+                    role=ProjectRole.VIEWER,
+                ),
+                NotificationChannel(
+                    id=alpha_channel_id,
+                    project_id=alpha_id,
+                    name="alpha-webhook",
+                    type="webhook",
+                    config={"url": "https://example.test/alpha"},
+                    is_active=True,
+                ),
+                UserSubscription(
+                    id=sub_alpha_id,
+                    user_id=user_id,
+                    project_id=alpha_id,
+                    trigger="task.failed",
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[alpha_channel_id],
+                    user_channel_ids=[],
+                    cooldown_seconds=0,
+                    is_active=True,
+                ),
+                UserSubscription(
+                    id=sub_beta_id,
+                    user_id=user_id,
+                    project_id=beta_id,
+                    trigger="task.failed",
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[],
+                    user_channel_ids=[],
+                    cooldown_seconds=0,
+                    is_active=True,
+                ),
+            ]
+        )
         # Three deliveries: 2 to alpha sub, 1 to beta sub.
         now = datetime.now(UTC)
         for i, sub_id in enumerate([sub_alpha_id, sub_alpha_id, sub_beta_id]):
-            s.add(NotificationDelivery(
-                subscription_id=sub_id,
-                channel_id=(
-                    alpha_channel_id if sub_id == sub_alpha_id else None
-                ),
-                project_id=(
-                    alpha_id if sub_id == sub_alpha_id else beta_id
-                ),
-                trigger="task.failed",
-                task_id=f"t-{i}",
-                task_name=f"app.task.{i}",
-                status="success",
-                response_code=200,
-                sent_at=now - timedelta(minutes=i),
-            ))
+            s.add(
+                NotificationDelivery(
+                    subscription_id=sub_id,
+                    channel_id=(alpha_channel_id if sub_id == sub_alpha_id else None),
+                    project_id=(alpha_id if sub_id == sub_alpha_id else beta_id),
+                    trigger="task.failed",
+                    task_id=f"t-{i}",
+                    task_name=f"app.task.{i}",
+                    status="success",
+                    response_code=200,
+                    sent_at=now - timedelta(minutes=i),
+                )
+            )
         await s.commit()
 
     return {
@@ -206,7 +207,9 @@ def _client(brain_app, settings: Settings, seed: dict) -> AsyncClient:
 @pytest.mark.asyncio
 class TestUserDeliveries:
     async def test_returns_all_user_deliveries_across_projects(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_basic(brain_app, settings)
         async with _client(brain_app, settings, seed) as client:
@@ -220,7 +223,9 @@ class TestUserDeliveries:
             assert triggers == {"task.failed"}
 
     async def test_filter_by_project_slug(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_basic(brain_app, settings)
         async with _client(brain_app, settings, seed) as client:
@@ -233,7 +238,9 @@ class TestUserDeliveries:
             assert len(body["items"]) == 2
 
     async def test_unknown_project_slug_returns_empty(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_basic(brain_app, settings)
         async with _client(brain_app, settings, seed) as client:
@@ -244,7 +251,9 @@ class TestUserDeliveries:
             assert resp.json() == {"items": [], "next_cursor": None}
 
     async def test_other_users_deliveries_invisible(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """A second user's deliveries must not surface in the
         first user's history. Pure IDOR-by-design check.
@@ -255,39 +264,49 @@ class TestUserDeliveries:
         other_sub_id = uuid.uuid4()
         async with brain_app.state.db.session() as s:
             hasher = PasswordHasher(settings)
-            s.add(User(
-                id=other_user_id,
-                email=f"o-{uuid.uuid4().hex[:8]}@example.com",
-                password_hash=hasher.hash(
-                    "correct horse battery staple 9",
-                ),
-                is_admin=False, is_active=True,
-            ))
-            s.add(Membership(
-                user_id=other_user_id, project_id=seed["alpha_id"],
-                role=ProjectRole.VIEWER,
-            ))
-            s.add(UserSubscription(
-                id=other_sub_id,
-                user_id=other_user_id,
-                project_id=seed["alpha_id"],
-                trigger="task.failed",
-                filters={},
-                in_app=True,
-                project_channel_ids=[],
-                user_channel_ids=[],
-                cooldown_seconds=0,
-                is_active=True,
-            ))
-            s.add(NotificationDelivery(
-                subscription_id=other_sub_id,
-                project_id=seed["alpha_id"],
-                trigger="task.failed",
-                task_id="other-task",
-                task_name="other.app",
-                status="success",
-                sent_at=datetime.now(UTC),
-            ))
+            s.add(
+                User(
+                    id=other_user_id,
+                    email=f"o-{uuid.uuid4().hex[:8]}@example.com",
+                    password_hash=hasher.hash(
+                        "correct horse battery staple 9",
+                    ),
+                    is_admin=False,
+                    is_active=True,
+                )
+            )
+            s.add(
+                Membership(
+                    user_id=other_user_id,
+                    project_id=seed["alpha_id"],
+                    role=ProjectRole.VIEWER,
+                )
+            )
+            s.add(
+                UserSubscription(
+                    id=other_sub_id,
+                    user_id=other_user_id,
+                    project_id=seed["alpha_id"],
+                    trigger="task.failed",
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[],
+                    user_channel_ids=[],
+                    cooldown_seconds=0,
+                    is_active=True,
+                )
+            )
+            s.add(
+                NotificationDelivery(
+                    subscription_id=other_sub_id,
+                    project_id=seed["alpha_id"],
+                    trigger="task.failed",
+                    task_id="other-task",
+                    task_name="other.app",
+                    status="success",
+                    sent_at=datetime.now(UTC),
+                )
+            )
             await s.commit()
 
         async with _client(brain_app, settings, seed) as client:
@@ -296,10 +315,12 @@ class TestUserDeliveries:
             body = resp.json()
             # Still 3 (the other user's delivery NOT included)
             assert len(body["items"]) == 3
-            assert all("other-task" != item["task_id"] for item in body["items"])
+            assert all(item["task_id"] != "other-task" for item in body["items"])
 
     async def test_deliveries_for_left_project_still_visible(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """User leaves alpha after the deliveries fired. Historical
         rows MUST still surface (audit data outlives membership).
@@ -326,7 +347,9 @@ class TestUserDeliveries:
             assert len(body["items"]) == 3
 
     async def test_pagination_cursor(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Limit + cursor round-trip yields stable ordered pages."""
         seed = await _seed_basic(brain_app, settings)
@@ -367,27 +390,31 @@ class TestChannelTestInUserLog:
     """
 
     async def test_test_fire_appears_in_users_personal_log(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_basic(brain_app, settings)
         # Hand-write a row that mimics what _dispatch_test produces:
         # subscription_id=NULL, trigger="test.dispatch",
         # triggered_by_user_id=current_user.
         async with brain_app.state.db.session() as s:
-            s.add(NotificationDelivery(
-                subscription_id=None,
-                channel_id=seed["alpha_channel_id"],
-                project_id=seed["alpha_id"],
-                trigger="test.dispatch",
-                task_id=None,
-                task_name=None,
-                status="sent",
-                response_code=200,
-                sent_at=datetime.now(UTC),
-                channel_name="alpha-webhook",
-                channel_type="webhook",
-                triggered_by_user_id=seed["user_id"],
-            ))
+            s.add(
+                NotificationDelivery(
+                    subscription_id=None,
+                    channel_id=seed["alpha_channel_id"],
+                    project_id=seed["alpha_id"],
+                    trigger="test.dispatch",
+                    task_id=None,
+                    task_name=None,
+                    status="sent",
+                    response_code=200,
+                    sent_at=datetime.now(UTC),
+                    channel_name="alpha-webhook",
+                    channel_type="webhook",
+                    triggered_by_user_id=seed["user_id"],
+                )
+            )
             await s.commit()
 
         async with _client(brain_app, settings, seed) as client:
@@ -399,15 +426,14 @@ class TestChannelTestInUserLog:
             assert "test.dispatch" in triggers, (
                 f"test fire not surfaced in personal log; got: {triggers}"
             )
-            test_row = next(
-                it for it in body["items"]
-                if it["trigger"] == "test.dispatch"
-            )
+            test_row = next(it for it in body["items"] if it["trigger"] == "test.dispatch")
             assert test_row["triggered_by_user_id"] == str(seed["user_id"])
             assert test_row["subscription_id"] is None
 
     async def test_test_fire_only_visible_to_triggering_user(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Two members on the same project. User A triggers a test.
         Only A sees it in their personal log; member B does not.
@@ -419,36 +445,46 @@ class TestChannelTestInUserLog:
         other_csrf = secrets.token_urlsafe(32)
         async with brain_app.state.db.session() as s:
             hasher = PasswordHasher(settings)
-            s.add(User(
-                id=other_user_id,
-                email=f"o-{uuid.uuid4().hex[:8]}@example.com",
-                password_hash=hasher.hash(
-                    "correct horse battery staple 9",
-                ),
-                is_admin=False, is_active=True,
-            ))
-            s.add(Session(
-                id=other_session_id,
-                user_id=other_user_id,
-                csrf_token=other_csrf,
-                expires_at=datetime.now(UTC) + timedelta(hours=1),
-                ip_at_issue="127.0.0.1",
-                user_agent_at_issue="test",
-            ))
-            s.add(Membership(
-                user_id=other_user_id, project_id=seed["alpha_id"],
-                role=ProjectRole.VIEWER,
-            ))
+            s.add(
+                User(
+                    id=other_user_id,
+                    email=f"o-{uuid.uuid4().hex[:8]}@example.com",
+                    password_hash=hasher.hash(
+                        "correct horse battery staple 9",
+                    ),
+                    is_admin=False,
+                    is_active=True,
+                )
+            )
+            s.add(
+                Session(
+                    id=other_session_id,
+                    user_id=other_user_id,
+                    csrf_token=other_csrf,
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    ip_at_issue="127.0.0.1",
+                    user_agent_at_issue="test",
+                )
+            )
+            s.add(
+                Membership(
+                    user_id=other_user_id,
+                    project_id=seed["alpha_id"],
+                    role=ProjectRole.VIEWER,
+                )
+            )
             # User A triggers a test fire
-            s.add(NotificationDelivery(
-                subscription_id=None,
-                channel_id=seed["alpha_channel_id"],
-                project_id=seed["alpha_id"],
-                trigger="test.dispatch",
-                status="sent",
-                sent_at=datetime.now(UTC),
-                triggered_by_user_id=seed["user_id"],
-            ))
+            s.add(
+                NotificationDelivery(
+                    subscription_id=None,
+                    channel_id=seed["alpha_channel_id"],
+                    project_id=seed["alpha_id"],
+                    trigger="test.dispatch",
+                    status="sent",
+                    sent_at=datetime.now(UTC),
+                    triggered_by_user_id=seed["user_id"],
+                )
+            )
             await s.commit()
 
         # User B logs in, asks for personal log, must NOT see A's test.
@@ -467,15 +503,15 @@ class TestChannelTestInUserLog:
             assert resp.status_code == 200, resp.text
             body = resp.json()
             triggers = [item["trigger"] for item in body["items"]]
-            assert "test.dispatch" not in triggers, (
-                f"user B leaked user A's test fire: {triggers}"
-            )
+            assert "test.dispatch" not in triggers, f"user B leaked user A's test fire: {triggers}"
 
 
 @pytest.mark.asyncio
 class TestUserSubscriptionTriggerRename:
     async def test_rename_user_sub_trigger(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_basic(brain_app, settings)
         async with _client(brain_app, settings, seed) as client:
@@ -485,7 +521,9 @@ class TestUserSubscriptionTriggerRename:
             assert resp.json()["trigger"] == "task.succeeded"
 
     async def test_rename_collides_with_existing_409(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """User already has task.failed on alpha; can't also rename
         another sub on alpha to task.failed.
@@ -494,18 +532,20 @@ class TestUserSubscriptionTriggerRename:
         # Insert a second sub on alpha for a different trigger.
         other_sub_id = uuid.uuid4()
         async with brain_app.state.db.session() as s:
-            s.add(UserSubscription(
-                id=other_sub_id,
-                user_id=seed["user_id"],
-                project_id=seed["alpha_id"],
-                trigger="task.succeeded",
-                filters={},
-                in_app=True,
-                project_channel_ids=[],
-                user_channel_ids=[],
-                cooldown_seconds=0,
-                is_active=True,
-            ))
+            s.add(
+                UserSubscription(
+                    id=other_sub_id,
+                    user_id=seed["user_id"],
+                    project_id=seed["alpha_id"],
+                    trigger="task.succeeded",
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[],
+                    user_channel_ids=[],
+                    cooldown_seconds=0,
+                    is_active=True,
+                )
+            )
             await s.commit()
 
         async with _client(brain_app, settings, seed) as client:

@@ -64,10 +64,11 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
         # is also active - a `Z4J_DEBUG_HOST_ERRORS=1` in a production
         # env does nothing (the startup check in cli.py refuses it too,
         # but belt + suspenders).
-        self._debug_errors = (
-            is_dev
-            and _os.environ.get("Z4J_DEBUG_HOST_ERRORS", "").lower()
-            in ("1", "true", "yes", "on")
+        self._debug_errors = is_dev and _os.environ.get("Z4J_DEBUG_HOST_ERRORS", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
         )
 
     async def dispatch(
@@ -146,10 +147,7 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
                 status_code=400,
                 content={
                     "error": "invalid_host",
-                    "message": (
-                        f"Host header {host!r} is not in the configured "
-                        f"allow-list."
-                    ),
+                    "message": (f"Host header {host!r} is not in the configured allow-list."),
                     "request_id": request_id,
                     "details": {
                         "rejected_host": host,
@@ -172,7 +170,7 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
         )
 
     @staticmethod
-    def _strip_port(host: str) -> str:
+    def _strip_port(host: str) -> str:  # noqa: PLR0911  host parser
         """Strip the optional port suffix.
 
         Handles IPv6 forms (``[::1]:7700`` -> ``[::1]``) and the

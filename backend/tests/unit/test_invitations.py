@@ -17,21 +17,18 @@ from __future__ import annotations
 
 import hmac
 import secrets
-import uuid
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.persistence import models  # noqa: F401  (registers metadata)
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import Project, User
 from z4j_brain.persistence.repositories import (
     InvitationRepository,
     MembershipRepository,
-    ProjectRepository,
     UserRepository,
 )
 
@@ -80,7 +77,10 @@ def _hash(plaintext: str, key: str = "unit-test-secret") -> str:
 @pytest.mark.asyncio
 class TestInvitationRepository:
     async def test_create_stores_hash_not_plaintext(
-        self, session, admin_user, project,
+        self,
+        session,
+        admin_user,
+        project,
     ):
         repo = InvitationRepository(session)
         plaintext = secrets.token_urlsafe(32)
@@ -99,7 +99,10 @@ class TestInvitationRepository:
         assert plaintext not in repr(row.__dict__)
 
     async def test_get_by_hash_returns_row(
-        self, session, admin_user, project,
+        self,
+        session,
+        admin_user,
+        project,
     ):
         repo = InvitationRepository(session)
         h = _hash("secret-token-plaintext")
@@ -119,7 +122,10 @@ class TestInvitationRepository:
         assert nope is None
 
     async def test_accept_stamps_timestamp_and_user_id(
-        self, session, admin_user, project,
+        self,
+        session,
+        admin_user,
+        project,
     ):
         repo = InvitationRepository(session)
         row = await repo.create(
@@ -143,14 +149,18 @@ class TestInvitationRepository:
         await session.flush()
 
         updated = await repo.accept(
-            row.id, accepted_by_user_id=acceptor.id,
+            row.id,
+            accepted_by_user_id=acceptor.id,
         )
         assert updated is not None
         assert updated.accepted_at is not None
         assert updated.accepted_by_user_id == acceptor.id
 
     async def test_revoke_stamps_revoked_at(
-        self, session, admin_user, project,
+        self,
+        session,
+        admin_user,
+        project,
     ):
         repo = InvitationRepository(session)
         row = await repo.create(
@@ -166,29 +176,41 @@ class TestInvitationRepository:
         assert updated.revoked_at is not None
 
     async def test_list_excludes_accepted_revoked_expired(
-        self, session, admin_user, project,
+        self,
+        session,
+        admin_user,
+        project,
     ):
         repo = InvitationRepository(session)
         now = datetime.now(UTC)
 
         # Pending (should appear)
         pending = await repo.create(
-            project_id=project.id, email="p@example.com", role="viewer",
-            invited_by=admin_user.id, token_hash=_hash("p"),
+            project_id=project.id,
+            email="p@example.com",
+            role="viewer",
+            invited_by=admin_user.id,
+            token_hash=_hash("p"),
             expires_at=now + timedelta(days=7),
         )
 
         # Expired (should NOT appear)
         await repo.create(
-            project_id=project.id, email="e@example.com", role="viewer",
-            invited_by=admin_user.id, token_hash=_hash("e"),
+            project_id=project.id,
+            email="e@example.com",
+            role="viewer",
+            invited_by=admin_user.id,
+            token_hash=_hash("e"),
             expires_at=now - timedelta(days=1),
         )
 
         # Revoked (should NOT appear)
         rev = await repo.create(
-            project_id=project.id, email="r@example.com", role="viewer",
-            invited_by=admin_user.id, token_hash=_hash("r"),
+            project_id=project.id,
+            email="r@example.com",
+            role="viewer",
+            invited_by=admin_user.id,
+            token_hash=_hash("r"),
             expires_at=now + timedelta(days=7),
         )
         await repo.revoke(rev.id)
@@ -205,7 +227,10 @@ class TestAcceptPathInvariants:
     """Verify the invariants the public accept endpoint relies on."""
 
     async def test_accept_path_is_atomic_with_membership_grant(
-        self, session, admin_user, project,
+        self,
+        session,
+        admin_user,
+        project,
     ):
         """Simulate the accept flow: create user + grant + stamp, in one tx.
 
@@ -239,17 +264,21 @@ class TestAcceptPathInvariants:
         session.add(new_user)
         await session.flush()
         await mem_repo.grant(
-            user_id=new_user.id, project_id=project.id, role="operator",
+            user_id=new_user.id,
+            project_id=project.id,
+            role="operator",
         )
         await inv_repo.accept(
-            row.id, accepted_by_user_id=new_user.id,
+            row.id,
+            accepted_by_user_id=new_user.id,
         )
 
         # All three side effects present.
         assert await user_repo.get_by_email("eve@example.com") is not None
         assert (
             await mem_repo.get_for_user_project(
-                user_id=new_user.id, project_id=project.id,
+                user_id=new_user.id,
+                project_id=project.id,
             )
             is not None
         )
@@ -258,13 +287,19 @@ class TestAcceptPathInvariants:
         assert reloaded.accepted_by_user_id == new_user.id
 
     async def test_invite_revoked_stays_revoked(
-        self, session, admin_user, project,
+        self,
+        session,
+        admin_user,
+        project,
     ):
         """Cannot un-revoke: the row state is one-way."""
         repo = InvitationRepository(session)
         row = await repo.create(
-            project_id=project.id, email="x@example.com", role="viewer",
-            invited_by=admin_user.id, token_hash=_hash("rev"),
+            project_id=project.id,
+            email="x@example.com",
+            role="viewer",
+            invited_by=admin_user.id,
+            token_hash=_hash("rev"),
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
         await repo.revoke(row.id)
@@ -277,9 +312,5 @@ class TestAcceptPathInvariants:
         expires_at = reloaded.expires_at
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=UTC)
-        pending = (
-            reloaded.accepted_at is None
-            and reloaded.revoked_at is None
-            and expires_at > now
-        )
+        pending = reloaded.accepted_at is None and reloaded.revoked_at is None and expires_at > now
         assert not pending, "revoked row must not be 'pending'"

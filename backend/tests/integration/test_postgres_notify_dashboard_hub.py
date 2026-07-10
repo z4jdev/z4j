@@ -27,7 +27,6 @@ import uuid
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
-
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.settings import Settings
 from z4j_brain.websocket.dashboard_hub import PostgresNotifyDashboardHub
@@ -58,7 +57,7 @@ def _build_hub(
     )
 
 
-async def _wait_for_frames(sink: _Sink, *, expected: int, timeout: float = 3.0) -> None:
+async def _wait_for_frames(sink: _Sink, *, expected: int, timeout: float = 3.0) -> None:  # noqa: ASYNC109  test helper uses explicit poll deadline, not cancellation
     """Poll until the sink has at least ``expected`` frames or timeout."""
     deadline = asyncio.get_event_loop().time() + timeout
     while len(sink.frames) < expected:

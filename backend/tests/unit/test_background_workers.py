@@ -9,10 +9,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.domain.workers import AgentHealthWorker, CommandTimeoutWorker
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.enums import AgentState, CommandStatus
 from z4j_brain.persistence.models import Agent, Command, Project
@@ -46,7 +45,8 @@ async def db(settings: Settings) -> DatabaseManager:
 @pytest.mark.asyncio
 class TestCommandTimeoutWorker:
     async def test_marks_overdue_pending_as_timeout(
-        self, db: DatabaseManager,
+        self,
+        db: DatabaseManager,
     ) -> None:
         async with db.session() as s:
             project = Project(slug="d", name="D")
@@ -103,7 +103,9 @@ class TestCommandTimeoutWorker:
 @pytest.mark.asyncio
 class TestAgentHealthWorker:
     async def test_marks_stale_agents_offline(
-        self, db: DatabaseManager, settings: Settings,
+        self,
+        db: DatabaseManager,
+        settings: Settings,
     ) -> None:
         async with db.session() as s:
             project = Project(slug="d", name="D")

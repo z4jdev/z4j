@@ -86,16 +86,18 @@ class ScheduleEvent(_message.Message):
     def __init__(self, kind: _Optional[_Union[ScheduleEvent.Kind, str]] = ..., schedule: _Optional[_Union[Schedule, _Mapping]] = ..., deleted_id: _Optional[str] = ..., resume_token: _Optional[str] = ...) -> None: ...
 
 class FireScheduleRequest(_message.Message):
-    __slots__ = ("schedule_id", "fire_id", "scheduled_for", "fired_at")
+    __slots__ = ("schedule_id", "fire_id", "scheduled_for", "fired_at", "triggered_by_user_id")
     SCHEDULE_ID_FIELD_NUMBER: _ClassVar[int]
     FIRE_ID_FIELD_NUMBER: _ClassVar[int]
     SCHEDULED_FOR_FIELD_NUMBER: _ClassVar[int]
     FIRED_AT_FIELD_NUMBER: _ClassVar[int]
+    TRIGGERED_BY_USER_ID_FIELD_NUMBER: _ClassVar[int]
     schedule_id: str
     fire_id: str
     scheduled_for: _timestamp_pb2.Timestamp
     fired_at: _timestamp_pb2.Timestamp
-    def __init__(self, schedule_id: _Optional[str] = ..., fire_id: _Optional[str] = ..., scheduled_for: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., fired_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    triggered_by_user_id: str
+    def __init__(self, schedule_id: _Optional[str] = ..., fire_id: _Optional[str] = ..., scheduled_for: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., fired_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., triggered_by_user_id: _Optional[str] = ...) -> None: ...
 
 class FireScheduleResponse(_message.Message):
     __slots__ = ("command_id", "error_code", "error_message", "buffered")

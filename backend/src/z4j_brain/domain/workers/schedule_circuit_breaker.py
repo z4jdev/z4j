@@ -57,11 +57,10 @@ class ScheduleCircuitBreakerWorker:
             # Operator opted out via Z4J_SCHEDULE_CIRCUIT_BREAKER_THRESHOLD=0
             return
 
-        from sqlalchemy import select  # noqa: PLC0415
+        from sqlalchemy import select
 
-        from z4j_brain.persistence.models import Schedule  # noqa: PLC0415
-        from z4j_brain.persistence.repositories import (  # noqa: PLC0415
-            AuditLogRepository,
+        from z4j_brain.persistence.models import Schedule
+        from z4j_brain.persistence.repositories import (
             ScheduleFireRepository,
         )
 
@@ -115,20 +114,19 @@ class ScheduleCircuitBreakerWorker:
         for schedule, streak in tripped:
             try:
                 await self._disable_and_audit(schedule, streak)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
-                    "z4j.brain.workers.schedule_circuit_breaker: "
-                    "failed to trip schedule_id=%s",
+                    "z4j.brain.workers.schedule_circuit_breaker: failed to trip schedule_id=%s",
                     schedule.id,
                 )
 
     async def _disable_and_audit(self, schedule, streak: int) -> None:
-        from datetime import UTC, datetime  # noqa: PLC0415
+        from datetime import UTC, datetime
 
-        from sqlalchemy import update  # noqa: PLC0415
+        from sqlalchemy import update
 
-        from z4j_brain.persistence.models import Schedule  # noqa: PLC0415
-        from z4j_brain.persistence.repositories import (  # noqa: PLC0415
+        from z4j_brain.persistence.models import Schedule
+        from z4j_brain.persistence.repositories import (
             AuditLogRepository,
             ScheduleFireRepository,
         )
@@ -196,16 +194,58 @@ class ScheduleCircuitBreakerWorker:
         logger.warning(
             "z4j.brain.workers.schedule_circuit_breaker: TRIPPED "
             "schedule_id=%s name=%r after %d consecutive failures",
-            schedule.id, schedule.name, streak,
+            schedule.id,
+            schedule.name,
+            streak,
         )
+        # Fan the trip out to project subscriptions (the 7 delivery
+        # channels + in-app bell). The ``schedule.circuit_breaker.tripped``
+        # trigger was subscribable since 1.6 but nothing ever emitted it,
+        # the same vapor class as the removed task.slow. Best-effort AFTER
+        # the disable+audit commit: a notification failure must never undo
+        # or block the trip itself. Fires once per episode by construction
+        # (the is_enabled re-check above makes the trip transition happen
+        # exactly once).
+        await self._dispatch_subscription_notification(schedule, streak)
+
+    async def _dispatch_subscription_notification(self, schedule, streak: int) -> None:
+        from z4j_brain.domain.notifications.service import (
+            NotificationService,
+        )
+
+        try:
+            async with self._db.session() as session:
+                await NotificationService().evaluate_and_dispatch(
+                    session=session,
+                    project_id=schedule.project_id,
+                    trigger="schedule.circuit_breaker.tripped",
+                    resource_type="schedule",
+                    # No task is involved; use the schedule id + name so
+                    # the bell row + deep link resolve to the schedule.
+                    task_id=str(schedule.id),
+                    task_name=schedule.name,
+                    engine=schedule.engine,
+                    state="circuit_tripped",
+                    queue=schedule.queue,
+                    exception=(
+                        f"schedule disabled by circuit breaker after "
+                        f"{streak} consecutive failed fires"
+                    ),
+                )
+        except Exception:
+            logger.exception(
+                "z4j.brain.workers.schedule_circuit_breaker: subscription "
+                "notification dispatch failed for schedule_id=%s",
+                schedule.id,
+            )
 
 
 class ScheduleFiresPruneWorker:
     """Periodic retention worker for the ``schedule_fires`` table.
 
     Drops rows older than ``Z4J_SCHEDULE_FIRES_RETENTION_DAYS``.
-    Bounds the table at typical fire rates (10 schedules × 1
-    fire/min × 30d ≈ 430k rows). Single DELETE per tick.
+    Bounds the table at typical fire rates (10 schedules x 1
+    fire/min x 30d ~= 430k rows). Single DELETE per tick.
     """
 
     def __init__(self, *, db: DatabaseManager, settings: Settings) -> None:
@@ -213,9 +253,9 @@ class ScheduleFiresPruneWorker:
         self._settings = settings
 
     async def tick(self) -> None:
-        from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+        from datetime import UTC, datetime, timedelta
 
-        from z4j_brain.persistence.repositories import (  # noqa: PLC0415
+        from z4j_brain.persistence.repositories import (
             ScheduleFireRepository,
         )
 

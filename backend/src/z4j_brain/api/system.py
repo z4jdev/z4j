@@ -16,7 +16,7 @@ discussion and the parser/validator implementation.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import APIRouter, Depends, Request
@@ -49,10 +49,7 @@ class VersionsSnapshotPublic(BaseModel):
         ),
     )
     generated_by: str = Field(
-        description=(
-            "Which release minted the snapshot, "
-            "e.g. ``z4j@1.4.0``."
-        ),
+        description=("Which release minted the snapshot, e.g. ``z4j@1.4.0``."),
     )
     canonical_url: str = Field(
         description=(
@@ -62,9 +59,7 @@ class VersionsSnapshotPublic(BaseModel):
         ),
     )
     packages: dict[str, str] = Field(
-        description=(
-            "Map of package name to latest known SemVer string."
-        ),
+        description=("Map of package name to latest known SemVer string."),
     )
     source: str = Field(
         description=(
@@ -85,8 +80,7 @@ class VersionsSnapshotPublic(BaseModel):
     fetched_from: str | None = Field(
         default=None,
         description=(
-            "URL the brain fetched the remote snapshot from. Null "
-            "for the bundled snapshot."
+            "URL the brain fetched the remote snapshot from. Null for the bundled snapshot."
         ),
     )
     check_for_updates_url: str = Field(
@@ -104,8 +98,8 @@ class VersionsSnapshotPublic(BaseModel):
 )
 async def get_versions_snapshot(
     request: Request,
-    admin: "User" = Depends(require_admin),  # noqa: ARG001
-    settings: "Settings" = Depends(get_settings),
+    admin: User = Depends(require_admin),
+    settings: Settings = Depends(get_settings),
 ) -> VersionsSnapshotPublic:
     """Return the brain's currently-cached versions snapshot.
 
@@ -123,8 +117,8 @@ async def get_versions_snapshot(
 )
 async def check_for_updates(
     request: Request,
-    admin: "User" = Depends(require_admin),  # noqa: ARG001
-    settings: "Settings" = Depends(get_settings),
+    admin: User = Depends(require_admin),
+    settings: Settings = Depends(get_settings),
 ) -> VersionsSnapshotPublic:
     """Operator-initiated remote refresh of the versions snapshot.
 
@@ -164,19 +158,22 @@ async def check_for_updates(
     # uses for outbound HTTP, so request timeouts and DNS resolver
     # config are uniform. Fetch is one-shot; no caching layer.
     http_client = getattr(
-        request.app.state, "notification_http_client", None,
+        request.app.state,
+        "notification_http_client",
+        None,
     )
     if http_client is None:
         # Defensive fallback: build an ephemeral client. The
         # notification_http_client fixture is normally set during
         # create_app; if a slim test app skipped it we don't want
         # the version-check button to crash.
-        import httpx  # noqa: PLC0415
+        import httpx
 
         async with httpx.AsyncClient() as client:
             try:
                 result = await fetch_remote(
-                    settings.version_check_url, http_client=client,
+                    settings.version_check_url,
+                    http_client=client,
                 )
             except (ValueError, RuntimeError) as exc:
                 raise ConflictError(
@@ -186,7 +183,8 @@ async def check_for_updates(
     else:
         try:
             result = await fetch_remote(
-                settings.version_check_url, http_client=http_client,
+                settings.version_check_url,
+                http_client=http_client,
             )
         except (ValueError, RuntimeError) as exc:
             raise ConflictError(
@@ -213,24 +211,30 @@ async def check_for_updates(
 
 def _to_public(
     request: Request,
-    settings: "Settings",
+    settings: Settings,
 ) -> VersionsSnapshotPublic:
     """Map the in-memory snapshot to the public DTO."""
     snapshot = getattr(request.app.state, "versions_snapshot", None)
     source = getattr(
-        request.app.state, "versions_snapshot_source", "bundled",
+        request.app.state,
+        "versions_snapshot_source",
+        "bundled",
     )
     fetched_at: datetime | None = getattr(
-        request.app.state, "versions_snapshot_fetched_at", None,
+        request.app.state,
+        "versions_snapshot_fetched_at",
+        None,
     )
     fetched_from: str | None = getattr(
-        request.app.state, "versions_snapshot_fetched_from", None,
+        request.app.state,
+        "versions_snapshot_fetched_from",
+        None,
     )
 
     if snapshot is None:
         # Should never happen post-startup, but keep the endpoint
         # well-defined.
-        from z4j_brain.domain.version_check import _empty_snapshot  # noqa: PLC0415
+        from z4j_brain.domain.version_check import _empty_snapshot
 
         snapshot = _empty_snapshot()
         source = "bundled"

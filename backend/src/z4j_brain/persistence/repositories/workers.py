@@ -165,7 +165,7 @@ class WorkerRepository(BaseRepository[Worker]):
         await self.session.flush()
         return existing
 
-    async def upsert_from_events_bulk(
+    async def upsert_from_events_bulk(  # noqa: PLR0912  bulk upsert
         self,
         rows: list[dict[str, Any]],
     ) -> int:
@@ -230,10 +230,7 @@ class WorkerRepository(BaseRepository[Worker]):
                     project_id=r["project_id"],
                     engine=r["engine"],
                     name=r["name"],
-                    updates={
-                        k: v for k, v in r.items()
-                        if k in _UPSERT_VARIABLE_COLS
-                    },
+                    updates={k: v for k, v in r.items() if k in _UPSERT_VARIABLE_COLS},
                 )
             return len(rows)
 
@@ -360,7 +357,10 @@ class WorkerRepository(BaseRepository[Worker]):
         retried_sum = func.sum(
             case((Event.kind == _KIND_RETRIED, 1), else_=0),
         ).label("retried")
-        from datetime import UTC as _UTC, datetime as _dt, timedelta as _td  # noqa: PLC0415
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
         if since is None:
             since = _dt.now(_UTC) - _td(hours=24)
         stmt = (

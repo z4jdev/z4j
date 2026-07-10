@@ -28,15 +28,15 @@ if _version_not_supported:
 class SchedulerServiceStub(object):
     """SchedulerService is implemented by both sides depending on
     direction:
-
+    
     - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
     AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
     these.
-
+    
     - Scheduler implements: TriggerSchedule (operator-initiated
     manual fires originating from the dashboard). Brain is the
     gRPC client for this one.
-
+    
     In practice this is two separate gRPC services on different
     ports; we declare them as one logical service here for clarity.
     """
@@ -82,15 +82,15 @@ class SchedulerServiceStub(object):
 class SchedulerServiceServicer(object):
     """SchedulerService is implemented by both sides depending on
     direction:
-
+    
     - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
     AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
     these.
-
+    
     - Scheduler implements: TriggerSchedule (operator-initiated
     manual fires originating from the dashboard). Brain is the
     gRPC client for this one.
-
+    
     In practice this is two separate gRPC services on different
     ports; we declare them as one logical service here for clarity.
     """
@@ -194,15 +194,15 @@ def add_SchedulerServiceServicer_to_server(servicer, server):
 class SchedulerService(object):
     """SchedulerService is implemented by both sides depending on
     direction:
-
+    
     - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
     AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
     these.
-
+    
     - Scheduler implements: TriggerSchedule (operator-initiated
     manual fires originating from the dashboard). Brain is the
     gRPC client for this one.
-
+    
     In practice this is two separate gRPC services on different
     ports; we declare them as one logical service here for clarity.
     """

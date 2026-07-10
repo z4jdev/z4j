@@ -74,17 +74,44 @@ export function NotificationBell() {
         },
       });
     }
-    // Deep-link to the task detail if we can resolve a slug + task_id
-    // + engine. Multi-engine: if the backend didn't stamp ``engine``
-    // onto the notification (older events from before BUG-2 was
-    // fixed), refuse to deep-link rather than guessing "celery" -
-    // the guess was the bug.
+    // Deep-link to the right detail page. Schedule/agent alerts
+    // (misfire, circuit-breaker trip, agent offline) reuse the
+    // task-shaped data contract with the schedule/agent UUID in
+    // ``task_id``; the backend stamps ``resource_type`` so the id
+    // routes to the resource that actually exists instead of a
+    // nonexistent task page. Absent resource_type (older rows)
+    // means task.
     const taskId =
       typeof n.data?.task_id === "string" ? (n.data.task_id as string) : null;
     const engine =
       typeof n.data?.engine === "string" ? (n.data.engine as string) : null;
+    const resourceType =
+      typeof n.data?.resource_type === "string"
+        ? (n.data.resource_type as string)
+        : "task";
     const targetSlug = resolveProjectSlug(n);
-    if (taskId && targetSlug && engine) {
+    if (!taskId || !targetSlug) {
+      return;
+    }
+    if (resourceType === "schedule") {
+      navigate({
+        to: "/projects/$slug/schedules/$scheduleId",
+        params: { slug: targetSlug, scheduleId: taskId },
+      });
+      return;
+    }
+    if (resourceType === "agent") {
+      navigate({
+        to: "/projects/$slug/agents",
+        params: { slug: targetSlug },
+      });
+      return;
+    }
+    // Task deep link. Multi-engine: if the backend didn't stamp
+    // ``engine`` (older events from before BUG-2 was fixed), refuse
+    // to deep-link rather than guessing "celery" - the guess was
+    // the bug.
+    if (engine) {
       navigate({
         to: "/projects/$slug/tasks/$engine/$taskId",
         params: { slug: targetSlug, engine, taskId },

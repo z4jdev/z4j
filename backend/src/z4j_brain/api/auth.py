@@ -47,10 +47,6 @@ from z4j_brain.api.deps import (
     require_csrf,
     require_fresh_mfa,
 )
-from z4j_brain.domain.ip_rate_limit import (
-    require_login_throttle,
-    require_password_reset_throttle,
-)
 from z4j_brain.auth.csrf import csrf_cookie_kwargs, csrf_cookie_name
 from z4j_brain.auth.sessions import (
     SessionCookieCodec,
@@ -58,6 +54,11 @@ from z4j_brain.auth.sessions import (
     cookie_kwargs,
     cookie_name,
 )
+from z4j_brain.domain.ip_rate_limit import (
+    require_login_throttle,
+    require_password_reset_throttle,
+)
+from z4j_brain.domain.mfa.enforcement import mfa_enforcement_applies
 
 if TYPE_CHECKING:
     import uuid
@@ -173,6 +174,30 @@ class LoginResponse(BaseModel):
             "calling any other endpoint."
         ),
     )
+    mfa_enrollment_required: bool = Field(
+        default=False,
+        description=(
+            "True when the operator's MFA enrollment-enforcement "
+            "policy (Z4J_MFA_ENFORCE_FOR_ADMINS / "
+            "Z4J_MFA_ENFORCE_FOR_ALL) targets this user and they "
+            "have not enrolled yet. Within the grace window the "
+            "dashboard should show a persistent enroll-by banner; "
+            "once mfa_enrollment_deadline is in the past every "
+            "endpoint outside the enrollment flow answers 403 with "
+            "error code mfa_enrollment_required."
+        ),
+    )
+    mfa_enrollment_deadline: datetime | None = Field(
+        default=None,
+        description=(
+            "End of the enrollment grace window "
+            "(mfa_enforcement_started_at + "
+            "Z4J_MFA_ENROLLMENT_GRACE_DAYS). Only set when "
+            "mfa_enrollment_required is True. A deadline in the "
+            "past means this session is already restricted to the "
+            "MFA-enrollment endpoints."
+        ),
+    )
 
 
 class UpdateProfileRequest(BaseModel):
@@ -210,7 +235,7 @@ class SessionRevokedResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _derive_display_name(user: "User") -> str | None:
+def _derive_display_name(user: User) -> str | None:
     """Same precedence rule as :mod:`z4j_brain.api.users`:
     explicit ``display_name`` → ``"first last"`` → email local part.
     Kept in both modules so a change to the rule is a single grep.
@@ -225,7 +250,7 @@ def _derive_display_name(user: "User") -> str | None:
     return user.email.split("@", 1)[0] if user.email else None
 
 
-def _user_payload(user: "User") -> UserPublic:
+def _user_payload(user: User) -> UserPublic:
     return UserPublic(
         id=user.id,
         email=user.email,
@@ -241,7 +266,7 @@ def _user_payload(user: "User") -> UserPublic:
 def _set_session_cookies(
     response: Response,
     *,
-    settings: "Settings",
+    settings: Settings,
     session_id: uuid.UUID,
     csrf_token: str,
     max_age_seconds: int | None = None,
@@ -283,7 +308,7 @@ def _set_session_cookies(
     )
 
 
-def _clear_session_cookies(response: Response, settings: "Settings") -> None:
+def _clear_session_cookies(response: Response, settings: Settings) -> None:
     """Best-effort clear of both cookies."""
     for name in (
         cookie_name(environment=settings.environment),
@@ -303,6 +328,121 @@ async def _hold_minimum_response_time(
         await asyncio.sleep(remaining)
 
 
+async def _apply_mfa_enrollment_enforcement(
+    *,
+    user: User,
+    users: UserRepository,
+    audit_log: AuditLogRepository,
+    db_session: AsyncSession,
+    settings: Settings,
+    session_row: SessionRow,
+    ip: str,
+) -> tuple[bool, datetime | None]:
+    """Login-time half of the MFA enrollment-enforcement policy.
+
+    Called from :func:`login` ONLY when the policy targets the user
+    and they have no MFA enrolled. Stamps the grace anchor
+    ``users.mfa_enforcement_started_at`` on the first login that
+    observes the policy (atomic stamp-once; concurrent first logins
+    are arbitrated by the database), writes the
+    ``auth.mfa_enforcement_grace_started`` audit row exactly once,
+    and writes ``auth.mfa_enforcement_blocked`` on every login that
+    lands past the deadline (per-request 403s are NOT audited - the
+    request-time gate in api/deps.py stays silent so the chained log
+    is not flooded).
+
+    Returns ``(mfa_enrollment_required, mfa_enrollment_deadline)``
+    for the :class:`LoginResponse` fields.
+    """
+    import logging
+    from datetime import UTC, timedelta
+
+    from z4j_brain.domain.audit_service import AuditService
+
+    logger = logging.getLogger("z4j.brain.auth.mfa_enforcement")
+    now = datetime.now(UTC)
+    policy = "mfa_enforce_for_all" if settings.mfa_enforce_for_all else "mfa_enforce_for_admins"
+
+    started_at = user.mfa_enforcement_started_at
+    grace_started_here = False
+    if started_at is None:
+        # Atomic stamp-once; a concurrent first login can race us
+        # here and exactly one caller wins at the database.
+        grace_started_here = await users.set_mfa_enforcement_started(
+            user.id,
+            when=now,
+        )
+        if grace_started_here:
+            started_at = now
+        else:
+            # Lost the race - re-read the winner's anchor.
+            await db_session.refresh(user)
+            started_at = user.mfa_enforcement_started_at
+
+    deadline: datetime | None = None
+    if started_at is not None:
+        deadline = aware_utc(started_at) + timedelta(
+            days=settings.mfa_enrollment_grace_days,
+        )
+
+    needs_commit = False
+    if grace_started_here:
+        # Audit + log exactly once per user - the row marks when the
+        # grace clock started, which is what a compliance reviewer
+        # asks for ("when was this account first told").
+        await AuditService(settings).record(
+            audit_log,
+            action="auth.mfa_enforcement_grace_started",
+            target_type="user",
+            target_id=str(user.id),
+            result="success",
+            outcome="allow",
+            user_id=user.id,
+            source_ip=ip,
+            metadata={
+                "policy": policy,
+                "grace_days": settings.mfa_enrollment_grace_days,
+                "deadline": deadline.isoformat() if deadline else None,
+            },
+        )
+        needs_commit = True
+        logger.info(
+            "z4j: MFA enrollment grace window started for user %s (policy=%s, grace_days=%d)",
+            user.id,
+            policy,
+            settings.mfa_enrollment_grace_days,
+        )
+    if deadline is not None and now >= deadline:
+        # Grace expired (immediately, when grace_days == 0). The
+        # request-time gate does the actual 403s; audit the blocked
+        # login once here.
+        await AuditService(settings).record(
+            audit_log,
+            action="auth.mfa_enforcement_blocked",
+            target_type="user",
+            target_id=str(user.id),
+            result="success",
+            outcome="deny",
+            user_id=user.id,
+            source_ip=ip,
+            metadata={
+                "policy": policy,
+                "deadline": deadline.isoformat(),
+                "session_id": str(session_row.id),
+            },
+        )
+        needs_commit = True
+        logger.info(
+            "z4j: login for user %s restricted to MFA enrollment (grace deadline %s passed)",
+            user.id,
+            deadline.isoformat(),
+        )
+    if needs_commit:
+        await db_session.commit()
+
+    return True, deadline
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -317,12 +457,12 @@ async def login(
     request: Request,
     request_body: LoginRequest,
     response: Response,
-    settings: "Settings" = Depends(get_settings),
-    auth_service: "AuthService" = Depends(get_auth_service),
-    users: "UserRepository" = Depends(get_user_repo),
-    sessions: "SessionRepository" = Depends(get_session_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    auth_service: AuthService = Depends(get_auth_service),
+    users: UserRepository = Depends(get_user_repo),
+    sessions: SessionRepository = Depends(get_session_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> LoginResponse:
     """Authenticate a user and mint a session.
@@ -331,6 +471,11 @@ async def login(
     raises :class:`AuthenticationError` which the error middleware
     maps to 401 with the byte-identical envelope. The caller cannot
     distinguish between the failure modes.
+
+    A successful login additionally evaluates the opt-in MFA
+    enrollment-enforcement policy: see the block below and the
+    ``mfa_enrollment_required`` / ``mfa_enrollment_deadline`` fields
+    on :class:`LoginResponse`.
     """
     # User-Agent is stored on the session row so the Account →
     # Security tab can show where each session was issued from.
@@ -370,10 +515,7 @@ async def login(
     # datetimes from the TIMESTAMPTZ columns; subtracting a naive
     # from an aware datetime raises TypeError.
     cookie_max_age = int(
-        (
-            aware_utc(session_row.expires_at)
-            - aware_utc(session_row.issued_at)
-        ).total_seconds(),
+        (aware_utc(session_row.expires_at) - aware_utc(session_row.issued_at)).total_seconds(),
     )
     _set_session_cookies(
         response,
@@ -394,10 +536,7 @@ async def login(
     from z4j_brain.auth.trusted_device import hash_cookie_id
     from z4j_brain.persistence.repositories import TrustedDeviceRepository
 
-    has_mfa = (
-        user.mfa_secret_encrypted is not None
-        and user.mfa_enrolled_at is not None
-    )
+    has_mfa = user.mfa_secret_encrypted is not None and user.mfa_enrolled_at is not None
     mfa_required = False
     if has_mfa:
         trust_cookie = request.cookies.get(
@@ -439,9 +578,35 @@ async def login(
                 trust_matched = True
         mfa_required = not trust_matched
 
+    # MFA enrollment enforcement (opt-in policy; both flags default
+    # OFF so upgrades see zero behavior change). When the policy
+    # targets this user and they have no MFA enrolled, the first
+    # login that observes the policy stamps the grace anchor
+    # ``users.mfa_enforcement_started_at``; past the deadline the
+    # session minted above still exists (a hard refusal here would
+    # make enrollment impossible) but ``enforce_mfa_enrollment`` in
+    # api/deps.py restricts it to the enrollment endpoints.
+    mfa_enrollment_required = False
+    mfa_enrollment_deadline: datetime | None = None
+    if not has_mfa and mfa_enforcement_applies(user=user, settings=settings):
+        (
+            mfa_enrollment_required,
+            mfa_enrollment_deadline,
+        ) = await _apply_mfa_enrollment_enforcement(
+            user=user,
+            users=users,
+            audit_log=audit_log,
+            db_session=db_session,
+            settings=settings,
+            session_row=session_row,
+            ip=ip,
+        )
+
     return LoginResponse(
         user=_user_payload(user),
         mfa_required=mfa_required,
+        mfa_enrollment_required=mfa_enrollment_required,
+        mfa_enrollment_deadline=mfa_enrollment_deadline,
     )
 
 
@@ -452,13 +617,13 @@ async def login(
 )
 async def logout(
     response: Response,
-    settings: "Settings" = Depends(get_settings),
-    auth_service: "AuthService" = Depends(get_auth_service),
-    sessions: "SessionRepository" = Depends(get_session_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    user: "User" = Depends(get_current_user),
-    session_row: "SessionRow" = Depends(get_current_session),
+    settings: Settings = Depends(get_settings),
+    auth_service: AuthService = Depends(get_auth_service),
+    sessions: SessionRepository = Depends(get_session_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+    session_row: SessionRow = Depends(get_current_session),
     ip: str = Depends(get_client_ip),
 ) -> Response:
     await auth_service.logout(
@@ -494,7 +659,7 @@ class PasswordPolicyPublic(BaseModel):
 
 @router.get("/policy", response_model=PasswordPolicyPublic)
 async def password_policy(
-    settings: "Settings" = Depends(get_settings),
+    settings: Settings = Depends(get_settings),
 ) -> PasswordPolicyPublic:
     """Public password-policy summary for the dashboard's UI hints.
 
@@ -513,16 +678,19 @@ async def password_policy(
         min_length=settings.password_min_length,
         required_character_classes=3,
         character_class_names=[
-            "lowercase", "uppercase", "digit", "symbol",
+            "lowercase",
+            "uppercase",
+            "digit",
+            "symbol",
         ],
     )
 
 
 @router.get("/me", response_model=UserMePublic)
 async def me(
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
 ) -> UserMePublic:
     """Return the current user with their project memberships.
 
@@ -549,7 +717,8 @@ async def me(
         membership_rows = []
         if rows:
             project_rows = await projects.list_by_ids(
-                {m.project_id for m in rows}, only_active=True,
+                {m.project_id for m in rows},
+                only_active=True,
             )
             by_id = {p.id: p for p in project_rows}
             for m in rows:
@@ -597,11 +766,11 @@ async def change_password(
     request: Request,
     response: Response,
     body: ChangePasswordRequest,
-    user: "User" = Depends(get_current_user),
-    session_row: "SessionRow" = Depends(get_current_session),
-    settings: "Settings" = Depends(get_settings),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    session_row: SessionRow = Depends(get_current_session),
+    settings: Settings = Depends(get_settings),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> LoginResponse:
     """Self-service password change for the current user.
@@ -652,13 +821,16 @@ async def change_password(
     new_hash = hasher.hash(body.new_password)
 
     await users.update_password_hash(
-        user.id, new_hash, password_changed=True,
+        user.id,
+        new_hash,
+        password_changed=True,
     )
     # Explicit revoke so every prior session row is flagged in the
     # database, not just implicitly defeated by the
     # ``password_changed_at`` timestamp check.
     await sessions.revoke_all_for_user(
-        user.id, reason="password_changed",
+        user.id,
+        reason="password_changed",
     )
     # Drop every "remember this device" row. The cookie continues to
     # send from the browser but the server-side row is gone so the
@@ -737,13 +909,13 @@ async def change_password(
 )
 async def update_profile(
     body: UpdateProfileRequest,
-    user: "User" = Depends(get_current_user),
-    users: "UserRepository" = Depends(get_user_repo),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    users: UserRepository = Depends(get_user_repo),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
     ip: str = Depends(get_client_ip),
 ) -> UserMePublic:
     """Update the current user's display name and/or timezone.
@@ -788,7 +960,8 @@ async def update_profile(
         membership_rows = []
         if rows:
             project_rows = await projects.list_by_ids(
-                {m.project_id for m in rows}, only_active=True,
+                {m.project_id for m in rows},
+                only_active=True,
             )
             by_id = {p.id: p for p in project_rows}
             for m in rows:
@@ -824,9 +997,9 @@ async def update_profile(
 
 @router.get("/sessions", response_model=list[SessionPublic])
 async def list_sessions(
-    user: "User" = Depends(get_current_user),
-    session_row: "SessionRow" = Depends(get_current_session),
-    sessions: "SessionRepository" = Depends(get_session_repo),
+    user: User = Depends(get_current_user),
+    session_row: SessionRow = Depends(get_current_session),
+    sessions: SessionRepository = Depends(get_session_repo),
 ) -> list[SessionPublic]:
     """Return every active (non-revoked, non-expired) session for the
     current user.
@@ -861,11 +1034,11 @@ async def list_sessions(
 )
 async def revoke_session(
     session_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    sessions: "SessionRepository" = Depends(get_session_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    sessions: SessionRepository = Depends(get_session_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
     ip: str = Depends(get_client_ip),
 ) -> SessionRevokedResponse:
     """Revoke a specific session belonging to the current user.
@@ -933,7 +1106,7 @@ class PasswordResetConfirmResponse(BaseModel):
 _PW_RESET_TTL_MINUTES = 30
 
 
-def _hash_reset_token(plaintext: str, settings: "Settings") -> str:
+def _hash_reset_token(plaintext: str, settings: Settings) -> str:
     """HMAC-SHA256 of a plaintext reset token - same construction
     as the invitation token hash. Keyed by the server secret so a
     DB exfil alone can't forge tokens.
@@ -954,10 +1127,10 @@ async def password_reset_request(
     request: Request,
     body: PasswordResetRequestBody,
     background_tasks: BackgroundTasks,
-    settings: "Settings" = Depends(get_settings),
-    users: "UserRepository" = Depends(get_user_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    users: UserRepository = Depends(get_user_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> PasswordResetRequestResponse:
     """Request a password-reset token.
@@ -1033,11 +1206,11 @@ async def password_reset_request(
 
 async def _send_password_reset_email(
     *,
-    db: "DatabaseManager",
-    user_id: "uuid.UUID",
+    db: DatabaseManager,
+    user_id: uuid.UUID,
     user_email: str,
     plaintext_token: str,
-    settings: "Settings",
+    settings: Settings,
 ) -> None:
     """Background task: find a project email channel for the user
     and dispatch the reset link.
@@ -1089,9 +1262,10 @@ async def _send_password_reset_email(
             for m in user_memberships:
                 try:
                     channels = await channel_repo.list_for_project(
-                        m.project_id, active_only=True,
+                        m.project_id,
+                        active_only=True,
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: S112  best-effort skip of unreachable project channels
                     continue
                 email_channels = [c for c in channels if c.type == "email"]
                 for channel in email_channels:
@@ -1106,12 +1280,12 @@ async def _send_password_reset_email(
                         )
                         if result.success:
                             return
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.exception(
                             "z4j: password-reset email channel %s crashed",
                             channel.id,
                         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("z4j: password-reset background send failed")
 
 
@@ -1122,9 +1296,9 @@ async def _send_password_reset_email(
 )
 async def password_reset_confirm(
     body: PasswordResetConfirmBody,
-    settings: "Settings" = Depends(get_settings),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> PasswordResetConfirmResponse:
     """Consume a reset token and set a new password.
@@ -1204,13 +1378,16 @@ async def password_reset_confirm(
     # kwarg names and would 500 on every call, leaving the reset
     # token un-consumed and replayable until TTL).
     await users_repo.update_password_hash(
-        user.id, new_hash, password_changed=True,
+        user.id,
+        new_hash,
+        password_changed=True,
     )
     # Revoke every existing session for this user - attacker who
     # had a live session must not survive the reset.
     sessions_repo = SessionRepository(db_session)
     await sessions_repo.revoke_all_for_user(
-        user.id, reason="password_reset",
+        user.id,
+        reason="password_reset",
     )
     # Invalidate any OTHER unconsumed reset tokens for this user
     # so a minted-but-unused token from an earlier request can't

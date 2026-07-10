@@ -48,7 +48,7 @@ class SchemaVersionError(RuntimeError):
 def _parse_calver(version: str) -> tuple[int, int, int]:
     """Parse CalVer 'YYYY.M.PATCH' or 'YYYY.M.PATCHaN' into a comparable tuple."""
     # Strip pre-release suffix (a1, b1, rc1)
-    clean = version.split("a")[0].split("b")[0].split("rc")[0]
+    clean = version.split("a", maxsplit=1)[0].split("b", maxsplit=1)[0].split("rc", maxsplit=1)[0]
     parts = clean.split(".")
     try:
         return (int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
@@ -110,7 +110,9 @@ async def check_and_update_schema_version(session: AsyncSession) -> None:
             "understands; newer features are unavailable until you "
             "upgrade. To use everything in the DB, install "
             "z4j-brain>=%s.",
-            db_version, code_version, db_version,
+            db_version,
+            code_version,
+            db_version,
         )
         # Don't update last_upgraded_at on a downgrade-skew boot;
         # leave the higher-version mark intact so future upgrade

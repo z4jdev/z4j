@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 from z4j_brain.errors import AuthorizationError, NotFoundError
 from z4j_brain.persistence.enums import ProjectRole
@@ -127,8 +126,7 @@ class PolicyEngine:
                 if role_rank(m.role) >= role_rank(min_role):
                     return m
                 raise AuthorizationError(
-                    f"role {m.role.value!r} is not sufficient "
-                    f"(need at least {min_role.value!r})",
+                    f"role {m.role.value!r} is not sufficient (need at least {min_role.value!r})",
                     details={"have": m.role.value, "need": min_role.value},
                 )
         # S-3: indistinguishable from a true 404 for non-admins.

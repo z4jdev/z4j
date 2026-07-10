@@ -173,11 +173,11 @@ class RegenerateResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _master_secret_bytes(settings: "Settings") -> bytes:
+def _master_secret_bytes(settings: Settings) -> bytes:
     return settings.secret.get_secret_value().encode("utf-8")
 
 
-def _previous_secrets_bytes(settings: "Settings") -> list[bytes]:
+def _previous_secrets_bytes(settings: Settings) -> list[bytes]:
     """Bytes form of every previous Z4J_SECRET still accepted for verify."""
     # ``all_secrets_for_verification`` returns the CURRENT secret first
     # plus every entry in Z4J_PREVIOUS_SECRETS. Drop the current value
@@ -190,22 +190,29 @@ def _previous_secrets_bytes(settings: "Settings") -> list[bytes]:
 
 async def _audit_verify_failure(
     *,
-    audit_log: "AuditLogRepository",
-    settings: "Settings",
+    audit_log: AuditLogRepository,
+    settings: Settings,
     user_id: UUID,
     ip: str,
     reason: str,
+    action: str = "user.mfa_verify_failed",
 ) -> None:
     """Record a failed MFA verify attempt in the HMAC-chained log.
     A brute-force attacker hitting the verify endpoint must leave
     a trail; without this row the per-IP throttle alone would let
     failed attempts vanish into a quiet 401.
+
+    ``action`` distinguishes the surface: ``user.mfa_verify_failed``
+    (the login step-up), ``user.mfa_disable_failed``, and
+    ``user.mfa_enroll_failed`` -- failed attempts against /disable and
+    /enroll-complete previously wrote NO rows at all, so those two
+    brute-force surfaces were invisible in the chained log.
     """
     from z4j_brain.domain.audit_service import AuditService
 
     await AuditService(settings).record(
         audit_log,
-        action="user.mfa_verify_failed",
+        action=action,
         target_type="user",
         target_id=str(user_id),
         result="failure",
@@ -230,14 +237,14 @@ async def _audit_verify_failure(
     ],
 )
 async def enroll_start(
-    user: "User" = Depends(get_current_user),
-    users: "UserRepository" = Depends(get_user_repo),
-    recovery_codes_repo: "MfaRecoveryCodeRepository" = Depends(
+    user: User = Depends(get_current_user),
+    users: UserRepository = Depends(get_user_repo),
+    recovery_codes_repo: MfaRecoveryCodeRepository = Depends(
         get_mfa_recovery_codes_repo,
     ),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    settings: "Settings" = Depends(get_settings),
-    db_session: "AsyncSession" = Depends(get_session),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> EnrollStartResponse:
     """Start (or restart) an MFA enrollment.
@@ -253,10 +260,7 @@ async def enroll_start(
     # secret + codes. The audit row distinguishes the two so an
     # attacker who hijacks a session and resets MFA mid-flow leaves
     # a clearly different event behind. (1.6.0 audit High-2.)
-    was_enrolled = (
-        user.mfa_secret_encrypted is not None
-        and user.mfa_enrolled_at is not None
-    )
+    was_enrolled = user.mfa_secret_encrypted is not None and user.mfa_enrolled_at is not None
 
     secret = generate_totp_secret()
     blob = encrypt_totp_secret(
@@ -295,7 +299,9 @@ async def enroll_start(
     host = urlparse(settings.public_url).hostname or "z4j"
     issuer = f"z4j ({host})"
     url = provisioning_url(
-        secret=secret, account_label=user.email, issuer=issuer,
+        secret=secret,
+        account_label=user.email,
+        issuer=issuer,
     )
     return EnrollStartResponse(
         secret_base32=secret_to_base32(secret),
@@ -306,20 +312,25 @@ async def enroll_start(
 @router.post(
     "/enroll-complete",
     response_model=EnrollCompleteResponse,
-    dependencies=[Depends(require_csrf)],
+    # Throttled like /verify: a wrong-code loop here is the same
+    # 6-digit brute-force surface (audit finding, MFA test suite).
+    dependencies=[
+        Depends(require_csrf),
+        Depends(require_mfa_verify_throttle),
+    ],
 )
 async def enroll_complete(
     body: EnrollCompleteRequest,
-    user: "User" = Depends(get_current_user),
-    users: "UserRepository" = Depends(get_user_repo),
-    recovery_codes_repo: "MfaRecoveryCodeRepository" = Depends(
+    user: User = Depends(get_current_user),
+    users: UserRepository = Depends(get_user_repo),
+    recovery_codes_repo: MfaRecoveryCodeRepository = Depends(
         get_mfa_recovery_codes_repo,
     ),
-    sessions: "SessionRepository" = Depends(get_session_repo),
-    session_row: "SessionRow" = Depends(get_current_session),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    settings: "Settings" = Depends(get_settings),
-    db_session: "AsyncSession" = Depends(get_session),
+    sessions: SessionRepository = Depends(get_session_repo),
+    session_row: SessionRow = Depends(get_current_session),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> EnrollCompleteResponse:
     """Confirm a pending enrollment and activate MFA.
@@ -348,8 +359,21 @@ async def enroll_complete(
         previous_secrets=_previous_secrets_bytes(settings),
     )
     if not verify_totp_code(plaintext_secret, body.code):
+        await _audit_verify_failure(
+            audit_log=audit_log,
+            settings=settings,
+            user_id=user.id,
+            ip=ip,
+            reason="wrong_totp",
+            action="user.mfa_enroll_failed",
+        )
+        # Commit BEFORE raising: the error path rolls the request
+        # session back, which would silently discard the audit row
+        # (same pattern as /verify's failure audits).
+        await db_session.commit()
         raise AuthenticationError(
-            "invalid code", details={"reason": "wrong_totp"},
+            "invalid code",
+            details={"reason": "wrong_totp"},
         )
 
     # Optionally re-encrypt with the current key if the prior blob
@@ -364,7 +388,9 @@ async def enroll_complete(
 
     now = datetime.now(UTC)
     await users.set_mfa_state(
-        user.id, secret_encrypted=blob, enrolled_at=now,
+        user.id,
+        secret_encrypted=blob,
+        enrolled_at=now,
     )
 
     plaintext_codes = generate_recovery_codes(
@@ -372,7 +398,8 @@ async def enroll_complete(
     )
     hashed = [hash_recovery_code(c) for c in plaintext_codes]
     await recovery_codes_repo.bulk_insert(
-        user_id=user.id, hashed_codes=hashed,
+        user_id=user.id,
+        hashed_codes=hashed,
     )
 
     # User is "MFA-fresh" right now.
@@ -407,22 +434,22 @@ async def enroll_complete(
         Depends(require_mfa_verify_throttle),
     ],
 )
-async def verify(
+async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor types
     request: Request,
     response: Response,
     body: VerifyRequest,
-    user: "User" = Depends(get_current_user),
-    sessions: "SessionRepository" = Depends(get_session_repo),
-    session_row: "SessionRow" = Depends(get_current_session),
-    recovery_codes_repo: "MfaRecoveryCodeRepository" = Depends(
+    user: User = Depends(get_current_user),
+    sessions: SessionRepository = Depends(get_session_repo),
+    session_row: SessionRow = Depends(get_current_session),
+    recovery_codes_repo: MfaRecoveryCodeRepository = Depends(
         get_mfa_recovery_codes_repo,
     ),
-    trusted_devices: "TrustedDeviceRepository" = Depends(
+    trusted_devices: TrustedDeviceRepository = Depends(
         get_trusted_device_repo,
     ),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    settings: "Settings" = Depends(get_settings),
-    db_session: "AsyncSession" = Depends(get_session),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> VerifyResponse:
     """Verify a TOTP code or a recovery code.
@@ -439,11 +466,11 @@ async def verify(
 
     raw = body.code
     used_recovery = False
-    from z4j_brain.domain.audit_service import AuditService
-
     # Recovery code path: anything that looks like XXXX-XXXX-XXXX once
     # normalised falls in here. Otherwise treat as TOTP digits.
     import re
+
+    from z4j_brain.domain.audit_service import AuditService
 
     normalized = normalize_recovery_code(raw)
     if re.match(RECOVERY_CODE_PATTERN, normalized):
@@ -463,12 +490,11 @@ async def verify(
             burn_one_argon2_cycle()
         match = None
         for r in rows:
-            if verify_recovery_code(plaintext=normalized, hashed=r.code_hash):
-                # Capture the first match but DO NOT break -- continue
-                # hashing every remaining row to keep the scan time
-                # uniform over hit / miss positions.
-                if match is None:
-                    match = r
+            # Capture the first match but DO NOT break -- continue
+            # hashing every remaining row to keep the scan time
+            # uniform over hit / miss positions.
+            if verify_recovery_code(plaintext=normalized, hashed=r.code_hash) and match is None:
+                match = r
         if match is None:
             await _audit_verify_failure(
                 audit_log=audit_log,
@@ -479,7 +505,8 @@ async def verify(
             )
             await db_session.commit()
             raise AuthenticationError(
-                "invalid code", details={"reason": "wrong_recovery_code"},
+                "invalid code",
+                details={"reason": "wrong_recovery_code"},
             )
         # Atomic consume: WHERE consumed_at IS NULL guards against the
         # double-spend race of two parallel verifies redeeming the same
@@ -497,15 +524,15 @@ async def verify(
             )
             await db_session.commit()
             raise AuthenticationError(
-                "invalid code", details={"reason": "wrong_recovery_code"},
+                "invalid code",
+                details={"reason": "wrong_recovery_code"},
             )
         used_recovery = True
     else:
         # TOTP path.
         if len(raw) != 6 or not raw.isdigit():
             raise ValidationError(
-                "code must be a 6-digit TOTP or a XXXX-XXXX-XXXX "
-                "recovery code",
+                "code must be a 6-digit TOTP or a XXXX-XXXX-XXXX recovery code",
                 details={"reason": "bad_code_format"},
             )
         plaintext_secret, needs_rewrite = decrypt_totp_secret(
@@ -524,7 +551,8 @@ async def verify(
             )
             await db_session.commit()
             raise AuthenticationError(
-                "invalid code", details={"reason": "wrong_totp"},
+                "invalid code",
+                details={"reason": "wrong_totp"},
             )
         if needs_rewrite:
             from z4j_brain.persistence.repositories import UserRepository
@@ -570,7 +598,8 @@ async def verify(
                     oldest = row
             if oldest is not None:
                 await trusted_devices.revoke(
-                    device_id=oldest.id, user_id=user.id,
+                    device_id=oldest.id,
+                    user_id=user.id,
                 )
         cookie_value = mint_cookie_id()
         cookie_hash = hash_cookie_id(cookie_value)
@@ -612,11 +641,7 @@ async def verify(
 
     await AuditService(settings).record(
         audit_log,
-        action=(
-            "user.mfa_recovery_code_used"
-            if used_recovery
-            else "user.mfa_verified"
-        ),
+        action=("user.mfa_recovery_code_used" if used_recovery else "user.mfa_verified"),
         target_type="user",
         target_id=str(user.id),
         result="success",
@@ -643,22 +668,29 @@ async def verify(
 @router.post(
     "/disable",
     response_model=VerifyResponse,
-    dependencies=[Depends(require_csrf)],
+    # Throttled like /verify: this route accepts password + TOTP, so
+    # WITHOUT the throttle an attacker who knows the password could
+    # brute-force the 6-digit code unthrottled and disable MFA -- a
+    # full second-factor bypass (audit finding, MFA test suite).
+    dependencies=[
+        Depends(require_csrf),
+        Depends(require_mfa_verify_throttle),
+    ],
 )
 async def disable(
     response: Response,
     body: DisableRequest,
-    user: "User" = Depends(get_current_user),
-    users: "UserRepository" = Depends(get_user_repo),
-    recovery_codes_repo: "MfaRecoveryCodeRepository" = Depends(
+    user: User = Depends(get_current_user),
+    users: UserRepository = Depends(get_user_repo),
+    recovery_codes_repo: MfaRecoveryCodeRepository = Depends(
         get_mfa_recovery_codes_repo,
     ),
-    trusted_devices: "TrustedDeviceRepository" = Depends(
+    trusted_devices: TrustedDeviceRepository = Depends(
         get_trusted_device_repo,
     ),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    settings: "Settings" = Depends(get_settings),
-    db_session: "AsyncSession" = Depends(get_session),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> VerifyResponse:
     """Disable MFA for the current user.
@@ -678,6 +710,17 @@ async def disable(
 
     hasher = PasswordHasher(settings)
     if not hasher.verify(user.password_hash, body.password):
+        await _audit_verify_failure(
+            audit_log=audit_log,
+            settings=settings,
+            user_id=user.id,
+            ip=ip,
+            reason="wrong_password",
+            action="user.mfa_disable_failed",
+        )
+        # Commit BEFORE raising (see /verify): the error path rolls
+        # the request session back and would discard the audit row.
+        await db_session.commit()
         raise AuthenticationError(
             "current password is incorrect",
             details={"reason": "wrong_password"},
@@ -690,23 +733,33 @@ async def disable(
         previous_secrets=_previous_secrets_bytes(settings),
     )
     if not verify_totp_code(plaintext_secret, body.code):
+        await _audit_verify_failure(
+            audit_log=audit_log,
+            settings=settings,
+            user_id=user.id,
+            ip=ip,
+            reason="wrong_totp",
+            action="user.mfa_disable_failed",
+        )
+        # Commit BEFORE raising (see /verify): the error path rolls
+        # the request session back and would discard the audit row.
+        await db_session.commit()
         raise AuthenticationError(
-            "invalid code", details={"reason": "wrong_totp"},
+            "invalid code",
+            details={"reason": "wrong_totp"},
         )
 
     # Count side effects before the writes so the audit row records
     # what was actually wiped. Forensics needs this when an attacker
     # disables MFA and we want to know how many recovery codes /
     # trust rows were lost. (1.6.0 audit High-5.)
-    deleted_recovery_codes = (
-        await recovery_codes_repo.count_unused_for_user(user.id)
-    )
-    deleted_trusted_devices = (
-        await trusted_devices.count_active_for_user(user.id)
-    )
+    deleted_recovery_codes = await recovery_codes_repo.count_unused_for_user(user.id)
+    deleted_trusted_devices = await trusted_devices.count_active_for_user(user.id)
 
     await users.set_mfa_state(
-        user.id, secret_encrypted=None, enrolled_at=None,
+        user.id,
+        secret_encrypted=None,
+        enrolled_at=None,
     )
     await recovery_codes_repo.delete_all_for_user(user.id)
     await trusted_devices.delete_all_for_user(user.id)
@@ -740,14 +793,14 @@ async def disable(
     dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
 async def regenerate_recovery_codes(
-    user: "User" = Depends(get_current_user),
-    users: "UserRepository" = Depends(get_user_repo),
-    recovery_codes_repo: "MfaRecoveryCodeRepository" = Depends(
+    user: User = Depends(get_current_user),
+    users: UserRepository = Depends(get_user_repo),
+    recovery_codes_repo: MfaRecoveryCodeRepository = Depends(
         get_mfa_recovery_codes_repo,
     ),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    settings: "Settings" = Depends(get_settings),
-    db_session: "AsyncSession" = Depends(get_session),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> RegenerateResponse:
     """Replace every recovery code with a fresh set.
@@ -776,7 +829,8 @@ async def regenerate_recovery_codes(
 
     await recovery_codes_repo.delete_all_for_user(user.id)
     await recovery_codes_repo.bulk_insert(
-        user_id=user.id, hashed_codes=hashed,
+        user_id=user.id,
+        hashed_codes=hashed,
     )
 
     from z4j_brain.domain.audit_service import AuditService
@@ -806,29 +860,55 @@ class MfaStatusResponse(BaseModel):
     enrolled: bool
     enrolled_at: datetime | None
     remaining_recovery_codes: int
+    enrollment_required: bool = Field(
+        default=False,
+        description=(
+            "True when the operator's MFA enrollment-enforcement "
+            "policy targets this user and they have not enrolled "
+            "yet. The enrollment page reads this (the endpoint stays "
+            "reachable even for a session that is past its grace "
+            "deadline)."
+        ),
+    )
+    enrollment_deadline: datetime | None = Field(
+        default=None,
+        description=(
+            "End of the enrollment grace window; None until the "
+            "grace clock has been started by a login that observed "
+            "the policy. A deadline in the past means every endpoint "
+            "outside the enrollment flow answers 403 with error code "
+            "mfa_enrollment_required."
+        ),
+    )
 
 
 @router.get("/status", response_model=MfaStatusResponse)
-async def status_endpoint(  # noqa: A001 - shadow fastapi.status
-    user: "User" = Depends(get_current_user),
-    recovery_codes_repo: "MfaRecoveryCodeRepository" = Depends(
+async def status_endpoint(
+    user: User = Depends(get_current_user),
+    recovery_codes_repo: MfaRecoveryCodeRepository = Depends(
         get_mfa_recovery_codes_repo,
     ),
+    settings: Settings = Depends(get_settings),
 ) -> MfaStatusResponse:
-    """Current user's MFA state. Used by the Settings, Security tab."""
-    enrolled = (
-        user.mfa_secret_encrypted is not None
-        and user.mfa_enrolled_at is not None
-    )
+    """Current user's MFA state. Used by the Settings, Security tab
+    and by the enrollment page (which also needs the enforcement
+    deadline to render the countdown / lockout panel).
+    """
+    from z4j_brain.domain.mfa.enforcement import evaluate_mfa_enforcement
+
+    enrolled = user.mfa_secret_encrypted is not None and user.mfa_enrolled_at is not None
     remaining = 0
     if enrolled:
         remaining = await recovery_codes_repo.count_unused_for_user(
             user.id,
         )
+    enforcement = evaluate_mfa_enforcement(user=user, settings=settings)
     return MfaStatusResponse(
         enrolled=enrolled,
         enrolled_at=user.mfa_enrolled_at,
         remaining_recovery_codes=remaining,
+        enrollment_required=enforcement.required,
+        enrollment_deadline=enforcement.deadline,
     )
 
 
@@ -863,11 +943,11 @@ class TrustedDeviceRename(BaseModel):
 )
 async def list_trusted_devices(
     request: Request,
-    user: "User" = Depends(get_current_user),
-    trusted_devices: "TrustedDeviceRepository" = Depends(
+    user: User = Depends(get_current_user),
+    trusted_devices: TrustedDeviceRepository = Depends(
         get_trusted_device_repo,
     ),
-    settings: "Settings" = Depends(get_settings),
+    settings: Settings = Depends(get_settings),
 ) -> list[TrustedDevicePublic]:
     """Return every trusted-device row for the caller.
 
@@ -890,8 +970,7 @@ async def list_trusted_devices(
             last_seen_at=r.last_seen_at,
             expires_at=r.expires_at,
             revoked_at=r.revoked_at,
-            is_current=inbound_hash is not None
-            and r.cookie_id_hash == inbound_hash,
+            is_current=inbound_hash is not None and r.cookie_id_hash == inbound_hash,
         )
         for r in rows
     ]
@@ -909,13 +988,13 @@ async def list_trusted_devices(
 async def trust_current_device(
     request: Request,
     response: Response,
-    user: "User" = Depends(get_current_user),
-    trusted_devices: "TrustedDeviceRepository" = Depends(
+    user: User = Depends(get_current_user),
+    trusted_devices: TrustedDeviceRepository = Depends(
         get_trusted_device_repo,
     ),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    settings: "Settings" = Depends(get_settings),
-    db_session: "AsyncSession" = Depends(get_session),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> TrustedDevicePublic:
     """Trust the caller's current browser without making them log out.
@@ -978,7 +1057,8 @@ async def trust_current_device(
                 oldest = row
         if oldest is not None:
             await trusted_devices.revoke(
-                device_id=oldest.id, user_id=user.id,
+                device_id=oldest.id,
+                user_id=user.id,
             )
 
     cookie_value = mint_cookie_id()
@@ -1044,13 +1124,13 @@ async def revoke_trusted_device(
     device_id: UUID,
     response: Response,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    trusted_devices: "TrustedDeviceRepository" = Depends(
+    user: User = Depends(get_current_user),
+    trusted_devices: TrustedDeviceRepository = Depends(
         get_trusted_device_repo,
     ),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    settings: "Settings" = Depends(get_settings),
-    db_session: "AsyncSession" = Depends(get_session),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> Response:
     """Revoke a single trusted-device row.
@@ -1063,7 +1143,8 @@ async def revoke_trusted_device(
     from z4j_brain.auth.trusted_device import cookie_name
 
     ok = await trusted_devices.revoke(
-        device_id=device_id, user_id=user.id,
+        device_id=device_id,
+        user_id=user.id,
     )
     if not ok:
         raise NotFoundError(
@@ -1082,7 +1163,8 @@ async def revoke_trusted_device(
         for r in rows:
             if r.id == device_id and r.cookie_id_hash == inbound_hash:
                 clear_trust_cookie(
-                    response, environment=settings.environment,
+                    response,
+                    environment=settings.environment,
                 )
                 break
 
@@ -1116,20 +1198,22 @@ async def rename_trusted_device(
     device_id: UUID,
     body: TrustedDeviceRename,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    trusted_devices: "TrustedDeviceRepository" = Depends(
+    user: User = Depends(get_current_user),
+    trusted_devices: TrustedDeviceRepository = Depends(
         get_trusted_device_repo,
     ),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    settings: "Settings" = Depends(get_settings),
-    db_session: "AsyncSession" = Depends(get_session),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> TrustedDevicePublic:
     """Rename a trusted device for the user's own clarity."""
     from z4j_brain.auth.trusted_device import cookie_name
 
     ok = await trusted_devices.rename(
-        device_id=device_id, user_id=user.id, label=body.label,
+        device_id=device_id,
+        user_id=user.id,
+        label=body.label,
     )
     if not ok:
         raise NotFoundError(
@@ -1173,13 +1257,11 @@ async def rename_trusted_device(
         last_seen_at=target.last_seen_at,
         expires_at=target.expires_at,
         revoked_at=target.revoked_at,
-        is_current=inbound_hash is not None
-        and target.cookie_id_hash == inbound_hash,
+        is_current=inbound_hash is not None and target.cookie_id_hash == inbound_hash,
     )
 
 
 __all__ = [
-    "router",
     "DisableRequest",
     "EnrollCompleteRequest",
     "EnrollCompleteResponse",
@@ -1190,4 +1272,5 @@ __all__ = [
     "TrustedDeviceRename",
     "VerifyRequest",
     "VerifyResponse",
+    "router",
 ]

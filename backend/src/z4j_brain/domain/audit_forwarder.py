@@ -131,11 +131,7 @@ def sign_payload(secret: bytes, body: bytes, timestamp: str | None = None) -> st
     verifying the signature. Receivers that supply no timestamp
     are still supported for backwards-compat (sign over body only).
     """
-    digest_input: bytes
-    if timestamp is not None:
-        digest_input = timestamp.encode("utf-8") + b"." + body
-    else:
-        digest_input = body
+    digest_input: bytes = timestamp.encode("utf-8") + b"." + body if timestamp is not None else body
     digest = hmac.new(secret, digest_input, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
 
@@ -206,7 +202,7 @@ class AuditForwarder:
         if not isinstance(payload, dict):
             try:
                 payload = row_to_payload(payload)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 record_swallowed("audit_forwarder", "row_to_payload")
                 return False
         try:
@@ -230,7 +226,8 @@ class AuditForwarder:
             return
         self._stopped = False
         self._task = asyncio.create_task(
-            self._run_forever(), name="audit-forwarder",
+            self._run_forever(),
+            name="audit-forwarder",
         )
 
     async def stop(self, *, drain_timeout: float = 5.0) -> None:
@@ -250,8 +247,7 @@ class AuditForwarder:
         while not self._queue.empty():
             if asyncio.get_running_loop().time() >= deadline:
                 logger.warning(
-                    "z4j audit_forwarder: shutdown drain timed out "
-                    "with %d rows still queued",
+                    "z4j audit_forwarder: shutdown drain timed out with %d rows still queued",
                     self._queue.qsize(),
                 )
                 break
@@ -261,7 +257,7 @@ class AuditForwarder:
             await self._task
         except asyncio.CancelledError:
             pass
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "z4j audit_forwarder: drain task raised on cancel",
                 exc_info=True,
@@ -279,8 +275,7 @@ class AuditForwarder:
             for _ in range(total_lost):
                 record_swallowed("audit_forwarder", "shutdown_lost")
             logger.warning(
-                "z4j audit_forwarder: %d row(s) lost during shutdown "
-                "(%d queued + %d in-flight)",
+                "z4j audit_forwarder: %d row(s) lost during shutdown (%d queued + %d in-flight)",
                 total_lost,
                 residual,
                 in_flight_lost,
@@ -294,7 +289,7 @@ class AuditForwarder:
         gauge surfaces queue saturation."""
         try:
             return self._queue.qsize()
-        except Exception:  # noqa: BLE001
+        except Exception:
             return 0
 
     async def _run_forever(self) -> None:
@@ -317,7 +312,7 @@ class AuditForwarder:
             except asyncio.CancelledError:
                 # Re-raise without clearing _in_flight; stop() reads it.
                 raise
-            except Exception:  # noqa: BLE001
+            except Exception:
                 self._failed_count += 1
                 record_swallowed("audit_forwarder", "send_one")
                 logger.warning(
@@ -360,7 +355,7 @@ class AuditForwarder:
                 pin_ip=safe_ip,
                 timeout=self._timeout,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._failed_count += 1
             # v1.6 Round 5 I: also trip the Grafana swallowed-
             # exceptions alert on this branch. SSRF / non-2xx /
@@ -382,8 +377,7 @@ class AuditForwarder:
             # while the alert dashboard stays green.
             record_swallowed("audit_forwarder", "non_2xx")
             logger.warning(
-                "z4j audit_forwarder: receiver returned %d; row "
-                "dropped. Body (truncated): %s",
+                "z4j audit_forwarder: receiver returned %d; row dropped. Body (truncated): %s",
                 resp.status_code,
                 resp.text[:200] if hasattr(resp, "text") else "",
             )

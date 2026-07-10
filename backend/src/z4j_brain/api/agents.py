@@ -11,8 +11,6 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
-
-from z4j_brain.errors import ConflictError
 from z4j_core.transport import CURRENT_PROTOCOL
 from z4j_core.transport.hmac import derive_project_secret
 
@@ -29,6 +27,7 @@ from z4j_brain.api.deps import (
     require_csrf,
     require_fresh_mfa,
 )
+from z4j_brain.errors import ConflictError
 from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.websocket.auth import hash_agent_token
 
@@ -134,7 +133,7 @@ class CreateAgentResponse(BaseModel):
 
 
 def _agent_payload(
-    agent: "Agent",
+    agent: Agent,
     *,
     versions_snapshot: Any | None = None,
 ) -> AgentPublic:
@@ -143,10 +142,7 @@ def _agent_payload(
     # (see AgentRepository.insert) and would otherwise show as
     # outdated before they get a chance to advertise their real
     # version.
-    is_outdated = (
-        agent.last_connect_at is not None
-        and agent.protocol_version != CURRENT_PROTOCOL
-    )
+    is_outdated = agent.last_connect_at is not None and agent.protocol_version != CURRENT_PROTOCOL
     # Pull the operator-supplied host.name out of agent_metadata.host
     # if the agent ever sent one in its hello frame. The metadata blob
     # is bounded by the gateway (only the host dict + agent_version
@@ -181,7 +177,9 @@ def _agent_payload(
             # Compare against the agent's z4j-core line (the
             # ``agent_version`` field carries z4j-core's version).
             version_status = compare(
-                agent_version_raw, "z4j-core", versions_snapshot,
+                agent_version_raw,
+                "z4j-core",
+                versions_snapshot,
             )
 
     return AgentPublic(
@@ -212,11 +210,11 @@ def _agent_payload(
 @router.get("", response_model=list[AgentPublic])
 async def list_agents(
     slug: str,
-    request: "Request",
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    request: Request,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[AgentPublic]:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import AgentRepository
@@ -244,13 +242,13 @@ async def list_agents(
 async def create_agent(
     slug: str,
     body: CreateAgentRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    settings: "Settings" = Depends(get_settings),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    settings: Settings = Depends(get_settings),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CreateAgentResponse:
     """Mint a new agent token.
@@ -321,12 +319,12 @@ async def create_agent(
 async def revoke_agent(
     slug: str,
     agent_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
     registry=Depends(get_brain_registry),
 ) -> None:
@@ -380,8 +378,9 @@ async def revoke_agent(
     # the operator's intent.
     try:
         await registry.kick(agent_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
         import structlog
+
         structlog.get_logger("z4j.brain.api.agents").exception(
             "z4j: agent kick after revoke failed (revoke itself succeeded)",
             agent_id=str(agent_id),

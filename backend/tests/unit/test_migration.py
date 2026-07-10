@@ -175,8 +175,6 @@ def test_v1_6_6_scrub_worker_conf_strips_existing_rows_r7_h1(
             # And the raw secret values must not be anywhere in the JSON.
             blob = json.dumps(md)
             for needle in ("LEAKED_CRED", "LEAKED_PG", "LEAKED_AWS"):
-                assert needle not in blob, (
-                    "R7-H1 migration left %r in workers.metadata" % (needle,)
-                )
+                assert needle not in blob, f"R7-H1 migration left {needle!r} in workers.metadata"
     finally:
         engine.dispose()

@@ -20,9 +20,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.enums import AgentState, ScheduleKind
 from z4j_brain.persistence.models import (
@@ -33,7 +32,6 @@ from z4j_brain.persistence.models import (
 )
 from z4j_brain.persistence.repositories import PendingFiresRepository
 from z4j_brain.settings import Settings
-
 
 # =====================================================================
 # Fixtures
@@ -73,6 +71,7 @@ async def _seed_project_and_schedule(
     db: DatabaseManager,
     *,
     catch_up: str = "skip",
+    is_enabled: bool = True,
 ) -> tuple[uuid.UUID, uuid.UUID]:
     project_id = uuid.uuid4()
     schedule_id = uuid.uuid4()
@@ -89,8 +88,9 @@ async def _seed_project_and_schedule(
                 kind=ScheduleKind.CRON,
                 expression="0 * * * *",
                 timezone="UTC",
-                args=[], kwargs={},
-                is_enabled=True,
+                args=[],
+                kwargs={},
+                is_enabled=is_enabled,
                 catch_up=catch_up,
             ),
         )
@@ -147,7 +147,8 @@ class TestBuffer:
 
     @pytest.mark.asyncio
     async def test_duplicate_fire_id_is_noop(
-        self, db: DatabaseManager,
+        self,
+        db: DatabaseManager,
     ) -> None:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         fire_id = uuid.uuid4()
@@ -185,7 +186,8 @@ class TestBuffer:
 class TestListForReplay:
     @pytest.mark.asyncio
     async def test_orders_by_scheduled_for(
-        self, db: DatabaseManager,
+        self,
+        db: DatabaseManager,
     ) -> None:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         base = datetime(2026, 4, 27, 10, 0, tzinfo=UTC)
@@ -205,15 +207,15 @@ class TestListForReplay:
 
         async with db.session() as s:
             fires = await PendingFiresRepository(s).list_for_replay(
-                project_id=project_id, engine="celery",
+                project_id=project_id,
+                engine="celery",
             )
             # SQLite strips tz; normalise both sides to naive for
             # the diff. Postgres preserves tz; the comparison still
             # holds because we subtract two like-shaped datetimes.
             base_naive = base.replace(tzinfo=None)
             assert [
-                int((f.scheduled_for.replace(tzinfo=None) - base_naive)
-                    .total_seconds() // 60)
+                int((f.scheduled_for.replace(tzinfo=None) - base_naive).total_seconds() // 60)
                 for f in fires
             ] == [0, 15, 30, 60]
 
@@ -300,7 +302,7 @@ class _RecordingDispatcher:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def issue(self, **kwargs):  # noqa: ANN201, ANN003
+    async def issue(self, **kwargs):
         self.calls.append(kwargs)
 
         class _Cmd:
@@ -317,14 +319,17 @@ def dispatcher() -> _RecordingDispatcher:
 class TestReplayWorker:
     @pytest.mark.asyncio
     async def test_no_online_agent_is_noop(
-        self, db: DatabaseManager, dispatcher,
+        self,
+        db: DatabaseManager,
+        dispatcher,
     ) -> None:
         from z4j_brain.domain.workers.pending_fires import (
             PendingFiresReplayWorker,
         )
 
         project_id, schedule_id = await _seed_project_and_schedule(
-            db, catch_up="fire_all_missed",
+            db,
+            catch_up="fire_all_missed",
         )
         # No agent seeded for this project/engine.
         async with db.session() as s:
@@ -350,14 +355,17 @@ class TestReplayWorker:
 
     @pytest.mark.asyncio
     async def test_skip_policy_drops_buffered_fires(
-        self, db: DatabaseManager, dispatcher,
+        self,
+        db: DatabaseManager,
+        dispatcher,
     ) -> None:
         from z4j_brain.domain.workers.pending_fires import (
             PendingFiresReplayWorker,
         )
 
         project_id, schedule_id = await _seed_project_and_schedule(
-            db, catch_up="skip",
+            db,
+            catch_up="skip",
         )
         await _seed_online_agent(db, project_id=project_id)
         async with db.session() as s:
@@ -374,26 +382,72 @@ class TestReplayWorker:
             await s.commit()
 
         await PendingFiresReplayWorker(
-            db=db, dispatcher=dispatcher,
+            db=db,
+            dispatcher=dispatcher,
         ).tick()
 
         # No issues from the dispatcher (skip policy).
         assert dispatcher.calls == []
-        # Buffer rows still present - the worker only deletes after
-        # a successful issue. Sweep removes them at expiry. (We
-        # could have the worker drop skip-policy rows in this pass;
-        # left as Phase 3 polish.)
+        # The dropped buffer rows are deleted in the same tick so a
+        # later tick cannot re-surface (and re-evaluate) them.
+        async with db.session() as s:
+            rows = (await s.execute(select(PendingFire))).scalars().all()
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_disabled_schedule_drops_buffered_fires(
+        self,
+        db: DatabaseManager,
+        dispatcher,
+    ) -> None:
+        """A schedule DISABLED during the outage must not replay its
+        buffered fires when agents return, even under fire_all_missed --
+        is_enabled is otherwise only enforced at fire/buffer time."""
+        from z4j_brain.domain.workers.pending_fires import (
+            PendingFiresReplayWorker,
+        )
+
+        project_id, schedule_id = await _seed_project_and_schedule(
+            db,
+            catch_up="fire_all_missed",
+            is_enabled=False,
+        )
+        await _seed_online_agent(db, project_id=project_id)
+        async with db.session() as s:
+            for _ in range(3):
+                await PendingFiresRepository(s).buffer(
+                    fire_id=uuid.uuid4(),
+                    schedule_id=schedule_id,
+                    project_id=project_id,
+                    engine="celery",
+                    payload={},
+                    scheduled_for=datetime.now(UTC),
+                    expires_at=datetime.now(UTC) + timedelta(days=7),
+                )
+            await s.commit()
+
+        await PendingFiresReplayWorker(db=db, dispatcher=dispatcher).tick()
+
+        # Nothing dispatched despite fire_all_missed, and the buffer rows
+        # are dropped so a later tick cannot re-surface them.
+        assert dispatcher.calls == []
+        async with db.session() as s:
+            rows = (await s.execute(select(PendingFire))).scalars().all()
+        assert rows == []
 
     @pytest.mark.asyncio
     async def test_fire_one_missed_keeps_only_latest(
-        self, db: DatabaseManager, dispatcher,
+        self,
+        db: DatabaseManager,
+        dispatcher,
     ) -> None:
         from z4j_brain.domain.workers.pending_fires import (
             PendingFiresReplayWorker,
         )
 
         project_id, schedule_id = await _seed_project_and_schedule(
-            db, catch_up="fire_one_missed",
+            db,
+            catch_up="fire_one_missed",
         )
         await _seed_online_agent(db, project_id=project_id)
         # Anchor relative to now so the test does not rot past its
@@ -415,25 +469,41 @@ class TestReplayWorker:
             await s.commit()
 
         await PendingFiresReplayWorker(
-            db=db, dispatcher=dispatcher,
+            db=db,
+            dispatcher=dispatcher,
         ).tick()
 
         # Exactly one issue, with the LATEST fire's payload.
         assert len(dispatcher.calls) == 1
         assert dispatcher.calls[0]["payload"]["offset"] == 45
-        # The other rows still in buffer (not deleted because not
-        # replayed).
+        # The replayed row AND the three dropped earlier occurrences are
+        # all cleared from the buffer, so a subsequent tick re-fires
+        # nothing. Regression: previously the dropped rows lingered and
+        # fire_one_missed re-fired one missed occurrence per tick.
+        async with db.session() as s:
+            rows = (await s.execute(select(PendingFire))).scalars().all()
+        assert rows == []
+
+        # Second tick: nothing left to replay, no duplicate fire.
+        await PendingFiresReplayWorker(
+            db=db,
+            dispatcher=dispatcher,
+        ).tick()
+        assert len(dispatcher.calls) == 1
 
     @pytest.mark.asyncio
     async def test_fire_all_missed_replays_in_order(
-        self, db: DatabaseManager, dispatcher,
+        self,
+        db: DatabaseManager,
+        dispatcher,
     ) -> None:
         from z4j_brain.domain.workers.pending_fires import (
             PendingFiresReplayWorker,
         )
 
         project_id, schedule_id = await _seed_project_and_schedule(
-            db, catch_up="fire_all_missed",
+            db,
+            catch_up="fire_all_missed",
         )
         await _seed_online_agent(db, project_id=project_id)
         # Anchor relative to now so the expires_at horizon stays in
@@ -454,7 +524,8 @@ class TestReplayWorker:
             await s.commit()
 
         await PendingFiresReplayWorker(
-            db=db, dispatcher=dispatcher,
+            db=db,
+            dispatcher=dispatcher,
         ).tick()
 
         # All four issued, in scheduled_for order.
@@ -463,14 +534,17 @@ class TestReplayWorker:
 
     @pytest.mark.asyncio
     async def test_expired_buffers_swept(
-        self, db: DatabaseManager, dispatcher,
+        self,
+        db: DatabaseManager,
+        dispatcher,
     ) -> None:
         from z4j_brain.domain.workers.pending_fires import (
             PendingFiresReplayWorker,
         )
 
         project_id, schedule_id = await _seed_project_and_schedule(
-            db, catch_up="fire_all_missed",
+            db,
+            catch_up="fire_all_missed",
         )
         await _seed_online_agent(db, project_id=project_id)
         async with db.session() as s:
@@ -486,7 +560,8 @@ class TestReplayWorker:
             await s.commit()
 
         await PendingFiresReplayWorker(
-            db=db, dispatcher=dispatcher,
+            db=db,
+            dispatcher=dispatcher,
         ).tick()
 
         async with db.session() as s:
@@ -494,3 +569,61 @@ class TestReplayWorker:
         assert rows == []
         # Expired never got dispatched.
         assert dispatcher.calls == []
+
+    @pytest.mark.asyncio
+    async def test_replay_upgrades_fire_row_to_delivered(
+        self,
+        db: DatabaseManager,
+        dispatcher,
+    ) -> None:
+        """A5: replaying a buffered fire upgrades its schedule_fires row
+        from ``buffered`` to ``delivered`` (with the command_id), so the
+        fire-history view reflects the dispatch instead of sitting at
+        ``buffered`` until the ack lands."""
+        from z4j_brain.domain.workers.pending_fires import (
+            PendingFiresReplayWorker,
+        )
+        from z4j_brain.persistence.models import ScheduleFire
+        from z4j_brain.persistence.repositories import ScheduleFireRepository
+
+        project_id, schedule_id = await _seed_project_and_schedule(
+            db,
+            catch_up="fire_all_missed",
+        )
+        await _seed_online_agent(db, project_id=project_id)
+        fire_id = uuid.uuid4()
+        now = datetime.now(UTC)
+        async with db.session() as s:
+            # The FireSchedule handler's buffered path writes this row.
+            await ScheduleFireRepository(s).record(
+                fire_id=fire_id,
+                schedule_id=schedule_id,
+                project_id=project_id,
+                command_id=None,
+                status="buffered",
+                scheduled_for=now,
+            )
+            await PendingFiresRepository(s).buffer(
+                fire_id=fire_id,
+                schedule_id=schedule_id,
+                project_id=project_id,
+                engine="celery",
+                payload={},
+                scheduled_for=now,
+                expires_at=now + timedelta(days=7),
+            )
+            await s.commit()
+
+        await PendingFiresReplayWorker(db=db, dispatcher=dispatcher).tick()
+
+        async with db.session() as s:
+            row = (
+                await s.execute(
+                    select(ScheduleFire).where(ScheduleFire.fire_id == fire_id),
+                )
+            ).scalar_one()
+            buffers = (await s.execute(select(PendingFire))).scalars().all()
+        assert row.status == "delivered"
+        assert row.command_id is not None
+        assert buffers == []  # buffer cleared after successful replay
+        assert len(dispatcher.calls) == 1

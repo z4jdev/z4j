@@ -49,10 +49,12 @@ class PasswordResetToken(PKMixin, Base):
     )
     token_hash: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
     consumed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

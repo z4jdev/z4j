@@ -37,13 +37,11 @@ from z4j_brain.persistence.enums import ProjectRole
 
 if TYPE_CHECKING:
     from z4j_brain.auth.passwords import PasswordHasher
-    from z4j_brain.auth.sessions import SessionPayload
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.persistence.models import Session as SessionRow
     from z4j_brain.persistence.models import User
     from z4j_brain.persistence.repositories import (
         AuditLogRepository,
-        MembershipRepository,
         SessionRepository,
         UserRepository,
     )
@@ -115,17 +113,19 @@ def canonicalize_email(raw: str) -> str:
 # We treat these as syntactically valid so an operator who uses
 # ``Z4J_BOOTSTRAP_ADMIN_EMAIL=admin@homelab.local`` does not get
 # locked out of their own brain at first login.
-_OPERATOR_RESERVED_TLDS = frozenset({
-    "local",
-    "localhost",
-    "internal",
-    "intranet",
-    "private",
-    "corp",
-    "home",
-    "lan",
-    "arpa",
-})
+_OPERATOR_RESERVED_TLDS = frozenset(
+    {
+        "local",
+        "localhost",
+        "internal",
+        "intranet",
+        "private",
+        "corp",
+        "home",
+        "lan",
+        "arpa",
+    }
+)
 
 
 def validate_admin_email(raw: str) -> str:
@@ -189,9 +189,9 @@ class AuthService:
     """
 
     __slots__ = (
-        "_settings",
-        "_hasher",
         "_audit",
+        "_hasher",
+        "_settings",
     )
 
     def __init__(
@@ -253,12 +253,7 @@ class AuthService:
             and user.locked_until is not None
             and aware_utc(user.locked_until) > datetime.now(UTC)
         )
-        ok = (
-            password_ok
-            and user is not None
-            and user.is_active
-            and not is_locked
-        )
+        ok = password_ok and user is not None and user.is_active and not is_locked
 
         # Hold the response duration before any branching. Mask DB
         # variance, argon2 variance, cache hit/miss.
@@ -449,19 +444,12 @@ class AuthService:
         # lifetime so the idle predicate cannot trip before the
         # absolute expiry does. Absolute lifetime still wins.
         lifetime_seconds = int(
-            (
-                aware_utc(session_row.expires_at)
-                - aware_utc(session_row.issued_at)
-            ).total_seconds(),
+            (aware_utc(session_row.expires_at) - aware_utc(session_row.issued_at)).total_seconds(),
         )
-        remember_me_seconds = (
-            self._settings.session_remember_me_lifetime_seconds
-        )
+        remember_me_seconds = self._settings.session_remember_me_lifetime_seconds
         is_remembered = lifetime_seconds >= remember_me_seconds
         effective_idle = (
-            lifetime_seconds + 1
-            if is_remembered
-            else self._settings.session_idle_timeout_seconds
+            lifetime_seconds + 1 if is_remembered else self._settings.session_idle_timeout_seconds
         )
         if not is_session_live(
             session_row,

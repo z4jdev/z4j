@@ -30,13 +30,11 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.domain.notifications import channels as channels_module
 from z4j_brain.domain.notifications.channels import DeliveryResult
@@ -54,10 +52,7 @@ from z4j_brain.persistence.models import (
 )
 from z4j_brain.settings import Settings
 
-
-SECRET_WEBHOOK_URL = (
-    "https://hooks.slack.com/services/T1234ABCD/B5678EFGH/SECRETTOKENXYZ"
-)
+SECRET_WEBHOOK_URL = "https://hooks.slack.com/services/T1234ABCD/B5678EFGH/SECRETTOKENXYZ"
 
 
 @pytest.fixture
@@ -92,7 +87,9 @@ async def engine(settings: Settings):
 
 @pytest.mark.asyncio
 async def test_real_delivery_error_masks_webhook_url_r7_m1(
-    settings: Settings, engine, monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The real-delivery persistence path must mask config URLs.
 
@@ -115,59 +112,62 @@ async def test_real_delivery_error_masks_webhook_url_r7_m1(
 
     # Seed: user + project + membership + a webhook channel pointing
     # at the secret URL + a user_subscription bound to that channel.
-    Session = async_sessionmaker(engine, expire_on_commit=False)
+    Session = async_sessionmaker(engine, expire_on_commit=False)  # noqa: N806  SQLAlchemy sessionmaker naming convention
     async with Session() as s:
-        s.add_all([
-            Project(id=project_id, slug="r7m1", name="R7M1"),
-            User(
-                id=user_id,
-                email=f"u-{uuid.uuid4().hex[:8]}@example.com",
-                password_hash=hasher.hash(
-                    "correct horse battery staple 9",
+        s.add_all(
+            [
+                Project(id=project_id, slug="r7m1", name="R7M1"),
+                User(
+                    id=user_id,
+                    email=f"u-{uuid.uuid4().hex[:8]}@example.com",
+                    password_hash=hasher.hash(
+                        "correct horse battery staple 9",
+                    ),
+                    is_admin=False,
+                    is_active=True,
                 ),
-                is_admin=False,
-                is_active=True,
-            ),
-            Membership(
-                user_id=user_id, project_id=project_id,
-                role=ProjectRole.VIEWER,
-            ),
-            NotificationChannel(
-                id=channel_id,
-                project_id=project_id,
-                name="slack-ops",
-                type="webhook",
-                # The sanitiser masks config values for the
-                # URL-bearing key set (``url``, ``webhook_url``,
-                # ``bot_token``, ``integration_key``) whose value
-                # is >= 8 chars long. ``url`` is the only relevant
-                # key in this webhook config; the secret URL is
-                # the substring we need to see redacted.
-                config={
-                    "url": SECRET_WEBHOOK_URL,
-                    "hmac_secret": "supersecrethmackeyAAAAAAAAAAAAAA",
-                },
-                is_active=True,
-            ),
-            UserSubscription(
-                id=sub_id,
-                user_id=user_id,
-                project_id=project_id,
-                trigger="task.failed",
-                filters={},
-                # in_app False so we don't accidentally satisfy the
-                # dispatch path via the in-app insert alone.
-                in_app=False,
-                project_channel_ids=[channel_id],
-                user_channel_ids=[],
-                cooldown_seconds=0,
-                # last_fired_at NULL so the cooldown claim succeeds
-                # without contention.
-                last_fired_at=None,
-                muted_until=None,
-                is_active=True,
-            ),
-        ])
+                Membership(
+                    user_id=user_id,
+                    project_id=project_id,
+                    role=ProjectRole.VIEWER,
+                ),
+                NotificationChannel(
+                    id=channel_id,
+                    project_id=project_id,
+                    name="slack-ops",
+                    type="webhook",
+                    # The sanitiser masks config values for the
+                    # URL-bearing key set (``url``, ``webhook_url``,
+                    # ``bot_token``, ``integration_key``) whose value
+                    # is >= 8 chars long. ``url`` is the only relevant
+                    # key in this webhook config; the secret URL is
+                    # the substring we need to see redacted.
+                    config={
+                        "url": SECRET_WEBHOOK_URL,
+                        "hmac_secret": "supersecrethmackeyAAAAAAAAAAAAAA",
+                    },
+                    is_active=True,
+                ),
+                UserSubscription(
+                    id=sub_id,
+                    user_id=user_id,
+                    project_id=project_id,
+                    trigger="task.failed",
+                    filters={},
+                    # in_app False so we don't accidentally satisfy the
+                    # dispatch path via the in-app insert alone.
+                    in_app=False,
+                    project_channel_ids=[channel_id],
+                    user_channel_ids=[],
+                    cooldown_seconds=0,
+                    # last_fired_at NULL so the cooldown claim succeeds
+                    # without contention.
+                    last_fired_at=None,
+                    muted_until=None,
+                    is_active=True,
+                ),
+            ]
+        )
         await s.commit()
 
     # Stub the webhook dispatcher with one that returns a failed
@@ -176,7 +176,8 @@ async def test_real_delivery_error_masks_webhook_url_r7_m1(
     # message: the URL appears in the message). The dispatcher
     # signature is ``(config, payload) -> DeliveryResult``.
     async def _stub_webhook(
-        config, payload,  # noqa: ANN001 - test stub matches signature
+        config,
+        payload,
     ) -> DeliveryResult:
         # Real httpx errors often look like:
         # ``ConnectError: [...] sending request to
@@ -195,7 +196,9 @@ async def test_real_delivery_error_masks_webhook_url_r7_m1(
     # by key inside ``_run_pending_deliveries``. Monkeypatch the
     # webhook entry only.
     monkeypatch.setitem(
-        channels_module.CHANNEL_DISPATCHERS, "webhook", _stub_webhook,
+        channels_module.CHANNEL_DISPATCHERS,
+        "webhook",
+        _stub_webhook,
     )
 
     # Drive the real evaluate_and_dispatch path (the one that
@@ -223,16 +226,18 @@ async def test_real_delivery_error_masks_webhook_url_r7_m1(
     # verbatim in deliveries.error / deliveries.response_body.
     async with Session() as s:
         rows = (
-            await s.execute(
-                select(NotificationDelivery).where(
-                    NotificationDelivery.project_id == project_id,
-                ),
+            (
+                await s.execute(
+                    select(NotificationDelivery).where(
+                        NotificationDelivery.project_id == project_id,
+                    ),
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
-    assert len(rows) == 1, (
-        f"expected exactly one delivery row, got {len(rows)}"
-    )
+    assert len(rows) == 1, f"expected exactly one delivery row, got {len(rows)}"
     row = rows[0]
     assert row.status == "failed"
     # The URL substring MUST be redacted in the error.

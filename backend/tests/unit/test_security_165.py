@@ -24,7 +24,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # F1: route-specific regression lock -- privileged routes carry fresh-MFA
 # ---------------------------------------------------------------------------
@@ -50,9 +49,7 @@ import pytest
 # This list is exclusively the routes where a stolen session can
 # durably escalate privileges or backdoor accounts.
 
-API_ROOT = (
-    Path(__file__).parent.parent.parent / "src" / "z4j_brain" / "api"
-)
+API_ROOT = Path(__file__).parent.parent.parent / "src" / "z4j_brain" / "api"
 
 
 # (filename, route_path_or_marker) -- routes that MUST have
@@ -70,24 +67,22 @@ F1_GATED_ROUTES = [
     ("auth_mfa.py", '"/recovery-codes/regenerate"'),
     # delete project (projects.py:476)
     ("projects.py", '@router.delete(\n    "/{slug}"'),
-
     # ----- 1.6.5 additions (the audit's F1) -----
     # users.py: create / update / admin password reset / delete
-    ("users.py", '@router.post(\n    ""'),                     # create user
-    ("users.py", '@router.patch(\n    "/{user_id}"'),          # update user
+    ("users.py", '@router.post(\n    ""'),  # create user
+    ("users.py", '@router.patch(\n    "/{user_id}"'),  # update user
     ("users.py", '@router.post(\n    "/{user_id}/password"'),  # admin pw reset
-    ("users.py", '@router.delete(\n    "/{user_id}"'),         # delete user
+    ("users.py", '@router.delete(\n    "/{user_id}"'),  # delete user
     # agents.py: mint + revoke project agent token
-    ("agents.py", '@router.post(\n    ""'),                    # mint agent
-    ("agents.py", '@router.delete(\n    "/{agent_id}"'),       # revoke agent
+    ("agents.py", '@router.post(\n    ""'),  # mint agent
+    ("agents.py", '@router.delete(\n    "/{agent_id}"'),  # revoke agent
     # memberships.py: grant / update / revoke
-    ("memberships.py", '@router.post(\n    ""'),               # grant
+    ("memberships.py", '@router.post(\n    ""'),  # grant
     ("memberships.py", '@router.patch(\n    "/{membership_id}"'),  # update
     ("memberships.py", '@router.delete(\n    "/{membership_id}"'),  # revoke
     # invitations.py: mint + revoke (admin_router)
-    ("invitations.py", '@admin_router.post(\n    ""'),         # mint
+    ("invitations.py", '@admin_router.post(\n    ""'),  # mint
     ("invitations.py", '@admin_router.delete(\n    "/{invitation_id}"'),  # revoke
-
     # ----- 1.6.5 round-2 additions (audit finding F5) -----
     # notifications.py: project-admin channel + default-subscription
     # mutating routes. A stolen project-admin session could
@@ -95,12 +90,18 @@ F1_GATED_ROUTES = [
     # infrastructure and pivot all future project notifications
     # there. Same threat shape as F1.
     ("notifications.py", '"/channels",\n    response_model=ChannelPublic'),  # create channel
-    ("notifications.py", '"/channels/import_from_user"'),       # import secrets server-side
-    ("notifications.py", '@router.patch(\n    "/channels/{channel_id}"'),  # update channel (URL pivot risk)
+    ("notifications.py", '"/channels/import_from_user"'),  # import secrets server-side
+    (
+        "notifications.py",
+        '@router.patch(\n    "/channels/{channel_id}"',
+    ),  # update channel (URL pivot risk)
     ("notifications.py", '@router.delete(\n    "/channels/{channel_id}"'),  # delete channel
-    ("notifications.py", '"/channels/test"'),                   # data-exfil preflight
-    ("notifications.py", '"/channels/{channel_id}/test"'),      # data-exfil saved-channel test
-    ("notifications.py", '"/defaults",\n    response_model=DefaultSubscriptionPublic'),  # add default routing
+    ("notifications.py", '"/channels/test"'),  # data-exfil preflight
+    ("notifications.py", '"/channels/{channel_id}/test"'),  # data-exfil saved-channel test
+    (
+        "notifications.py",
+        '"/defaults",\n    response_model=DefaultSubscriptionPublic',
+    ),  # add default routing
     ("notifications.py", '@router.patch(\n    "/defaults/{default_id}"'),  # update default routing
     ("notifications.py", '@router.delete(\n    "/defaults/{default_id}"'),  # delete default routing
 ]
@@ -131,7 +132,7 @@ def test_route_carries_fresh_mfa_gate(filename: str, route_marker: str) -> None:
 
     # Window: from the marker to ~250 chars later (the dependencies
     # list is always within the route decorator block).
-    window = text[idx:idx + 400]
+    window = text[idx : idx + 400]
 
     assert "Depends(require_fresh_mfa)" in window, (
         f"\n1.6.5 advisory F1 regression: route in {filename} matching "
@@ -180,7 +181,8 @@ NOTIFICATIONS_F1_HANDLERS = [
 
 @pytest.mark.parametrize("handler_name,route_marker", NOTIFICATIONS_F1_HANDLERS)
 def test_notifications_f1_route_calls_audit_record(
-    handler_name: str, route_marker: str,
+    handler_name: str,
+    route_marker: str,
 ) -> None:
     """Locked: every F1-gated notifications.py route MUST call
     audit.record() in its handler body.
@@ -238,7 +240,10 @@ def test_f1_route_list_includes_known_admin_surfaces() -> None:
     files_in_list = {f for f, _ in F1_GATED_ROUTES}
     audit_identified_files = {
         # 1.6.5 round-1
-        "users.py", "agents.py", "memberships.py", "invitations.py",
+        "users.py",
+        "agents.py",
+        "memberships.py",
+        "invitations.py",
         # 1.6.5 round-2
         "notifications.py",
     }
@@ -275,8 +280,8 @@ async def test_f3_notification_webhook_includes_timestamp_and_dual_sig(
     monkeypatch,
 ) -> None:
     """Locked: deliver_webhook ships X-Z4J-Timestamp + X-Z4J-Signature
-    (v2 over timestamp.body) + X-Z4J-Signature-V1 (legacy over body)
-    when ``hmac_secret`` is configured.
+    (v2 over timestamp.body) and NO legacy X-Z4J-Signature-V1 (removed in
+    1.7) when ``hmac_secret`` is configured.
 
     The HMAC values must:
     - Use the SAME secret
@@ -310,7 +315,11 @@ async def test_f3_notification_webhook_includes_timestamp_and_dual_sig(
         return None, "203.0.113.42"
 
     async def fake_post(
-        url: str, *, content: str, headers: dict, pin_ip: str,
+        url: str,
+        *,
+        content: str,
+        headers: dict,
+        pin_ip: str,
     ):
         captured["headers"] = headers
         captured["body"] = content
@@ -318,13 +327,19 @@ async def test_f3_notification_webhook_includes_timestamp_and_dual_sig(
         return FakeResponse()
 
     monkeypatch.setattr(
-        channels, "validate_webhook_url", fake_validate_webhook_url,
+        channels,
+        "validate_webhook_url",
+        fake_validate_webhook_url,
     )
     monkeypatch.setattr(
-        channels, "validate_webhook_headers", fake_validate_webhook_headers,
+        channels,
+        "validate_webhook_headers",
+        fake_validate_webhook_headers,
     )
     monkeypatch.setattr(
-        channels, "resolve_and_pin", fake_resolve_and_pin,
+        channels,
+        "resolve_and_pin",
+        fake_resolve_and_pin,
     )
     monkeypatch.setattr(channels, "_post", fake_post)
 
@@ -338,21 +353,18 @@ async def test_f3_notification_webhook_includes_timestamp_and_dual_sig(
     assert result.success is True
 
     headers = captured["headers"]
-    assert "X-Z4J-Timestamp" in headers, (
-        "1.6.5 F3: outbound webhook MUST include X-Z4J-Timestamp"
-    )
-    assert "X-Z4J-Signature" in headers, (
-        "outbound webhook MUST include X-Z4J-Signature"
-    )
-    assert "X-Z4J-Signature-V1" in headers, (
-        "1.6.5 F3: outbound webhook MUST include X-Z4J-Signature-V1 "
-        "during the backwards-compat window (removed in 1.7)"
+    assert "X-Z4J-Timestamp" in headers, "1.6.5 F3: outbound webhook MUST include X-Z4J-Timestamp"
+    assert "X-Z4J-Signature" in headers, "outbound webhook MUST include X-Z4J-Signature"
+    assert "X-Z4J-Signature-V1" not in headers, (
+        "1.7 REMOVED the legacy body-only X-Z4J-Signature-V1 header; "
+        "only the timestamp+body X-Z4J-Signature ships now"
     )
 
     # Verify the timestamp is a plausible unix-seconds integer.
     ts = headers["X-Z4J-Timestamp"]
     assert ts.isdigit(), f"timestamp must be unix seconds, got {ts!r}"
     import time as _time
+
     now = int(_time.time())
     assert abs(now - int(ts)) < 60, (
         f"timestamp must be near 'now' (within 60s), got {ts}, now={now}"
@@ -360,30 +372,14 @@ async def test_f3_notification_webhook_includes_timestamp_and_dual_sig(
 
     # Verify v2 signature: HMAC(secret, "{timestamp}.{body}")
     v2_sig = headers["X-Z4J-Signature"]
-    assert v2_sig.startswith("sha256="), (
-        f"signature MUST be 'sha256=<hex>', got {v2_sig!r}"
-    )
+    assert v2_sig.startswith("sha256="), f"signature MUST be 'sha256=<hex>', got {v2_sig!r}"
     expected_v2 = hmac.new(
         secret.encode("utf-8"),
-        f"{ts}.{expected_body}".encode("utf-8"),
+        f"{ts}.{expected_body}".encode(),
         hashlib.sha256,
     ).hexdigest()
     assert v2_sig == f"sha256={expected_v2}", (
-        "v2 signature MUST be HMAC over '{timestamp}.{body}' "
-        "(matches the audit-forwarder pattern)"
-    )
-
-    # Verify legacy v1 signature: HMAC(secret, body)
-    v1_sig = headers["X-Z4J-Signature-V1"]
-    expected_v1 = hmac.new(
-        secret.encode("utf-8"),
-        expected_body.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    assert v1_sig == f"sha256={expected_v1}", (
-        "legacy v1 signature MUST be HMAC over body-only "
-        "(matches the pre-1.6.5 format) so receivers in the upgrade "
-        "window keep verifying"
+        "v2 signature MUST be HMAC over '{timestamp}.{body}' (matches the audit-forwarder pattern)"
     )
 
 
@@ -405,7 +401,11 @@ async def test_f3_no_hmac_secret_means_no_signature_headers(
         text = "ok"
 
     async def fake_post(
-        url: str, *, content: str, headers: dict, pin_ip: str,
+        url: str,
+        *,
+        content: str,
+        headers: dict,
+        pin_ip: str,
     ):
         captured["headers"] = headers
         return FakeResponse()

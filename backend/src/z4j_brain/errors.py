@@ -45,6 +45,21 @@ class MfaReverifyRequiredError(AuthorizationError):
     code = "mfa_reverify_required"
 
 
+class MfaEnrollmentRequiredError(AuthorizationError):
+    """Raised by ``enforce_mfa_enrollment`` (api/deps.py) when a
+    cookie-session caller is targeted by the MFA enrollment-
+    enforcement policy, has no MFA enrolled, and is past the grace
+    deadline. Only the enrollment routes (plus ``GET /auth/me`` and
+    logout) accept such a session; everything else gets this 403.
+
+    Distinct stable ``code`` so the dashboard can branch on it and
+    route to the enrollment page. ``details`` carries the missed
+    ``deadline`` for display.
+    """
+
+    code = "mfa_enrollment_required"
+
+
 _STATUS_MAP: dict[type[Z4JError], HTTPStatus] = {
     ValidationError: HTTPStatus.UNPROCESSABLE_ENTITY,
     InvalidFrameError: HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -85,6 +100,7 @@ __all__ = [
     "ConfigError",
     "ConflictError",
     "InvalidFrameError",
+    "MfaEnrollmentRequiredError",
     "MfaReverifyRequiredError",
     "NotFoundError",
     "ProtocolError",

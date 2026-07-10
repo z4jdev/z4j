@@ -29,6 +29,7 @@ the scheduler subprocess restarts in lockstep with brain anyway.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import secrets
@@ -137,13 +138,13 @@ def _validate_pki_out_dir(out_dir: Path) -> None:
     0o700. Refuse on a conservative blocklist; legitimate paths
     (system tempdirs, user homes, ``/var/lib/z4j``) are allowed.
     """
-    import os  # noqa: PLC0415
+    import os
 
     # Resolve to an absolute path WITHOUT requiring it to exist
     # (the minter creates it). This expands .. segments + normalizes
     # separators so attackers can't slip past via ``//etc`` etc.
     try:
-        resolved = Path(os.path.abspath(str(out_dir)))
+        resolved = Path(os.path.abspath(str(out_dir)))  # noqa: PTH100  abspath intentionally does not resolve symlinks in this security check
     except (OSError, ValueError) as exc:
         raise ValueError(
             f"PKI dir {out_dir!r} could not be resolved: {exc}",
@@ -177,10 +178,10 @@ def mint_loopback_pki(out_dir: Path) -> LoopbackPKI:
     The five files are::
 
         ca.crt
-        brain-embedded.crt
-        brain-embedded.key
-        scheduler-embedded.crt
-        scheduler-embedded.key
+        brain - embedded.crt
+        brain - embedded.key
+        scheduler - embedded.crt
+        scheduler - embedded.key
 
     Audit fix 4.1 (Apr 2026): refuses to write into a directory
     whose parent is a system-critical path. Without this check,
@@ -230,7 +231,7 @@ def mint_loopback_pki(out_dir: Path) -> LoopbackPKI:
                 "or pre-set it to 0o700 yourself before starting the "
                 "brain. The PKI material must not be world or group "
                 "readable.",
-            )
+            ) from None
         # Mode is already restrictive enough; continue without
         # chmod. Operator-chosen pre-locked-down directories are a
         # valid setup.
@@ -282,9 +283,10 @@ def mint_loopback_pki(out_dir: Path) -> LoopbackPKI:
         _key_to_pem(client_cert[1]),
     )
     logger.info(
-        "z4j.brain.embedded_scheduler: minted loopback PKI in %s "
-        "(server CN=%s, client CN=%s)",
-        out_dir, BRAIN_SERVER_CN, SCHEDULER_CLIENT_CN,
+        "z4j.brain.embedded_scheduler: minted loopback PKI in %s (server CN=%s, client CN=%s)",
+        out_dir,
+        BRAIN_SERVER_CN,
+        SCHEDULER_CLIENT_CN,
     )
     return bundle
 
@@ -292,14 +294,16 @@ def mint_loopback_pki(out_dir: Path) -> LoopbackPKI:
 def _mint_ca() -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
     """Self-signed CA used to sign both the server and client leaves."""
     key = rsa.generate_private_key(
-        public_exponent=65537, key_size=_KEY_SIZE_BITS,
+        public_exponent=65537,
+        key_size=_KEY_SIZE_BITS,
     )
     subject = x509.Name(
         [
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, "z4j"),
             x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "embedded"),
             x509.NameAttribute(
-                NameOID.COMMON_NAME, "z4j-embedded-loopback-ca",
+                NameOID.COMMON_NAME,
+                "z4j-embedded-loopback-ca",
             ),
         ],
     )
@@ -313,7 +317,8 @@ def _mint_ca() -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
         .not_valid_before(now - timedelta(minutes=5))
         .not_valid_after(now + timedelta(days=_VALIDITY_DAYS))
         .add_extension(
-            x509.BasicConstraints(ca=True, path_length=0), critical=True,
+            x509.BasicConstraints(ca=True, path_length=0),
+            critical=True,
         )
         .add_extension(
             x509.KeyUsage(
@@ -344,7 +349,8 @@ def _mint_leaf(
 ) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
     """Sign a leaf cert under ``ca_cert`` for the given CN + SANs."""
     key = rsa.generate_private_key(
-        public_exponent=65537, key_size=_KEY_SIZE_BITS,
+        public_exponent=65537,
+        key_size=_KEY_SIZE_BITS,
     )
     subject = x509.Name(
         [
@@ -380,7 +386,8 @@ def _mint_leaf(
             critical=True,
         )
         .add_extension(
-            x509.SubjectAlternativeName(sans), critical=False,
+            x509.SubjectAlternativeName(sans),
+            critical=False,
         )
     )
     cert = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
@@ -404,12 +411,12 @@ def _write_pem(path: Path, data: bytes) -> None:
     (audit fix S005) so the cert-mint helper in
     ``scheduler_grpc/auth.py`` shares the same race-safe primitive.
     """
-    from z4j_brain.utils.fs_safe import write_bytes_secure  # noqa: PLC0415
+    from z4j_brain.utils.fs_safe import write_bytes_secure
 
     write_bytes_secure(path, data)
 
 
-def _ip(value: str):  # noqa: ANN202 - tiny helper
+def _ip(value: str):
     import ipaddress
 
     return ipaddress.ip_address(value)
@@ -550,10 +557,8 @@ class EmbeddedSchedulerSupervisor:
         self._stop_event.set()
         if self._watchdog is not None:
             self._watchdog.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._watchdog
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
             self._watchdog = None
         await self._terminate_subprocess()
 
@@ -576,10 +581,8 @@ class EmbeddedSchedulerSupervisor:
             prev: asyncio.Task | None = getattr(self, prev_task_attr)
             if prev is not None and not prev.done():
                 prev.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await prev
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
             setattr(self, prev_task_attr, None)
 
         # Validate every element of ``embedded_scheduler_argv``
@@ -592,16 +595,23 @@ class EmbeddedSchedulerSupervisor:
         # ``-c "import os; ..."``-shaped tricks via flag-value
         # confusion). The allow-list is the known-good set of
         # z4j_scheduler subcommands + their flags.
-        _SCHEDULER_ARG_ALLOWLIST = {
-            "serve", "import", "export", "verify",
-            "--config", "--log-level", "--leader-backend",
-            "--brain-url", "--instance-id", "--healthcheck-port",
+        scheduler_arg_allowlist = {
+            "serve",
+            "import",
+            "export",
+            "verify",
+            "--config",
+            "--log-level",
+            "--leader-backend",
+            "--brain-url",
+            "--instance-id",
+            "--healthcheck-port",
         }
         validated_extra: list[str] = []
         for raw in self._settings.embedded_scheduler_argv:
             arg = str(raw)
             head = arg.split("=", 1)[0]  # support --flag=value
-            if head not in _SCHEDULER_ARG_ALLOWLIST:
+            if head not in scheduler_arg_allowlist:
                 raise RuntimeError(
                     f"embedded_scheduler_argv element {arg!r} is not in "
                     f"the safe-flag allow-list; refusing to launch the "
@@ -650,10 +660,8 @@ class EmbeddedSchedulerSupervisor:
                     "during spawn; terminating orphan PID=%s",
                     proc.pid,
                 )
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     proc.terminate()
-                except ProcessLookupError:
-                    pass
             raise
         # Drain stdout/stderr in the background so the OS pipe
         # buffer doesn't fill (which would block the subprocess on
@@ -669,9 +677,10 @@ class EmbeddedSchedulerSupervisor:
             name="z4j.embedded_scheduler.stderr",
         )
         logger.info(
-            "z4j.brain.embedded_scheduler: spawned subprocess "
-            "(pid=%s, brain_grpc=%s:%s)",
-            self._proc.pid, self._brain_grpc_host, self._brain_grpc_port,
+            "z4j.brain.embedded_scheduler: spawned subprocess (pid=%s, brain_grpc=%s:%s)",
+            self._proc.pid,
+            self._brain_grpc_host,
+            self._brain_grpc_port,
         )
 
     def _build_subprocess_env(self) -> dict[str, str]:
@@ -699,25 +708,42 @@ class EmbeddedSchedulerSupervisor:
         """
         # Whitelist of env-var prefixes / exact names the subprocess
         # needs. Everything else is dropped.
-        _ALLOWED_PREFIXES = ("Z4J_SCHEDULER_", "LC_")
-        _ALLOWED_EXACT = frozenset({
-            "PATH", "PYTHONPATH", "PYTHONHOME", "LANG", "LANGUAGE",
-            "TZ", "HOME", "USER", "LOGNAME", "TERM", "TMPDIR",
-            "TMP", "TEMP",
-            # Windows runtime essentials
-            "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT",
-            "USERPROFILE", "APPDATA", "LOCALAPPDATA", "WINDIR",
-            "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
-        })
+        allowed_prefixes = ("Z4J_SCHEDULER_", "LC_")
+        allowed_exact = frozenset(
+            {
+                "PATH",
+                "PYTHONPATH",
+                "PYTHONHOME",
+                "LANG",
+                "LANGUAGE",
+                "TZ",
+                "HOME",
+                "USER",
+                "LOGNAME",
+                "TERM",
+                "TMPDIR",
+                "TMP",
+                "TEMP",
+                # Windows runtime essentials
+                "SYSTEMROOT",
+                "SYSTEMDRIVE",
+                "COMSPEC",
+                "PATHEXT",
+                "USERPROFILE",
+                "APPDATA",
+                "LOCALAPPDATA",
+                "WINDIR",
+                "PROCESSOR_ARCHITECTURE",
+                "NUMBER_OF_PROCESSORS",
+            }
+        )
         env: dict[str, str] = {
-            k: v for k, v in os.environ.items()
-            if k in _ALLOWED_EXACT
-            or any(k.startswith(p) for p in _ALLOWED_PREFIXES)
+            k: v
+            for k, v in os.environ.items()
+            if k in allowed_exact or any(k.startswith(p) for p in allowed_prefixes)
         }
 
-        env["Z4J_SCHEDULER_BRAIN_GRPC_URL"] = (
-            f"{self._brain_grpc_host}:{self._brain_grpc_port}"
-        )
+        env["Z4J_SCHEDULER_BRAIN_GRPC_URL"] = f"{self._brain_grpc_host}:{self._brain_grpc_port}"
         env["Z4J_SCHEDULER_BRAIN_REST_URL"] = self._brain_rest_url
         env["Z4J_SCHEDULER_TLS_CERT"] = str(self._pki.client_cert_pem)
         env["Z4J_SCHEDULER_TLS_KEY"] = str(self._pki.client_key_pem)
@@ -737,13 +763,11 @@ class EmbeddedSchedulerSupervisor:
         # environments). ``socket.gethostname()`` is portable and
         # returns the actual machine name on both POSIX and
         # Windows.
-        import socket as _socket  # noqa: PLC0415
+        import socket as _socket
+
         try:
-            _hostname = (
-                os.uname().nodename if hasattr(os, "uname")
-                else _socket.gethostname()
-            )
-        except Exception:  # noqa: BLE001
+            _hostname = os.uname().nodename if hasattr(os, "uname") else _socket.gethostname()
+        except Exception:
             _hostname = "brain"
         env.setdefault(
             "Z4J_SCHEDULER_INSTANCE_ID",
@@ -779,7 +803,7 @@ class EmbeddedSchedulerSupervisor:
         if stream is None:
             return
         # Patterns we never want surfaced into brain's log pipeline.
-        _REDACT_TOKENS = (
+        redact_tokens = (
             "Z4J_SCHEDULER_TLS_KEY",
             "Z4J_SCHEDULER_TLS_CERT",
             "BEGIN PRIVATE KEY",
@@ -795,21 +819,22 @@ class EmbeddedSchedulerSupervisor:
                     return
                 try:
                     decoded = line.decode("utf-8", errors="replace").rstrip()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     decoded = repr(line)
                 # Redact whole lines that look secret-bearing
                 # rather than try to scrub in-line.
-                if any(t in decoded for t in _REDACT_TOKENS):
+                if any(t in decoded for t in redact_tokens):
                     logger.warning(
-                        "z4j.brain.embedded_scheduler[%s]: <redacted "
-                        "line containing TLS material>",
+                        "z4j.brain.embedded_scheduler[%s]: <redacted line containing TLS material>",
                         label,
                     )
                     continue
                 logger.info(
-                    "z4j.brain.embedded_scheduler[%s]: %s", label, decoded,
+                    "z4j.brain.embedded_scheduler[%s]: %s",
+                    label,
+                    decoded,
                 )
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        except (asyncio.CancelledError, Exception):
             return
 
     async def _supervise(self) -> None:
@@ -821,9 +846,7 @@ class EmbeddedSchedulerSupervisor:
         gives up and logs CRITICAL. The operator's only recovery
         is to restart brain.
         """
-        max_attempts = (
-            self._settings.embedded_scheduler_restart_max_attempts
-        )
+        max_attempts = self._settings.embedded_scheduler_restart_max_attempts
         backoff = float(
             self._settings.embedded_scheduler_restart_backoff_seconds,
         )
@@ -834,7 +857,7 @@ class EmbeddedSchedulerSupervisor:
                 returncode = await self._proc.wait()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j.brain.embedded_scheduler: subprocess wait failed",
                 )
@@ -856,7 +879,8 @@ class EmbeddedSchedulerSupervisor:
                     "embedded scheduler is now permanently down. "
                     "supervisor.permanently_failed=True. "
                     "Restart brain to recover.",
-                    returncode, max_attempts,
+                    returncode,
+                    max_attempts,
                 )
                 return
             # Randomised backoff (decorrelated jitter) defends
@@ -867,29 +891,32 @@ class EmbeddedSchedulerSupervisor:
             # simultaneously. Multiplying by uniform(0.7, 1.3)
             # decorrelates restart times by up to 60% within
             # the cap.
-            import random  # noqa: PLC0415
+            import random
 
             base_delay = min(60.0, backoff * (2 ** (self._restart_count - 1)))
-            delay = base_delay * random.uniform(0.7, 1.3)
+            delay = base_delay * random.uniform(0.7, 1.3)  # noqa: S311  non-security backoff jitter
             delay = min(60.0, max(0.1, delay))
             logger.warning(
                 "z4j.brain.embedded_scheduler: subprocess exited "
                 "(returncode=%s); restart attempt %d/%d in %.1fs",
-                returncode, self._restart_count, max_attempts, delay,
+                returncode,
+                self._restart_count,
+                max_attempts,
+                delay,
             )
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=delay,
+                    self._stop_event.wait(),
+                    timeout=delay,
                 )
                 return  # stop fired during backoff
             except TimeoutError:
                 pass
             try:
                 await self._spawn_subprocess()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
-                    "z4j.brain.embedded_scheduler: respawn failed; "
-                    "watchdog continuing",
+                    "z4j.brain.embedded_scheduler: respawn failed; watchdog continuing",
                 )
                 # When respawn raises, the next loop iteration's
                 # ``await self._proc.wait()`` returns IMMEDIATELY
@@ -922,7 +949,7 @@ class EmbeddedSchedulerSupervisor:
         except ProcessLookupError:
             self._proc = None
             return
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j.brain.embedded_scheduler: terminate() raised",
             )
@@ -931,26 +958,25 @@ class EmbeddedSchedulerSupervisor:
         except TimeoutError:
             logger.warning(
                 "z4j.brain.embedded_scheduler: subprocess did not exit "
-                "within %.1fs; sending SIGKILL", grace,
+                "within %.1fs; sending SIGKILL",
+                grace,
             )
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-            except ProcessLookupError:
-                pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:
-                logger.error(
-                    "z4j.brain.embedded_scheduler: subprocess survived "
-                    "SIGKILL; leaking pid=%s", proc.pid,
+                logger.exception(
+                    "z4j.brain.embedded_scheduler: subprocess survived SIGKILL; leaking pid=%s",
+                    proc.pid,
                 )
         self._proc = None
 
 
 __all__ = [
     "BRAIN_SERVER_CN",
+    "SCHEDULER_CLIENT_CN",
     "EmbeddedSchedulerSupervisor",
     "LoopbackPKI",
-    "SCHEDULER_CLIENT_CN",
     "mint_loopback_pki",
 ]

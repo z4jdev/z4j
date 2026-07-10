@@ -30,6 +30,7 @@ Usage from ``main.py.create_app``::
 
     app = FastAPI(..., openapi_url=None, docs_url=None, redoc_url=None)
     from z4j_brain.api.openapi_route import register_openapi_routes
+
     register_openapi_routes(app, settings)
 """
 
@@ -40,7 +41,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Request, Response, status
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -103,7 +104,7 @@ def _hash_schema(schema: dict[str, Any]) -> str:
 async def _audit_schema_access(
     request: Request,
     *,
-    user: "User | None",
+    user: User | None,
     path: str,
 ) -> None:
     """Write an ``openapi.schema_accessed`` audit row.
@@ -133,12 +134,14 @@ async def _audit_schema_access(
                 metadata={
                     "path": path,
                     "auth_kind": getattr(
-                        request.state, "auth_kind", "anonymous",
+                        request.state,
+                        "auth_kind",
+                        "anonymous",
                     ),
                 },
             )
             await session.commit()
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Recon-surface audit logging is observability, not a hard
         # security gate. A DB hiccup must not deny legitimate access.
         logger.warning(
@@ -160,11 +163,11 @@ def _safe_client_ip(request: Request) -> str:
         from z4j_brain.api.deps import get_client_ip
 
         return get_client_ip(request)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return "unknown"
 
 
-def register_openapi_routes(app: FastAPI, settings: "Settings") -> None:
+def register_openapi_routes(app: FastAPI, settings: Settings) -> None:
     """Mount the schema + Swagger UI routes per the visibility mode.
 
     Idempotent: skips registration when ``visibility == "disabled"``
@@ -195,8 +198,8 @@ def register_openapi_routes(app: FastAPI, settings: "Settings") -> None:
         from z4j_brain.api.deps import get_current_user
 
         async def _require_auth(
-            user: "User" = Depends(get_current_user),
-        ) -> "User":
+            user: User = Depends(get_current_user),
+        ) -> User:
             return user
 
         _auth_user_dep = _require_auth
@@ -231,7 +234,8 @@ def register_openapi_routes(app: FastAPI, settings: "Settings") -> None:
                 },
             )
         await _audit_schema_access(
-            request, user=user if visibility == "private" else None,
+            request,
+            user=user if visibility == "private" else None,
             path=OPENAPI_SCHEMA_PATH,
         )
         return JSONResponse(
@@ -261,7 +265,8 @@ def register_openapi_routes(app: FastAPI, settings: "Settings") -> None:
             title="z4j API docs",
         )
         await _audit_schema_access(
-            request, user=user if visibility == "private" else None,
+            request,
+            user=user if visibility == "private" else None,
             path=OPENAPI_DOCS_PATH,
         )
         # Stamp Cache-Control on the HTML response too. The browser

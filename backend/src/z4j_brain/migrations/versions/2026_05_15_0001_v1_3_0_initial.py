@@ -188,13 +188,12 @@ def upgrade() -> None:
     # explicitly to keep the 1.3.0 baseline true to its name. The
     # 1.5 ``agent_status_history`` migration creates that table
     # additively. See ``2026_05_20_0002_v1_5_agent_status_history.py``.
-    _post_1_3_0_tables: frozenset[str] = frozenset({
-        "agent_status_history",
-    })
-    initial_tables = [
-        t for t in Base.metadata.sorted_tables
-        if t.name not in _post_1_3_0_tables
-    ]
+    _post_1_3_0_tables: frozenset[str] = frozenset(
+        {
+            "agent_status_history",
+        }
+    )
+    initial_tables = [t for t in Base.metadata.sorted_tables if t.name not in _post_1_3_0_tables]
     Base.metadata.create_all(bind=bind, tables=initial_tables)
 
     if is_postgres:
@@ -333,6 +332,8 @@ def _install_postgres_only_features(
         "alert_events",
         "api_keys",
         "audit_log",
+        "automation_firing_outbox",
+        "automation_rules",
         "commands",
         "export_jobs",
         "extension_store",
@@ -340,6 +341,7 @@ def _install_postgres_only_features(
         "first_boot_tokens",
         "invitations",
         "memberships",
+        "misfire_alerts",
         "notification_channels",
         "notification_deliveries",
         "password_reset_tokens",
@@ -367,8 +369,7 @@ def _install_postgres_only_features(
         # own optional extension) doesn't break the migration.
         op.execute(
             sa.text(
-                f"ALTER TABLE IF EXISTS {table} "
-                f"ALTER COLUMN id SET DEFAULT gen_random_uuid()",
+                f"ALTER TABLE IF EXISTS {table} ALTER COLUMN id SET DEFAULT gen_random_uuid()",
             ),
         )
 
@@ -402,8 +403,7 @@ def _install_audit_log_triggers() -> None:
     # guarantees should use a least-privilege deploy role.
     op.execute(
         sa.text(
-            "REVOKE ALL ON FUNCTION audit_log_forbid_mutation() "
-            "FROM PUBLIC",
+            "REVOKE ALL ON FUNCTION audit_log_forbid_mutation() FROM PUBLIC",
         ),
     )
 
@@ -429,8 +429,7 @@ def _install_schedules_notify_trigger() -> None:
 def _drop_schedules_notify_trigger() -> None:
     op.execute(
         sa.text(
-            "DROP TRIGGER IF EXISTS z4j_schedules_notify_trigger "
-            "ON schedules",
+            "DROP TRIGGER IF EXISTS z4j_schedules_notify_trigger ON schedules",
         ),
     )
     op.execute(sa.text("DROP FUNCTION IF EXISTS z4j_schedules_notify()"))
@@ -512,14 +511,12 @@ def _install_events_partitioning() -> None:
     # the migration and the ORM agree on what's there.
     op.execute(
         sa.text(
-            "CREATE INDEX ix_events_project_task ON events "
-            "(project_id, task_id, occurred_at)",
+            "CREATE INDEX ix_events_project_task ON events (project_id, task_id, occurred_at)",
         ),
     )
     op.execute(
         sa.text(
-            "CREATE INDEX ix_events_project_kind ON events "
-            "(project_id, kind, occurred_at)",
+            "CREATE INDEX ix_events_project_kind ON events (project_id, kind, occurred_at)",
         ),
     )
 
@@ -548,8 +545,7 @@ def _install_events_partitioning() -> None:
     # window (clamp-bypass detection).
     op.execute(
         sa.text(
-            "CREATE TABLE IF NOT EXISTS events_default "
-            "PARTITION OF events DEFAULT",
+            "CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT",
         ),
     )
 
@@ -575,8 +571,7 @@ def _install_postgres_only_indexes() -> None:
     """
     op.execute(
         sa.text(
-            "CREATE INDEX ix_events_payload_gin "
-            "ON events USING GIN (payload)",
+            "CREATE INDEX ix_events_payload_gin ON events USING GIN (payload)",
         ),
     )
     # Audit fix S006-C (1.4.0): performance indexes that the test
@@ -585,14 +580,12 @@ def _install_postgres_only_indexes() -> None:
     # so hot lookups stay cheap as the table grows.
     op.execute(
         sa.text(
-            "CREATE INDEX ix_users_active_partial "
-            "ON users (id) WHERE is_active",
+            "CREATE INDEX ix_users_active_partial ON users (id) WHERE is_active",
         ),
     )
     op.execute(
         sa.text(
-            "CREATE INDEX ix_projects_active_partial "
-            "ON projects (id) WHERE is_active",
+            "CREATE INDEX ix_projects_active_partial ON projects (id) WHERE is_active",
         ),
     )
     # Pending-with-deadline scan: command_dispatcher's timeout
@@ -620,24 +613,19 @@ def _install_postgres_only_indexes() -> None:
     # bar.
     op.execute(
         sa.text(
-            "CREATE INDEX ix_tasks_args_gin "
-            "ON tasks USING GIN (args) "
-            "WHERE args IS NOT NULL",
+            "CREATE INDEX ix_tasks_args_gin ON tasks USING GIN (args) WHERE args IS NOT NULL",
         ),
     )
     op.execute(
         sa.text(
-            "CREATE INDEX ix_tasks_kwargs_gin "
-            "ON tasks USING GIN (kwargs) "
-            "WHERE kwargs IS NOT NULL",
+            "CREATE INDEX ix_tasks_kwargs_gin ON tasks USING GIN (kwargs) WHERE kwargs IS NOT NULL",
         ),
     )
     # Trigram search over task name (e.g. dashboard search "send%email").
     # ``pg_trgm`` is installed by ``_install_extensions``.
     op.execute(
         sa.text(
-            "CREATE INDEX ix_tasks_search "
-            "ON tasks USING GIN (name gin_trgm_ops)",
+            "CREATE INDEX ix_tasks_search ON tasks USING GIN (name gin_trgm_ops)",
         ),
     )
     # Live-session lookup: 'how many active sessions does this user
@@ -646,8 +634,7 @@ def _install_postgres_only_indexes() -> None:
     # accumulate before the audit retention sweep clears them.
     op.execute(
         sa.text(
-            "CREATE INDEX ix_sessions_user_active "
-            "ON sessions (user_id) WHERE revoked_at IS NULL",
+            "CREATE INDEX ix_sessions_user_active ON sessions (user_id) WHERE revoked_at IS NULL",
         ),
     )
 
@@ -676,15 +663,19 @@ def _drop_postgres_only_indexes() -> None:
 
 # SQLAlchemy creates these as a side effect of the Enum columns;
 # downgrade drops them after the tables are gone.
+# The seven native enum types SQLAlchemy creates from the Enum columns
+# (the ``name=`` on each Enum in the models). The previous list used
+# stale 1.0-era names (schedulekind, agentstate, ...) that matched NONE
+# of the real types plus five that were never enums at all, so
+# ``downgrade base`` on Postgres silently orphaned all seven real types.
+# These now match the models' ``Enum(name=...)`` exactly. task_priority
+# is created once (by tasks) and reused by schedules, so it drops once.
 _SQL_ENUM_NAMES: tuple[str, ...] = (
-    "schedulekind",
-    "scheduleengine",
-    "commandstatus",
-    "agentstate",
-    "projectrole",
-    "userrole",
-    "memberinvitestatus",
-    "channelkind",
-    "deliverystatus",
-    "subscriptionscope",
+    "agent_state",
+    "command_status",
+    "project_role",
+    "schedule_kind",
+    "task_priority",
+    "task_state",
+    "worker_state",
 )

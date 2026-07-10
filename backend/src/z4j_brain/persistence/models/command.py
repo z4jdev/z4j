@@ -79,7 +79,10 @@ class Command(PKMixin, Base):
     target_type: Mapped[str] = mapped_column(String(40), nullable=False)
     target_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(
-        jsonb(), nullable=False, default=dict, server_default="{}",
+        jsonb(),
+        nullable=False,
+        default=dict,
+        server_default="{}",
     )
     idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[CommandStatus] = mapped_column(
@@ -102,24 +105,30 @@ class Command(PKMixin, Base):
         server_default=func.now(),
     )
     dispatched_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     timeout_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
     source_ip: Mapped[str | None] = mapped_column(inet(), nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
-            "project_id", "idempotency_key",
+            "project_id",
+            "idempotency_key",
             name="uq_commands_project_idempotency_key",
         ),
         Index(
             "ix_commands_project_status_issued",
-            "project_id", "status", "issued_at",
+            "project_id",
+            "status",
+            "issued_at",
         ),
         Index("ix_commands_timeout_at", "timeout_at"),
         Index("ix_commands_issued_by_at", "issued_by", "issued_at"),

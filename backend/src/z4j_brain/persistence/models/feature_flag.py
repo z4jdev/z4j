@@ -22,7 +22,10 @@ class FeatureFlag(PKMixin, TimestampsMixin, Base):
     key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="false",
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
     )
     value: Mapped[str] = mapped_column(Text, nullable=False, default="")
 

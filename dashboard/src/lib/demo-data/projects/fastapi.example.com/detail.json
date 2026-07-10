@@ -5,7 +5,6 @@
   "description": "API gateway, FastAPI + arq + arq-cron. Medium scale, all green.",
   "environment": "production",
   "timezone": "UTC",
-  "retention_days": 30,
   "is_active": true,
   "created_at_offset_s": -15552000,
   "updated_at_offset_s": -1800

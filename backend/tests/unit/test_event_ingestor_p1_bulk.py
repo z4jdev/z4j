@@ -59,7 +59,9 @@ async def session():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False,
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
     )
     async with factory() as s:
         yield s
@@ -206,10 +208,14 @@ class TestBulkWorkerUpsert:
         await session.commit()
 
         workers = (
-            await session.execute(
-                select(Worker).order_by(Worker.name),
+            (
+                await session.execute(
+                    select(Worker).order_by(Worker.name),
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(workers) == 3
         for idx, w in enumerate(workers):
             assert w.name == f"celery@worker-{idx}"
@@ -384,7 +390,9 @@ class TestBulkUpsertFallback:
         async def _exploding_bulk(self, rows):
             call_count["n"] += 1
             raise OperationalError(
-                "simulated deadlock", params=None, orig=Exception("deadlock"),
+                "simulated deadlock",
+                params=None,
+                orig=Exception("deadlock"),
             )
 
         with patch.object(

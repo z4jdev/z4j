@@ -62,7 +62,8 @@ class AgentRepository(BaseRepository[Agent]):
         return list(result.scalars().all())
 
     async def list_online_for_project(
-        self, project_id: UUID,
+        self,
+        project_id: UUID,
     ) -> list[Agent]:
         """Return only the currently-online agents for a project.
 
@@ -136,12 +137,9 @@ class AgentRepository(BaseRepository[Agent]):
         # the winner's). On SQLite (no jsonb_set) we fall back to the
         # legacy RMW path, the dev DB is single-writer so no race.
         if metadata_updates:
-            dialect = (
-                self.session.bind.dialect.name
-                if self.session.bind is not None else ""
-            )
+            dialect = self.session.bind.dialect.name if self.session.bind is not None else ""
             if dialect == "postgresql":
-                from sqlalchemy import text as _text  # noqa: PLC0415
+                from sqlalchemy import text as _text
 
                 # Chain ``jsonb_set`` calls so each metadata key is
                 # set independently in a single SQL statement. Order
@@ -168,14 +166,8 @@ class AgentRepository(BaseRepository[Agent]):
                 bind_params: dict[str, Any] = {}
                 for i, (key, value) in enumerate(metadata_updates.items()):
                     pname = f"meta_{i}_value"
-                    expr = (
-                        f"jsonb_set({expr}, "
-                        f"'{{{key}}}', "
-                        f"CAST(:{pname} AS jsonb), true)"
-                    )
-                    bind_params[pname] = (
-                        __import__("json").dumps(value)
-                    )
+                    expr = f"jsonb_set({expr}, '{{{key}}}', CAST(:{pname} AS jsonb), true)"
+                    bind_params[pname] = __import__("json").dumps(value)
                 await self.session.execute(
                     update(Agent)
                     .where(Agent.id == agent_id)
@@ -309,7 +301,10 @@ class AgentRepository(BaseRepository[Agent]):
         await self.touch_heartbeat_at(agent_id, when=None)
 
     async def touch_heartbeat_at(
-        self, agent_id: UUID, *, when: datetime | None = None,
+        self,
+        agent_id: UUID,
+        *,
+        when: datetime | None = None,
     ) -> None:
         """Bump ``last_seen_at`` to ``when`` (defaults to now).
 
@@ -339,6 +334,36 @@ class AgentRepository(BaseRepository[Agent]):
             .values(state=AgentState.OFFLINE),
         )
         return int(result.rowcount or 0)
+
+    async def list_offline_unseen_since(
+        self,
+        *,
+        cutoff: datetime,
+        limit: int = 500,
+    ) -> list[Agent]:
+        """Offline agents whose last heartbeat predates ``cutoff``.
+
+        Used by :class:`AgentHealthWorker` to find confirmed-down
+        offline EPISODES to alert on. Includes agents flipped offline by
+        the gateway's close handler as well as by the sweep, because
+        both paths land on ``state=offline`` -- the alert must not
+        depend on WHICH path noticed the death. Agents that never
+        connected (``last_seen_at IS NULL``) are excluded: with no
+        heartbeat anchor there is no episode to alert on (and nothing
+        was ever "lost"). Oldest-unseen first so a burst that overflows
+        the caller's per-sweep cap alerts the longest-dead agents first.
+        """
+        result = await self.session.execute(
+            select(Agent)
+            .where(
+                Agent.state == AgentState.OFFLINE,
+                Agent.last_seen_at.is_not(None),
+                Agent.last_seen_at < cutoff,
+            )
+            .order_by(Agent.last_seen_at.asc())
+            .limit(limit),
+        )
+        return list(result.scalars().all())
 
     async def prune_stale(self, *, cutoff: datetime) -> int:
         """Delete agents that have been offline past ``cutoff``.

@@ -14,11 +14,15 @@ silently ignores.
 from __future__ import annotations
 
 from z4j_brain.persistence.models.agent import Agent
+from z4j_brain.persistence.models.agent_offline_alert import AgentOfflineAlert
 from z4j_brain.persistence.models.agent_status_history import AgentStatusHistory
 from z4j_brain.persistence.models.agent_worker import AgentWorker
-from z4j_brain.persistence.models.alert_event import AlertEvent
 from z4j_brain.persistence.models.api_key import ApiKey
 from z4j_brain.persistence.models.audit_log import AuditLog
+from z4j_brain.persistence.models.automation_firing_outbox import (
+    AutomationFiringOutbox,
+)
+from z4j_brain.persistence.models.automation_rule import AutomationRule
 from z4j_brain.persistence.models.command import Command
 from z4j_brain.persistence.models.event import Event
 from z4j_brain.persistence.models.export_job import ExportJob
@@ -27,17 +31,9 @@ from z4j_brain.persistence.models.first_boot_token import FirstBootToken
 from z4j_brain.persistence.models.invitation import Invitation
 from z4j_brain.persistence.models.kv_store import ExtensionStore, ProjectConfig, UserPreference
 from z4j_brain.persistence.models.membership import Membership
+from z4j_brain.persistence.models.meta import Z4JMeta
 from z4j_brain.persistence.models.mfa_recovery_code import MfaRecoveryCode
-from z4j_brain.persistence.models.password_reset_token import (
-    PasswordResetToken,
-)
-from z4j_brain.persistence.models.pending_fire import PendingFire
-from z4j_brain.persistence.models.project import Project
-from z4j_brain.persistence.models.queue import Queue
-from z4j_brain.persistence.models.schedule import Schedule
-from z4j_brain.persistence.models.schedule_fire import ScheduleFire
-from z4j_brain.persistence.models.scheduler_rate_bucket import SchedulerRateBucket
-from z4j_brain.persistence.models.session import Session
+from z4j_brain.persistence.models.misfire_alert import MisfireAlert
 from z4j_brain.persistence.models.notification import (
     NotificationChannel,
     NotificationDelivery,
@@ -46,8 +42,17 @@ from z4j_brain.persistence.models.notification import (
     UserNotification,
     UserSubscription,
 )
-from z4j_brain.persistence.models.meta import Z4JMeta
+from z4j_brain.persistence.models.password_reset_token import (
+    PasswordResetToken,
+)
+from z4j_brain.persistence.models.pending_fire import PendingFire
+from z4j_brain.persistence.models.project import Project
+from z4j_brain.persistence.models.queue import Queue
 from z4j_brain.persistence.models.saved_view import SavedView
+from z4j_brain.persistence.models.schedule import Schedule
+from z4j_brain.persistence.models.schedule_fire import ScheduleFire
+from z4j_brain.persistence.models.scheduler_rate_bucket import SchedulerRateBucket
+from z4j_brain.persistence.models.session import Session
 from z4j_brain.persistence.models.task import Task
 from z4j_brain.persistence.models.task_annotation import TaskAnnotation
 from z4j_brain.persistence.models.trusted_device import TrustedDevice
@@ -56,26 +61,29 @@ from z4j_brain.persistence.models.worker import Worker
 
 __all__ = [
     "Agent",
+    "AgentOfflineAlert",
     "AgentStatusHistory",
     "AgentWorker",
-    "AlertEvent",
     "ApiKey",
     "AuditLog",
+    "AutomationFiringOutbox",
+    "AutomationRule",
     "Command",
     "Event",
     "ExportJob",
+    "ExtensionStore",
     "FeatureFlag",
     "FirstBootToken",
-    "ExtensionStore",
     "Invitation",
     "Membership",
     "MfaRecoveryCode",
-    "ProjectConfig",
+    "MisfireAlert",
     "NotificationChannel",
     "NotificationDelivery",
     "PasswordResetToken",
     "PendingFire",
     "Project",
+    "ProjectConfig",
     "ProjectDefaultSubscription",
     "Queue",
     "SavedView",

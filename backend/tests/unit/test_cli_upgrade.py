@@ -16,7 +16,8 @@ import pytest
 
 
 def _patch_pypi(
-    monkeypatch: pytest.MonkeyPatch, responses: dict[str, dict],
+    monkeypatch: pytest.MonkeyPatch,
+    responses: dict[str, dict],
 ) -> None:
     """Make every httpx.Client return canned PyPI responses by URL."""
 
@@ -39,7 +40,8 @@ def _patch_pypi(
 
 
 def _patch_installed(
-    monkeypatch: pytest.MonkeyPatch, versions: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    versions: dict[str, str],
 ) -> None:
     """Replace importlib.metadata.version inside the cli module."""
     from importlib.metadata import PackageNotFoundError
@@ -58,13 +60,17 @@ def _patch_installed(
 
 class TestUpgradeCheck:
     def test_all_current_returns_zero(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _patch_installed(monkeypatch, {"z4j": "1.2.2", "z4j-brain": "1.2.2"})
-        _patch_pypi(monkeypatch, {
-            "/pypi/z4j/json": {"info": {"version": "1.2.2"}},
-            "/pypi/z4j-brain/json": {"info": {"version": "1.2.2"}},
-        })
+        _patch_pypi(
+            monkeypatch,
+            {
+                "/pypi/z4j/json": {"info": {"version": "1.2.2"}},
+                "/pypi/z4j-brain/json": {"info": {"version": "1.2.2"}},
+            },
+        )
 
         from z4j_brain.cli import main
 
@@ -75,13 +81,17 @@ class TestUpgradeCheck:
         assert "current" in buf.getvalue()
 
     def test_behind_returns_one(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _patch_installed(monkeypatch, {"z4j": "1.2.1", "z4j-brain": "1.2.1"})
-        _patch_pypi(monkeypatch, {
-            "/pypi/z4j/json": {"info": {"version": "1.2.2"}},
-            "/pypi/z4j-brain/json": {"info": {"version": "1.2.2"}},
-        })
+        _patch_pypi(
+            monkeypatch,
+            {
+                "/pypi/z4j/json": {"info": {"version": "1.2.2"}},
+                "/pypi/z4j-brain/json": {"info": {"version": "1.2.2"}},
+            },
+        )
 
         from z4j_brain.cli import main
 
@@ -92,12 +102,16 @@ class TestUpgradeCheck:
         assert "behind" in buf.getvalue()
 
     def test_json_output(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _patch_installed(monkeypatch, {"z4j": "1.2.1"})
-        _patch_pypi(monkeypatch, {
-            "/pypi/z4j/json": {"info": {"version": "1.2.2"}},
-        })
+        _patch_pypi(
+            monkeypatch,
+            {
+                "/pypi/z4j/json": {"info": {"version": "1.2.2"}},
+            },
+        )
 
         from z4j_brain.cli import main
 
@@ -112,13 +126,17 @@ class TestUpgradeCheck:
         assert payload["rows"][0]["behind"] is True
 
     def test_uninstalled_packages_skipped(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Only z4j is installed; the other adapters are not.
         _patch_installed(monkeypatch, {"z4j": "1.2.2"})
-        _patch_pypi(monkeypatch, {
-            "/pypi/z4j/json": {"info": {"version": "1.2.2"}},
-        })
+        _patch_pypi(
+            monkeypatch,
+            {
+                "/pypi/z4j/json": {"info": {"version": "1.2.2"}},
+            },
+        )
 
         from z4j_brain.cli import main
 
@@ -130,12 +148,16 @@ class TestUpgradeCheck:
         assert len(payload["rows"]) == 1
 
     def test_pypi_404_marked_unpublished(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _patch_installed(monkeypatch, {"z4j-bare": "1.2.0"})
-        _patch_pypi(monkeypatch, {
-            "/pypi/z4j-bare/json": {"status": 404},
-        })
+        _patch_pypi(
+            monkeypatch,
+            {
+                "/pypi/z4j-bare/json": {"status": 404},
+            },
+        )
 
         from z4j_brain.cli import main
 

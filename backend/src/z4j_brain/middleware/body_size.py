@@ -20,8 +20,6 @@ those are not body-size aware.
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
-
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -74,16 +72,16 @@ class BodySizeLimitMiddleware:
                 body = message.get("body", b"")
                 received += len(body)
                 if received > max_bytes:
-                    raise _BodyTooLarge()
+                    raise _BodyTooLargeError()
             return message
 
         try:
             await self.app(scope, counting_receive, send)
-        except _BodyTooLarge:
+        except _BodyTooLargeError:
             await _too_large(send, reason="streamed_body_exceeded")
 
 
-class _BodyTooLarge(Exception):
+class _BodyTooLargeError(Exception):
     """Raised by ``counting_receive`` when the cap is exceeded."""
 
 

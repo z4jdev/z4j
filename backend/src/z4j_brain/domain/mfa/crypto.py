@@ -45,7 +45,7 @@ _HKDF_INFO = b"z4j-mfa-totp-secret"
 _KEY_LEN = 32
 
 
-class DecryptionFailed(RuntimeError):
+class DecryptionFailed(RuntimeError):  # noqa: N818  public exception name in __all__, kept for API stability
     """Raised when no candidate key can decrypt the ciphertext.
 
     A correctly-authenticated AES-GCM payload returns the plaintext;
@@ -76,7 +76,7 @@ def _aad_for_user(user_id: object) -> bytes:
     will get InvalidTag at decrypt time -- the "encrypted-secret swap"
     attack the audit caught. (1.6.0 audit Medium-1.)
     """
-    return f"z4j-mfa-totp:user={user_id!s}".encode("utf-8")
+    return f"z4j-mfa-totp:user={user_id!s}".encode()
 
 
 def encrypt_totp_secret(
@@ -159,7 +159,9 @@ def decrypt_totp_secret(
         try:
             key = _derive_key(prev)
             plaintext = AESGCM(key).decrypt(
-                nonce, ciphertext, associated_data=aad,
+                nonce,
+                ciphertext,
+                associated_data=aad,
             )
             return plaintext, True
         except InvalidTag:
@@ -172,8 +174,8 @@ def decrypt_totp_secret(
 
 
 __all__ = [
-    "DecryptionFailed",
     "NONCE_BYTES",
+    "DecryptionFailed",
     "decrypt_totp_secret",
     "encrypt_totp_secret",
 ]

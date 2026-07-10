@@ -36,10 +36,16 @@ class SavedView(PKMixin, TimestampsMixin, Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     page: Mapped[str] = mapped_column(String(50), nullable=False)  # tasks, workers, etc.
     filters: Mapped[dict[str, Any]] = mapped_column(
-        jsonb(), nullable=False, default=dict, server_default="{}",
+        jsonb(),
+        nullable=False,
+        default=dict,
+        server_default="{}",
     )
     is_default: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="false",
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
     )
 
 

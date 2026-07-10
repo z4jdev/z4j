@@ -15,21 +15,17 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import (
     AgentState,
-    CommandStatus,
-    ProjectRole,
     TaskState,
 )
 from z4j_brain.persistence.models import (
     Agent,
-    Membership,
     Project,
     Session,
     Task,
@@ -162,7 +158,9 @@ class TestAgentsRouter:
         assert r.json() == []
 
     async def test_create_agent_returns_token_once(
-        self, client, seeded,
+        self,
+        client,
+        seeded,
     ) -> None:
         r = await client.post(
             "/api/v1/projects/default/agents",
@@ -213,9 +211,7 @@ class TestAgentsRouter:
                         engine_adapters=["celery"],
                         scheduler_adapters=[],
                         capabilities={},
-                        state=(
-                            AgentState.OFFLINE if connected else AgentState.UNKNOWN
-                        ),
+                        state=(AgentState.OFFLINE if connected else AgentState.UNKNOWN),
                         last_connect_at=connected,
                     ),
                 )
@@ -238,7 +234,10 @@ class TestTasksRouter:
         assert r.json()["next_cursor"] is None
 
     async def test_list_tasks_with_state_filter(
-        self, brain_app, client, seeded,
+        self,
+        brain_app,
+        client,
+        seeded,
     ) -> None:
         # Seed two tasks in different states.
         async with brain_app.state.db.session() as s:
@@ -350,7 +349,7 @@ class TestCommandsRouter:
             async def send_bytes(self, _data: bytes) -> None:
                 pass
 
-            async def close(self, code: int = 1000) -> None:  # noqa: ARG002
+            async def close(self, code: int = 1000) -> None:
                 pass
 
         fake_ws = FakeWS()

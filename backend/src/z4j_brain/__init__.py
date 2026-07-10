@@ -8,7 +8,8 @@ commercial license is available - contact licensing@z4j.com.
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
 # Read the wheel version from installed metadata. The brain code
 # ships in the ``z4j`` distribution as of the 1.4.0 consolidation

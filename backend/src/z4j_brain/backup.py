@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -152,14 +151,16 @@ def backup_postgres(database_url: str, output: Path) -> None:
     libpq_url = _pg_libpq_url(database_url)
     # -Fc: custom format. -Z6: gzip compression. --no-owner / --no-acl
     # for portability across environments.
-    result = subprocess.run(
-        [
+    result = subprocess.run(  # noqa: S603, PLW1510  fixed internal pg_dump, returncode checked below
+        [  # noqa: S607  pg_dump resolved via PATH by design (shutil.which guard above)
             "pg_dump",
             "-Fc",
-            "-Z", "6",
+            "-Z",
+            "6",
             "--no-owner",
             "--no-acl",
-            "-f", str(output),
+            "-f",
+            str(output),
             libpq_url,
         ],
         capture_output=True,
@@ -187,14 +188,15 @@ def restore_postgres(database_url: str, source: Path) -> None:
     if not src.exists():
         raise FileNotFoundError(f"restore: source file does not exist: {src}")
     libpq_url = _pg_libpq_url(database_url)
-    result = subprocess.run(
-        [
+    result = subprocess.run(  # noqa: S603, PLW1510  fixed internal pg_restore, returncode checked below
+        [  # noqa: S607  pg_restore resolved via PATH by design (shutil.which guard above)
             "pg_restore",
             "--clean",
             "--if-exists",
             "--no-owner",
             "--no-acl",
-            "-d", libpq_url,
+            "-d",
+            libpq_url,
             str(src),
         ],
         capture_output=True,

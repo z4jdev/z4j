@@ -100,8 +100,7 @@ class SchedulerGrpcServer:
         """
         if not self._settings.scheduler_grpc_enabled:
             logger.info(
-                "z4j.brain.scheduler_grpc: disabled via settings; "
-                "not starting server",
+                "z4j.brain.scheduler_grpc: disabled via settings; not starting server",
             )
             return
 
@@ -177,9 +176,7 @@ class SchedulerGrpcServer:
             interceptors: tuple = ()
         else:
             creds = _build_server_credentials(self._settings)
-            interceptors = (
-                SchedulerAllowlistInterceptor(allowed_cns=allowed_cns),
-            )
+            interceptors = (SchedulerAllowlistInterceptor(allowed_cns=allowed_cns),)
         # gRPC server options. The two ``min_*ping*`` knobs match
         # the scheduler client's keepalive cadence (30s by default,
         # see ``z4j_scheduler.storage.brain_client``). Without them,
@@ -203,7 +200,8 @@ class SchedulerGrpcServer:
             ("grpc.http2.max_ping_strikes", 0),
         ]
         server = grpc.aio.server(
-            interceptors=interceptors, options=server_options,
+            interceptors=interceptors,
+            options=server_options,
         )
         servicer = SchedulerServiceImpl(
             settings=self._settings,
@@ -214,8 +212,7 @@ class SchedulerGrpcServer:
         pb_grpc.add_SchedulerServiceServicer_to_server(servicer, server)
 
         bind_addr = (
-            f"{self._settings.scheduler_grpc_bind_host}"
-            f":{self._settings.scheduler_grpc_bind_port}"
+            f"{self._settings.scheduler_grpc_bind_host}:{self._settings.scheduler_grpc_bind_port}"
         )
         # ``add_secure_port`` / ``add_insecure_port`` returns the port
         # that was actually bound; capture it so test fixtures using
@@ -250,7 +247,7 @@ class SchedulerGrpcServer:
         grace = float(self._settings.scheduler_grpc_grace_seconds)
         try:
             await self._server.stop(grace=grace)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j.brain.scheduler_grpc: server.stop crashed",
             )

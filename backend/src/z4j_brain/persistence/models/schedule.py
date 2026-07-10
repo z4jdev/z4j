@@ -76,7 +76,10 @@ class Schedule(PKMixin, TimestampsMixin, Base):
     )
     expression: Mapped[str] = mapped_column(String, nullable=False)
     timezone: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="UTC", server_default="UTC",
+        String(64),
+        nullable=False,
+        default="UTC",
+        server_default="UTC",
     )
     queue: Mapped[str | None] = mapped_column(String(200), nullable=True)
     priority: Mapped[TaskPriority] = mapped_column(
@@ -92,22 +95,36 @@ class Schedule(PKMixin, TimestampsMixin, Base):
         server_default="normal",
     )
     args: Mapped[Any] = mapped_column(
-        jsonb(), nullable=False, default=list, server_default="[]",
+        jsonb(),
+        nullable=False,
+        default=list,
+        server_default="[]",
     )
     kwargs: Mapped[Any] = mapped_column(
-        jsonb(), nullable=False, default=dict, server_default="{}",
+        jsonb(),
+        nullable=False,
+        default=dict,
+        server_default="{}",
     )
     is_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default="true",
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
     )
     last_run_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     next_run_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     total_runs: Mapped[int] = mapped_column(
-        big_integer(), nullable=False, default=0, server_default="0",
+        big_integer(),
+        nullable=False,
+        default=0,
+        server_default="0",
     )
     external_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
@@ -118,30 +135,39 @@ class Schedule(PKMixin, TimestampsMixin, Base):
     # ``skip`` drops the late fire, ``fire_one_missed`` runs once,
     # ``fire_all_missed`` runs every missed slot in sequence.
     catch_up: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="skip", server_default="skip",
+        String(32),
+        nullable=False,
+        default="skip",
+        server_default="skip",
     )
     # ``source`` - which surface created this schedule. Used by the
     # dashboard to render a "managed by" badge and by the importers
     # to resolve idempotency on re-import.
     source: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="dashboard",
+        String(64),
+        nullable=False,
+        default="dashboard",
         server_default="dashboard",
     )
     # ``source_hash`` - content hash for declarative reconciliation
     # (the Z4J["schedules"] dict diff in framework adapters).
     source_hash: Mapped[str | None] = mapped_column(
-        String(128), nullable=True,
+        String(128),
+        nullable=True,
     )
     # ``last_fire_id`` - UUID of the most recent fire issued by
     # z4j-scheduler. Used by the brain's AcknowledgeFireResult
     # handler to correlate the ack back to its schedule row.
     last_fire_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(as_uuid=True), nullable=True,
+        Uuid(as_uuid=True),
+        nullable=True,
     )
 
     __table_args__ = (
         UniqueConstraint(
-            "project_id", "scheduler", "name",
+            "project_id",
+            "scheduler",
+            "name",
             name="uq_schedules_project_scheduler_name",
         ),
         Index("ix_schedules_project_id", "project_id"),

@@ -11,8 +11,8 @@ Three scoped K/V stores for different use cases:
 ``project_config``
     Per-project overrides and plugin configuration.
     Scoped to a project_id. Agents and the brain read these.
-    Example keys: ``retention_days_override``, ``alert_cooldown``,
-    ``plugin.sentry.dsn``, ``plugin.datadog.api_key``.
+    Example keys: ``alert_cooldown``, ``plugin.sentry.dsn``,
+    ``plugin.datadog.api_key``.
 
 ``extension_store``
     Global schemaless storage for plugins and extensions.
@@ -58,7 +58,10 @@ class UserPreference(PKMixin, TimestampsMixin, Base):
     )
     key: Mapped[str] = mapped_column(String(100), nullable=False)
     value: Mapped[Any] = mapped_column(
-        jsonb(), nullable=False, default=dict, server_default="{}",
+        jsonb(),
+        nullable=False,
+        default=dict,
+        server_default="{}",
     )
 
     __table_args__ = (
@@ -84,7 +87,10 @@ class ProjectConfig(PKMixin, TimestampsMixin, Base):
     )
     key: Mapped[str] = mapped_column(String(200), nullable=False)
     value: Mapped[Any] = mapped_column(
-        jsonb(), nullable=False, default=dict, server_default="{}",
+        jsonb(),
+        nullable=False,
+        default=dict,
+        server_default="{}",
     )
 
     __table_args__ = (
@@ -108,16 +114,20 @@ class ExtensionStore(PKMixin, TimestampsMixin, Base):
 
     key: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
     value: Mapped[Any] = mapped_column(
-        jsonb(), nullable=False, default=dict, server_default="{}",
+        jsonb(),
+        nullable=False,
+        default=dict,
+        server_default="{}",
     )
     autoload: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="false",
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
     )
     description: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    __table_args__ = (
-        Index("ix_extension_store_autoload", "autoload"),
-    )
+    __table_args__ = (Index("ix_extension_store_autoload", "autoload"),)
 
 
 __all__ = ["ExtensionStore", "ProjectConfig", "UserPreference"]

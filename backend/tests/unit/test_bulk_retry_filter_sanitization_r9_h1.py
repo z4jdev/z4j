@@ -30,6 +30,7 @@ class TestServerOwnedFilterKeys:
 
     def test_task_names_is_server_owned(self) -> None:
         from z4j_brain.api.commands import SERVER_OWNED_FILTER_KEYS
+
         assert "task_names" in SERVER_OWNED_FILTER_KEYS, (
             "R9-H1 regression: task_names must remain server-owned. "
             "Removing it would let an authenticated operator spoof "
@@ -39,6 +40,7 @@ class TestServerOwnedFilterKeys:
 
     def test_overrides_is_server_owned(self) -> None:
         from z4j_brain.api.commands import SERVER_OWNED_FILTER_KEYS
+
         assert "overrides" in SERVER_OWNED_FILTER_KEYS, (
             "R9-H1 regression: overrides (per-job args/kwargs) is "
             "brain-populated; client must not seed it."
@@ -46,6 +48,7 @@ class TestServerOwnedFilterKeys:
 
     def test_task_priorities_is_server_owned(self) -> None:
         from z4j_brain.api.commands import SERVER_OWNED_FILTER_KEYS
+
         assert "task_priorities" in SERVER_OWNED_FILTER_KEYS, (
             "R9-H1 regression: task_priorities is populated by the "
             "TaskRepository priority lookup; client must not seed."
@@ -54,6 +57,7 @@ class TestServerOwnedFilterKeys:
     def test_set_shape_is_immutable(self) -> None:
         """Defense against accidental list-not-frozenset drift."""
         from z4j_brain.api.commands import SERVER_OWNED_FILTER_KEYS
+
         assert isinstance(SERVER_OWNED_FILTER_KEYS, frozenset), (
             "SERVER_OWNED_FILTER_KEYS must be a frozenset so the "
             "module-level membership check stays O(1) and the set "
@@ -75,6 +79,7 @@ class TestEndpointStripsServerOwnedKeys:
 
     def test_issue_bulk_retry_uses_server_owned_filter_keys(self) -> None:
         import inspect
+
         from z4j_brain.api import commands
 
         src = inspect.getsource(commands.issue_bulk_retry)
@@ -92,9 +97,8 @@ class TestEndpointStripsServerOwnedKeys:
         # comprehension that excludes the server-owned keys, not by
         # copying the raw filter and overwriting conditionally
         # (which was the pre-R9-H1 shape).
-        assert (
-            "k not in SERVER_OWNED_FILTER_KEYS" in src
-            or "k for k in" in src and "if k not in SERVER" in src
+        assert "k not in SERVER_OWNED_FILTER_KEYS" in src or (
+            "k for k in" in src and "if k not in SERVER" in src
         ), (
             "R9-H1 regression: enriched_filter must be derived via "
             "a comprehension that excludes SERVER_OWNED_FILTER_KEYS, "
@@ -112,6 +116,7 @@ class TestEndpointStripsServerOwnedKeys:
         silently retried the resolved ids; the fix raises HTTP 400
         with the missing-id list."""
         import inspect
+
         from z4j_brain.api import commands
 
         src = inspect.getsource(commands.issue_bulk_retry)

@@ -49,7 +49,9 @@ async def session():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False,
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
     )
     async with factory() as s:
         yield s
@@ -93,7 +95,9 @@ def _row(
 @pytest.mark.asyncio
 class TestBulkUpsertInsert:
     async def test_fresh_batch_inserts_every_row(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         repo = WorkerRepository(session)
         now = datetime.now(UTC)
@@ -128,7 +132,9 @@ class TestBulkUpsertInsert:
         assert w.last_heartbeat is not None
 
     async def test_empty_input_is_noop(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         repo = WorkerRepository(session)
         n = await repo.upsert_from_events_bulk([])
@@ -139,7 +145,9 @@ class TestBulkUpsertInsert:
         assert result.scalar_one() == 0
 
     async def test_missing_required_field_raises(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         repo = WorkerRepository(session)
         with pytest.raises(ValueError, match="project_id, engine, name"):
@@ -151,24 +159,30 @@ class TestBulkUpsertInsert:
 @pytest.mark.asyncio
 class TestBulkUpsertConflict:
     async def test_second_batch_updates_existing_rows(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         repo = WorkerRepository(session)
         t1 = datetime.now(UTC) - timedelta(seconds=30)
         t2 = datetime.now(UTC)
 
         # First batch lands two new workers.
-        await repo.upsert_from_events_bulk([
-            _row(project.id, name="celery@a", last_heartbeat=t1, concurrency=2),
-            _row(project.id, name="celery@b", last_heartbeat=t1, concurrency=2),
-        ])
+        await repo.upsert_from_events_bulk(
+            [
+                _row(project.id, name="celery@a", last_heartbeat=t1, concurrency=2),
+                _row(project.id, name="celery@b", last_heartbeat=t1, concurrency=2),
+            ]
+        )
         await session.commit()
 
         # Second batch updates both.
-        await repo.upsert_from_events_bulk([
-            _row(project.id, name="celery@a", last_heartbeat=t2, concurrency=8),
-            _row(project.id, name="celery@b", last_heartbeat=t2, concurrency=8),
-        ])
+        await repo.upsert_from_events_bulk(
+            [
+                _row(project.id, name="celery@a", last_heartbeat=t2, concurrency=8),
+                _row(project.id, name="celery@b", last_heartbeat=t2, concurrency=8),
+            ]
+        )
         await session.commit()
 
         # Still two rows, with updated values.
@@ -184,7 +198,9 @@ class TestBulkUpsertConflict:
         assert a.concurrency == 8
 
     async def test_partial_update_preserves_unspecified_columns(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         """Heartbeat-only batch must not blank ``hostname`` /
         ``concurrency`` set by an earlier worker_details batch."""
@@ -194,28 +210,32 @@ class TestBulkUpsertConflict:
 
         # First batch sets the full payload (state, last_heartbeat,
         # hostname, concurrency).
-        await repo.upsert_from_events_bulk([
-            _row(
-                project.id,
-                name="celery@a",
-                last_heartbeat=t1,
-                hostname="web-a.internal",
-                concurrency=16,
-            ),
-        ])
+        await repo.upsert_from_events_bulk(
+            [
+                _row(
+                    project.id,
+                    name="celery@a",
+                    last_heartbeat=t1,
+                    hostname="web-a.internal",
+                    concurrency=16,
+                ),
+            ]
+        )
         await session.commit()
 
         # Second batch is a stripped heartbeat - just last_heartbeat
         # + state, no hostname/concurrency keys at all.
-        await repo.upsert_from_events_bulk([
-            {
-                "project_id": project.id,
-                "engine": "celery",
-                "name": "celery@a",
-                "state": WorkerState.ONLINE,
-                "last_heartbeat": t2,
-            },
-        ])
+        await repo.upsert_from_events_bulk(
+            [
+                {
+                    "project_id": project.id,
+                    "engine": "celery",
+                    "name": "celery@a",
+                    "state": WorkerState.ONLINE,
+                    "last_heartbeat": t2,
+                },
+            ]
+        )
         await session.commit()
 
         result = await session.execute(
@@ -224,7 +244,11 @@ class TestBulkUpsertConflict:
         a = result.scalar_one()
         # last_heartbeat advanced
         assert a.last_heartbeat is not None
-        assert a.last_heartbeat >= t2.replace(tzinfo=None) if a.last_heartbeat.tzinfo is None else a.last_heartbeat >= t2
+        assert (
+            a.last_heartbeat >= t2.replace(tzinfo=None)
+            if a.last_heartbeat.tzinfo is None
+            else a.last_heartbeat >= t2
+        )
         # hostname + concurrency PRESERVED (no key, no touch)
         assert a.hostname == "web-a.internal"
         assert a.concurrency == 16
@@ -233,7 +257,9 @@ class TestBulkUpsertConflict:
 @pytest.mark.asyncio
 class TestBulkUpsertSqlCount:
     async def test_one_insert_statement_per_batch(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         """The P-1 acceptance criterion: 200 rows = 1 INSERT.
 
@@ -250,7 +276,12 @@ class TestBulkUpsertSqlCount:
 
         @event.listens_for(engine.sync_engine, "before_cursor_execute")
         def _count_inserts(
-            conn, cursor, statement, parameters, context, executemany,
+            conn,
+            cursor,
+            statement,
+            parameters,
+            context,
+            executemany,
         ) -> None:
             nonlocal insert_count
             sql = (statement or "").lower()
@@ -272,7 +303,9 @@ class TestBulkUpsertSqlCount:
             await session.commit()
         finally:
             event.remove(
-                engine.sync_engine, "before_cursor_execute", _count_inserts,
+                engine.sync_engine,
+                "before_cursor_execute",
+                _count_inserts,
             )
 
         # Exactly one INSERT statement. The N+1 path would have
@@ -285,7 +318,9 @@ class TestBulkUpsertSqlCount:
         )
 
     async def test_duplicates_in_input_resolve_via_on_conflict(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         """Two rows with the same (engine, name) → ON CONFLICT folds them.
 
@@ -336,20 +371,24 @@ class TestBulkUpsertWorkerMetadata:
     """
 
     async def test_insert_with_worker_metadata(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         repo = WorkerRepository(session)
         now = datetime.now(UTC)
-        await repo.upsert_from_events_bulk([
-            {
-                "project_id": project.id,
-                "engine": "celery",
-                "name": "celery@meta-insert",
-                "state": WorkerState.ONLINE,
-                "last_heartbeat": now,
-                "worker_metadata": {"version": "5.6.3", "platform": "linux"},
-            },
-        ])
+        await repo.upsert_from_events_bulk(
+            [
+                {
+                    "project_id": project.id,
+                    "engine": "celery",
+                    "name": "celery@meta-insert",
+                    "state": WorkerState.ONLINE,
+                    "last_heartbeat": now,
+                    "worker_metadata": {"version": "5.6.3", "platform": "linux"},
+                },
+            ]
+        )
         await session.commit()
 
         result = await session.execute(
@@ -359,36 +398,42 @@ class TestBulkUpsertWorkerMetadata:
         assert w.worker_metadata == {"version": "5.6.3", "platform": "linux"}
 
     async def test_update_with_worker_metadata_on_conflict(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         repo = WorkerRepository(session)
         t1 = datetime.now(UTC) - timedelta(seconds=10)
         t2 = datetime.now(UTC)
 
         # First batch lands the worker with v1 metadata.
-        await repo.upsert_from_events_bulk([
-            {
-                "project_id": project.id,
-                "engine": "celery",
-                "name": "celery@meta-update",
-                "state": WorkerState.ONLINE,
-                "last_heartbeat": t1,
-                "worker_metadata": {"version": "5.5.0"},
-            },
-        ])
+        await repo.upsert_from_events_bulk(
+            [
+                {
+                    "project_id": project.id,
+                    "engine": "celery",
+                    "name": "celery@meta-update",
+                    "state": WorkerState.ONLINE,
+                    "last_heartbeat": t1,
+                    "worker_metadata": {"version": "5.5.0"},
+                },
+            ]
+        )
         await session.commit()
 
         # Second batch updates the metadata via ON CONFLICT.
-        await repo.upsert_from_events_bulk([
-            {
-                "project_id": project.id,
-                "engine": "celery",
-                "name": "celery@meta-update",
-                "state": WorkerState.ONLINE,
-                "last_heartbeat": t2,
-                "worker_metadata": {"version": "5.6.3", "newkey": "ok"},
-            },
-        ])
+        await repo.upsert_from_events_bulk(
+            [
+                {
+                    "project_id": project.id,
+                    "engine": "celery",
+                    "name": "celery@meta-update",
+                    "state": WorkerState.ONLINE,
+                    "last_heartbeat": t2,
+                    "worker_metadata": {"version": "5.6.3", "newkey": "ok"},
+                },
+            ]
+        )
         await session.commit()
 
         result = await session.execute(
@@ -412,7 +457,9 @@ class TestBulkUpsertLockOrdering:
     """
 
     async def test_rows_land_in_database_in_canonical_lock_order(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         # End-to-end check: pass rows in REVERSE lexical order, then
         # verify the rows actually committed by id-sequence reflect the

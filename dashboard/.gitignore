@@ -7,3 +7,10 @@ dist
 .env.local
 .env.*.local
 src/routeTree.gen.ts
+
+# pnpm v11 config-migration keeps auto-writing a placeholder
+# pnpm-workspace.yaml here ("allowBuilds: ... set this to true or
+# false") that hard-errors EVERY pnpm command for older pnpm and CI
+# ("packages field missing or empty"). The dashboard is not a pnpm
+# workspace; never commit this file.
+pnpm-workspace.yaml

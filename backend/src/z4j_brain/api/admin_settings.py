@@ -34,10 +34,10 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from z4j_core.paths import z4j_home
 
 from z4j_brain.api.deps import get_settings, require_admin
 from z4j_brain.cli import _config_source
-from z4j_core.paths import z4j_home
 
 if TYPE_CHECKING:
     from z4j_brain.persistence.models import User
@@ -94,8 +94,7 @@ class AdminSettingsResponse(BaseModel):
     )
     settings: list[SettingItem] = Field(
         description=(
-            "Every Settings field, sorted alphabetically by name "
-            "for stable output across requests."
+            "Every Settings field, sorted alphabetically by name for stable output across requests."
         ),
     )
 
@@ -118,13 +117,15 @@ _SECRET_NAME_SUFFIXES: tuple[str, ...] = (
     "_api_key",
     "_private_key",
 )
-_SECRET_NAME_EXACT: frozenset[str] = frozenset({
-    "secret",
-    "password",
-    "token",
-    "api_key",
-    "private_key",
-})
+_SECRET_NAME_EXACT: frozenset[str] = frozenset(
+    {
+        "secret",
+        "password",
+        "token",
+        "api_key",
+        "private_key",
+    }
+)
 
 
 def _normalize_source(raw_source: str) -> str:
@@ -168,8 +169,8 @@ def _render_value(value: Any, *, is_secret: bool) -> str:
     response_model=AdminSettingsResponse,
 )
 async def get_effective_settings(
-    settings: "Settings" = Depends(get_settings),
-    _admin: "User" = Depends(require_admin),
+    settings: Settings = Depends(get_settings),
+    _admin: User = Depends(require_admin),
 ) -> AdminSettingsResponse:
     """Return the brain's effective settings + per-field source labels.
 
@@ -200,10 +201,7 @@ async def get_effective_settings(
         # SecretStr is the typed marker; the name-hint scan is a
         # defense-in-depth fallback for fields someone might have
         # forgotten to wrap.
-        is_secret = (
-            isinstance(raw_value, SecretStr)
-            or _looks_secret(field_name)
-        )
+        is_secret = isinstance(raw_value, SecretStr) or _looks_secret(field_name)
         if isinstance(raw_value, SecretStr):
             # Never call get_secret_value() here, even for an admin.
             # The dashboard is intentionally kept on the "see the
@@ -212,9 +210,7 @@ async def get_effective_settings(
         else:
             display = _render_value(raw_value, is_secret=is_secret)
 
-        description = (
-            field_info.description if field_info.description else ""
-        )
+        description = field_info.description if field_info.description else ""
 
         items.append(
             SettingItem(

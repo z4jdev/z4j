@@ -68,11 +68,14 @@ router = APIRouter(prefix="/user", tags=["user-notifications"])
 # ---------------------------------------------------------------------------
 
 
+# ``task.slow`` was removed in 1.7: it never had an emit site, so a
+# subscription on it could never fire. Stored rows that still carry the
+# string keep listing / muting fine; only create + rename reject it.
 _TRIGGER_PATTERN = (
     r"^(task\.failed|task\.succeeded|task\.retried|"
-    r"task\.slow|agent\.offline|agent\.online)$"
+    r"agent\.offline|agent\.online)$"
 )
-_CHANNEL_TYPE_PATTERN = r"^(webhook|email|slack|telegram|pagerduty|discord)$"
+_CHANNEL_TYPE_PATTERN = r"^(webhook|email|slack|telegram|pagerduty|discord|teams)$"
 
 _SENSITIVE_KEYS = (
     "smtp_pass",
@@ -87,7 +90,7 @@ _MASK = "••••••••"
 def _mask(config: dict[str, Any]) -> dict[str, Any]:
     safe = dict(config)
     for k in _SENSITIVE_KEYS:
-        if k in safe and safe[k]:
+        if safe.get(k):
             safe[k] = _MASK
     return safe
 
@@ -140,7 +143,7 @@ def _safe_merge_config(
     return merged, url_changed
 
 
-async def _validate_channel_config(
+async def _validate_channel_config(  # noqa: PLR0912  per-channel-type validation
     channel_type: str,
     config: dict[str, Any] | None,
 ) -> None:
@@ -182,6 +185,7 @@ async def _validate_channel_config(
         from z4j_brain.domain.notifications.channels import (
             validate_pagerduty_config,
         )
+
         err = validate_pagerduty_config(config)
         if err:
             raise ConflictError(f"invalid pagerduty config: {err}")
@@ -189,6 +193,7 @@ async def _validate_channel_config(
         from z4j_brain.domain.notifications.channels import (
             validate_discord_config,
         )
+
         err = validate_discord_config(config)
         if err:
             raise ConflictError(f"invalid discord config: {err}")
@@ -281,6 +286,7 @@ class UserChannelImportFromProjectRequest(BaseModel):
     secret-bearing delivery config into a personal scope. The
     channel must belong to that project.
     """
+
     project_slug: str = Field(min_length=1, max_length=63)
     channel_id: uuid.UUID
     name: str | None = Field(
@@ -288,8 +294,7 @@ class UserChannelImportFromProjectRequest(BaseModel):
         min_length=1,
         max_length=200,
         description=(
-            "Override the imported channel's name. Defaults to "
-            "'Copy of {original}' if omitted."
+            "Override the imported channel's name. Defaults to 'Copy of {original}' if omitted."
         ),
     )
     model_config = {"extra": "forbid"}
@@ -312,10 +317,12 @@ class UserSubscriptionCreate(BaseModel):
     in_app: bool = True
     # Cap channel_ids lists.
     project_channel_ids: list[uuid.UUID] = Field(
-        default_factory=list, max_length=64,
+        default_factory=list,
+        max_length=64,
     )
     user_channel_ids: list[uuid.UUID] = Field(
-        default_factory=list, max_length=64,
+        default_factory=list,
+        max_length=64,
     )
     cooldown_seconds: int = Field(default=0, ge=0, le=86400)
 
@@ -333,10 +340,12 @@ class UserSubscriptionUpdate(BaseModel):
     filters: SubscriptionFilters | None = None
     in_app: bool | None = None
     project_channel_ids: list[uuid.UUID] | None = Field(
-        default=None, max_length=64,
+        default=None,
+        max_length=64,
     )
     user_channel_ids: list[uuid.UUID] | None = Field(
-        default=None, max_length=64,
+        default=None,
+        max_length=64,
     )
     cooldown_seconds: int | None = Field(default=None, ge=0, le=86400)
     muted_until: datetime | None = None
@@ -379,7 +388,9 @@ class UserSubscriptionsListPublic(BaseModel):
 
 
 def _encode_user_subscriptions_cursor(
-    project_id: uuid.UUID, trigger: str, sub_id: uuid.UUID,
+    project_id: uuid.UUID,
+    trigger: str,
+    sub_id: uuid.UUID,
 ) -> str:
     return f"{project_id.hex}|{trigger}|{sub_id.hex}"
 
@@ -479,8 +490,8 @@ def _notification_payload(n: Any) -> UserNotificationPublic:
 
 @router.get("/channels", response_model=list[UserChannelPublic])
 async def list_user_channels(
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[UserChannelPublic]:
     from z4j_brain.persistence.repositories import UserChannelRepository
 
@@ -496,8 +507,8 @@ async def list_user_channels(
 )
 async def create_user_channel(
     body: UserChannelCreate,
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> UserChannelPublic:
     from z4j_brain.persistence.models.notification import UserChannel
 
@@ -533,10 +544,10 @@ async def create_user_channel(
 )
 async def import_user_channel_from_project(
     body: UserChannelImportFromProjectRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> UserChannelPublic:
     """Copy a project's channel into the caller's personal channels.
 
@@ -560,17 +571,16 @@ async def import_user_channel_from_project(
       - Re-validates through the same SSRF / format guards used at
         create time.
     """
-    from z4j_brain.errors import NotFoundError
-    from z4j_brain.persistence.models.notification import UserChannel
-    from z4j_brain.persistence.repositories import (
-        NotificationChannelRepository,
-    )
-
     # Resolve slug -> project_id via the policy engine, then verify
     # the caller has membership. Mirrors the pattern in
     # api/notifications.py::_resolve_member_project but keeps the
     # logic local so we don't cross-module-import a private helper.
     from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.errors import NotFoundError
+    from z4j_brain.persistence.models.notification import UserChannel
+    from z4j_brain.persistence.repositories import (
+        NotificationChannelRepository,
+    )
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, body.project_slug)
@@ -588,7 +598,8 @@ async def import_user_channel_from_project(
     )
 
     source = await NotificationChannelRepository(db_session).get_for_project(
-        project_id, body.channel_id,
+        project_id,
+        body.channel_id,
     )
     if source is None:
         raise NotFoundError(
@@ -621,8 +632,7 @@ async def import_user_channel_from_project(
     except IntegrityError:
         await db_session.rollback()
         raise ConflictError(
-            f"a channel named {new_name!r} already exists in your "
-            f"personal channels",
+            f"a channel named {new_name!r} already exists in your personal channels",
         ) from None
     await db_session.refresh(channel)
     return _channel_payload(channel)
@@ -636,14 +646,15 @@ async def import_user_channel_from_project(
 async def update_user_channel(
     channel_id: uuid.UUID,
     body: UserChannelUpdate,
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> UserChannelPublic:
     from z4j_brain.errors import NotFoundError
     from z4j_brain.persistence.repositories import UserChannelRepository
 
     channel = await UserChannelRepository(db_session).get_for_user(
-        user.id, channel_id,
+        user.id,
+        channel_id,
     )
     if channel is None:
         raise NotFoundError(
@@ -659,7 +670,9 @@ async def update_user_channel(
         # See _safe_merge_config for HIGH-01 details (mask-echo
         # preservation + URL-pivot scrub).
         merged, _url_changed = _safe_merge_config(
-            channel.config or {}, body.config, mask=_MASK,
+            channel.config or {},
+            body.config,
+            mask=_MASK,
         )
         channel.config = merged
     if body.is_active is not None:
@@ -677,8 +690,8 @@ async def update_user_channel(
 )
 async def delete_user_channel(
     channel_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> None:
     from sqlalchemy import delete
 
@@ -691,7 +704,8 @@ async def delete_user_channel(
     # channels are owned by a single user, so the cleanup is scoped
     # to that user only.
     await UserSubscriptionRepository(db_session).strip_user_channel(
-        user_id=user.id, channel_id=channel_id,
+        user_id=user.id,
+        channel_id=channel_id,
     )
 
     await db_session.execute(
@@ -717,7 +731,8 @@ async def delete_user_channel(
 
 
 async def _dispatch_user_test(
-    channel_type: str, config: dict[str, Any],
+    channel_type: str,
+    config: dict[str, Any],
 ) -> ChannelTestResult:
     """Run the real dispatcher with a canned test payload.
 
@@ -741,7 +756,8 @@ async def _dispatch_user_test(
     dispatcher = CHANNEL_DISPATCHERS.get(channel_type)
     if dispatcher is None:
         return ChannelTestResult(
-            success=False, error=f"unknown channel type {channel_type!r}",
+            success=False,
+            error=f"unknown channel type {channel_type!r}",
         )
 
     result = await dispatcher(config, _test_payload())
@@ -749,9 +765,7 @@ async def _dispatch_user_test(
         success=result.success,
         status_code=result.status_code,
         error=result.error,
-        response_body=(
-            (result.response_body or "")[:500] if result.response_body else None
-        ),
+        response_body=((result.response_body or "")[:500] if result.response_body else None),
     )
 
 
@@ -766,10 +780,10 @@ async def _dispatch_user_test(
 async def test_user_channel_config(
     body: ChannelTestRequest,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> ChannelTestResult:
     """Dispatch a test notification against an UNSAVED user-channel config.
 
@@ -821,10 +835,10 @@ async def test_user_channel_config(
 async def test_saved_user_channel(
     channel_id: uuid.UUID,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> ChannelTestResult:
     """Dispatch a test notification against a SAVED user channel.
 
@@ -841,7 +855,8 @@ async def test_saved_user_channel(
     from z4j_brain.persistence.repositories import UserChannelRepository
 
     channel = await UserChannelRepository(db_session).get_for_user(
-        user.id, channel_id,
+        user.id,
+        channel_id,
     )
     if channel is None:
         raise NotFoundError(
@@ -863,7 +878,8 @@ async def test_saved_user_channel(
         metadata={
             "type": channel.type,
             "destination_summary": _destination_summary(
-                channel.type, channel.config or {},
+                channel.type,
+                channel.config or {},
             ),
             "ok": result.success,
         },
@@ -885,9 +901,9 @@ async def list_user_subscriptions(
     project_id: uuid.UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     cursor: str | None = Query(default=None),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> UserSubscriptionsListPublic:
     """List the caller's subscriptions, optionally filtered to one project.
 
@@ -907,7 +923,8 @@ async def list_user_subscriptions(
 
     if project_id is not None and not user.is_admin:
         membership = await memberships.get_for_user_project(
-            user_id=user.id, project_id=project_id,
+            user_id=user.id,
+            project_id=project_id,
         )
         if membership is None:
             from z4j_brain.errors import AuthorizationError
@@ -917,9 +934,7 @@ async def list_user_subscriptions(
                 details={"project_id": str(project_id)},
             )
 
-    cursor_project_id, cursor_trigger, cursor_id = (
-        _decode_user_subscriptions_cursor(cursor)
-    )
+    cursor_project_id, cursor_trigger, cursor_id = _decode_user_subscriptions_cursor(cursor)
     # Fetch limit+1 so we can detect a next page without a second
     # COUNT() round-trip. Mirrors the schedules / deliveries pattern.
     rows = await UserSubscriptionRepository(db_session).list_for_user(
@@ -935,7 +950,9 @@ async def list_user_subscriptions(
         rows = rows[:limit]
         last = rows[-1]
         next_cursor = _encode_user_subscriptions_cursor(
-            last.project_id, last.trigger, last.id,
+            last.project_id,
+            last.trigger,
+            last.id,
         )
     return UserSubscriptionsListPublic(
         items=[_subscription_payload(r) for r in rows],
@@ -951,18 +968,11 @@ async def list_user_subscriptions(
 )
 async def create_user_subscription(
     body: UserSubscriptionCreate,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> UserSubscriptionPublic:
-    from z4j_brain.persistence.models.notification import UserSubscription
-    from z4j_brain.persistence.repositories import (
-        NotificationChannelRepository,
-        UserChannelRepository,
-        UserSubscriptionRepository,
-    )
-
     # User must be a member of the project they're subscribing to.
     # Global brain admins (``user.is_admin``) MUST
     # bypass this membership check. /auth/me synthesises an admin
@@ -977,6 +987,12 @@ async def create_user_subscription(
     # it returns a synthesised admin-grade Membership for global
     # admins without touching the DB.
     from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.models.notification import UserSubscription
+    from z4j_brain.persistence.repositories import (
+        NotificationChannelRepository,
+        UserChannelRepository,
+        UserSubscriptionRepository,
+    )
 
     policy = PolicyEngine()
     project = await projects.get(body.project_id)
@@ -1006,7 +1022,8 @@ async def create_user_subscription(
             )
     if body.user_channel_ids:
         valid = await UserChannelRepository(db_session).get_many_for_user(
-            user.id, body.user_channel_ids,
+            user.id,
+            body.user_channel_ids,
         )
         if len(valid) != len(set(body.user_channel_ids)):
             raise ConflictError(
@@ -1015,7 +1032,9 @@ async def create_user_subscription(
 
     sub_repo = UserSubscriptionRepository(db_session)
     existing = await sub_repo.get_by_unique(
-        user_id=user.id, project_id=body.project_id, trigger=body.trigger,
+        user_id=user.id,
+        project_id=body.project_id,
+        trigger=body.trigger,
     )
     if existing is not None:
         raise ConflictError(
@@ -1053,11 +1072,11 @@ async def create_user_subscription(
     response_model=UserSubscriptionPublic,
     dependencies=[Depends(require_csrf)],
 )
-async def update_user_subscription(
+async def update_user_subscription(  # noqa: PLR0912  subscription field update branches
     sub_id: uuid.UUID,
     body: UserSubscriptionUpdate,
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> UserSubscriptionPublic:
     from z4j_brain.errors import NotFoundError
     from z4j_brain.persistence.repositories import (
@@ -1085,8 +1104,7 @@ async def update_user_subscription(
         )
         if existing is not None:
             raise ConflictError(
-                "you already have a subscription for this trigger "
-                "on this project",
+                "you already have a subscription for this trigger on this project",
                 details={"trigger": body.trigger},
             )
         sub.trigger = body.trigger
@@ -1108,7 +1126,8 @@ async def update_user_subscription(
     if body.user_channel_ids is not None:
         if body.user_channel_ids:
             valid = await UserChannelRepository(db_session).get_many_for_user(
-                user.id, body.user_channel_ids,
+                user.id,
+                body.user_channel_ids,
             )
             if len(valid) != len(set(body.user_channel_ids)):
                 raise ConflictError(
@@ -1142,8 +1161,8 @@ async def update_user_subscription(
 )
 async def delete_user_subscription(
     sub_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> None:
     from sqlalchemy import delete
 
@@ -1170,10 +1189,10 @@ async def list_user_deliveries(
     limit: int = Query(default=50, ge=1, le=500),
     cursor: str | None = Query(default=None),
     project_slug: str | None = Query(default=None),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ):
     """Personal delivery history across all of the user's projects.
 
@@ -1196,6 +1215,8 @@ async def list_user_deliveries(
     """
     from z4j_brain.api.home import (
         _decode_recent_failures_cursor as _decode_cursor,
+    )
+    from z4j_brain.api.home import (
         _encode_recent_failures_cursor as _encode_cursor,
     )
     from z4j_brain.api.notifications import (
@@ -1255,10 +1276,7 @@ async def list_user_deliveries(
         triggered_by_lookup = {row.id: row.email for row in result.all()}
 
     return DeliveryListPublic(
-        items=[
-            _delivery_payload(r, triggered_by_lookup=triggered_by_lookup)
-            for r in rows
-        ],
+        items=[_delivery_payload(r, triggered_by_lookup=triggered_by_lookup) for r in rows],
         next_cursor=next_cursor,
     )
 
@@ -1275,13 +1293,15 @@ async def list_user_deliveries(
 async def list_user_notifications(
     unread_only: bool = Query(default=False),
     limit: int = Query(default=50, ge=1, le=200),
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[UserNotificationPublic]:
     from z4j_brain.persistence.repositories import UserNotificationRepository
 
     rows = await UserNotificationRepository(db_session).list_for_user(
-        user.id, unread_only=unread_only, limit=limit,
+        user.id,
+        unread_only=unread_only,
+        limit=limit,
     )
     return [_notification_payload(r) for r in rows]
 
@@ -1291,8 +1311,8 @@ async def list_user_notifications(
     response_model=UnreadCountPublic,
 )
 async def user_unread_count(
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> UnreadCountPublic:
     from z4j_brain.persistence.repositories import UserNotificationRepository
 
@@ -1307,13 +1327,14 @@ async def user_unread_count(
 )
 async def mark_user_notification_read(
     notification_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> None:
     from z4j_brain.persistence.repositories import UserNotificationRepository
 
     await UserNotificationRepository(db_session).mark_read(
-        user_id=user.id, notification_id=notification_id,
+        user_id=user.id,
+        notification_id=notification_id,
     )
     await db_session.commit()
 
@@ -1324,8 +1345,8 @@ async def mark_user_notification_read(
     dependencies=[Depends(require_csrf)],
 )
 async def mark_all_user_notifications_read(
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> None:
     from z4j_brain.persistence.repositories import UserNotificationRepository
 

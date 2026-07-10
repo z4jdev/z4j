@@ -20,9 +20,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import (
     AgentState,
@@ -66,9 +66,9 @@ class TestSchemaCreation:
         names = set(Base.metadata.tables.keys())
         # Spot-check the load-bearing tables instead of pinning the
         # exact set. New tables land often (invitations, saved_views,
-        # project_config, alert_events, task_annotations, z4j_meta,
-        # ...) and a literal-set comparison churns this test without
-        # catching anything the migrations themselves don't.
+        # project_config, task_annotations, z4j_meta, ...) and a
+        # literal-set comparison churns this test without catching
+        # anything the migrations themselves don't.
         core_tables = {
             "users",
             "projects",
@@ -122,7 +122,7 @@ class TestRoundTrip:
         fetched = (await session.execute(select(Project))).scalar_one()
         assert fetched.slug == "default"
         assert fetched.environment == "production"
-        assert fetched.retention_days == 30
+        assert fetched.timezone == "UTC"
 
     async def test_membership_unique_user_project(self, session: AsyncSession) -> None:
         user = User(email="b@example.com", password_hash="x")
@@ -135,7 +135,7 @@ class TestRoundTrip:
 
         # Same (user, project) again must fail.
         session.add(Membership(user_id=user.id, project_id=project.id, role=ProjectRole.VIEWER))
-        with pytest.raises(Exception):  # noqa: PT011 - SA wraps the IntegrityError
+        with pytest.raises(IntegrityError):
             await session.commit()
         await session.rollback()
 
@@ -313,7 +313,8 @@ class TestRoundTrip:
 @pytest.mark.asyncio
 class TestCascadeDelete:
     async def test_deleting_project_cascades_to_agents(
-        self, session: AsyncSession,
+        self,
+        session: AsyncSession,
     ) -> None:
         project = Project(slug="todelete", name="X")
         session.add(project)

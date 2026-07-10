@@ -6,7 +6,6 @@ from http import HTTPStatus
 
 import pytest
 from fastapi import APIRouter
-
 from z4j_brain.errors import (
     AgentOfflineError,
     AuthenticationError,
@@ -55,16 +54,18 @@ class TestStatusMap:
         assert http_status_for(ProtocolError("x")) == HTTPStatus.UPGRADE_REQUIRED
 
     def test_unknown_subclass_falls_back_to_500(self) -> None:
-        class Weird(Z4JError):
+        class WeirdError(Z4JError):
             code = "weird"
 
-        assert http_status_for(Weird("x")) == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert http_status_for(WeirdError("x")) == HTTPStatus.INTERNAL_SERVER_ERROR
 
 
 @pytest.mark.asyncio
 class TestErrorMiddleware:
     async def test_z4j_error_returns_mapped_status_and_envelope(
-        self, brain_app, client,
+        self,
+        brain_app,
+        client,
     ) -> None:
         router = APIRouter()
 
@@ -83,7 +84,9 @@ class TestErrorMiddleware:
         assert body["request_id"]
 
     async def test_unhandled_exception_returns_generic_500(
-        self, brain_app, client,
+        self,
+        brain_app,
+        client,
     ) -> None:
         router = APIRouter()
 

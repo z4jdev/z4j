@@ -65,9 +65,7 @@ class MfaRecoveryCode(PKMixin, Base):
         nullable=True,
     )
 
-    __table_args__ = (
-        Index("ix_mfa_recovery_codes_user_id", "user_id"),
-    )
+    __table_args__ = (Index("ix_mfa_recovery_codes_user_id", "user_id"),)
 
 
 __all__ = ["MfaRecoveryCode"]

@@ -48,7 +48,6 @@ export type TriggerType =
   | "task.failed"
   | "task.succeeded"
   | "task.retried"
-  | "task.slow"
   | "agent.offline"
   | "agent.online"
   // Synthetic trigger written by /channels/test (1.0.14+) so the

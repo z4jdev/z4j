@@ -6,7 +6,6 @@ import uuid
 from typing import Any
 
 import pytest
-
 from z4j_brain.websocket.registry.local import LocalRegistry
 
 
@@ -30,7 +29,7 @@ def captured_deliveries() -> list[uuid.UUID]:
 
 @pytest.fixture
 def registry(captured_deliveries: list[uuid.UUID]) -> LocalRegistry:
-    async def deliver(command_id: uuid.UUID, ws: Any) -> bool:  # noqa: ARG001
+    async def deliver(command_id: uuid.UUID, ws: Any) -> bool:
         captured_deliveries.append(command_id)
         return True
 
@@ -40,33 +39,42 @@ def registry(captured_deliveries: list[uuid.UUID]) -> LocalRegistry:
 @pytest.mark.asyncio
 class TestRegister:
     async def test_register_makes_agent_online(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         ws = FakeWebSocket("a")
         agent_id = uuid.uuid4()
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws,
         )
         assert registry.is_online(agent_id)
 
     async def test_second_connection_kicks_first(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         ws1 = FakeWebSocket("first")
         ws2 = FakeWebSocket("second")
         agent_id = uuid.uuid4()
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws1,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws1,
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws2,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws2,
         )
         assert ws1.closed is True
         assert ws1.close_code == 4002
         assert ws2.closed is False
 
     async def test_unregister_removes_agent(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         agent_id = uuid.uuid4()
         await registry.register(
@@ -98,7 +106,8 @@ class TestDeliver:
         assert captured_deliveries == [command_id]
 
     async def test_deliver_to_unknown_agent(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         result = await registry.deliver(
             command_id=uuid.uuid4(),
@@ -109,9 +118,10 @@ class TestDeliver:
         assert result.agent_was_known is False
 
     async def test_deliver_callback_failure(
-        self, captured_deliveries: list[uuid.UUID],  # noqa: ARG002
+        self,
+        captured_deliveries: list[uuid.UUID],
     ) -> None:
-        async def deliver_fail(command_id: uuid.UUID, ws: Any) -> bool:  # noqa: ARG001
+        async def deliver_fail(command_id: uuid.UUID, ws: Any) -> bool:
             raise RuntimeError("kaboom")
 
         registry = LocalRegistry(deliver_local=deliver_fail)
@@ -122,7 +132,8 @@ class TestDeliver:
             ws=FakeWebSocket("a"),
         )
         result = await registry.deliver(
-            command_id=uuid.uuid4(), agent_id=agent_id,
+            command_id=uuid.uuid4(),
+            agent_id=agent_id,
         )
         # Crash inside the callback collapses to "not delivered".
         assert result.delivered_locally is False
@@ -132,10 +143,11 @@ class TestDeliver:
 @pytest.mark.asyncio
 class TestStop:
     async def test_stop_closes_all_connections(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         ws_list = [FakeWebSocket(f"a{i}") for i in range(3)]
-        for i, ws in enumerate(ws_list):
+        for ws in ws_list:
             await registry.register(
                 project_id=uuid.uuid4(),
                 agent_id=uuid.uuid4(),
@@ -158,12 +170,15 @@ class TestKick:
     """
 
     async def test_kick_closes_single_ws(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         ws = FakeWebSocket("a")
         agent_id = uuid.uuid4()
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws,
         )
         assert registry.is_online(agent_id)
 
@@ -180,7 +195,8 @@ class TestKick:
         )
 
     async def test_kick_closes_all_workers_for_agent(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """If an agent has multiple worker connections (1.2.0+
         multi-worker model), kick closes ALL of them."""
@@ -190,15 +206,21 @@ class TestKick:
         agent_id = uuid.uuid4()
         project_id = uuid.uuid4()
         await registry.register(
-            project_id=project_id, agent_id=agent_id, ws=ws1,
+            project_id=project_id,
+            agent_id=agent_id,
+            ws=ws1,
             worker_id="worker-1",
         )
         await registry.register(
-            project_id=project_id, agent_id=agent_id, ws=ws2,
+            project_id=project_id,
+            agent_id=agent_id,
+            ws=ws2,
             worker_id="worker-2",
         )
         await registry.register(
-            project_id=project_id, agent_id=agent_id, ws=ws3,
+            project_id=project_id,
+            agent_id=agent_id,
+            ws=ws3,
             worker_id="worker-3",
         )
 
@@ -209,41 +231,47 @@ class TestKick:
             assert ws.close_code == 4003
 
     async def test_kick_is_idempotent(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """Calling kick on an unknown agent returns 0, not an error."""
         result = await registry.kick(uuid.uuid4())
         assert result == 0
 
     async def test_kick_does_not_affect_other_agents(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         ws_a = FakeWebSocket("a")
         ws_b = FakeWebSocket("b")
         agent_a = uuid.uuid4()
         agent_b = uuid.uuid4()
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_a, ws=ws_a,
+            project_id=uuid.uuid4(),
+            agent_id=agent_a,
+            ws=ws_a,
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_b, ws=ws_b,
+            project_id=uuid.uuid4(),
+            agent_id=agent_b,
+            ws=ws_b,
         )
 
         closed = await registry.kick(agent_a)
         assert closed == 1
         assert ws_a.closed is True
         assert ws_b.closed is False
-        assert registry.is_online(agent_b), (
-            "kick MUST be scoped to the specified agent only"
-        )
+        assert registry.is_online(agent_b), "kick MUST be scoped to the specified agent only"
 
     async def test_kick_tolerates_already_closed_ws(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """A WebSocket that errors on close (already torn down,
         network gone) MUST NOT raise out of kick. kick is the
         cleanup primitive of last resort.
         """
+
         class FailingWebSocket(FakeWebSocket):
             async def close(self, code: int = 1000) -> None:
                 raise RuntimeError("connection already gone")
@@ -251,7 +279,9 @@ class TestKick:
         ws = FailingWebSocket("failing")
         agent_id = uuid.uuid4()
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws,
         )
         # Should not raise; closed count is 0 (the close raised).
         closed = await registry.kick(agent_id)

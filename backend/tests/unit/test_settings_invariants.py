@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from z4j_brain.settings import ConfigError, Settings
 
 

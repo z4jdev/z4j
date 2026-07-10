@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain.persistence.models import AuditLog
@@ -28,7 +28,7 @@ class AuditLogRepository(BaseRepository[AuditLog]):
     async def insert(
         self,
         *,
-        id: UUID | None = None,
+        id: UUID | None = None,  # noqa: A002  public insert() kwarg mirrors the audit_log.id column
         action: str,
         target_type: str,
         target_id: str | None,
@@ -54,29 +54,56 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         next chained row's anchor - detectable by
         ``AuditService.verify_chain``.
         """
-        kwargs: dict[str, Any] = dict(
-            action=action,
-            target_type=target_type,
-            target_id=target_id,
-            result=result,
-            outcome=outcome,
-            event_id=event_id,
-            user_id=user_id,
-            project_id=project_id,
-            api_key_id=api_key_id,
-            source_ip=source_ip,
-            user_agent=user_agent,
-            audit_metadata=metadata,
-            row_hmac=row_hmac,
-            prev_row_hmac=prev_row_hmac,
-            occurred_at=occurred_at,
-        )
+        kwargs: dict[str, Any] = {
+            "action": action,
+            "target_type": target_type,
+            "target_id": target_id,
+            "result": result,
+            "outcome": outcome,
+            "event_id": event_id,
+            "user_id": user_id,
+            "project_id": project_id,
+            "api_key_id": api_key_id,
+            "source_ip": source_ip,
+            "user_agent": user_agent,
+            "audit_metadata": metadata,
+            "row_hmac": row_hmac,
+            "prev_row_hmac": prev_row_hmac,
+            "occurred_at": occurred_at,
+        }
         if id is not None:
             kwargs["id"] = id
         row = AuditLog(**kwargs)
         self.session.add(row)
         await self.session.flush()
         return row
+
+    async def list_misfires_for_schedule(
+        self,
+        *,
+        project_id: UUID,
+        schedule_id: UUID,
+        limit: int = 50,
+    ) -> list[AuditLog]:
+        """Return a schedule's ``scheduler.misfire_detected`` rows, newest
+        first.
+
+        Backs the VIEWER-facing per-schedule misfire history (A4). The
+        misfire detector writes these rows with ``target_id`` set to the
+        schedule id; the ``(project_id, target_id, action)`` filter keeps
+        it project-scoped + IDOR-safe. Bounded by ``limit``.
+        """
+        result = await self.session.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.project_id == project_id,
+                AuditLog.target_id == str(schedule_id),
+                AuditLog.action == "scheduler.misfire_detected",
+            )
+            .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
+            .limit(limit),
+        )
+        return list(result.scalars().all())
 
     async def get_latest_row_hmac(self) -> str | None:
         """Return the row_hmac of the most recently inserted row.
@@ -107,7 +134,7 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         heap order, flipping the chain anchor
         non-deterministically between calls.
         """
-        from sqlalchemy import desc as _desc  # noqa: PLC0415
+        from sqlalchemy import desc as _desc
 
         stmt = (
             select(AuditLog.row_hmac)
@@ -134,19 +161,19 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         """
         # Stable magic so the same lock is reused across processes.
         # 0x7A_34_6A_DA = "z4j" + "ada"(udit) ASCII pun, fits in int32.
-        _AUDIT_CHAIN_LOCK_ID = 0x7A_34_6A_DA
+        audit_chain_lock_id = 0x7A_34_6A_DA
         if self.session.bind is None:
             return
         if self.session.bind.dialect.name != "postgresql":
             return
         try:
-            from sqlalchemy import text as _text  # noqa: PLC0415
+            from sqlalchemy import text as _text
 
             await self.session.execute(
                 _text("SELECT pg_advisory_xact_lock(:lock_id)"),
-                {"lock_id": _AUDIT_CHAIN_LOCK_ID},
+                {"lock_id": audit_chain_lock_id},
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: S110  best-effort advisory lock, unique index is the durable safeguard
             # Lock is best-effort. The UNIQUE partial index on
             # ``prev_row_hmac`` is the durable safeguard.
             pass
@@ -209,9 +236,7 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         for excluded in exclude_actions:
             where_clauses.append(AuditLog.action != excluded)
         result = await self.session.execute(
-            select(func.count())
-            .select_from(AuditLog)
-            .where(*where_clauses),
+            select(func.count()).select_from(AuditLog).where(*where_clauses),
         )
         return int(result.scalar_one() or 0)
 
@@ -219,20 +244,40 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         self,
         *,
         chunk: int = 500,
+        after_occurred_at: datetime | None = None,
+        after_id: UUID | None = None,
     ) -> list[AuditLog]:
-        """Return rows for offline HMAC verification.
+        """Return up to ``chunk`` rows in chain order for HMAC verify.
 
-        v1 returns up to ``chunk`` rows starting from the oldest;
-        the verifier CLI re-invokes with ``offset`` for paging.
+        Keyset-paginated on the chain-order key ``(occurred_at, id)``:
+        pass the previous page's last ``(occurred_at, id)`` as
+        ``after_occurred_at`` / ``after_id`` to fetch the next page. The
+        ``z4j audit verify`` CLI loops until a short page, so the ENTIRE
+        chain is verified rather than only the first ``chunk`` rows (the
+        earlier single-slice behaviour silently skipped every row past
+        the cap -- exactly the case a compliance audit cares about).
         Hot-table-aware: we never load the whole table into memory.
         """
         if chunk <= 0 or chunk > 5000:
             raise ValueError("chunk must be between 1 and 5000")
-        result = await self.session.execute(
-            select(AuditLog)
-            .order_by(AuditLog.occurred_at.asc(), AuditLog.id.asc())
-            .limit(chunk),
+        stmt = select(AuditLog).order_by(
+            AuditLog.occurred_at.asc(),
+            AuditLog.id.asc(),
         )
+        if after_occurred_at is not None and after_id is not None:
+            # Row-value keyset "strictly after (occurred_at, id)",
+            # written as an OR rather than a tuple comparison so it is
+            # portable across Postgres and SQLite.
+            stmt = stmt.where(
+                or_(
+                    AuditLog.occurred_at > after_occurred_at,
+                    and_(
+                        AuditLog.occurred_at == after_occurred_at,
+                        AuditLog.id > after_id,
+                    ),
+                ),
+            )
+        result = await self.session.execute(stmt.limit(chunk))
         return list(result.scalars().all())
 
 

@@ -126,8 +126,7 @@ class VersionsSnapshot:
         schema_version = raw.get("schema_version")
         if not isinstance(schema_version, int) or schema_version < 1:
             raise ValueError(
-                "versions.json: missing or invalid schema_version "
-                f"(got {schema_version!r})",
+                f"versions.json: missing or invalid schema_version (got {schema_version!r})",
             )
         if schema_version > 1:
             # Forward-compat: log + continue with the fields we know.
@@ -137,7 +136,7 @@ class VersionsSnapshot:
             )
         packages_raw = raw.get("packages")
         if not isinstance(packages_raw, dict):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004  ValueError is this module's validation-error contract, caught by load_bundled
                 "versions.json: 'packages' must be a dict of "
                 f"{{name: version}} (got {type(packages_raw).__name__})",
             )
@@ -146,7 +145,8 @@ class VersionsSnapshot:
             if not isinstance(k, str) or not isinstance(v, str):
                 logger.warning(
                     "versions.json: skipping non-string entry",
-                    key=str(k), value=str(v),
+                    key=str(k),
+                    value=str(v),
                 )
                 continue
             packages[k] = v
@@ -196,7 +196,7 @@ def load_bundled() -> VersionsSnapshot:
     try:
         raw = json.loads(_BUNDLED_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        logger.error(
+        logger.exception(
             "z4j: bundled versions.json unreadable",
             error=str(exc),
         )
@@ -204,7 +204,7 @@ def load_bundled() -> VersionsSnapshot:
     try:
         return VersionsSnapshot.from_dict(raw)
     except ValueError as exc:
-        logger.error(
+        logger.exception(
             "z4j: bundled versions.json failed validation",
             error=str(exc),
         )
@@ -221,7 +221,7 @@ def _empty_snapshot() -> VersionsSnapshot:
     )
 
 
-def compare(
+def compare(  # noqa: PLR0911  version-status dispatch
     agent_version: str | None,
     package: str,
     snapshot: VersionsSnapshot,
@@ -339,14 +339,12 @@ async def fetch_remote(
     )
     if response.status_code != 200:
         raise RuntimeError(
-            f"version-check fetch returned HTTP {response.status_code} "
-            f"from {url!r}",
+            f"version-check fetch returned HTTP {response.status_code} from {url!r}",
         )
     body = response.content
     if len(body) > _MAX_RESPONSE_BYTES:
         raise RuntimeError(
-            f"version-check response too large: "
-            f"{len(body)} bytes > cap {_MAX_RESPONSE_BYTES}",
+            f"version-check response too large: {len(body)} bytes > cap {_MAX_RESPONSE_BYTES}",
         )
     try:
         raw = json.loads(body)

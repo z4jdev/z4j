@@ -27,10 +27,6 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
-from z4j_brain.auth.sessions import generate_csrf_token
-from z4j_brain.domain.ip_rate_limit import require_setup_throttle
-from z4j_brain.persistence.repositories import SessionRepository
-
 from z4j_brain.api.auth import (
     UserPublic,
     _set_session_cookies,
@@ -48,7 +44,10 @@ from z4j_brain.api.deps import (
     get_setup_service,
     get_user_repo,
 )
+from z4j_brain.auth.sessions import generate_csrf_token
+from z4j_brain.domain.ip_rate_limit import require_setup_throttle
 from z4j_brain.errors import AuthenticationError
+from z4j_brain.persistence.repositories import SessionRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,9 +116,9 @@ class CompleteResponse(BaseModel):
 
 @router_api.get("/status", response_model=StatusResponse)
 async def status_endpoint(
-    setup_service: "SetupService" = Depends(get_setup_service),
-    users: "UserRepository" = Depends(get_user_repo),
-    optional_user: "User | None" = Depends(get_optional_user),
+    setup_service: SetupService = Depends(get_setup_service),
+    users: UserRepository = Depends(get_user_repo),
+    optional_user: User | None = Depends(get_optional_user),
 ) -> StatusResponse:
     """Return whether the brain is in first-boot mode.
 
@@ -166,14 +165,14 @@ async def status_endpoint(
 async def complete(
     request_body: CompleteRequest,
     response: Response,
-    settings: "Settings" = Depends(get_settings),
-    setup_service: "SetupService" = Depends(get_setup_service),
-    users: "UserRepository" = Depends(get_user_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    tokens: "FirstBootTokenRepository" = Depends(get_first_boot_token_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    setup_service: SetupService = Depends(get_setup_service),
+    users: UserRepository = Depends(get_user_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    tokens: FirstBootTokenRepository = Depends(get_first_boot_token_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CompleteResponse:
     """Verify the setup token and bootstrap the brain."""
@@ -599,10 +598,10 @@ _FORM_HTML = """<!doctype html>
 
 @router_html.get("/setup")
 async def setup_form(
-    token: str = Query(default=""),  # noqa: ARG001 - read by JS, not server
-    setup_service: "SetupService" = Depends(get_setup_service),
-    users: "UserRepository" = Depends(get_user_repo),
-    tokens: "FirstBootTokenRepository" = Depends(get_first_boot_token_repo),
+    token: str = Query(default=""),
+    setup_service: SetupService = Depends(get_setup_service),
+    users: UserRepository = Depends(get_user_repo),
+    tokens: FirstBootTokenRepository = Depends(get_first_boot_token_repo),
 ) -> HTMLResponse:
     """Serve the inline HTML form.
 

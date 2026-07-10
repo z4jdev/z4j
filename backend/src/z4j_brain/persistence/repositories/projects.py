@@ -52,7 +52,10 @@ class ProjectRepository(BaseRepository[Project]):
         return result.scalar_one_or_none()
 
     async def list_by_ids(
-        self, ids: Iterable[UUID], *, only_active: bool = False,
+        self,
+        ids: Iterable[UUID],
+        *,
+        only_active: bool = False,
     ) -> list[Project]:
         """Batch lookup. One ``IN``-query, not N round-trips.
 
@@ -73,9 +76,7 @@ class ProjectRepository(BaseRepository[Project]):
     async def count_active(self) -> int:
         """Return the number of active (non-archived) projects."""
         result = await self.session.execute(
-            select(func.count())
-            .select_from(Project)
-            .where(Project.is_active.is_(True)),
+            select(func.count()).select_from(Project).where(Project.is_active.is_(True)),
         )
         return int(result.scalar_one())
 

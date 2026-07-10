@@ -8,17 +8,14 @@ statement. On Postgres it serialises two parallel transactions.
 
 from __future__ import annotations
 
-import secrets
 import uuid
-from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import User
 from z4j_brain.persistence.repositories import UserRepository
 
@@ -56,7 +53,9 @@ async def user(session: AsyncSession) -> User:
 @pytest.mark.asyncio
 class TestLockForPasswordChange:
     async def test_returns_without_error(
-        self, session: AsyncSession, user: User,
+        self,
+        session: AsyncSession,
+        user: User,
     ) -> None:
         """Minimum contract: the method runs cleanly for a real user."""
         repo = UserRepository(session)
@@ -65,7 +64,8 @@ class TestLockForPasswordChange:
         await repo.lock_for_password_change(user.id)
 
     async def test_noop_for_missing_user(
-        self, session: AsyncSession,
+        self,
+        session: AsyncSession,
     ) -> None:
         """No error for a non-existent user id - the subsequent
         ``update_password_hash`` simply updates zero rows."""
@@ -73,24 +73,28 @@ class TestLockForPasswordChange:
         await repo.lock_for_password_change(uuid.uuid4())
 
     async def test_ordering_with_update_password_hash(
-        self, session: AsyncSession, user: User,
+        self,
+        session: AsyncSession,
+        user: User,
     ) -> None:
         """The lock → verify → update sequence used by the
         change_password handler must not raise on a happy path."""
         repo = UserRepository(session)
         await repo.lock_for_password_change(user.id)
         await repo.update_password_hash(
-            user.id, "$argon2id$v=19$m=65536,t=3,p=4$c$d", password_changed=True,
+            user.id,
+            "$argon2id$v=19$m=65536,t=3,p=4$c$d",
+            password_changed=True,
         )
         await session.commit()
-        refreshed = (
-            await session.execute(select(User).where(User.id == user.id))
-        ).scalar_one()
+        refreshed = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
         assert refreshed.password_hash.endswith("$c$d")
         assert refreshed.password_changed_at is not None
 
     async def test_serialisation_semantic_documented(
-        self, session: AsyncSession, user: User,
+        self,
+        session: AsyncSession,
+        user: User,
     ) -> None:
         """On Postgres, two concurrent transactions both calling
         ``lock_for_password_change`` would serialise. SQLite has no

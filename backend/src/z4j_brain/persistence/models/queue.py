@@ -46,13 +46,20 @@ class Queue(PKMixin, TimestampsMixin, Base):
     broker_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     broker_url_hint: Mapped[str | None] = mapped_column(String, nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     pending_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default="0",
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
     )
     consumer_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default="0",
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
     )
     queue_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
@@ -64,7 +71,10 @@ class Queue(PKMixin, TimestampsMixin, Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "project_id", "engine", "name", name="uq_queues_project_engine_name",
+            "project_id",
+            "engine",
+            "name",
+            name="uq_queues_project_engine_name",
         ),
         Index("ix_queues_project_id", "project_id"),
     )

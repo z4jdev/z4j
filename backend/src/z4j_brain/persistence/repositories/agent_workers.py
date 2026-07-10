@@ -18,8 +18,8 @@ worker-aware clients (1.2.0+) get one row per worker_id.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Sequence
 from uuid import UUID
 
 from sqlalchemy import and_, select, update
@@ -163,9 +163,7 @@ class AgentWorkerRepository(BaseRepository[AgentWorker]):
         Used on brain shutdown / agent removal. Idempotent.
         """
         await self.session.execute(
-            update(AgentWorker)
-            .where(AgentWorker.agent_id == agent_id)
-            .values(state="offline"),
+            update(AgentWorker).where(AgentWorker.agent_id == agent_id).values(state="offline"),
         )
 
     async def list_for_project(

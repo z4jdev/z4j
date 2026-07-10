@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-
 from z4j_brain.domain.version_check import (
     ParsedVersion,
     VersionsSnapshot,
@@ -41,21 +40,26 @@ class TestParsedVersion:
         ],
     )
     def test_parses_well_formed(
-        self, raw: str, expected: tuple[int, int, int, str],
+        self,
+        raw: str,
+        expected: tuple[int, int, int, str],
     ) -> None:
         result = ParsedVersion.parse(raw)
         assert result is not None
         assert (
-            result.major, result.minor, result.patch, result.pre,
+            result.major,
+            result.minor,
+            result.patch,
+            result.pre,
         ) == expected
 
     @pytest.mark.parametrize(
         "raw",
         [
             "",
-            "1.3",         # missing patch
-            "v1.3.0",      # leading v
-            "1.3.0.0",     # 4-part
+            "1.3",  # missing patch
+            "v1.3.0",  # leading v
+            "1.3.0.0",  # 4-part
             "abc",
             None,
         ],
@@ -79,10 +83,7 @@ class TestVersionsSnapshotFromDict:
             "schema_version": 1,
             "generated_at": "2026-04-30T15:00:00Z",
             "generated_by": "z4j-brain@1.3.4",
-            "canonical_url": (
-                "https://raw.githubusercontent.com/z4jdev/z4j/main/"
-                "versions.json"
-            ),
+            "canonical_url": ("https://raw.githubusercontent.com/z4jdev/z4j/main/versions.json"),
             "packages": {"z4j-core": "1.3.1", "z4j-brain": "1.3.4"},
         }
         base.update(overrides)
@@ -92,7 +93,8 @@ class TestVersionsSnapshotFromDict:
         snap = VersionsSnapshot.from_dict(self._payload())
         assert snap.schema_version == 1
         assert snap.packages == {
-            "z4j-core": "1.3.1", "z4j-brain": "1.3.4",
+            "z4j-core": "1.3.1",
+            "z4j-brain": "1.3.4",
         }
         # Round-trip through to_payload preserves shape.
         again = VersionsSnapshot.from_dict(snap.to_payload())
@@ -113,11 +115,13 @@ class TestVersionsSnapshotFromDict:
         """Forward-compat: a future schema might add structured
         package entries. We tolerate them by skipping rather than
         crashing."""
-        bad = self._payload(packages={
-            "z4j-core": "1.3.1",
-            "z4j-brain": {"version": "1.3.4"},  # unsupported shape
-            42: "not_a_string_key",
-        })
+        bad = self._payload(
+            packages={
+                "z4j-core": "1.3.1",
+                "z4j-brain": {"version": "1.3.4"},  # unsupported shape
+                42: "not_a_string_key",
+            }
+        )
         snap = VersionsSnapshot.from_dict(bad)
         assert snap.packages == {"z4j-core": "1.3.1"}
 
@@ -137,13 +141,15 @@ class TestCompare:
     """The badge logic the dashboard renders against."""
 
     def _snap(self) -> VersionsSnapshot:
-        return VersionsSnapshot.from_dict({
-            "schema_version": 1,
-            "generated_at": "2026-04-30T00:00:00Z",
-            "generated_by": "z4j-brain@1.3.4",
-            "canonical_url": "https://example.test/versions.json",
-            "packages": {"z4j-core": "1.3.1"},
-        })
+        return VersionsSnapshot.from_dict(
+            {
+                "schema_version": 1,
+                "generated_at": "2026-04-30T00:00:00Z",
+                "generated_by": "z4j-brain@1.3.4",
+                "canonical_url": "https://example.test/versions.json",
+                "packages": {"z4j-core": "1.3.1"},
+            }
+        )
 
     def test_current_when_versions_match(self) -> None:
         assert compare("1.3.1", "z4j-core", self._snap()) == "current"
@@ -155,12 +161,22 @@ class TestCompare:
 
     def test_newer_than_known_when_agent_ahead(self) -> None:
         # Operator's brain has a stale snapshot; agent runs newer.
-        assert compare(
-            "1.3.5", "z4j-core", self._snap(),
-        ) == "newer_than_known"
-        assert compare(
-            "1.4.0", "z4j-core", self._snap(),
-        ) == "newer_than_known"
+        assert (
+            compare(
+                "1.3.5",
+                "z4j-core",
+                self._snap(),
+            )
+            == "newer_than_known"
+        )
+        assert (
+            compare(
+                "1.4.0",
+                "z4j-core",
+                self._snap(),
+            )
+            == "newer_than_known"
+        )
 
     def test_incompatible_on_major_mismatch(self) -> None:
         assert compare("2.0.0", "z4j-core", self._snap()) == "incompatible"
@@ -175,17 +191,27 @@ class TestCompare:
         assert compare("v1.3.0", "z4j-core", self._snap()) == "unknown"
 
     def test_unknown_when_package_not_in_snapshot(self) -> None:
-        assert compare(
-            "1.3.0", "z4j-mystery", self._snap(),
-        ) == "unknown"
+        assert (
+            compare(
+                "1.3.0",
+                "z4j-mystery",
+                self._snap(),
+            )
+            == "unknown"
+        )
 
     def test_pre_release_does_not_create_outdated_noise(self) -> None:
         """Operator runs ``1.3.1`` against a snapshot of ``1.3.1``.
         Pre-release agent at ``1.3.1rc1`` should rank ``current`` -
         not ``outdated``. (Edge case after a future rc cycle.)"""
-        assert compare(
-            "1.3.1rc1", "z4j-core", self._snap(),
-        ) == "current"
+        assert (
+            compare(
+                "1.3.1rc1",
+                "z4j-core",
+                self._snap(),
+            )
+            == "current"
+        )
 
 
 class TestLoadBundled:
@@ -216,20 +242,19 @@ class TestFetchRemote:
             "schema_version": 1,
             "generated_at": "2026-05-01T00:00:00Z",
             "generated_by": "z4j-brain@1.3.5",
-            "canonical_url": (
-                "https://raw.githubusercontent.com/z4jdev/z4j/main/"
-                "versions.json"
-            ),
+            "canonical_url": ("https://raw.githubusercontent.com/z4jdev/z4j/main/versions.json"),
             "packages": {"z4j-core": "1.3.2", "z4j-brain": "1.3.5"},
         }
 
     async def test_happy_path_returns_parsed_snapshot(self) -> None:
         client = AsyncMock(spec=httpx.AsyncClient)
         client.get.return_value = httpx.Response(
-            200, content=json.dumps(self._good_payload()).encode(),
+            200,
+            content=json.dumps(self._good_payload()).encode(),
         )
         result = await fetch_remote(
-            "https://example.test/versions.json", http_client=client,
+            "https://example.test/versions.json",
+            http_client=client,
         )
         assert result.snapshot.packages["z4j-core"] == "1.3.2"
         assert result.fetched_from == "https://example.test/versions.json"
@@ -243,7 +268,8 @@ class TestFetchRemote:
         client = AsyncMock(spec=httpx.AsyncClient)
         with pytest.raises(ValueError, match="https"):
             await fetch_remote(
-                "http://example.test/v.json", http_client=client,
+                "http://example.test/v.json",
+                http_client=client,
             )
 
     async def test_non_200_raises_runtime_error(self) -> None:
@@ -251,17 +277,20 @@ class TestFetchRemote:
         client.get.return_value = httpx.Response(404, content=b"")
         with pytest.raises(RuntimeError, match="HTTP 404"):
             await fetch_remote(
-                "https://example.test/v.json", http_client=client,
+                "https://example.test/v.json",
+                http_client=client,
             )
 
     async def test_invalid_json_raises_runtime_error(self) -> None:
         client = AsyncMock(spec=httpx.AsyncClient)
         client.get.return_value = httpx.Response(
-            200, content=b"not json at all",
+            200,
+            content=b"not json at all",
         )
         with pytest.raises(RuntimeError, match="not JSON"):
             await fetch_remote(
-                "https://example.test/v.json", http_client=client,
+                "https://example.test/v.json",
+                http_client=client,
             )
 
     async def test_oversized_response_raises_runtime_error(self) -> None:
@@ -270,7 +299,8 @@ class TestFetchRemote:
         client.get.return_value = httpx.Response(200, content=big)
         with pytest.raises(RuntimeError, match="too large"):
             await fetch_remote(
-                "https://example.test/v.json", http_client=client,
+                "https://example.test/v.json",
+                http_client=client,
             )
 
     async def test_invalid_schema_raises_runtime_error(self) -> None:
@@ -279,5 +309,6 @@ class TestFetchRemote:
         client.get.return_value = httpx.Response(200, content=bad)
         with pytest.raises(RuntimeError, match="failed validation"):
             await fetch_remote(
-                "https://example.test/v.json", http_client=client,
+                "https://example.test/v.json",
+                http_client=client,
             )

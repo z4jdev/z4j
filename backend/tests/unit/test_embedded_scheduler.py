@@ -24,14 +24,12 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import ExtendedKeyUsageOID
-
 from z4j_brain.embedded_scheduler import (
     BRAIN_SERVER_CN,
-    EmbeddedSchedulerSupervisor,
     SCHEDULER_CLIENT_CN,
+    EmbeddedSchedulerSupervisor,
     mint_loopback_pki,
 )
-
 
 # =====================================================================
 # PKI minting
@@ -49,7 +47,8 @@ class TestMintLoopbackPKI:
     """
 
     def test_writes_five_files_at_correct_modes(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         bundle = mint_loopback_pki(tmp_path / "pki")
 
@@ -65,9 +64,7 @@ class TestMintLoopbackPKI:
             # don't apply); skip the mode check there.
             if sys.platform != "win32":
                 mode = path.stat().st_mode & 0o777
-                assert mode == 0o600, (
-                    f"{path} has mode {oct(mode)}, expected 0o600"
-                )
+                assert mode == 0o600, f"{path} has mode {oct(mode)}, expected 0o600"
 
     def test_server_cert_has_localhost_san(self, tmp_path: Path) -> None:
         bundle = mint_loopback_pki(tmp_path / "pki")
@@ -86,9 +83,12 @@ class TestMintLoopbackPKI:
         ).value
         dns_names = san_ext.get_values_for_type(x509.DNSName)
         assert "localhost" in dns_names
-        ip_names = [str(ip) for ip in san_ext.get_values_for_type(
-            x509.IPAddress,
-        )]
+        ip_names = [
+            str(ip)
+            for ip in san_ext.get_values_for_type(
+                x509.IPAddress,
+            )
+        ]
         assert "127.0.0.1" in ip_names
         # Server EKU
         eku = cert.extensions.get_extension_for_class(
@@ -119,9 +119,7 @@ class TestMintLoopbackPKI:
         ca = x509.load_pem_x509_certificate(bundle.ca_pem.read_bytes())
         for leaf_path in (bundle.server_cert_pem, bundle.client_cert_pem):
             leaf = x509.load_pem_x509_certificate(leaf_path.read_bytes())
-            assert leaf.issuer == ca.subject, (
-                f"{leaf_path} not issued by CA"
-            )
+            assert leaf.issuer == ca.subject, f"{leaf_path} not issued by CA"
             # Verify signature (raises InvalidSignature on tamper)
             ca.public_key().verify(
                 leaf.signature,
@@ -140,7 +138,8 @@ class TestMintLoopbackPKI:
         for key_path in (bundle.server_key_pem, bundle.client_key_pem):
             # No password should be needed.
             serialization.load_pem_private_key(
-                key_path.read_bytes(), password=None,
+                key_path.read_bytes(),
+                password=None,
             )
 
     def test_idempotent_directory_create(self, tmp_path: Path) -> None:
@@ -175,7 +174,8 @@ def _make_settings(
     """
     s = MagicMock()
     s.embedded_scheduler_argv = argv or [
-        "-c", "import time; time.sleep(60)",
+        "-c",
+        "import time; time.sleep(60)",
     ]
     s.embedded_scheduler_restart_max_attempts = restart_max
     s.embedded_scheduler_restart_backoff_seconds = restart_backoff
@@ -192,9 +192,9 @@ def _make_pki(tmp_path: Path) -> object:
 
 @pytest.mark.asyncio
 class TestEmbeddedSchedulerSupervisor:
-
     async def test_start_spawns_subprocess(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # Use a do-nothing python -c that sleeps. We're not running
         # real z4j-scheduler; we override the argv directly. But
@@ -211,7 +211,6 @@ class TestEmbeddedSchedulerSupervisor:
         )
         # Override the spawn argv: skip the ``-m z4j_scheduler``
         # so the subprocess is just python -c "...".
-        original_spawn = sup._spawn_subprocess
 
         async def spawn_with_direct_argv() -> None:
             argv = [sys.executable, *sup._settings.embedded_scheduler_argv]
@@ -234,7 +233,8 @@ class TestEmbeddedSchedulerSupervisor:
         assert not sup.is_running
 
     async def test_stop_terminates_subprocess(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         sup = EmbeddedSchedulerSupervisor(
             settings=_make_settings(),
@@ -275,7 +275,8 @@ class TestEmbeddedSchedulerSupervisor:
         await sup.stop()
 
     async def test_env_overrides_embedded_vars(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """The subprocess env must carry the loopback wiring."""
         pki = _make_pki(tmp_path)
@@ -303,7 +304,8 @@ class TestEmbeddedSchedulerSupervisor:
         assert env["Z4J_SCHEDULER_LEADER_BACKEND"] == "single"
 
     async def test_restart_cap_zero_disables_auto_restart(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """``restart_max_attempts=0`` means a single crash is permanent."""
         # Subprocess that exits immediately.
@@ -336,12 +338,12 @@ class TestEmbeddedSchedulerSupervisor:
         await sup.stop()
         # Watchdog must NOT have respawned.
         assert sup.restart_count == 1, (
-            f"expected exactly 1 crash with no restart, got "
-            f"{sup.restart_count}"
+            f"expected exactly 1 crash with no restart, got {sup.restart_count}"
         )
 
     async def test_restart_cap_positive_respawns(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """With cap=2 a fast-crashing subprocess respawns up to 2 times."""
         crash_count = {"n": 0}

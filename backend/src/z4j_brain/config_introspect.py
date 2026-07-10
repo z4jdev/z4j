@@ -31,7 +31,7 @@ def config_source(
     """Return a short label describing where ``field``'s value came from.
 
     Args:
-        field: Settings field name (e.g. ``retention_days``). The
+        field: Settings field name (e.g. ``audit_retention_days``). The
             corresponding env var is ``Z4J_<FIELD_UPPER>``.
         env: process environment to consult. Defaults to ``os.environ``.
         is_secret_field: if True, ``secret.env`` is omitted from the
@@ -108,7 +108,9 @@ def _secret_env_safe_to_read(path: Path) -> bool:
             "z4j config: refusing to read %s for source attribution; "
             "file mode is too permissive (got %o, expected 0o600). "
             "Run `chmod 600 %s` to fix.",
-            path, st.st_mode & 0o777, path,
+            path,
+            st.st_mode & 0o777,
+            path,
         )
         return False
     return True

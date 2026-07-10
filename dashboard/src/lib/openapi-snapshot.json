@@ -5603,13 +5603,6 @@
             "maxLength": 64,
             "title": "Timezone",
             "default": "UTC"
-          },
-          "retention_days": {
-            "type": "integer",
-            "maximum": 3650.0,
-            "minimum": 1.0,
-            "title": "Retention Days",
-            "default": 30
           }
         },
         "type": "object",
@@ -6392,10 +6385,6 @@
             "type": "string",
             "title": "Timezone"
           },
-          "retention_days": {
-            "type": "integer",
-            "title": "Retention Days"
-          },
           "is_active": {
             "type": "boolean",
             "title": "Is Active"
@@ -6419,7 +6408,6 @@
           "description",
           "environment",
           "timezone",
-          "retention_days",
           "is_active",
           "created_at",
           "updated_at"
@@ -7851,19 +7839,6 @@
               }
             ],
             "title": "Timezone"
-          },
-          "retention_days": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "maximum": 3650.0,
-                "minimum": 1.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Retention Days"
           }
         },
         "type": "object",

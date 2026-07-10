@@ -7,11 +7,10 @@ import secrets
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.main import create_app
 from z4j_brain.middleware.host_validation import HostValidationMiddleware
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.settings import Settings
 
 
@@ -177,7 +176,8 @@ class TestHostValidationDispatchR5M1:
         assert r.json()["error"] == "invalid_host"
 
     async def test_ipv6_with_garbage_after_bracket_rejected(
-        self, client,
+        self,
+        client,
     ) -> None:
         r = await client.get(
             "/api/v1/health",
@@ -211,7 +211,8 @@ class TestHostValidationDispatchR5M1:
         assert r.json()["error"] == "invalid_host"
 
     async def test_malformed_response_does_not_leak_raw_header(
-        self, client,
+        self,
+        client,
     ) -> None:
         """The 400 body must NOT echo the raw malformed Host header.
 

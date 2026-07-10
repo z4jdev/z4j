@@ -39,6 +39,7 @@ from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.errors import (
     AuthenticationError,
     AuthorizationError,
+    MfaEnrollmentRequiredError,
     MfaReverifyRequiredError,
 )
 from z4j_brain.persistence.database import DatabaseManager
@@ -99,7 +100,7 @@ _touch_lock = threading.Lock()
 #: here is "elapsed since last write", which is exactly what
 #: time.monotonic measures. We separately stamp `last_used_at`
 #: on the row using `now: datetime`.
-_touch_last_committed: "OrderedDict[UUID, float]" = OrderedDict()
+_touch_last_committed: OrderedDict[UUID, float] = OrderedDict()
 
 
 def _claim_touch_slot(key_id: UUID) -> bool:
@@ -116,9 +117,7 @@ def _claim_touch_slot(key_id: UUID) -> bool:
     monotonic_now = time.monotonic()
     with _touch_lock:
         last = _touch_last_committed.get(key_id)
-        if last is not None and (
-            monotonic_now - last
-        ) < _TOUCH_LAST_USED_INTERVAL_SECONDS:
+        if last is not None and (monotonic_now - last) < _TOUCH_LAST_USED_INTERVAL_SECONDS:
             # Touch MRU so the eviction loop doesn't kill a hot key.
             _touch_last_committed.move_to_end(key_id)
             return False
@@ -297,10 +296,10 @@ def get_client_ip(request: Request) -> str:
 async def get_optional_session(
     request: Request,
     settings: Settings = Depends(get_settings),
-    auth_service: "AuthService" = Depends(get_auth_service),
+    auth_service: AuthService = Depends(get_auth_service),
     users: UserRepository = Depends(get_user_repo),
     sessions: SessionRepository = Depends(get_session_repo),
-) -> tuple["SessionRow", "User"] | None:
+) -> tuple[SessionRow, User] | None:
     """Resolve the session cookie OR return None.
 
     Used by :func:`get_optional_user` (which never raises) and by
@@ -317,7 +316,9 @@ async def get_optional_session(
     if sid is None:
         return None
     resolved = await auth_service.resolve_session(
-        users=users, sessions=sessions, session_id=sid,
+        users=users,
+        sessions=sessions,
+        session_id=sid,
     )
     # Mark the auth winner as
     # "session" so ``resolve_api_key_id`` can correctly distinguish
@@ -334,11 +335,11 @@ async def get_optional_session(
     return resolved
 
 
-async def _resolve_bearer_user(
+async def _resolve_bearer_user(  # noqa: PLR0912, PLR0915  bearer auth resolution branches
     request: Request,
     settings: Settings = Depends(get_settings),
     db_session: AsyncSession = Depends(get_session),
-) -> "User | None":
+) -> User | None:
     """Resolve ``Authorization: Bearer z4k_...`` to a User.
 
     Returns ``None`` if the header is missing / malformed / the
@@ -348,7 +349,7 @@ async def _resolve_bearer_user(
     successful :class:`ApiKey` row to ``request.state.api_key``.
     """
     # Lazy imports to keep the module-level dep graph small.
-    from datetime import UTC, datetime
+    from datetime import UTC
 
     from z4j_brain.auth.scopes import (
         PROJECT_SCOPED_NONSLUG_ALLOWLIST,
@@ -369,6 +370,7 @@ async def _resolve_bearer_user(
     # used - any divergence means the lookup silently misses every
     # valid token. Single source of truth lives in api/api_keys.py.
     from z4j_brain.api.api_keys import _hash_api_key as _hash
+
     secret = settings.secret.get_secret_value().encode("utf-8")
     digest = _hash(plaintext=plaintext, secret=secret)
 
@@ -421,14 +423,14 @@ async def _resolve_bearer_user(
     # narrow-scope token must never be an account-takeover vector.
     if is_bearer_denied_tag(first_tag):
         raise AuthorizationError(
-            "api keys cannot access identity endpoints - use a "
-            "session cookie for /auth/*",
+            "api keys cannot access identity endpoints - use a session cookie for /auth/*",
             details={"reason": "bearer_denied_for_tag", "tag": first_tag},
         )
 
     need = required_scope(tags=tags, method=request.method)
     if need is not None and not scope_satisfies(
-        granted=list(key_row.scopes or []), required=need,
+        granted=list(key_row.scopes or []),
+        required=need,
     ):
         raise AuthorizationError(
             "api key lacks required scope",
@@ -513,11 +515,13 @@ async def _resolve_bearer_user(
             if db_mgr is not None:
                 async with db_mgr.session() as touch_session:
                     await _ApiKeyRepo(touch_session).touch_used(
-                        key_id=key_row.id, ip=ip_hint, when=now,
+                        key_id=key_row.id,
+                        ip=ip_hint,
+                        when=now,
                     )
                     await touch_session.commit()
                     committed = True
-        except Exception:  # noqa: BLE001
+        except Exception:
             from z4j_brain.api.metrics import record_swallowed
 
             record_swallowed("deps.bearer_auth", "touch_used")
@@ -543,8 +547,8 @@ async def _resolve_bearer_user(
 
 
 async def get_optional_api_key_user(
-    user: "User | None" = Depends(_resolve_bearer_user),
-) -> "User | None":
+    user: User | None = Depends(_resolve_bearer_user),
+) -> User | None:
     return user
 
 
@@ -577,7 +581,7 @@ def resolve_api_key_id(request: Request) -> UUID | None:
         return None
     try:
         return getattr(bearer_key, "id", None)
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Defensive: a detached ORM row could raise on attribute
         # access. Silent attribution loss is preferable to a
         # request crash on the audit-write path.
@@ -585,24 +589,108 @@ def resolve_api_key_id(request: Request) -> UUID | None:
 
 
 async def get_optional_user(
-    resolved: tuple["SessionRow", "User"] | None = Depends(get_optional_session),
-    api_key_user: "User | None" = Depends(get_optional_api_key_user),
-) -> "User | None":
+    resolved: tuple[SessionRow, User] | None = Depends(get_optional_session),
+    api_key_user: User | None = Depends(get_optional_api_key_user),
+) -> User | None:
     if resolved is not None:
         return resolved[1]
     return api_key_user
 
 
+# ---------------------------------------------------------------------------
+# MFA enrollment enforcement gate
+# ---------------------------------------------------------------------------
+
+#: ``(METHOD, route-path-template)`` pairs a session that is PAST its
+#: MFA-enrollment grace deadline may still call: everything a blocked
+#: user needs to become enrolled, and nothing else. Whoami stays
+#: reachable so the dashboard can render the enrollment page; logout
+#: so the user can leave. Templates are matched against
+#: ``request.scope["route"].path`` (the ``/api/v1`` mount prefix is
+#: part of the template), so path-parameter routes could be listed
+#: here verbatim if ever needed.
+_MFA_ENROLLMENT_EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/v1/auth/me"),
+        ("POST", "/api/v1/auth/logout"),
+        ("GET", "/api/v1/auth/mfa/status"),
+        ("POST", "/api/v1/auth/mfa/enroll-start"),
+        ("POST", "/api/v1/auth/mfa/enroll-complete"),
+    },
+)
+
+
+def enforce_mfa_enrollment(
+    *,
+    request: Request,
+    user: User,
+    settings: Settings,
+) -> None:
+    """Raise 403 ``mfa_enrollment_required`` for blocked sessions.
+
+    The request-time half of the MFA enrollment-enforcement policy
+    (the login-time half stamps the grace anchor and surfaces the
+    deadline -- see ``api/auth.py::login``). Evaluated on EVERY
+    cookie-session request via :func:`get_current_user` /
+    :func:`get_current_session`, so the policy is live: it engages
+    mid-session when the deadline passes, and lifts on the very next
+    request after the user enrolls (or the operator relaxes the
+    policy). Deliberately a hard 403 rather than a login refusal --
+    enrollment itself needs an authenticated session, so the session
+    survives but only the allowlisted enrollment routes accept it.
+
+    Bearer-only (API-key) requests never reach this gate by design:
+    programmatic accounts are exempt from MFA enforcement
+    (docs/MFA-DESIGN.md, open question 5).
+
+    Cheap: pure computation over the already-loaded user row; no
+    additional queries. Not audited per-request (that would flood the
+    chained log); the enforcement decision is audited once at login
+    (``auth.mfa_enforcement_blocked``).
+    """
+    from z4j_brain.domain.mfa.enforcement import evaluate_mfa_enforcement
+
+    enforcement = evaluate_mfa_enforcement(user=user, settings=settings)
+    if not enforcement.blocked:
+        return
+    route = request.scope.get("route")
+    path_template = getattr(route, "path", request.url.path)
+    if (request.method.upper(), path_template) in _MFA_ENROLLMENT_EXEMPT_ROUTES:
+        return
+    raise MfaEnrollmentRequiredError(
+        "MFA enrollment required before this account can be used",
+        details={
+            "reason": "mfa_enrollment_required",
+            "deadline": (
+                enforcement.deadline.isoformat() if enforcement.deadline is not None else None
+            ),
+        },
+    )
+
+
 async def get_current_user(
-    resolved: tuple["SessionRow", "User"] | None = Depends(get_optional_session),
-    api_key_user: "User | None" = Depends(get_optional_api_key_user),
-) -> "User":
+    request: Request,
+    resolved: tuple[SessionRow, User] | None = Depends(get_optional_session),
+    api_key_user: User | None = Depends(get_optional_api_key_user),
+    settings: Settings = Depends(get_settings),
+) -> User:
     """Return the authenticated user, or raise 401.
 
     Session cookies win when both are present - this matches the
     behaviour most operators expect when sharing a browser.
+
+    Cookie sessions additionally pass through
+    :func:`enforce_mfa_enrollment`: a user targeted by the MFA
+    enrollment-enforcement policy who is past the grace deadline gets
+    403 ``mfa_enrollment_required`` everywhere except the enrollment
+    allowlist. Bearer callers skip that gate (see its docstring).
     """
     if resolved is not None:
+        enforce_mfa_enrollment(
+            request=request,
+            user=resolved[1],
+            settings=settings,
+        )
         return resolved[1]
     if api_key_user is not None:
         return api_key_user
@@ -610,30 +698,81 @@ async def get_current_user(
 
 
 async def get_current_session(
-    resolved: tuple["SessionRow", "User"] | None = Depends(get_optional_session),
-) -> "SessionRow":
+    request: Request,
+    resolved: tuple[SessionRow, User] | None = Depends(get_optional_session),
+    settings: Settings = Depends(get_settings),
+) -> SessionRow:
     """Return the active session row, or raise 401.
 
     Used by ``/auth/logout`` so the handler has the session row to
-    revoke without re-querying.
+    revoke without re-querying. Carries the same
+    :func:`enforce_mfa_enrollment` gate as :func:`get_current_user`
+    so no session-consuming route can dodge the enrollment policy by
+    depending on the session row alone.
     """
     if resolved is None:
         raise AuthenticationError("authentication required")
+    enforce_mfa_enrollment(
+        request=request,
+        user=resolved[1],
+        settings=settings,
+    )
     return resolved[0]
 
 
 async def require_admin(
-    user: "User" = Depends(get_current_user),
-) -> "User":
+    user: User = Depends(get_current_user),
+) -> User:
     """The current user must be a global brain admin."""
     if not user.is_admin:
         raise AuthorizationError("admin role required")
     return user
 
 
+def enforce_fresh_mfa(
+    *,
+    user: User,
+    session_row: SessionRow,
+    settings: Settings,
+) -> None:
+    """Raise ``MfaReverifyRequiredError`` unless MFA was verified recently.
+
+    The reusable core shared by :func:`require_fresh_mfa` (the route
+    dependency) and by handlers that must gate a step-up CONDITIONALLY on
+    the request body -- e.g. creating an automation rule that carries a
+    DESTRUCTIVE action. A user with no MFA enrolled passes this gate --
+    whether such a user is required to ENROLL is the separate
+    enrollment-enforcement policy (:func:`enforce_mfa_enrollment`), not
+    this per-action step-up gate.
+    """
+    from datetime import UTC, timedelta
+
+    has_mfa = user.mfa_secret_encrypted is not None and user.mfa_enrolled_at is not None
+    if not has_mfa:
+        return
+    verified_at = session_row.mfa_verified_at
+    if verified_at is None:
+        raise MfaReverifyRequiredError(
+            "fresh MFA verification required",
+            details={"ttl_seconds": settings.mfa_verification_ttl_seconds},
+        )
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=settings.mfa_verification_ttl_seconds,
+    )
+    # Normalise naive datetimes from SQLite to UTC for comparison.
+    verified_at_aware = (
+        verified_at if verified_at.tzinfo is not None else verified_at.replace(tzinfo=UTC)
+    )
+    if verified_at_aware < cutoff:
+        raise MfaReverifyRequiredError(
+            "fresh MFA verification required",
+            details={"ttl_seconds": settings.mfa_verification_ttl_seconds},
+        )
+
+
 async def require_fresh_mfa(
-    user: "User" = Depends(get_current_user),
-    session_row: "SessionRow" = Depends(get_current_session),
+    user: User = Depends(get_current_user),
+    session_row: SessionRow = Depends(get_current_session),
     settings: Settings = Depends(get_settings),
 ) -> None:
     """Sensitive-action gate: caller must have verified MFA recently.
@@ -641,58 +780,37 @@ async def require_fresh_mfa(
     Three branches:
 
     * User has no MFA enrolled. The gate is a no-op; the action
-      proceeds. (Operators who want MFA universally required can
-      flip ``Z4J_MFA_ENFORCE_FOR_ALL=true`` and the login flow will
-      refuse new sessions for un-enrolled users.)
+      proceeds. (NOTE: whether an un-enrolled user is REQUIRED to
+      enroll is governed separately by ``Z4J_MFA_ENFORCE_FOR_ALL`` /
+      ``Z4J_MFA_ENFORCE_FOR_ADMINS`` + the
+      ``users.mfa_enforcement_started_at`` grace anchor: login stamps
+      the anchor and surfaces the deadline, and past the deadline
+      :func:`enforce_mfa_enrollment` restricts the session to the
+      enrollment endpoints. This step-up gate stays orthogonal to
+      that policy.)
     * User has MFA and the current session has ``mfa_verified_at``
       within the last ``Z4J_MFA_VERIFICATION_TTL_SECONDS``. Pass.
     * User has MFA but no recent verify. Raise ``403`` with
       ``error="mfa_reverify_required"``. The dashboard catches this
       response and prompts for a fresh TOTP code, then retries.
 
-    Bearer-authenticated callers (API keys) are exempt: API keys are
-    themselves a separate credential factor and are minted with
-    explicit scopes; MFA enforcement on the user's session does not
-    apply to their tokens.
+    Bearer / API-key callers: this dependency resolves the current
+    session via ``get_current_session``, which raises 401 when there is
+    no cookie session. So a bearer-only request to a route gated by this
+    dependency is 401'd BEFORE this body runs -- i.e. these routes are
+    cookie-session-only in practice (fail closed), NOT bearer-exempt. The
+    ``session_row is None`` guard below is a defensive fallback for any
+    caller that resolves an optional session; it is not the path a pure
+    Bearer request takes here. (Automation's write gate uses the optional
+    ``enforce_fresh_mfa(resolved is not None)`` pattern instead when it
+    genuinely wants to let a scoped API key through.)
     """
-    # Bearer / API key path -- no session row binding.
+    # Defensive: if a session row was resolved as optional (not the
+    # 401-raising get_current_session path), a missing row means no
+    # cookie session -> nothing to step up.
     if session_row is None:
         return
-
-    has_mfa = (
-        user.mfa_secret_encrypted is not None
-        and user.mfa_enrolled_at is not None
-    )
-    if not has_mfa:
-        return
-
-    verified_at = session_row.mfa_verified_at
-    if verified_at is None:
-        raise MfaReverifyRequiredError(
-            "fresh MFA verification required",
-            details={
-                "ttl_seconds": settings.mfa_verification_ttl_seconds,
-            },
-        )
-
-    from datetime import UTC, datetime, timedelta
-
-    cutoff = datetime.now(UTC) - timedelta(
-        seconds=settings.mfa_verification_ttl_seconds,
-    )
-    # Normalise naive datetimes from SQLite to UTC for comparison.
-    verified_at_aware = (
-        verified_at
-        if verified_at.tzinfo is not None
-        else verified_at.replace(tzinfo=UTC)
-    )
-    if verified_at_aware < cutoff:
-        raise MfaReverifyRequiredError(
-            "fresh MFA verification required",
-            details={
-                "ttl_seconds": settings.mfa_verification_ttl_seconds,
-            },
-        )
+    enforce_fresh_mfa(user=user, session_row=session_row, settings=settings)
 
 
 # ---------------------------------------------------------------------------
@@ -703,11 +821,11 @@ async def require_fresh_mfa(
 async def require_csrf(
     request: Request,
     settings: Settings = Depends(get_settings),
-    resolved: tuple["SessionRow", "User"] | None = Depends(get_optional_session),
+    resolved: tuple[SessionRow, User] | None = Depends(get_optional_session),
     # Force Bearer resolution before the CSRF check so the exemption
     # below can read ``request.state.auth_kind`` reliably regardless
     # of the order FastAPI walks the dep DAG for a given endpoint.
-    _api_key_user: "User | None" = Depends(get_optional_api_key_user),
+    _api_key_user: User | None = Depends(get_optional_api_key_user),
 ) -> None:
     """Enforce the double-submit CSRF check on state-changing requests.
 
@@ -755,6 +873,8 @@ async def require_csrf(
 
 
 __all__ = [
+    "enforce_fresh_mfa",
+    "enforce_mfa_enrollment",
     "get_audit_log_repo",
     "get_audit_service",
     "get_auth_service",

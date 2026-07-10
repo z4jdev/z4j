@@ -71,10 +71,12 @@ _TRIGGER_TIMEOUT_SECONDS = 10.0
 #: a fresh connection might succeed. Any other code is either
 #: structurally meaningful (NOT_FOUND, PERMISSION_DENIED) or a hard
 #: failure (UNIMPLEMENTED, INTERNAL) and won't recover via retry.
-_RECONNECT_STATUS_CODES = frozenset({
-    grpc.StatusCode.UNAVAILABLE,
-    grpc.StatusCode.DEADLINE_EXCEEDED,
-})
+_RECONNECT_STATUS_CODES = frozenset(
+    {
+        grpc.StatusCode.UNAVAILABLE,
+        grpc.StatusCode.DEADLINE_EXCEEDED,
+    }
+)
 
 
 class TriggerScheduleClient:
@@ -101,8 +103,7 @@ class TriggerScheduleClient:
             return
         if not self._settings.scheduler_trigger_url:
             raise RuntimeError(
-                "TriggerScheduleClient.connect requires "
-                "Z4J_SCHEDULER_TRIGGER_URL to be set",
+                "TriggerScheduleClient.connect requires Z4J_SCHEDULER_TRIGGER_URL to be set",
             )
         async with self._lock:
             # Re-check inside the lock: another coroutine may have
@@ -131,7 +132,7 @@ class TriggerScheduleClient:
             self._stub = None
         try:
             await channel.close(grace=2.0)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug(
                 "z4j.brain.scheduler_grpc.trigger_client: close failed",
                 exc_info=True,
@@ -163,7 +164,8 @@ class TriggerScheduleClient:
         )
         try:
             return await self._stub.TriggerSchedule(
-                request, timeout=_TRIGGER_TIMEOUT_SECONDS,
+                request,
+                timeout=_TRIGGER_TIMEOUT_SECONDS,
             )
         except grpc.aio.AioRpcError as exc:
             if exc.code() not in _RECONNECT_STATUS_CODES:
@@ -176,7 +178,8 @@ class TriggerScheduleClient:
             await self._reconnect()
             assert self._stub is not None
             return await self._stub.TriggerSchedule(
-                request, timeout=_TRIGGER_TIMEOUT_SECONDS,
+                request,
+                timeout=_TRIGGER_TIMEOUT_SECONDS,
             )
 
     async def _reconnect(self) -> None:
@@ -189,10 +192,9 @@ class TriggerScheduleClient:
         """
         try:
             await self.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug(
-                "z4j.brain.scheduler_grpc.trigger_client: "
-                "close during reconnect raised; ignoring",
+                "z4j.brain.scheduler_grpc.trigger_client: close during reconnect raised; ignoring",
                 exc_info=True,
             )
         await self.connect()

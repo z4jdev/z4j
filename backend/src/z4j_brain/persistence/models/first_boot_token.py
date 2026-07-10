@@ -33,7 +33,8 @@ class FirstBootToken(PKMixin, Base):
 
     token_hash: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

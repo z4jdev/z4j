@@ -41,7 +41,8 @@ class RealClientIPMiddleware(BaseHTTPMiddleware):
         peer_ip = request.client.host if request.client else None
         xff = request.headers.get("x-forwarded-for")
         request.state.client_ip = self._resolver.resolve(
-            peer_ip=peer_ip, xff_header=xff,
+            peer_ip=peer_ip,
+            xff_header=xff,
         )
         return await call_next(request)
 

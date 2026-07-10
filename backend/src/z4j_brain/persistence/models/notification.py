@@ -59,11 +59,10 @@ from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models._mixins import PKMixin, TimestampsMixin
 from z4j_brain.persistence.types import jsonb, uuid_array
 
-
 # ---------------------------------------------------------------------------
 # Type vocabularies (kept as plain string constants - matches the rest of
 # the brain's "string columns over Python enums" convention used by
-# ChannelType in the previous design and by AlertEvent.severity).
+# ChannelType).
 # ---------------------------------------------------------------------------
 
 
@@ -91,12 +90,17 @@ class ChannelType:
 
 
 class TriggerType:
-    """Event types that can fire a subscription."""
+    """Event types that can fire a subscription.
+
+    ``task.slow`` was removed in 1.7: it never had an emit site, so a
+    subscription on it could never fire. Legacy rows that still carry
+    the string are tolerated on the read path (list / mute / delete)
+    but the APIs reject it on create + rename.
+    """
 
     TASK_FAILED = "task.failed"
     TASK_SUCCEEDED = "task.succeeded"
     TASK_RETRIED = "task.retried"
-    TASK_SLOW = "task.slow"
     AGENT_OFFLINE = "agent.offline"
     AGENT_ONLINE = "agent.online"
 
@@ -115,9 +119,10 @@ class NotificationReason:
     Helps users answer "why did I get this?" - shown in the bell row.
     """
 
-    SUBSCRIBED = "subscribed"   # explicit user_subscription matched
-    DEFAULT = "default"         # came from a project default subscription
-    MENTIONED = "mentioned"     # @mention - phase 2
+    SUBSCRIBED = "subscribed"  # explicit user_subscription matched
+    DEFAULT = "default"  # came from a project default subscription
+    MENTIONED = "mentioned"  # @mention - phase 2
+    AUTOMATION = "automation"  # an automation rule's notify action fired
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +187,7 @@ class UserChannel(PKMixin, TimestampsMixin, Base):
     """
 
     __tablename__ = "user_channels"
-    __table_args__ = (
-        UniqueConstraint("user_id", "name", name="uq_user_channel_name"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_user_channel_name"),)
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -236,7 +239,9 @@ class UserSubscription(PKMixin, TimestampsMixin, Base):
     __tablename__ = "user_subscriptions"
     __table_args__ = (
         UniqueConstraint(
-            "user_id", "project_id", "trigger",
+            "user_id",
+            "project_id",
+            "trigger",
             name="uq_user_subscription_trigger",
         ),
     )
@@ -267,13 +272,17 @@ class UserSubscription(PKMixin, TimestampsMixin, Base):
         default=list,
     )
     muted_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     cooldown_seconds: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0,
+        Integer,
+        nullable=False,
+        default=0,
     )
     last_fired_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
@@ -312,7 +321,8 @@ class ProjectDefaultSubscription(PKMixin, TimestampsMixin, Base):
     __tablename__ = "project_default_subscriptions"
     __table_args__ = (
         UniqueConstraint(
-            "project_id", "trigger",
+            "project_id",
+            "trigger",
             name="uq_project_default_subscription_trigger",
         ),
     )
@@ -331,7 +341,9 @@ class ProjectDefaultSubscription(PKMixin, TimestampsMixin, Base):
         default=list,
     )
     cooldown_seconds: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0,
+        Integer,
+        nullable=False,
+        default=0,
     )
 
 
@@ -388,13 +400,16 @@ class UserNotification(PKMixin, Base):
     )
     trigger: Mapped[str] = mapped_column(String(40), nullable=False)
     reason: Mapped[str] = mapped_column(
-        String(20), nullable=False, default=NotificationReason.SUBSCRIBED,
+        String(20),
+        nullable=False,
+        default=NotificationReason.SUBSCRIBED,
     )
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
     data: Mapped[dict] = mapped_column(jsonb(), nullable=False, default=dict)
     read_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,7 @@ class ScheduleFireRepository:
         fired_at: datetime | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        triggered_by_user_id: UUID | None = None,
     ) -> ScheduleFire:
         """Insert one fire row. Idempotent on ``fire_id``.
 
@@ -71,16 +72,19 @@ class ScheduleFireRepository:
             scheduled_for=scheduled_for,
             fired_at=fired_at or datetime.now(UTC),
             error_code=error_code,
-            error_message=(
-                error_message[:2000] if error_message else None
-            ),
+            error_message=(error_message[:2000] if error_message else None),
+            triggered_by_user_id=triggered_by_user_id,
         )
         try:
             async with self.session.begin_nested():
                 self.session.add(row)
                 await self.session.flush()
         except IntegrityError:
-            existing = await self._get_by_fire_id(fire_id)
+            # Prune to the single partition on Postgres: scheduled_for is
+            # stable per fire_id and we have it here, so the buffered ->
+            # delivered upgrade lookup is a single-partition probe, not a
+            # scan of every daily partition.
+            existing = await self._get_by_fire_id(fire_id, scheduled_for=scheduled_for)
             if existing is None:
                 raise
             # Upgrade transitions: buffered → delivered/failed,
@@ -93,6 +97,12 @@ class ScheduleFireRepository:
                 existing.status = status
                 if command_id is not None:
                     existing.command_id = command_id
+                # Preserve an existing trigger attribution: the replay
+                # worker upgrades buffered -> delivered with None here, so
+                # only set it when explicitly supplied (never clobber a
+                # real user id back to NULL).
+                if triggered_by_user_id is not None:
+                    existing.triggered_by_user_id = triggered_by_user_id
                 if error_code is not None:
                     existing.error_code = error_code[:64]
                 if error_message is not None:
@@ -222,35 +232,37 @@ class ScheduleFireRepository:
         in Python. Acceptable for dev because SQLite installs are
         single-tenant.
         """
-        from sqlalchemy import and_, select as _select  # noqa: PLC0415
+        from sqlalchemy import select as _select
 
         if not schedule_ids:
             return {}
-        dialect = (
-            self.session.bind.dialect.name
-            if self.session.bind is not None else ""
-        )
+        dialect = self.session.bind.dialect.name if self.session.bind is not None else ""
         out: dict[UUID, list[ScheduleFire]] = {sid: [] for sid in schedule_ids}
         if dialect == "postgresql":
-            from sqlalchemy import func as _func, over  # noqa: PLC0415
+            from sqlalchemy import func as _func
 
-            row_num = _func.row_number().over(
-                partition_by=ScheduleFire.schedule_id,
-                order_by=ScheduleFire.fired_at.desc(),
-            ).label("rn")
+            row_num = (
+                _func.row_number()
+                .over(
+                    partition_by=ScheduleFire.schedule_id,
+                    order_by=ScheduleFire.fired_at.desc(),
+                )
+                .label("rn")
+            )
             inner = (
                 _select(ScheduleFire, row_num)
                 .where(ScheduleFire.schedule_id.in_(schedule_ids))
                 .subquery()
             )
-            from sqlalchemy.orm import aliased  # noqa: PLC0415
+            from sqlalchemy.orm import aliased
 
             sf = aliased(ScheduleFire, inner)
             stmt = (
                 _select(sf)
                 .where(inner.c.rn <= per_schedule_limit)
                 .order_by(
-                    sf.schedule_id, sf.fired_at.desc(),
+                    sf.schedule_id,
+                    sf.fired_at.desc(),
                 )
             )
             result = await self.session.execute(stmt)
@@ -262,7 +274,8 @@ class ScheduleFireRepository:
             _select(ScheduleFire)
             .where(ScheduleFire.schedule_id.in_(schedule_ids))
             .order_by(
-                ScheduleFire.schedule_id, ScheduleFire.fired_at.desc(),
+                ScheduleFire.schedule_id,
+                ScheduleFire.fired_at.desc(),
             )
         )
         result = await self.session.execute(stmt)
@@ -273,23 +286,54 @@ class ScheduleFireRepository:
         return out
 
     async def delete_older_than(
-        self, *, cutoff: datetime,
+        self,
+        *,
+        cutoff: datetime,
     ) -> int:
         """Sweep rows older than ``cutoff``. Returns rows deleted.
 
-        Called by the periodic retention worker. The 30-day default
-        keeps the table bounded at typical fire rates (10 schedules
-        × 1 fire/min × 30d ≈ 430k rows).
+        Called by the periodic retention worker. On Postgres the table is
+        RANGE-partitioned by scheduled_for and the daily partitions are
+        reclaimed by the partition worker's whole-partition DROP; this
+        DELETE only needs to sweep rows that landed in the DEFAULT partition
+        (data the migration copied there, or out-of-window fires). Scoping
+        the DELETE to schedule_fires_default avoids seq-scanning every
+        partition to delete nothing (fired_at is not the partition key and
+        has no standalone index, so the parent-wide DELETE cannot prune).
+        On SQLite it is the plain table, so the whole-table DELETE stands.
         """
+        bind = await self.session.connection()
+        if bind.dialect.name == "postgresql":
+            result = await self.session.execute(
+                text("DELETE FROM schedule_fires_default WHERE fired_at < :cutoff"),
+                {"cutoff": cutoff},
+            )
+            return result.rowcount or 0
         result = await self.session.execute(
             delete(ScheduleFire).where(ScheduleFire.fired_at < cutoff),
         )
         return result.rowcount or 0
 
-    async def _get_by_fire_id(self, fire_id: UUID) -> ScheduleFire | None:
-        result = await self.session.execute(
-            select(ScheduleFire).where(ScheduleFire.fire_id == fire_id),
-        )
+    async def _get_by_fire_id(
+        self,
+        fire_id: UUID,
+        scheduled_for: datetime | None = None,
+    ) -> ScheduleFire | None:
+        """Look up a fire row by fire_id.
+
+        When ``scheduled_for`` is supplied, it is added to the WHERE so
+        Postgres can prune to the single partition (the table is
+        RANGE-partitioned by scheduled_for, and scheduled_for is stable per
+        fire_id, so this is exact). Callers that have it -- record()'s
+        upgrade path -- should pass it. The AcknowledgeFireResult path does
+        NOT carry scheduled_for in its request, so it falls back to the
+        cross-partition lookup; giving the ack request a scheduled_for
+        field is the follow-up needed to prune it too.
+        """
+        stmt = select(ScheduleFire).where(ScheduleFire.fire_id == fire_id)
+        if scheduled_for is not None:
+            stmt = stmt.where(ScheduleFire.scheduled_for == scheduled_for)
+        result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
 
@@ -302,13 +346,23 @@ class ScheduleFireRepository:
 # A late retry of FireSchedule for an already-acked fire would
 # otherwise overwrite the ack outcome - this map blocks that.
 _UPGRADE_TRANSITIONS: dict[str, frozenset[str]] = {
-    "pending": frozenset({
-        "buffered", "delivered", "failed",
-        "acked_success", "acked_failed",
-    }),
-    "buffered": frozenset({
-        "delivered", "failed", "acked_success", "acked_failed",
-    }),
+    "pending": frozenset(
+        {
+            "buffered",
+            "delivered",
+            "failed",
+            "acked_success",
+            "acked_failed",
+        }
+    ),
+    "buffered": frozenset(
+        {
+            "delivered",
+            "failed",
+            "acked_success",
+            "acked_failed",
+        }
+    ),
     "delivered": frozenset({"acked_success", "acked_failed", "failed"}),
     "failed": frozenset({"acked_success", "acked_failed"}),
     # ``acked_*`` are terminal - no upgrade.

@@ -19,15 +19,14 @@ project.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import deque
 from datetime import UTC, datetime
-import asyncio
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
-
 from z4j_core.transport.frames import (
     AgentStatusFrame,
     CommandAckFrame,
@@ -56,10 +55,17 @@ logger = structlog.get_logger("z4j.brain.frame_router")
 #: in its own DB session and may make external HTTP calls; an event
 #: flood from a misbehaving agent shouldn't be allowed to spawn
 #: thousands of in-flight tasks. The cap is per-FrameRouter (i.e.
-#: per agent connection); a busy fleet of 100 agents = 100 × cap
+#: per agent connection); a busy fleet of 100 agents = 100 x cap
 #: ceiling. 256 leaves room for a 200-event burst with a normal
 #: subscription fanout.
 _MAX_PENDING_NOTIFICATION_TASKS = 256
+
+#: Cap on the agent-controlled ``exception`` blob persisted to the durable
+#: outbox (the outbox fills under failure storms with large tracebacks).
+_OUTBOX_EXCEPTION_CAP = 8192
+
+#: TTL for the per-connection "does this project have rules for T" memo.
+_HAS_RULES_TTL_SECONDS = 15.0
 
 # SECURITY: defense-in-depth allowlist for worker_metadata.conf
 # persistence. The CANONICAL source of this list lives at
@@ -72,31 +78,33 @@ _MAX_PENDING_NOTIFICATION_TASKS = 256
 # DB, where they would be exposed to ProjectRole.VIEWER over the worker
 # detail endpoint. Round-7 audit finding R7-H1. Keep the two lists in
 # sync; the audit-suite scans for divergence is a TODO for 1.7.
-_WORKER_CONF_ALLOWLIST: frozenset[str] = frozenset({
-    # Serialization
-    "task_serializer",
-    "result_serializer",
-    "accept_content",
-    # Queue routing
-    "task_default_queue",
-    # Worker concurrency / lifecycle
-    "worker_concurrency",
-    "worker_prefetch_multiplier",
-    "worker_max_tasks_per_child",
-    "worker_max_memory_per_child",
-    # Reliability semantics
-    "task_acks_late",
-    "task_reject_on_worker_lost",
-    # Time limits
-    "task_time_limit",
-    "task_soft_time_limit",
-    # Broker pooling (knobs, not creds; broker_url is excluded)
-    "broker_pool_limit",
-    "broker_heartbeat",
-    # Time zone
-    "timezone",
-    "enable_utc",
-})
+_WORKER_CONF_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # Serialization
+        "task_serializer",
+        "result_serializer",
+        "accept_content",
+        # Queue routing
+        "task_default_queue",
+        # Worker concurrency / lifecycle
+        "worker_concurrency",
+        "worker_prefetch_multiplier",
+        "worker_max_tasks_per_child",
+        "worker_max_memory_per_child",
+        # Reliability semantics
+        "task_acks_late",
+        "task_reject_on_worker_lost",
+        # Time limits
+        "task_time_limit",
+        "task_soft_time_limit",
+        # Broker pooling (knobs, not creds; broker_url is excluded)
+        "broker_pool_limit",
+        "broker_heartbeat",
+        # Time zone
+        "timezone",
+        "enable_utc",
+    }
+)
 
 
 def _filter_worker_conf(cfg: Any) -> dict[str, Any]:
@@ -111,6 +119,25 @@ def _filter_worker_conf(cfg: Any) -> dict[str, Any]:
     if not isinstance(cfg, dict):
         return {}
     return {k: v for k, v in cfg.items() if k in _WORKER_CONF_ALLOWLIST}
+
+
+def _fingerprint_of(data: dict[str, Any]) -> str | None:
+    """R4 failure fingerprint from an event's ``data`` (None for a
+    non-failure event with no exception/traceback).
+
+    Prefers the fingerprint the event ingestor already computed and
+    stamped onto the event (from the scrubbed, full-length traceback) so
+    a ``fingerprint``-keyed rule matches the SAME value the Issues view
+    stores. Falls back to computing from the event data for any event
+    that was not ingest-stamped (defence in depth)."""
+    stamped = data.get("fingerprint")
+    if isinstance(stamped, str) and stamped:
+        return stamped
+
+    from z4j_brain.domain.fingerprint import compute_fingerprint
+
+    return compute_fingerprint(data.get("exception"), data.get("traceback"))
+
 
 #: Hard cap on the number of notification dispatch tasks that can
 #: hold an OPEN DB session
@@ -131,10 +158,49 @@ def _get_notify_db_session_semaphore() -> asyncio.Semaphore:
     loop in the unit-test fixtures; ``asyncio.Semaphore`` binds to
     the loop at construction.
     """
-    global _notify_db_session_sem
+    global _notify_db_session_sem  # noqa: PLW0603  module-level singleton lazy-init
     if _notify_db_session_sem is None:
         _notify_db_session_sem = asyncio.Semaphore(_NOTIFY_DB_SESSION_BOUND)
     return _notify_db_session_sem
+
+
+#: Automation gets its OWN DB-session semaphore, separate from the
+#: notification bound, so an observability flood (many slow notify tasks
+#: holding their slots across external HTTP delivery) can never starve
+#: governed automation actions -- retry / cancel are safety controls and
+#: must not queue behind Slack/webhook traffic.
+_AUTOMATION_DB_SESSION_BOUND = 8
+_automation_db_session_sem: asyncio.Semaphore | None = None
+
+
+def _get_automation_db_session_semaphore() -> asyncio.Semaphore:
+    """Lazy-init the per-process automation-dispatch semaphore."""
+    global _automation_db_session_sem  # noqa: PLW0603  module-level singleton lazy-init
+    if _automation_db_session_sem is None:
+        _automation_db_session_sem = asyncio.Semaphore(_AUTOMATION_DB_SESSION_BOUND)
+    return _automation_db_session_sem
+
+
+def _is_benign_disconnect(exc: BaseException) -> bool:
+    """True if an outbound-send failure is just the agent having already
+    disconnected (keepalive timeout / reconnect), not a real error.
+
+    A flaky link drops the connection mid-send, and every in-flight
+    outbound frame (event_batch_ack, ...) then raises an ASGI/websockets
+    "send after close" error. A missed ack is SELF-HEALING -- the agent
+    re-ships unacked entries on reconnect and the brain dedupes by the
+    content-derived event_id -- so these are DEBUG, not a per-send
+    traceback storm that would drown real errors in the log.
+    """
+    msg = str(exc).lower()
+    return (
+        "close message has been sent" in msg
+        or "after sending 'websocket.close'" in msg
+        or "websocket is not connected" in msg
+        or "connection is closed" in msg
+        or "connection closed" in msg
+        or "disconnect" in msg
+    )
 
 
 def _log_notify_task_exception(task: asyncio.Task[object]) -> None:
@@ -179,9 +245,11 @@ class FrameRouter:
         dispatcher: CommandDispatcher,
         project_id: UUID,
         agent_id: UUID,
-        dashboard_hub: "DashboardHub | None" = None,
+        dashboard_hub: DashboardHub | None = None,
         worker_id: str | None = None,
-        send_frame: "Callable[[Frame], Awaitable[None]] | None" = None,
+        send_frame: Callable[[Frame], Awaitable[None]] | None = None,
+        automation_notify_coalesce_seconds: int = 0,
+        automation_outbox_max_rows_per_project: int = 10_000,
     ) -> None:
         self._db = db
         self._ingestor = ingestor
@@ -189,6 +257,17 @@ class FrameRouter:
         self._project_id = project_id
         self._agent_id = agent_id
         self._dashboard_hub = dashboard_hub
+        #: Notify-coalesce window threaded into the automation executor so a
+        #: distinct-event flood cannot fan out one notification per event.
+        self._automation_notify_coalesce_seconds = automation_notify_coalesce_seconds
+        #: Per-project ceiling on the durable firing outbox; above it we
+        #: hard-drop (counted) instead of deferring, so a flood can't grow
+        #: the outbox unbounded.
+        self._automation_outbox_max_rows = automation_outbox_max_rows_per_project
+        #: Short-TTL memo of "does this project have any enabled rule for
+        #: trigger T" so the outbox-defer path can skip a project with no
+        #: automation without a query per event. {trigger: (has_rules, expiry)}.
+        self._has_rules_cache: dict[str, tuple[bool, float]] = {}
         # Worker-first persistence (1.2.1+): the per-connection
         # worker_id from the hello payload, threaded through here
         # so heartbeat handling can refresh THIS worker's row in
@@ -214,6 +293,11 @@ class FrameRouter:
         # its coroutine completes, swallowing any exception. Tasks
         # remove themselves on completion via the done callback.
         self._pending_notify_tasks: set[asyncio.Task[None]] = set()
+        # Same strong-reference + backpressure discipline for detached
+        # automation-rule dispatch tasks. Kept separate from the notify
+        # set so the two backpressure caps don't interfere: a flood of
+        # notifications must not starve rule evaluation, and vice versa.
+        self._pending_automation_tasks: set[asyncio.Task[None]] = set()
         # Per-agent rate cap on inbound agent_status frames. The
         # agent's heartbeat module emits one every ~10s by design
         # (6/min); a misbehaving agent post-handshake (or a hostile
@@ -221,7 +305,7 @@ class FrameRouter:
         # could ship them at line rate and force one DB INSERT each.
         # The sliding-window cap bounds the worst-case write rate
         # per (agent_id) connection.
-        # 12/minute = 6× the nominal rate, so a stuck-at-1Hz agent
+        # 12/minute = 6x the nominal rate, so a stuck-at-1Hz agent
         # is throttled but a healthy agent that briefly bunches
         # frames after a backoff recovery still makes it through.
         self._agent_status_window: deque[float] = deque(
@@ -249,14 +333,25 @@ class FrameRouter:
         -> ``ReplayGuard`` (4096 nonces) per disconnected session, and
         a high-churn reconnect rate accumulates the per-session state
         in memory. Idempotent and safe to call multiple times.
+
+        ALL three detached-task sets are cancelled -- ack, notify, AND
+        automation. A leaked automation task holds a DB-session-semaphore
+        slot and keeps this router (and its per-connection caps) alive, so
+        under reconnect churn old routers would accumulate and the
+        per-connection pending cap would not bound total in-flight work.
+        (Firings that genuinely need durability under backpressure already
+        go to the durable automation_firing_outbox; the inline detached
+        tasks here are best-effort and safe to cancel on disconnect.)
         """
         for t in list(self._pending_ack_tasks):
             t.cancel()
         for t in list(self._pending_notify_tasks):
             t.cancel()
+        for t in list(self._pending_automation_tasks):
+            t.cancel()
         self._send_frame = None
 
-    async def _send_frame_safe(self, out: "Frame") -> None:
+    async def _send_frame_safe(self, out: Frame) -> None:
         """Send ``out`` via the per-connection send_frame callback.
 
         Wraps any exception so a failed websocket write doesn't
@@ -269,12 +364,23 @@ class FrameRouter:
             return
         try:
             await self._send_frame(out)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "z4j frame_router: outbound frame send failed",
-                agent_id=str(self._agent_id),
-                frame_type=getattr(out, "type", None),
-            )
+        except Exception as exc:
+            if _is_benign_disconnect(exc):
+                # Agent already disconnected mid-send (keepalive timeout /
+                # reconnect). Self-healing: it re-ships unacked entries on
+                # reconnect + the brain dedupes by event_id. DEBUG so a
+                # flaky link cannot flood the error log with tracebacks.
+                logger.debug(
+                    "z4j frame_router: outbound frame skipped; agent already disconnected",
+                    agent_id=str(self._agent_id),
+                    frame_type=getattr(out, "type", None),
+                )
+            else:
+                logger.exception(
+                    "z4j frame_router: outbound frame send failed",
+                    agent_id=str(self._agent_id),
+                    frame_type=getattr(out, "type", None),
+                )
 
     async def dispatch(self, frame: Frame) -> None:
         """Route ``frame`` to the right service. Never raises."""
@@ -300,7 +406,7 @@ class FrameRouter:
                     "z4j frame_router: unhandled frame type",
                     frame_type=getattr(frame, "type", None),
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception(
                 "z4j frame_router: dispatch crashed; connection survives",
                 frame_type=getattr(frame, "type", None),
@@ -333,23 +439,27 @@ class FrameRouter:
         # downstream notification-evaluation loop (one query per
         # event) cannot be amplified by a malicious or buggy agent.
         # The agent's own batcher tops out near 500.
-        _EVENT_BATCH_CAP = 1_000
+        event_batch_cap = 1_000
         events = list(frame.payload.events)
-        if len(events) > _EVENT_BATCH_CAP:
+        if len(events) > event_batch_cap:
             logger.warning(
                 "z4j frame_router: event_batch over cap; trimming",
                 project_id=str(self._project_id),
                 agent_id=str(self._agent_id),
                 received=len(events),
-                cap=_EVENT_BATCH_CAP,
+                cap=event_batch_cap,
             )
-            events = events[:_EVENT_BATCH_CAP]
+            events = events[:event_batch_cap]
 
         accepted_count = 0
+        # The NEW (non-duplicate) events this batch actually ingested.
+        # Automation fires only on these so an agent-reconnect buffer
+        # re-flush (same event_ids) cannot re-fire a rule N times.
+        new_events: list[dict[str, Any]] = []
         commit_ok = False
         try:
             async with self._db.session() as session:
-                accepted_count = await self._ingestor.ingest_batch(
+                new_events = await self._ingestor.ingest_batch(
                     events=events,
                     project_id=self._project_id,
                     agent_id=self._agent_id,
@@ -359,6 +469,7 @@ class FrameRouter:
                     queue_repo=QueueRepository(session),
                     worker_repo=WorkerRepository(session),
                 )
+                accepted_count = len(new_events)
                 await session.commit()
                 commit_ok = True
         finally:
@@ -369,7 +480,7 @@ class FrameRouter:
             #
             # Fire-and-forget the send so the next event_batch can
             # start ingesting immediately. Awaiting the ack send
-            # inline would serialize ``ingest_one × N + commit +
+            # inline would serialize ``ingest_one x N + commit +
             # ack_send`` per frame, which under high event rate +
             # high fanout would push the ack ~30s past commit and
             # trip the agent's ack watchdog. Spawning a task lets
@@ -409,11 +520,20 @@ class FrameRouter:
         # ``frame.payload.events``) so the cap propagates here too.
         await self._evaluate_notifications(events)
 
+        # Fire cross-engine automation rules for the NEW events only
+        # (``new_events``, not the full delivered batch). Re-delivered
+        # duplicates deduped at ingest, so a flaky-WS reconnect that
+        # re-flushes buffered ``task.failed`` events cannot fire a rule
+        # (and its notify/retry action) repeatedly for one failure. Runs
+        # after notifications + after the commit so rule actions see the
+        # persisted task rows.
+        await self._evaluate_automation(new_events)
+
     # ------------------------------------------------------------------
     # heartbeat
     # ------------------------------------------------------------------
 
-    async def _handle_heartbeat(self, frame: HeartbeatFrame) -> None:
+    async def _handle_heartbeat(self, frame: HeartbeatFrame) -> None:  # noqa: PLR0912, PLR0915  heartbeat handler
         from z4j_brain.persistence.repositories import (
             AgentRepository,
             AgentWorkerRepository,
@@ -451,17 +571,16 @@ class FrameRouter:
             # ``str.endswith`` checks per heartbeat, fired every 10s
             # per connection. 256 leaves room for new suffixes
             # without ever becoming a meaningful work amplifier.
-            _ADAPTER_HEALTH_KEYS_CAP = 256
-            if len(adapter_health) > _ADAPTER_HEALTH_KEYS_CAP:
+            adapter_health_keys_cap = 256
+            if len(adapter_health) > adapter_health_keys_cap:
                 logger.warning(
-                    "z4j frame_router: adapter_health key cap exceeded; "
-                    "trimming",
+                    "z4j frame_router: adapter_health key cap exceeded; trimming",
                     project_id=str(self._project_id),
                     received=len(adapter_health),
-                    cap=_ADAPTER_HEALTH_KEYS_CAP,
+                    cap=adapter_health_keys_cap,
                 )
                 adapter_health = dict(
-                    list(adapter_health.items())[:_ADAPTER_HEALTH_KEYS_CAP],
+                    list(adapter_health.items())[:adapter_health_keys_cap],
                 )
             for key, value in adapter_health.items():
                 if key.endswith(".queue_depths") and isinstance(value, str):
@@ -474,17 +593,16 @@ class FrameRouter:
                             # prevent a malicious agent from
                             # triggering thousands of upserts per
                             # heartbeat tick.
-                            _QUEUE_DEPTHS_CAP = 1024
-                            if len(depths) > _QUEUE_DEPTHS_CAP:
+                            queue_depths_cap = 1024
+                            if len(depths) > queue_depths_cap:
                                 logger.warning(
-                                    "z4j frame_router: queue_depths cap "
-                                    "exceeded; trimming",
+                                    "z4j frame_router: queue_depths cap exceeded; trimming",
                                     key=key,
                                     received=len(depths),
-                                    cap=_QUEUE_DEPTHS_CAP,
+                                    cap=queue_depths_cap,
                                 )
                                 depths = dict(
-                                    list(depths.items())[:_QUEUE_DEPTHS_CAP],
+                                    list(depths.items())[:queue_depths_cap],
                                 )
                             queue_repo = QueueRepository(session)
                             # 1.5.1: sort by queue name so concurrent
@@ -511,7 +629,7 @@ class FrameRouter:
                                             name=str(queue_name),
                                             pending_count=q_depth,
                                         )
-                                except Exception:  # noqa: BLE001
+                                except Exception:
                                     logger.debug(
                                         "z4j frame_router: queue depth update failed",
                                         queue=str(queue_name),
@@ -528,15 +646,16 @@ class FrameRouter:
                                         queue=str(queue_name),
                                         engine=engine_name,
                                     ).set(q_depth)
-                                except Exception:  # noqa: BLE001
+                                except Exception:
                                     from z4j_brain.api.metrics import (
                                         record_swallowed,
                                     )
 
                                     record_swallowed(
-                                        "frame_router", "queue_depth_gauge",
+                                        "frame_router",
+                                        "queue_depth_gauge",
                                     )
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.debug(
                             "z4j frame_router: failed to parse queue depths",
                             key=key,
@@ -597,7 +716,8 @@ class FrameRouter:
                                     "engine": engine,
                                     "name": hostname,
                                     "state": WorkerState.ONLINE,
-                                    "last_heartbeat": frame.payload.last_flush_at or datetime.now(UTC),
+                                    "last_heartbeat": frame.payload.last_flush_at
+                                    or datetime.now(UTC),
                                     "hostname": hostname,
                                     "worker_metadata": {
                                         "stats": stats,
@@ -633,8 +753,7 @@ class FrameRouter:
                                 aq = data.get("active_queues", [])
                                 if isinstance(aq, list):
                                     queue_list = [
-                                        q.get("name", "") for q in aq
-                                        if isinstance(q, dict)
+                                        q.get("name", "") for q in aq if isinstance(q, dict)
                                     ]
                                     row["queues"] = queue_list
                                     # Collect for separate queue touches below.
@@ -642,8 +761,7 @@ class FrameRouter:
                                     # worker can announce multiple
                                     # queues, so this stays a flat list.
                                     queue_names_to_touch.extend(
-                                        q for q in queue_list
-                                        if isinstance(q, str) and q
+                                        q for q in queue_list if isinstance(q, str) and q
                                     )
                                 # Load average
                                 if isinstance(rusage, dict):
@@ -661,6 +779,7 @@ class FrameRouter:
                                 # back to the original per-row
                                 # savepointed loop for this batch only.
                                 from sqlalchemy.exc import OperationalError
+
                                 try:
                                     async with session.begin_nested():
                                         await worker_repo.upsert_from_events_bulk(
@@ -683,13 +802,17 @@ class FrameRouter:
                                                     engine=row["engine"],
                                                     name=row["name"],
                                                     updates={
-                                                        k: v for k, v in row.items()
-                                                        if k not in (
-                                                            "project_id", "engine", "name",
+                                                        k: v
+                                                        for k, v in row.items()
+                                                        if k
+                                                        not in (
+                                                            "project_id",
+                                                            "engine",
+                                                            "name",
                                                         )
                                                     },
                                                 )
-                                        except Exception:  # noqa: BLE001
+                                        except Exception:
                                             logger.debug(
                                                 "z4j frame_router: per-row "
                                                 "worker upsert fallback failed",
@@ -721,11 +844,11 @@ class FrameRouter:
                                             engine=engine,
                                             name=qname,
                                         )
-                                except Exception:  # noqa: BLE001
+                                except Exception:
                                     logger.exception(
                                         "z4j frame_router: queue touch failed",
                                     )
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.exception(
                             "z4j frame_router: failed to parse worker details",
                         )
@@ -812,7 +935,7 @@ class FrameRouter:
                     payload=payload_dict,
                 )
                 await session.commit()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j frame_router: agent_status persist failed; "
                 "snapshot dropped, connection survives",
@@ -904,7 +1027,7 @@ class FrameRouter:
         from z4j_brain.domain.notifications import NotificationService
 
         # Map event kinds to notification trigger types.
-        KIND_TO_TRIGGER: dict[str, str] = {
+        kind_to_trigger: dict[str, str] = {
             EventKind.TASK_FAILED.value: "task.failed",
             EventKind.TASK_SUCCEEDED.value: "task.succeeded",
             EventKind.TASK_RETRIED.value: "task.retried",
@@ -915,7 +1038,7 @@ class FrameRouter:
 
         for raw_event in events:
             kind = raw_event.get("kind", "")
-            trigger = KIND_TO_TRIGGER.get(kind)
+            trigger = kind_to_trigger.get(kind)
             if trigger is None:
                 continue
             task_id = raw_event.get("task_id", "")
@@ -959,7 +1082,7 @@ class FrameRouter:
 
     async def _dispatch_notification(
         self,
-        svc: "NotificationService",
+        svc: NotificationService,
         *,
         trigger: str,
         task_id: str,
@@ -986,34 +1109,288 @@ class FrameRouter:
             # ``_MAX_PENDING_NOTIFICATION_TASKS`` cap upstream is
             # the global drop-policy for sustained overflow.
             sem = _get_notify_db_session_semaphore()
-            async with sem:
-                async with self._db.session() as session:
-                    await svc.evaluate_and_dispatch(
-                        session=session,
-                        project_id=self._project_id,
-                        trigger=trigger,
-                        task_id=task_id,
-                        task_name=task_name,
-                        engine=engine,
-                        priority=priority,
-                        state=state,
-                        queue=queue,
-                        exception=exception,
-                        traceback=traceback,
-                    )
-        except Exception:  # noqa: BLE001
+            async with sem, self._db.session() as session:
+                await svc.evaluate_and_dispatch(
+                    session=session,
+                    project_id=self._project_id,
+                    trigger=trigger,
+                    task_id=task_id,
+                    task_name=task_name,
+                    engine=engine,
+                    priority=priority,
+                    state=state,
+                    queue=queue,
+                    exception=exception,
+                    traceback=traceback,
+                )
+        except Exception:
             logger.exception(
                 "z4j frame_router: notification dispatch task failed",
                 trigger=trigger,
                 task_id=task_id,
             )
 
+    async def _evaluate_automation(self, events: list[dict[str, Any]]) -> None:
+        """Match + fire automation rules for task-lifecycle events.
+
+        Mirrors :meth:`_evaluate_notifications`: same event-kind ->
+        trigger mapping and per-batch dedup, but dispatches to the
+        automation executor (rule match -> circuit-breaker claim ->
+        governed action) instead of the subscription fan-out. Each match
+        is a detached task with its own DB session, so a slow or failing
+        rule never blocks event ingestion. Backpressure drops new work
+        once the pending set is full (ingestion takes priority).
+
+        NOTE: unlike notifications, a dropped automation firing is NOT
+        recovered by an agent reconnect -- automation runs AFTER the event
+        batch is acked (the agent has already evicted its buffer entry).
+        A drop is therefore permanent, so it is logged at WARNING here for
+        operator visibility; a durable firing outbox is a follow-up.
+        """
+        from z4j_core.models.event import EventKind
+
+        kind_to_trigger: dict[str, str] = {
+            EventKind.TASK_FAILED.value: "task.failed",
+            EventKind.TASK_SUCCEEDED.value: "task.succeeded",
+            EventKind.TASK_RETRIED.value: "task.retried",
+        }
+        seen: set[tuple[str, str]] = set()
+        # Firings deferred to the outbox because the inline pending set was
+        # full. Collected here and flushed in ONE batched, gated write after
+        # the loop (not a session+commit per event on the awaited hot path).
+        deferred: list[tuple[str, dict[str, Any]]] = []
+
+        for raw_event in events:
+            kind = raw_event.get("kind", "")
+            trigger = kind_to_trigger.get(kind)
+            if trigger is None:
+                continue
+            task_id = raw_event.get("task_id", "")
+            if (trigger, task_id) in seen:
+                continue
+            seen.add((trigger, task_id))
+
+            if len(self._pending_automation_tasks) >= _MAX_PENDING_NOTIFICATION_TASKS:
+                # The inline pending set is full. Rather than permanently
+                # drop the firing, defer it to the durable outbox -- but
+                # collect them and write once after the loop.
+                data = raw_event.get("data") or {}
+                exception = data.get("exception")
+                if isinstance(exception, str) and len(exception) > _OUTBOX_EXCEPTION_CAP:
+                    # Bound agent-controlled blobs: the outbox fires under a
+                    # failure storm (large tracebacks) and this is durable.
+                    exception = exception[:_OUTBOX_EXCEPTION_CAP]
+                outbox_fields: dict[str, Any] = {
+                    "task_id": task_id,
+                    "task_name": data.get("task_name"),
+                    "engine": raw_event.get("engine"),
+                    "queue": data.get("queue"),
+                    "priority": data.get("priority", "normal"),
+                    "exception": exception,
+                    "runtime_ms": data.get("runtime_ms"),
+                    "fingerprint": _fingerprint_of(data),
+                    # JSON-safe: the drain worker rehydrates this straight
+                    # into run_matching; the command runner accepts a str id.
+                    "agent_id": str(self._agent_id),
+                }
+                deferred.append((trigger, outbox_fields))
+                continue
+
+            data = raw_event.get("data") or {}
+            fields: dict[str, Any] = {
+                "task_id": task_id,
+                "task_name": data.get("task_name"),
+                "engine": raw_event.get("engine"),
+                "queue": data.get("queue"),
+                "priority": data.get("priority", "normal"),
+                "exception": data.get("exception"),
+                "runtime_ms": data.get("runtime_ms"),
+                # R4: the failure fingerprint so a rule can condition on a
+                # specific issue (e.g. notify when a fingerprint reappears).
+                "fingerprint": _fingerprint_of(data),
+                # The agent that REPORTED the event is the command target
+                # for retry / cancel actions.
+                "agent_id": self._agent_id,
+            }
+            task = asyncio.create_task(
+                self._dispatch_automation(trigger=trigger, fields=fields),
+                name=f"z4j-automation-{trigger}",
+            )
+            self._pending_automation_tasks.add(task)
+            task.add_done_callback(self._pending_automation_tasks.discard)
+            task.add_done_callback(_log_notify_task_exception)
+
+        if deferred:
+            await self._flush_deferred_to_outbox(deferred)
+
+    async def _dispatch_automation(
+        self,
+        *,
+        trigger: str,
+        fields: dict[str, Any],
+    ) -> None:
+        """Run automation rules for one event in its own DB session.
+
+        Detached task (see :meth:`_evaluate_automation`). Each task owns
+        its session because sessions are not safe to share across tasks.
+        ``run_matching`` commits (and rolls back) per rule -- it owns the
+        transaction boundary so the audit-chain + circuit-breaker locks
+        release promptly and one rule's DB error cannot abort the rest --
+        so this method does NOT commit. Errors are logged in the
+        done-callback, not raised.
+        """
+        try:
+            from z4j_brain.domain.automation import (
+                AutomationActionRunner,
+                AutomationExecutor,
+            )
+            from z4j_brain.persistence.repositories.audit_log import (
+                AuditLogRepository,
+            )
+            from z4j_brain.persistence.repositories.automation_rule import (
+                AutomationRuleRepository,
+            )
+
+            sem = _get_automation_db_session_semaphore()
+            async with sem, self._db.session() as session:
+                executor = AutomationExecutor(
+                    audit=self._dispatcher.audit,
+                    runner=AutomationActionRunner(dispatcher=self._dispatcher),
+                )
+                await executor.run_matching(
+                    session=session,
+                    rules_repo=AutomationRuleRepository(session),
+                    audit_log=AuditLogRepository(session),
+                    project_id=self._project_id,
+                    trigger=trigger,
+                    fields=fields,
+                    now=datetime.now(UTC),
+                    notify_coalesce_seconds=self._automation_notify_coalesce_seconds,
+                )
+        except Exception:
+            logger.exception(
+                "z4j frame_router: automation dispatch task failed",
+                trigger=trigger,
+            )
+
+    async def _project_has_rules_for(self, trigger: str, session: Any) -> bool:
+        """Memoized (short TTL) EXISTS check: does this project have an
+        enabled rule for ``trigger``? Skips deferring firings to the outbox
+        for a project with no automation, so a busy no-rules project cannot
+        bloat the outbox under a flood."""
+        cached = self._has_rules_cache.get(trigger)
+        now = time.monotonic()
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        from z4j_brain.persistence.repositories import (
+            AutomationRuleRepository,
+        )
+
+        has_rules = await AutomationRuleRepository(session).has_enabled_rule_for_trigger(
+            project_id=self._project_id,
+            trigger=trigger,
+        )
+        self._has_rules_cache[trigger] = (has_rules, now + _HAS_RULES_TTL_SECONDS)
+        return has_rules
+
+    async def _flush_deferred_to_outbox(
+        self,
+        deferred: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """Persist the firings deferred under backpressure in ONE batched
+        write, after gating: skip triggers the project has no rule for, and
+        stop deferring (hard-drop, counted) once the per-project outbox cap
+        is reached. A single session + commit for the whole batch keeps the
+        awaited ingest path off per-row fsyncs."""
+        try:
+            from z4j_brain.persistence.repositories import (
+                AutomationFiringOutboxRepository,
+            )
+
+            async with self._db.session() as session:
+                # Drop firings for triggers with no enabled rule -- they would
+                # replay to a no-op. Count them so the drop is observable.
+                to_write: list[tuple[str, dict[str, Any]]] = []
+                skipped_norule = 0
+                for trigger, fields in deferred:
+                    if await self._project_has_rules_for(trigger, session):
+                        to_write.append((trigger, fields))
+                    else:
+                        skipped_norule += 1
+
+                dropped_cap = 0
+                if to_write:
+                    outbox = AutomationFiringOutboxRepository(session)
+                    existing = await outbox.count_for_project(self._project_id)
+                    room = max(0, self._automation_outbox_max_rows - existing)
+                    if len(to_write) > room:
+                        dropped_cap = len(to_write) - room
+                        to_write = to_write[:room]
+                    if to_write:
+                        await outbox.enqueue_many(
+                            project_id=self._project_id,
+                            items=to_write,
+                        )
+                        await session.commit()
+
+            self._bump_drop_metrics(
+                enqueued=len(to_write),
+                dropped=skipped_norule + dropped_cap,
+                dropped_reason="outbox_full" if dropped_cap else "no_rule",
+            )
+            if to_write or skipped_norule or dropped_cap:
+                logger.warning(
+                    "z4j frame_router: automation pending queue full; "
+                    "deferred=%d skipped_no_rule=%d dropped_cap=%d",
+                    len(to_write),
+                    skipped_norule,
+                    dropped_cap,
+                )
+        except Exception:
+            logger.exception(
+                "z4j frame_router: failed to flush deferred firings to outbox; dropping %d",
+                len(deferred),
+            )
+            self._bump_drop_metrics(
+                enqueued=0,
+                dropped=len(deferred),
+                dropped_reason="pending_queue_full",
+            )
+
+    def _bump_drop_metrics(
+        self,
+        *,
+        enqueued: int,
+        dropped: int,
+        dropped_reason: str,
+    ) -> None:
+        try:
+            from z4j_brain.api.metrics import (
+                z4j_automation_firings_dropped_total,
+                z4j_automation_outbox_enqueued_total,
+            )
+
+            if enqueued:
+                z4j_automation_outbox_enqueued_total.labels(
+                    project=str(self._project_id),
+                    trigger="batch",
+                ).inc(enqueued)
+            if dropped:
+                z4j_automation_firings_dropped_total.labels(
+                    project=str(self._project_id),
+                    reason=dropped_reason,
+                ).inc(dropped)
+        except Exception:
+            from z4j_brain.api.metrics import record_swallowed
+
+            record_swallowed("frame_router", "automation_drop_metric")
+
     async def _publish_task_change(self) -> None:
         if self._dashboard_hub is None:
             return
         try:
             await self._dashboard_hub.publish_task_change(self._project_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j frame_router: dashboard task publish failed",
                 project_id=str(self._project_id),
@@ -1024,7 +1401,7 @@ class FrameRouter:
             return
         try:
             await self._dashboard_hub.publish_command_change(self._project_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j frame_router: dashboard command publish failed",
                 project_id=str(self._project_id),

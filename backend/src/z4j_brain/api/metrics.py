@@ -16,12 +16,28 @@ Metric naming follows the Prometheus convention:
 
 These metrics are designed to be compatible with common Grafana
 dashboard patterns used by Flower and Celery monitoring setups.
+
+Multi-worker aggregation (audit R3-M8): ``z4j serve`` defaults to
+min(4, cpu) uvicorn worker PROCESSES, each with its own copy of the
+private registry below, so a load-balanced scrape would otherwise
+see only one worker's counters (incident counters increment in one
+process and appear missing or reset from another). The serve path
+(``cli.py``) exports ``PROMETHEUS_MULTIPROC_DIR`` before uvicorn
+spawns the workers, flipping prometheus_client into multiprocess
+mode: every process writes its values through to mmap files under
+that directory, and the endpoint below aggregates ALL processes at
+scrape time via ``multiprocess.MultiProcessCollector``. When the
+env var is unset (single worker, tests, library embedding) the
+private in-process registry is rendered exactly as before.
 """
 
 from __future__ import annotations
 
 import hmac
-from typing import TYPE_CHECKING, Callable
+import os
+from collections.abc import Callable
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from prometheus_client import (
@@ -46,6 +62,12 @@ router = APIRouter(tags=["metrics"])
 #
 # Brain-private registry so tests can construct multiple create_app()
 # instances without "metric already registered" exceptions.
+#
+# Under multiprocess mode (PROMETHEUS_MULTIPROC_DIR set before this
+# module is imported) the metric objects below transparently write
+# through to shared mmap files as well; the private registry then
+# only carries this process's view and the scrape endpoint switches
+# to the MultiProcessCollector aggregate instead.
 
 registry = CollectorRegistry()
 
@@ -109,12 +131,19 @@ z4j_inmemory_state_items = Gauge(
     "Items held in process-local in-memory state by subsystem.",
     labelnames=("subsystem",),
     registry=registry,
+    # Multiprocess: the state is process-local and disjoint (each
+    # worker owns its own signer sessions, throttle buckets, etc.),
+    # so the brain-wide total is the sum over live workers. Values
+    # refresh only in the worker handling a scrape; the others
+    # contribute their last-scrape sample (bounded staleness under
+    # a load-balanced scrape rotation).
+    multiprocess_mode="livesum",
 )
 
-_inmemory_subsystems: dict[str, "Callable[[], int]"] = {}
+_inmemory_subsystems: dict[str, Callable[[], int]] = {}
 
 
-def register_inmemory_subsystem(name: str, count_fn: "Callable[[], int]") -> None:
+def register_inmemory_subsystem(name: str, count_fn: Callable[[], int]) -> None:
     """Register a subsystem to be reflected in
     ``z4j_inmemory_state_items{subsystem=name}``.
 
@@ -128,8 +157,9 @@ def _refresh_inmemory_gauges() -> None:
     for name, fn in _inmemory_subsystems.items():
         try:
             z4j_inmemory_state_items.labels(subsystem=name).set(fn())
-        except Exception:  # noqa: BLE001
+        except Exception:
             record_swallowed("metrics", f"inmemory_{name}")
+
 
 # -- Agents and workers --
 
@@ -138,6 +168,14 @@ z4j_agents_online = Gauge(
     "Number of agents currently connected.",
     labelnames=("project",),
     registry=registry,
+    # Multiprocess: ``fleet_snapshot()`` (both Local and
+    # PostgresNotify registry variants) reports only THIS process's
+    # connections, and each agent WebSocket lives in exactly one
+    # uvicorn worker, so the per-process views are disjoint and
+    # summing live workers yields the whole-brain count without
+    # double-counting. See ``_refresh_fleet_gauges`` for the
+    # departed-project zeroing that keeps this sum honest.
+    multiprocess_mode="livesum",
 )
 
 z4j_workers_online = Gauge(
@@ -145,6 +183,9 @@ z4j_workers_online = Gauge(
     "Number of workers currently online.",
     labelnames=("project",),
     registry=registry,
+    # Multiprocess: livesum for the same disjoint-per-process reason
+    # as ``z4j_agents_online`` above.
+    multiprocess_mode="livesum",
 )
 
 
@@ -154,44 +195,71 @@ z4j_workers_online = Gauge(
 #:    "workers": {project_id_str: count, ...}}``.
 #: Sampled at scrape time so per-WS connect/disconnect does not need
 #: a hot-path metric update.
-_fleet_gauge_provider: "Callable[[], dict[str, dict[str, int]]] | None" = None
+_fleet_gauge_provider: Callable[[], dict[str, dict[str, int]]] | None = None
 
 
 def register_fleet_gauge_provider(
-    provider: "Callable[[], dict[str, dict[str, int]]]",
+    provider: Callable[[], dict[str, dict[str, int]]],
 ) -> None:
     """Register the callable that reports current agent + worker
     counts per project. The provider is invoked at every Prometheus
     scrape; it should be cheap (read in-memory registry state, not a
     DB query)."""
-    global _fleet_gauge_provider
+    global _fleet_gauge_provider  # noqa: PLW0603  module-level singleton lazy-init
     _fleet_gauge_provider = provider
+
+
+#: Projects present in this process's previous fleet snapshot, per
+#: stream. Needed for multiprocess mode: ``Gauge.clear`` only drops
+#: the in-process label children, it does NOT erase the mmap-file
+#: entries that ``MultiProcessCollector`` aggregates, so a departed
+#: project must be explicitly written as 0 or its stale count would
+#: inflate the livesum forever. Process-local by design; each worker
+#: only zeroes labels it wrote itself.
+_fleet_prev_projects: dict[str, set[str]] = {"agents": set(), "workers": set()}
 
 
 def _refresh_fleet_gauges() -> None:
     """Sample agents/workers per project at scrape time.
 
-    Clears prior labels first so a project that goes from N agents
-    to zero shows up as zero rather than the stale N. ``Gauge.clear``
-    drops every label permutation, then the loop re-sets only the
-    projects with current activity.
+    Single-process path: clears prior labels first so a project that
+    goes from N agents to zero drops out of the output rather than
+    showing the stale N. ``Gauge.clear`` drops every label
+    permutation, then the loop re-sets only the projects with
+    current activity.
+
+    Multiprocess path (``PROMETHEUS_MULTIPROC_DIR`` set): ``clear``
+    does not touch the shared mmap files, so departed projects are
+    additionally zeroed by explicit ``set(0)`` writes; they render
+    as 0 (not absent) in the aggregated output. The zeroing also
+    runs on the single-process path, where the subsequent ``clear``
+    drops the label entirely, keeping that output unchanged.
     """
     if _fleet_gauge_provider is None:
         return
     try:
         snapshot = _fleet_gauge_provider()
-    except Exception:  # noqa: BLE001
+    except Exception:
         record_swallowed("metrics", "fleet_gauges")
         return
     try:
+        agents = snapshot.get("agents", {})
+        workers = snapshot.get("workers", {})
+        for project in _fleet_prev_projects["agents"] - set(agents):
+            z4j_agents_online.labels(project=project).set(0)
+        for project in _fleet_prev_projects["workers"] - set(workers):
+            z4j_workers_online.labels(project=project).set(0)
         z4j_agents_online.clear()
         z4j_workers_online.clear()
-        for project, count in snapshot.get("agents", {}).items():
+        for project, count in agents.items():
             z4j_agents_online.labels(project=project).set(int(count))
-        for project, count in snapshot.get("workers", {}).items():
+        for project, count in workers.items():
             z4j_workers_online.labels(project=project).set(int(count))
-    except Exception:  # noqa: BLE001
+        _fleet_prev_projects["agents"] = set(agents)
+        _fleet_prev_projects["workers"] = set(workers)
+    except Exception:
         record_swallowed("metrics", "fleet_gauges_apply")
+
 
 # -- Queues --
 
@@ -200,6 +268,13 @@ z4j_queue_depth = Gauge(
     "Number of pending messages in a queue.",
     labelnames=("project", "queue", "engine"),
     registry=registry,
+    # Multiprocess: a broker queue's depth is a fleet-wide fact
+    # reported by an agent heartbeat to whichever uvicorn worker
+    # holds that agent's connection. Summing would double-count
+    # after an agent reconnects to a different worker (the old
+    # worker's mmap entry lingers); the most recent write is the
+    # freshest truth regardless of which process received it.
+    multiprocess_mode="mostrecent",
 )
 
 # -- WebSocket --
@@ -208,6 +283,10 @@ z4j_ws_connections = Gauge(
     "z4j_ws_connections",
     "Number of live WebSocket connections held by this worker.",
     registry=registry,
+    # Multiprocess: connection counts are per-process and disjoint;
+    # summing live workers gives the brain-wide total of live
+    # WebSocket connections.
+    multiprocess_mode="livesum",
 )
 
 # -- Database pool + connection-level health (1.5.1 leak-fix visibility) --
@@ -223,6 +302,11 @@ z4j_db_pool_size = Gauge(
     "Configured size of the SQLAlchemy connection pool. "
     "Rises only when ``pool_size`` setting changes; useful baseline.",
     registry=registry,
+    # Multiprocess: every uvicorn worker owns an independent pool, so
+    # the brain's total configured capacity against the database (the
+    # number that matters vs Postgres ``max_connections``) is the sum
+    # across live workers, not one worker's ``pool_size``.
+    multiprocess_mode="livesum",
 )
 
 z4j_db_pool_checked_out = Gauge(
@@ -231,6 +315,11 @@ z4j_db_pool_checked_out = Gauge(
     "use by handlers/workers). Steady-state under burst load is a "
     "key indicator of contention; should be << pool_size.",
     registry=registry,
+    # Multiprocess: checked-out connections are per-process and
+    # disjoint; sum over live workers is the brain-wide in-use count.
+    # Refreshed at scrape time by the scraped worker only, so other
+    # workers contribute their last-scrape sample.
+    multiprocess_mode="livesum",
 )
 
 z4j_brain_rss_bytes = Gauge(
@@ -241,6 +330,10 @@ z4j_brain_rss_bytes = Gauge(
     "leak fix is working; rapid growth indicates either an unbounded "
     "cache (tune ``Z4J_DATABASE_STATEMENT_CACHE_SIZE``) or a regression.",
     registry=registry,
+    # Multiprocess: RSS is inherently per-process; sum over live
+    # workers is the brain's total memory footprint, which is what
+    # capacity dashboards actually watch.
+    multiprocess_mode="livesum",
 )
 
 #: Counter incremented when a Postgres deadlock surfaces through
@@ -267,7 +360,7 @@ def _read_linux_rss_bytes() -> int:
     production target) always have /proc; the read is sub-millisecond.
     """
     try:
-        with open("/proc/self/status", "r") as fh:
+        with Path("/proc/self/status").open() as fh:
             for line in fh:
                 if line.startswith("VmRSS:"):
                     # "VmRSS:    123456 kB"
@@ -281,14 +374,14 @@ def _read_linux_rss_bytes() -> int:
 
 #: Provider for pool gauges. Populated by ``main.py`` once the
 #: ``DatabaseManager`` exists. Returns ``(pool_size, checked_out)``.
-_pool_gauge_provider: "Callable[[], tuple[int, int]] | None" = None
+_pool_gauge_provider: Callable[[], tuple[int, int]] | None = None
 
 
 def register_pool_gauge_provider(
-    provider: "Callable[[], tuple[int, int]]",
+    provider: Callable[[], tuple[int, int]],
 ) -> None:
     """Register the callable that reports pool size + checked-out count."""
-    global _pool_gauge_provider
+    global _pool_gauge_provider  # noqa: PLW0603  module-level singleton lazy-init
     _pool_gauge_provider = provider
 
 
@@ -303,7 +396,7 @@ def _refresh_leak_visibility_gauges() -> None:
     # RSS gauge -- pure file read, no DB hit.
     try:
         z4j_brain_rss_bytes.set(_read_linux_rss_bytes())
-    except Exception:  # noqa: BLE001
+    except Exception:
         record_swallowed("metrics", "rss_gauge")
     # Pool gauges -- read in-memory pool state via the registered provider.
     if _pool_gauge_provider is not None:
@@ -311,8 +404,9 @@ def _refresh_leak_visibility_gauges() -> None:
             size, checked_out = _pool_gauge_provider()
             z4j_db_pool_size.set(size)
             z4j_db_pool_checked_out.set(checked_out)
-        except Exception:  # noqa: BLE001
+        except Exception:
             record_swallowed("metrics", "pool_gauges")
+
 
 # -- Notifications --
 
@@ -328,6 +422,105 @@ z4j_notifications_cooldown_skipped_total = Counter(
     "Number of subscription dispatches skipped because the cooldown "
     "window had not elapsed (the conditional UPDATE returned no rows).",
     labelnames=("project", "trigger"),
+    registry=registry,
+)
+
+# -- Automation / scheduler reliability --
+#
+# A brain-side misfire (a schedule that should have fired but did not,
+# usually because its scheduler is dead or partitioned) is the headline
+# A4 signal. It writes an audit row, but operators alert on metrics, so
+# every detected misfire also bumps this counter.
+z4j_scheduler_misfires_detected_total = Counter(
+    "z4j_scheduler_misfires_detected_total",
+    "Schedules the brain detected as misfired (expected fire is past the "
+    "grace window). A sustained non-zero rate means a scheduler is dead, "
+    "partitioned, or badly behind.",
+    labelnames=("project",),
+    registry=registry,
+)
+
+# A confirmed agent-offline episode (no heartbeat past the offline
+# timeout + alert grace) is the brain-side emit for the worker.offline
+# trigger. It writes an audit row, but operators alert on metrics, so
+# every detected episode also bumps this counter.
+z4j_agents_offline_detected_total = Counter(
+    "z4j_agents_offline_detected_total",
+    "Agent-offline episodes the brain confirmed (no heartbeat past the "
+    "offline timeout + alert grace). Each episode counts once, however "
+    "long the agent stays down.",
+    labelnames=("project",),
+    registry=registry,
+)
+
+# One increment per automation rule action execution (including dry-run
+# and failsafe-skipped ones -- the outcome label distinguishes them).
+# Labelled by project + action type + outcome, NOT by rule: rule ids are
+# unbounded cardinality, and per-rule detail lives in the HMAC-chained
+# ``automation.rule.fired`` audit rows this counter mirrors.
+z4j_automation_rule_fires_total = Counter(
+    "z4j_automation_rule_fires_total",
+    "Automation rule action executions, by action type and outcome "
+    "(executed / dry_run / skipped_failsafe / failed / ...).",
+    labelnames=("project", "action", "outcome"),
+    registry=registry,
+)
+
+# A rule's rolling-window circuit breaker tripping into notify-only
+# failsafe mode. Mirrors the ``automation.rule.circuit_tripped`` audit
+# row; operators alert on this.
+z4j_automation_circuit_trips_total = Counter(
+    "z4j_automation_circuit_trips_total",
+    "Automation rule circuit-breaker trips (rule downgraded to notify-only failsafe until reset).",
+    labelnames=("project",),
+    registry=registry,
+)
+
+# Automation firings the frame router had to DROP (the per-connection
+# pending-automation set was full under an event flood). Unlike a
+# notification, a dropped firing is permanent, so this is the signal that
+# automation silently stopped acting for a project.
+z4j_automation_firings_dropped_total = Counter(
+    "z4j_automation_firings_dropped_total",
+    "Automation firings dropped before dispatch (pending queue full). A "
+    "permanent drop -- a sustained rate means automation is shedding load.",
+    labelnames=("project", "reason"),
+    registry=registry,
+)
+
+# Notify actions suppressed by the per-rule coalesce window (a distinct-
+# event flood that would otherwise fan out one notification per event per
+# member). The first alert in each window still goes out; this counts the
+# ones folded into it.
+z4j_automation_notify_coalesced_total = Counter(
+    "z4j_automation_notify_coalesced_total",
+    "Automation notify actions suppressed by the per-rule coalesce window.",
+    labelnames=("project",),
+    registry=registry,
+)
+
+# Automation firings captured to the durable outbox because they could not
+# be dispatched inline (pending queue full), to be replayed by the drain
+# worker. Pairs with z4j_automation_firings_dropped_total: enqueued means
+# recoverable, dropped means lost.
+z4j_automation_outbox_enqueued_total = Counter(
+    "z4j_automation_outbox_enqueued_total",
+    "Automation firings persisted to the durable outbox for later replay.",
+    labelnames=("project", "trigger"),
+    registry=registry,
+)
+
+# schedule_fires partition-manager failures. reason="default_blocked" is the
+# serious one: a day's rows already sit in the DEFAULT partition, so its
+# daily partition can never be created and retention-by-DROP cannot reclaim
+# it until DEFAULT is cleared. A sustained non-zero default_blocked rate is
+# an alert.
+z4j_schedule_fires_partition_failures_total = Counter(
+    "z4j_schedule_fires_partition_failures_total",
+    "schedule_fires partition create/drop operations that failed. "
+    "reason=default_blocked means a day is un-partitionable because rows "
+    "for it are stuck in the DEFAULT partition (retention-by-DROP blocked).",
+    labelnames=("op", "reason"),
     registry=registry,
 )
 
@@ -360,7 +553,7 @@ def record_swallowed(module: str, site: str) -> None:
     """
     try:
         z4j_swallowed_exceptions_total.labels(module=module, site=site).inc()
-    except Exception:  # noqa: BLE001
+    except Exception:
         # The counter infra itself is broken; nothing sensible to do.
         return
 
@@ -389,6 +582,13 @@ z4j_audit_retention_pruned_total = Gauge(
     "Cumulative audit_log rows deleted by the retention sweeper "
     "since this brain process started (resets on restart).",
     registry=registry,
+    # Multiprocess: every worker runs its own sweeper against the
+    # shared DB and deletes disjoint rows, so cumulative work is the
+    # sum. Deliberately NOT the live variant: a dead worker's
+    # deletions really happened and must stay in the run's total (a
+    # restarted worker starts a fresh per-PID series at 0, so the
+    # sum stays monotone within one serve run).
+    multiprocess_mode="sum",
 )
 
 z4j_audit_retention_last_run_timestamp = Gauge(
@@ -396,13 +596,19 @@ z4j_audit_retention_last_run_timestamp = Gauge(
     "Unix timestamp of the most recent audit-log retention sweep "
     "(0 if the sweeper has never run a successful pass).",
     registry=registry,
+    # Multiprocess: "when did a sweep last happen brain-wide" is the
+    # max across workers. Non-live on purpose: a dead worker's
+    # timestamp records a run that really happened.
+    multiprocess_mode="max",
 )
 
 z4j_audit_retention_last_deleted = Gauge(
     "z4j_audit_retention_last_deleted",
-    "Rows deleted in the most recent audit-log retention sweep "
-    "pass.",
+    "Rows deleted in the most recent audit-log retention sweep pass.",
     registry=registry,
+    # Multiprocess: "the most recent pass" is whichever worker wrote
+    # last; sum or max would blend rows from different passes.
+    multiprocess_mode="mostrecent",
 )
 
 z4j_wal_checkpoint_pages_last = Gauge(
@@ -410,6 +616,9 @@ z4j_wal_checkpoint_pages_last = Gauge(
     "Pages checkpointed in the most recent WAL checkpoint pass "
     "(SQLite-only; -1 on non-WAL or unsupported response shape).",
     registry=registry,
+    # Multiprocess: last-pass semantics, same reasoning as
+    # ``z4j_audit_retention_last_deleted``.
+    multiprocess_mode="mostrecent",
 )
 
 z4j_wal_checkpoint_last_run_timestamp = Gauge(
@@ -417,6 +626,9 @@ z4j_wal_checkpoint_last_run_timestamp = Gauge(
     "Unix timestamp of the most recent WAL checkpoint pass "
     "(0 on Postgres deployments, or before the task has run once).",
     registry=registry,
+    # Multiprocess: most-recent-run semantics, same reasoning as
+    # ``z4j_audit_retention_last_run_timestamp``.
+    multiprocess_mode="max",
 )
 
 z4j_background_task_error_active = Gauge(
@@ -425,6 +637,11 @@ z4j_background_task_error_active = Gauge(
     "0 otherwise. Cleared when a subsequent pass succeeds.",
     labelnames=("task",),
     registry=registry,
+    # Multiprocess: alerting semantics -- raise if ANY worker's most
+    # recent pass failed. Non-live on purpose: a worker that died
+    # while failing keeps the alert raised for the rest of the serve
+    # run instead of silently clearing it when its PID disappears.
+    multiprocess_mode="max",
 )
 
 #: Sampled at scrape time. Each callable returns a dict of:
@@ -433,16 +650,16 @@ z4j_background_task_error_active = Gauge(
 #:    "wal_pages_last": int, "wal_last_run_at": datetime|None,
 #:    "wal_error": str|None}``.
 #: Registered by ``main.py`` once the singletons exist.
-_self_watch_provider: "Callable[[], dict] | None" = None
+_self_watch_provider: Callable[[], dict] | None = None
 
 
-def register_self_watch_provider(provider: "Callable[[], dict]") -> None:
+def register_self_watch_provider(provider: Callable[[], dict]) -> None:
     """Register the callable that supplies self-watch state.
 
     The provider is invoked at scrape time and should be cheap
     (read instance attributes, no DB queries).
     """
-    global _self_watch_provider
+    global _self_watch_provider  # noqa: PLW0603  module-level singleton lazy-init
     _self_watch_provider = provider
 
 
@@ -452,7 +669,7 @@ def _refresh_self_watch_gauges() -> None:
         return
     try:
         snap = _self_watch_provider()
-    except Exception:  # noqa: BLE001
+    except Exception:
         record_swallowed("metrics", "self_watch_provider")
         return
 
@@ -460,13 +677,13 @@ def _refresh_self_watch_gauges() -> None:
     audit_total = int(snap.get("audit_pruned_total") or 0)
     try:
         z4j_audit_retention_pruned_total.set(audit_total)
-    except Exception:  # noqa: BLE001
+    except Exception:
         record_swallowed("metrics", "audit_pruned_set")
 
     audit_last_deleted = int(snap.get("audit_last_deleted") or 0)
     try:
         z4j_audit_retention_last_deleted.set(audit_last_deleted)
-    except Exception:  # noqa: BLE001
+    except Exception:
         record_swallowed("metrics", "audit_last_deleted_set")
 
     audit_last = snap.get("audit_last_run_at")
@@ -474,7 +691,7 @@ def _refresh_self_watch_gauges() -> None:
         z4j_audit_retention_last_run_timestamp.set(
             audit_last.timestamp() if audit_last is not None else 0,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         record_swallowed("metrics", "audit_last_run_set")
 
     audit_err_active = 1 if snap.get("audit_error") else 0
@@ -482,7 +699,7 @@ def _refresh_self_watch_gauges() -> None:
         z4j_background_task_error_active.labels(
             task="audit_retention",
         ).set(audit_err_active)
-    except Exception:  # noqa: BLE001
+    except Exception:
         record_swallowed("metrics", "audit_err_set")
 
     # WAL-checkpoint gauges
@@ -490,7 +707,7 @@ def _refresh_self_watch_gauges() -> None:
     if wal_pages is not None:
         try:
             z4j_wal_checkpoint_pages_last.set(int(wal_pages))
-        except Exception:  # noqa: BLE001
+        except Exception:
             record_swallowed("metrics", "wal_pages_set")
 
     wal_last = snap.get("wal_last_run_at")
@@ -498,7 +715,7 @@ def _refresh_self_watch_gauges() -> None:
         z4j_wal_checkpoint_last_run_timestamp.set(
             wal_last.timestamp() if wal_last is not None else 0,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         record_swallowed("metrics", "wal_last_run_set")
 
     wal_err_active = 1 if snap.get("wal_error") else 0
@@ -506,11 +723,57 @@ def _refresh_self_watch_gauges() -> None:
         z4j_background_task_error_active.labels(
             task="wal_checkpoint",
         ).set(wal_err_active)
-    except Exception:  # noqa: BLE001
+    except Exception:
         record_swallowed("metrics", "wal_err_set")
 
 
-def _check_metrics_auth(request: Request, settings: "Settings") -> None:
+def _reap_dead_worker_metrics(multiproc_dir: str) -> None:
+    """Drop live-gauge files of workers that no longer exist (R4-M2).
+
+    prometheus_client's multiprocess mode leaves one value file per
+    PID; ``mark_process_dead`` is meant to run at child exit, but
+    uvicorn's worker supervisor exposes no such hook -- and a
+    SIGKILLed worker could never run one anyway. Without reaping, a
+    replaced worker's ``livesum``/``liveall`` gauges keep counting
+    (round 4 measured pool-size gauges tripling after one worker
+    kill+respawn). Reaping at scrape time bounds the staleness to one
+    scrape interval.
+
+    Only gauge_live* files are removed (that is all mark_process_dead
+    touches); counter/histogram files persist so a dead worker's
+    already-counted work is never un-counted. PID liveness is probed
+    with ``os.kill(pid, 0)``: workers are same-user siblings, and a
+    recycled PID merely delays cleanup one scrape. Best-effort by
+    design -- any failure is swallowed into the scrape-health counter.
+    """
+    try:
+        from prometheus_client import multiprocess
+
+        live_prefixes = ("gauge_live", "gauge_liveall", "gauge_livesum")
+        seen: set[int] = set()
+        for f in Path(multiproc_dir).glob("gauge_live*_*.db"):
+            stem = f.stem
+            if not stem.startswith(live_prefixes):
+                continue
+            pid_part = stem.rsplit("_", 1)[-1]
+            if not pid_part.isdigit():
+                continue
+            pid = int(pid_part)
+            if pid in seen or pid == os.getpid():
+                continue
+            seen.add(pid)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                multiprocess.mark_process_dead(pid, path=multiproc_dir)
+            except PermissionError:
+                # Exists but owned elsewhere: alive, leave it.
+                continue
+    except Exception:
+        record_swallowed("metrics", "dead_worker_reap")
+
+
+def _check_metrics_auth(request: Request, settings: Settings) -> None:
     """Enforce bearer-token auth on ``/metrics`` (fail-secure default).
 
     Policy (as of 1.0.13):
@@ -576,7 +839,7 @@ def _check_metrics_auth(request: Request, settings: "Settings") -> None:
 @router.get("/metrics", response_class=Response)
 async def metrics_endpoint(
     request: Request,
-    settings: "Settings" = Depends(get_settings),
+    settings: Settings = Depends(get_settings),
 ) -> Response:
     """Render the brain's metrics in Prometheus text format.
 
@@ -584,13 +847,51 @@ async def metrics_endpoint(
     Prometheus scrape gets a fresh ``z4j_inmemory_state_items``
     snapshot without forcing every subsystem to update on every
     mutation.
+
+    R3-M8: when ``PROMETHEUS_MULTIPROC_DIR`` is set (multi-worker
+    serve), the response aggregates every worker process via
+    ``multiprocess.MultiProcessCollector`` instead of rendering only
+    this process's private registry.
     """
     _check_metrics_auth(request, settings)
     _refresh_inmemory_gauges()
     _refresh_self_watch_gauges()
     _refresh_leak_visibility_gauges()
     _refresh_fleet_gauges()
-    body = generate_latest(registry)
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if multiproc_dir:
+        # Multi-worker serve: cli.py exported PROMETHEUS_MULTIPROC_DIR
+        # before uvicorn spawned the workers (or the operator set it
+        # themselves), so every worker's metric writes -- including
+        # the scrape-time refreshes above, which wrote THIS worker's
+        # samples through to the mmap files -- land in the shared
+        # directory. Aggregate ALL workers here. A fresh throwaway
+        # registry per scrape is the documented prometheus_client
+        # pattern: MultiProcessCollector reads the value files at
+        # collect time and must not accumulate on a long-lived
+        # registry.
+        from prometheus_client import multiprocess
+
+        # Reap dead workers BEFORE collecting (R4-M2): uvicorn gives
+        # us no child-exit hook, so a killed/replaced worker's live
+        # gauge files stayed in the directory and livesum kept adding
+        # the corpse's values to the aggregate (round 4 reproduced
+        # z4j_db_pool_size tripling after one worker kill+respawn).
+        # mark_process_dead removes only the gauge_live* files for
+        # that PID -- counters correctly keep a dead worker's counts.
+        # PID liveness via kill(pid, 0): workers are same-user
+        # siblings in the same container/host. Best-effort; a reap
+        # failure must never break the scrape.
+        _reap_dead_worker_metrics(multiproc_dir)
+        throwaway = CollectorRegistry()
+        multiprocess.MultiProcessCollector(throwaway, path=multiproc_dir)
+        body = generate_latest(throwaway)
+    else:
+        # Default single-process path: render the private in-process
+        # registry exactly as before. Test isolation depends on this
+        # branch staying the default (tests construct multiple
+        # create_app() instances against the module-level registry).
+        body = generate_latest(registry)
     return Response(content=body, media_type=CONTENT_TYPE_LATEST)
 
 
@@ -612,11 +913,11 @@ __all__ = [
     "z4j_commands_total",
     "z4j_db_pool_checked_out",
     "z4j_db_pool_size",
-    "z4j_postgres_deadlocks_total",
     "z4j_events_ingested_total",
     "z4j_inmemory_state_items",
     "z4j_notifications_cooldown_skipped_total",
     "z4j_notifications_sent_total",
+    "z4j_postgres_deadlocks_total",
     "z4j_queue_depth",
     "z4j_swallowed_exceptions_total",
     "z4j_task_duration_seconds",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from z4j_brain.auth.ip import TrustedProxyResolver
 
 
@@ -59,10 +58,13 @@ class TestEdgeCases:
 
     def test_ipv6_in_chain(self) -> None:
         r = TrustedProxyResolver(["fc00::/7"])
-        assert r.resolve(
-            peer_ip="fc00::1",
-            xff_header="2001:db8::1, fc00::5",
-        ) == "2001:db8::1"
+        assert (
+            r.resolve(
+                peer_ip="fc00::1",
+                xff_header="2001:db8::1, fc00::5",
+            )
+            == "2001:db8::1"
+        )
 
     def test_zone_id_stripped(self) -> None:
         r = TrustedProxyResolver(["fe80::/10"])

@@ -20,7 +20,7 @@ Schema rationale:
   without a brain restart. v1 always writes the settings defaults
   on first observation.
 - ``tokens`` is ``DOUBLE PRECISION`` because lazy refill needs
-  fractional accumulation (10 tokens/sec × 0.1 second = 1.0 token).
+  fractional accumulation (10 tokens/sec x 0.1 second = 1.0 token).
 
 Backwards compatible: brains without z4j-scheduler attached never
 write rows to this table.
@@ -64,7 +64,8 @@ class SchedulerRateBucket(Base):
         primary_key=True,
     )
     tokens: Mapped[float] = mapped_column(
-        Float, nullable=False,
+        Float,
+        nullable=False,
     )
     last_refill: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -72,10 +73,12 @@ class SchedulerRateBucket(Base):
         server_default=func.now(),
     )
     capacity: Mapped[float] = mapped_column(
-        Float, nullable=False,
+        Float,
+        nullable=False,
     )
     refill_per_second: Mapped[float] = mapped_column(
-        Float, nullable=False,
+        Float,
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

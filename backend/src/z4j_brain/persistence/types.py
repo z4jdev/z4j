@@ -47,7 +47,9 @@ class _SQLiteUuidArrayJSON(TypeDecorator):
     cache_ok = True
 
     def process_bind_param(
-        self, value: Any, dialect: Any,
+        self,
+        value: Any,
+        dialect: Any,
     ) -> list[str] | None:
         if value is None:
             return None
@@ -64,7 +66,9 @@ class _SQLiteUuidArrayJSON(TypeDecorator):
         return out
 
     def process_result_value(
-        self, value: Any, dialect: Any,
+        self,
+        value: Any,
+        dialect: Any,
     ) -> list[_uuid.UUID] | None:
         if value is None:
             return None
@@ -137,7 +141,8 @@ def uuid_array() -> TypeEngine:
     in v1.0.17. SQLite-only - the Postgres path is unaffected.
     """
     return ARRAY(Uuid(as_uuid=True)).with_variant(
-        _SQLiteUuidArrayJSON(), "sqlite",
+        _SQLiteUuidArrayJSON(),
+        "sqlite",
     )
 
 

@@ -19,6 +19,7 @@ under the ``/api/v1/user/`` prefix.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import uuid
 from datetime import datetime
@@ -47,6 +48,12 @@ from z4j_brain.domain.notifications.channels import (
     validate_webhook_headers,
     validate_webhook_url,
 )
+
+# Audit-log sanitization helper lives in domain so service.py and
+# api.notifications.py share one implementation (audit H-1/H-2/H-3).
+from z4j_brain.domain.notifications.sanitize import (
+    sanitize_audit_text as _sanitize_audit_text,
+)
 from z4j_brain.errors import ConflictError
 from z4j_brain.persistence.enums import ProjectRole
 
@@ -73,14 +80,17 @@ router = APIRouter(
 # ---------------------------------------------------------------------------
 
 
+# ``task.slow`` was removed in 1.7: it never had an emit site, so a
+# subscription on it could never fire. Stored rows that still carry the
+# string keep listing / muting fine; only create + rename reject it.
 _TRIGGER_PATTERN = (
     r"^(task\.failed|task\.succeeded|task\.retried|"
-    r"task\.slow|agent\.offline|agent\.online|"
+    r"agent\.offline|agent\.online|"
     r"schedule\.fire\.failed|schedule\.fire\.succeeded|"
-    r"schedule\.task_failed|"
+    r"schedule\.task_failed|schedule\.misfired|"
     r"schedule\.circuit_breaker\.tripped)$"
 )
-_CHANNEL_TYPE_PATTERN = r"^(webhook|email|slack|telegram|pagerduty|discord)$"
+_CHANNEL_TYPE_PATTERN = r"^(webhook|email|slack|telegram|pagerduty|discord|teams)$"
 
 
 #: Hard cap on the JSON-serialized size of a channel config dict.
@@ -149,14 +159,14 @@ class ChannelImportFromUserRequest(BaseModel):
     The source must be owned by the caller (anti-takeover: an admin
     can't import another user's personal channel into their project).
     """
+
     user_channel_id: uuid.UUID
     name: str | None = Field(
         default=None,
         min_length=1,
         max_length=200,
         description=(
-            "Override the imported channel's name. Defaults to "
-            "'Copy of {original}' if omitted."
+            "Override the imported channel's name. Defaults to 'Copy of {original}' if omitted."
         ),
     )
 
@@ -228,8 +238,8 @@ class SubscriptionFilters(BaseModel):
     # Literal value can't bloat the dispatcher's per-event match
     # loop (only 4 distinct priorities exist, so 8 covers the
     # matrix).
-    priority: list[Literal["critical", "high", "normal", "low"]] | None = (
-        Field(default=None, max_length=8)
+    priority: list[Literal["critical", "high", "normal", "low"]] | None = Field(
+        default=None, max_length=8
     )
     task_name: str | None = Field(default=None, max_length=500)
     task_name_pattern: str | None = Field(default=None, max_length=200)
@@ -267,8 +277,7 @@ class SubscriptionFilters(BaseModel):
             )
         if bracket_count > 3:
             raise ValueError(
-                f"task_name_pattern has too many [...] character classes "
-                f"({bracket_count}; max 3).",
+                f"task_name_pattern has too many [...] character classes ({bracket_count}; max 3).",
             )
         return v
 
@@ -281,7 +290,8 @@ class DefaultSubscriptionCreate(BaseModel):
     # ``get_many_for_project`` to build an enormous IN-clause.
     # Real subscriptions hit at most a handful of channels.
     project_channel_ids: list[uuid.UUID] = Field(
-        default_factory=list, max_length=64,
+        default_factory=list,
+        max_length=64,
     )
     cooldown_seconds: int = Field(default=0, ge=0, le=86400)
 
@@ -364,10 +374,6 @@ _SENSITIVE_CONFIG_KEYS = (
     "integration_key",
 )
 
-# Audit-log sanitization helper lives in domain so service.py and
-# api.notifications.py share one implementation (audit H-1/H-2/H-3).
-from z4j_brain.domain.notifications.sanitize import sanitize_audit_text as _sanitize_audit_text  # noqa: E501
-
 # Telegram bot-token and chat-id regexes now live in the domain
 # module (``z4j_brain.domain.notifications.channels``) so the
 # project-channel and user-channel validators share one source of
@@ -379,7 +385,7 @@ def _mask_config(config: dict[str, Any]) -> dict[str, Any]:
     """Mask credential-like fields when returning channel configs."""
     safe = dict(config)
     for key in _SENSITIVE_CONFIG_KEYS:
-        if key in safe and safe[key]:
+        if safe.get(key):
             safe[key] = _MASK
     return safe
 
@@ -434,7 +440,7 @@ def _safe_merge_config(
     return merged, url_changed
 
 
-async def _validate_channel_config(
+async def _validate_channel_config(  # noqa: PLR0912, PLR0915  per-channel-type validation
     channel_type: str,
     config: dict[str, Any] | None,
 ) -> None:
@@ -467,6 +473,7 @@ async def _validate_channel_config(
         from z4j_brain.domain.notifications.channels import (
             validate_telegram_config,
         )
+
         err = validate_telegram_config(config)
         if err:
             raise ConflictError(f"unsafe telegram config: {err}")
@@ -476,6 +483,7 @@ async def _validate_channel_config(
         from z4j_brain.domain.notifications.channels import (
             validate_smtp_config,
         )
+
         err = await validate_smtp_config(config)
         if err:
             raise ConflictError(f"unsafe email config: {err}")
@@ -483,6 +491,7 @@ async def _validate_channel_config(
         from z4j_brain.domain.notifications.channels import (
             validate_pagerduty_config,
         )
+
         err = validate_pagerduty_config(config)
         if err:
             raise ConflictError(f"invalid pagerduty config: {err}")
@@ -490,6 +499,7 @@ async def _validate_channel_config(
         from z4j_brain.domain.notifications.channels import (
             validate_discord_config,
         )
+
         # First the static checks (URL present, etc.).
         err = validate_discord_config(config)
         if err:
@@ -514,6 +524,7 @@ async def _validate_channel_config(
         from z4j_brain.domain.notifications.channels import (
             validate_teams_config,
         )
+
         err = validate_teams_config(config)
         if err:
             raise ConflictError(f"invalid teams config: {err}")
@@ -526,9 +537,9 @@ async def _validate_channel_config(
 
 async def _resolve_member_project(
     slug: str,
-    user: "User",
-    memberships: "MembershipRepository",
-    projects: "ProjectRepository",
+    user: User,
+    memberships: MembershipRepository,
+    projects: ProjectRepository,
     *,
     min_role: ProjectRole = ProjectRole.VIEWER,
 ) -> uuid.UUID:
@@ -538,7 +549,10 @@ async def _resolve_member_project(
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
     await policy.require_member(
-        memberships, user=user, project=project, min_role=min_role,
+        memberships,
+        user=user,
+        project=project,
+        min_role=min_role,
     )
     return project.id
 
@@ -599,11 +613,7 @@ def _delivery_payload(
     if name is None and type_ is None:
         if d.channel_id and channel_lookup and d.channel_id in channel_lookup:
             name, type_ = channel_lookup[d.channel_id]
-        elif (
-            d.user_channel_id
-            and user_channel_lookup
-            and d.user_channel_id in user_channel_lookup
-        ):
+        elif d.user_channel_id and user_channel_lookup and d.user_channel_id in user_channel_lookup:
             name, type_ = user_channel_lookup[d.user_channel_id]
     triggered_by_user_id = getattr(d, "triggered_by_user_id", None)
     triggered_by_email: str | None = None
@@ -637,10 +647,10 @@ def _delivery_payload(
 @router.get("/channels", response_model=list[ChannelPublic])
 async def list_channels(
     slug: str,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[ChannelPublic]:
     """List the project's shared channels.
 
@@ -670,17 +680,21 @@ async def create_channel(
     slug: str,
     body: ChannelCreate,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> ChannelPublic:
     from z4j_brain.persistence.models.notification import NotificationChannel
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
     # SSRF / header validation BEFORE persisting. Blocks private-IP
     # webhooks and auth-header smuggling at the entry point.
@@ -734,12 +748,12 @@ async def import_channel_from_user(
     slug: str,
     body: ChannelImportFromUserRequest,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> ChannelPublic:
     """Copy one of the caller's personal channels into the project.
 
@@ -765,11 +779,16 @@ async def import_channel_from_user(
     from z4j_brain.persistence.repositories import UserChannelRepository
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
 
     source = await UserChannelRepository(db_session).get_for_user(
-        user.id, body.user_channel_id,
+        user.id,
+        body.user_channel_id,
     )
     if source is None:
         # NotFound (not Forbidden) so we don't leak whether a channel
@@ -847,12 +866,12 @@ async def update_channel(
     channel_id: uuid.UUID,
     body: ChannelUpdate,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> ChannelPublic:
     from z4j_brain.errors import NotFoundError
     from z4j_brain.persistence.repositories import (
@@ -860,10 +879,15 @@ async def update_channel(
     )
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
     channel = await NotificationChannelRepository(db_session).get_for_project(
-        project_id, channel_id,
+        project_id,
+        channel_id,
     )
     if channel is None:
         raise NotFoundError(
@@ -883,7 +907,9 @@ async def update_channel(
         # masked credentials. See _safe_merge_config for HIGH-01
         # details (mask-echo preservation + URL-pivot scrub).
         merged, url_changed = _safe_merge_config(
-            channel.config or {}, body.config, mask=_MASK,
+            channel.config or {},
+            body.config,
+            mask=_MASK,
         )
         channel.config = merged
         fields_changed.append("config")
@@ -928,12 +954,12 @@ async def delete_channel(
     slug: str,
     channel_id: uuid.UUID,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> None:
     from sqlalchemy import delete
 
@@ -943,7 +969,11 @@ async def delete_channel(
     )
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
 
     # Look up the row first so the audit metadata can name what was
@@ -951,7 +981,8 @@ async def delete_channel(
     # ``deleted webhook channel "Slack: ops-alerts"``, not just
     # an opaque UUID). Returns None on cross-project IDOR attempts.
     channel = await NotificationChannelRepository(db_session).get_for_project(
-        project_id, channel_id,
+        project_id,
+        channel_id,
     )
 
     # DATA-05: strip this channel id from every subscription that
@@ -965,10 +996,12 @@ async def delete_channel(
     )
 
     await UserSubscriptionRepository(db_session).strip_project_channel(
-        project_id=project_id, channel_id=channel_id,
+        project_id=project_id,
+        channel_id=channel_id,
     )
     await ProjectDefaultSubscriptionRepository(db_session).strip_project_channel(
-        project_id=project_id, channel_id=channel_id,
+        project_id=project_id,
+        channel_id=channel_id,
     )
 
     await db_session.execute(
@@ -1045,7 +1078,8 @@ def _test_payload() -> dict[str, Any]:
     ``task_name``, ``priority``, ``state``) so the test exercises
     the same rendering path production traffic hits.
     """
-    from datetime import UTC, datetime as _dt
+    from datetime import UTC
+    from datetime import datetime as _dt
 
     now = _dt.now(UTC).isoformat()
     return {
@@ -1071,7 +1105,7 @@ async def _dispatch_test(
     channel_id: uuid.UUID | None = None,
     user_channel_id: uuid.UUID | None = None,
     triggered_by_user_id: uuid.UUID | None = None,
-    db_session: "AsyncSession | None" = None,
+    db_session: AsyncSession | None = None,
 ) -> ChannelTestResult:
     """Run the real dispatcher with a canned test payload.
 
@@ -1103,7 +1137,8 @@ async def _dispatch_test(
     dispatcher = CHANNEL_DISPATCHERS.get(channel_type)
     if dispatcher is None:
         return ChannelTestResult(
-            success=False, error=f"unknown channel type {channel_type!r}",
+            success=False,
+            error=f"unknown channel type {channel_type!r}",
         )
 
     result = await dispatcher(config, _test_payload())
@@ -1144,8 +1179,10 @@ async def _dispatch_test(
                 from z4j_brain.persistence.repositories import (
                     NotificationChannelRepository,
                 )
+
                 src = await NotificationChannelRepository(db_session).get_for_project(
-                    project_id, channel_id,
+                    project_id,
+                    channel_id,
                 )
                 if src is not None:
                     snapshot_name = src.name
@@ -1170,13 +1207,11 @@ async def _dispatch_test(
             )
             db_session.add(row)
             await db_session.commit()
-        except Exception:  # noqa: BLE001
+        except Exception:
             import logging as _logging
 
-            try:
+            with contextlib.suppress(Exception):
                 await db_session.rollback()
-            except Exception:  # noqa: BLE001
-                pass
             _logging.getLogger("z4j.brain.notifications").exception(
                 "test_dispatch_audit_failed",
             )
@@ -1185,9 +1220,7 @@ async def _dispatch_test(
         success=result.success,
         status_code=result.status_code,
         error=result.error,
-        response_body=(
-            (result.response_body or "")[:500] if result.response_body else None
-        ),
+        response_body=((result.response_body or "")[:500] if result.response_body else None),
     )
 
 
@@ -1204,12 +1237,12 @@ async def test_channel_config(
     slug: str,
     body: ChannelTestRequest,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> ChannelTestResult:
     """Dispatch a single test notification against an UNSAVED config.
 
@@ -1227,7 +1260,11 @@ async def test_channel_config(
     Admin-only; same role gate as create_channel.
     """
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
     result = await _dispatch_test(
         body.type,
@@ -1276,12 +1313,12 @@ async def test_saved_channel(
     slug: str,
     channel_id: uuid.UUID,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> ChannelTestResult:
     """Dispatch a single test notification against a SAVED channel.
 
@@ -1299,10 +1336,15 @@ async def test_saved_channel(
     )
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
     channel = await NotificationChannelRepository(db_session).get_for_project(
-        project_id, channel_id,
+        project_id,
+        channel_id,
     )
     if channel is None:
         raise NotFoundError(
@@ -1352,17 +1394,21 @@ async def test_saved_channel(
 )
 async def list_defaults(
     slug: str,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[DefaultSubscriptionPublic]:
     from z4j_brain.persistence.repositories import (
         ProjectDefaultSubscriptionRepository,
     )
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
     rows = await ProjectDefaultSubscriptionRepository(
         db_session,
@@ -1384,12 +1430,12 @@ async def create_default(
     slug: str,
     body: DefaultSubscriptionCreate,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> DefaultSubscriptionPublic:
     from z4j_brain.persistence.models.notification import (
         ProjectDefaultSubscription,
@@ -1400,7 +1446,11 @@ async def create_default(
     )
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
 
     # Validate channel ids belong to this project (defaults can only
@@ -1483,7 +1533,8 @@ class DefaultSubscriptionUpdate(BaseModel):
     filters: SubscriptionFilters | None = None
     in_app: bool | None = None
     project_channel_ids: list[uuid.UUID] | None = Field(
-        default=None, max_length=64,
+        default=None,
+        max_length=64,
     )
     cooldown_seconds: int | None = Field(default=None, ge=0, le=86400)
 
@@ -1498,12 +1549,12 @@ async def update_default(
     default_id: uuid.UUID,
     body: DefaultSubscriptionUpdate,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> DefaultSubscriptionPublic:
     """Partial-update an existing default subscription (admin only).
 
@@ -1531,7 +1582,11 @@ async def update_default(
     )
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
 
     # Load the row scoped to this project so a leaked default_id
@@ -1584,10 +1639,7 @@ async def update_default(
             "to_count": len(body.project_channel_ids),
         }
         default.project_channel_ids = body.project_channel_ids
-    if (
-        body.cooldown_seconds is not None
-        and body.cooldown_seconds != default.cooldown_seconds
-    ):
+    if body.cooldown_seconds is not None and body.cooldown_seconds != default.cooldown_seconds:
         changed["cooldown_seconds"] = {
             "from": default.cooldown_seconds,
             "to": body.cooldown_seconds,
@@ -1626,6 +1678,7 @@ async def update_default(
     await db_session.refresh(default)
     return _default_payload(default)
 
+
 @router.delete(
     "/defaults/{default_id}",
     status_code=204,
@@ -1635,12 +1688,12 @@ async def delete_default(
     slug: str,
     default_id: uuid.UUID,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
 ) -> None:
     from sqlalchemy import delete
 
@@ -1652,7 +1705,11 @@ async def delete_default(
     )
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
     # Capture the trigger before the row goes so the audit metadata
     # has something more useful than an opaque UUID.
@@ -1692,6 +1749,7 @@ async def delete_default(
 
 class ClearDeliveriesResult(BaseModel):
     """Response shape for the admin clear-log endpoint (added v1.0.14)."""
+
     deleted: int
 
 
@@ -1712,10 +1770,10 @@ async def clear_deliveries(
             "recent debugging history. When unset, deletes everything."
         ),
     ),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> ClearDeliveriesResult:
     """Bulk-delete every delivery row for the project.
 
@@ -1745,7 +1803,11 @@ async def clear_deliveries(
     )
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
     deleted = await NotificationDeliveryRepository(db_session).delete_for_project(
         project_id,
@@ -1780,10 +1842,10 @@ async def list_deliveries(
     slug: str,
     limit: int = Query(default=50, ge=1, le=500),
     cursor: str | None = Query(default=None),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> DeliveryListPublic:
     """Paged admin-visible delivery log with keyset pagination.
 
@@ -1794,6 +1856,8 @@ async def list_deliveries(
     """
     from z4j_brain.api.home import (  # reuse the same encoder shape
         _decode_recent_failures_cursor as _decode_cursor,
+    )
+    from z4j_brain.api.home import (
         _encode_recent_failures_cursor as _encode_cursor,
     )
     from z4j_brain.persistence.repositories import (
@@ -1801,7 +1865,11 @@ async def list_deliveries(
     )
 
     project_id = await _resolve_member_project(
-        slug, user, memberships, projects, min_role=ProjectRole.ADMIN,
+        slug,
+        user,
+        memberships,
+        projects,
+        min_role=ProjectRole.ADMIN,
     )
 
     cursor_dt, cursor_id = _decode_cursor(cursor)

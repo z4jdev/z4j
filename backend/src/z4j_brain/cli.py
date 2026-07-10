@@ -16,20 +16,23 @@ remember the uvicorn invocation flags.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
-from z4j_brain import __version__
 from z4j_core.paths import (
     ensure_z4j_home,
     reject_deprecated_path_env,
     z4j_home,
 )
 
+from z4j_brain import __version__
 
-def main(argv: Sequence[str] | None = None) -> int:
+
+def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, PLR0915  flat CLI dispatch
     """Entry point installed as the ``z4j`` console script.
 
     The pre-1.4.0 ``z4j-brain`` alias was dropped in the
@@ -162,7 +165,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     migrate.add_argument(
         "action",
         choices=(
-            "upgrade", "downgrade", "revision", "current", "history",
+            "upgrade",
+            "downgrade",
+            "revision",
+            "current",
+            "history",
             "sync",
         ),
     )
@@ -204,13 +211,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     audit_verify.add_argument(
         "--limit",
         type=int,
-        default=5_000,
+        default=1_000,
         help=(
-            "maximum number of rows to verify per invocation "
-            "(default: 5000, hard cap: 5000). The repository's "
-            "stream_for_verify returns up to N rows from the "
-            "oldest entry; re-run for more if your audit log "
-            "is larger."
+            "page size for the chain walk (default: 1000, max: 5000). "
+            "The command pages through the ENTIRE audit log in chain "
+            "order and verifies every row; this only controls how many "
+            "rows are fetched per query, not how many are verified."
         ),
     )
 
@@ -257,7 +263,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="project-scoped operations (rewrite-scheduler, ...)",
     )
     projects_sub = projects_cmd.add_subparsers(
-        dest="projects_command", required=True,
+        dest="projects_command",
+        required=True,
     )
     rewrite_sched = projects_sub.add_parser(
         "rewrite-scheduler",
@@ -319,10 +326,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="create the initial admin user + default project (first-boot only)",
     )
     bootstrap.add_argument(
-        "--email", required=True, help="admin email address",
+        "--email",
+        required=True,
+        help="admin email address",
     )
     bootstrap.add_argument(
-        "--display-name", default=None, help="optional display name",
+        "--display-name",
+        default=None,
+        help="optional display name",
     )
     bootstrap_pw = bootstrap.add_mutually_exclusive_group(required=True)
     bootstrap_pw.add_argument(
@@ -398,10 +409,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="create an admin user (Django-style alias for bootstrap-admin)",
     )
     createsuperuser.add_argument(
-        "--email", required=True, help="admin email address",
+        "--email",
+        required=True,
+        help="admin email address",
     )
     createsuperuser.add_argument(
-        "--display-name", default=None, help="optional display name",
+        "--display-name",
+        default=None,
+        help="optional display name",
     )
     createsuperuser_pw = createsuperuser.add_mutually_exclusive_group(
         required=True,
@@ -492,11 +507,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     ah_sub.add_parser("list", help="print the current persisted allow-list")
     ah_add = ah_sub.add_parser("add", help="add one or more hosts to the file")
-    ah_add.add_argument("hosts", nargs="+", metavar="HOST",
-                        help="hostname or IP literal to allow")
+    ah_add.add_argument("hosts", nargs="+", metavar="HOST", help="hostname or IP literal to allow")
     ah_rm = ah_sub.add_parser("remove", help="remove one or more hosts from the file")
-    ah_rm.add_argument("hosts", nargs="+", metavar="HOST",
-                       help="hostname or IP literal to remove")
+    ah_rm.add_argument("hosts", nargs="+", metavar="HOST", help="hostname or IP literal to remove")
     ah_sub.add_parser("path", help="print the file path the brain reads from")
 
     # doctor
@@ -682,7 +695,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="inspect and validate ~/.z4j/config.env",
     )
     config_sub = config_cmd.add_subparsers(
-        dest="config_command", required=True,
+        dest="config_command",
+        required=True,
     )
     config_show = config_sub.add_parser(
         "show",
@@ -695,7 +709,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help=(
             "print secret values in cleartext. Default is to mask "
             "every secret as ***. Required for one-off debugging "
-            "(\"is this secret what I expect\") but should never "
+            '("is this secret what I expect") but should never '
             "land in a script."
         ),
     )
@@ -707,10 +721,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "path",
         nargs="?",
         default=None,
-        help=(
-            "path to a candidate .env file. Defaults to "
-            "$Z4J_HOME/config.env."
-        ),
+        help=("path to a candidate .env file. Defaults to $Z4J_HOME/config.env."),
     )
 
     # version
@@ -796,7 +807,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 2
 
 
-def _run_upgrade(args: argparse.Namespace) -> int:
+def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  upgrade check + apply dispatch
     """Dispatch ``z4j upgrade``.
 
     Compares installed z4j package versions against PyPI's
@@ -810,7 +821,6 @@ def _run_upgrade(args: argparse.Namespace) -> int:
     import shlex
     import shutil
     import subprocess
-
     from importlib.metadata import PackageNotFoundError, version
 
     import httpx
@@ -819,7 +829,7 @@ def _run_upgrade(args: argparse.Namespace) -> int:
     # than walking ``pkg_resources`` so an unrelated third-party
     # package whose name happens to start with "z4j" never gets
     # confused for one of ours.
-    _Z4J_PACKAGES = (
+    _z4j_packages = (
         "z4j",
         "z4j-brain",
         "z4j-scheduler",
@@ -850,10 +860,10 @@ def _run_upgrade(args: argparse.Namespace) -> int:
 
     started_at = time.monotonic()
     walltime_budget = max(5.0, args.timeout * 2)  # 2x timeout for 15 pkgs
-    per_call_timeout = max(2.0, args.timeout / max(1, len(_Z4J_PACKAGES)))
+    per_call_timeout = max(2.0, args.timeout / max(1, len(_z4j_packages)))
 
     with httpx.Client(timeout=per_call_timeout) as client:
-        for pkg in _Z4J_PACKAGES:
+        for pkg in _z4j_packages:
             try:
                 installed = version(pkg)
             except PackageNotFoundError:
@@ -865,59 +875,71 @@ def _run_upgrade(args: argparse.Namespace) -> int:
                 network_errors.append(
                     f"{pkg}: skipped (walltime budget exhausted)",
                 )
-                rows.append({
-                    "package": pkg,
-                    "installed": installed,
-                    "latest": "(skipped: timeout)",
-                    "behind": False,
-                })
+                rows.append(
+                    {
+                        "package": pkg,
+                        "installed": installed,
+                        "latest": "(skipped: timeout)",
+                        "behind": False,
+                    }
+                )
                 continue
 
             try:
                 resp = client.get(f"https://pypi.org/pypi/{pkg}/json")
                 if resp.status_code == 404:
-                    rows.append({
-                        "package": pkg,
-                        "installed": installed,
-                        "latest": "(not on PyPI)",
-                        "behind": False,
-                    })
+                    rows.append(
+                        {
+                            "package": pkg,
+                            "installed": installed,
+                            "latest": "(not on PyPI)",
+                            "behind": False,
+                        }
+                    )
                     continue
                 resp.raise_for_status()
                 latest = resp.json().get("info", {}).get("version", "?")
-            except httpx.HTTPError as exc:  # noqa: BLE001
+            except httpx.HTTPError as exc:
                 network_errors.append(
                     f"{pkg}: {type(exc).__name__}: {exc}",
                 )
-                rows.append({
-                    "package": pkg,
-                    "installed": installed,
-                    "latest": "(lookup failed)",
-                    "behind": False,
-                })
+                rows.append(
+                    {
+                        "package": pkg,
+                        "installed": installed,
+                        "latest": "(lookup failed)",
+                        "behind": False,
+                    }
+                )
                 continue
 
             is_behind = installed != latest
             if is_behind:
                 behind += 1
-            rows.append({
-                "package": pkg,
-                "installed": installed,
-                "latest": latest,
-                "behind": is_behind,
-            })
+            rows.append(
+                {
+                    "package": pkg,
+                    "installed": installed,
+                    "latest": latest,
+                    "behind": is_behind,
+                }
+            )
 
     # Backwards-compat single-string for the JSON shape callers
     # already test against:
     network_error = "; ".join(network_errors) if network_errors else None
 
     if args.json:
-        print(_json.dumps({  # noqa: T201
-            "ok": behind == 0 and network_error is None,
-            "behind_count": behind,
-            "rows": rows,
-            "network_error": network_error,
-        }))
+        print(  # noqa: T201  CLI output
+            _json.dumps(
+                {
+                    "ok": behind == 0 and network_error is None,
+                    "behind_count": behind,
+                    "rows": rows,
+                    "network_error": network_error,
+                }
+            )
+        )
     else:
         if not rows:
             print("z4j upgrade: no z4j packages installed in this venv.")  # noqa: T201
@@ -925,18 +947,15 @@ def _run_upgrade(args: argparse.Namespace) -> int:
         col_pkg = max(len(str(r["package"])) for r in rows) + 2
         col_inst = max(len(str(r["installed"])) for r in rows) + 2
         col_last = max(len(str(r["latest"])) for r in rows) + 2
-        header = (
-            f"{'PACKAGE':<{col_pkg}}{'INSTALLED':<{col_inst}}"
-            f"{'LATEST':<{col_last}}STATUS"
-        )
+        header = f"{'PACKAGE':<{col_pkg}}{'INSTALLED':<{col_inst}}{'LATEST':<{col_last}}STATUS"
         print(header)  # noqa: T201
         print("-" * len(header))  # noqa: T201
         for r in rows:
             status = "behind" if r["behind"] else "current"
             print(  # noqa: T201
-                f"{str(r['package']):<{col_pkg}}"
-                f"{str(r['installed']):<{col_inst}}"
-                f"{str(r['latest']):<{col_last}}{status}",
+                f"{r['package']!s:<{col_pkg}}"
+                f"{r['installed']!s:<{col_inst}}"
+                f"{r['latest']!s:<{col_last}}{status}",
             )
         print()  # noqa: T201
         if network_error:
@@ -964,7 +983,7 @@ def _run_upgrade(args: argparse.Namespace) -> int:
         print("error: cannot locate python executable", file=sys.stderr)  # noqa: T201
         return 2
     try:
-        proc = subprocess.run(pip_cmd, check=False)
+        proc = subprocess.run(pip_cmd, check=False)  # noqa: S603  fixed internal pip upgrade command
     except OSError as exc:
         print(f"error: pip invocation failed: {exc}", file=sys.stderr)  # noqa: T201
         return 2
@@ -983,17 +1002,17 @@ def _run_mint_scheduler_cert(args: argparse.Namespace) -> int:
     operators who actually run this command.
     """
     try:
-        from z4j_brain.scheduler_grpc.auth import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.auth import (
             mint_scheduler_cert,
             write_minted_cert,
         )
     except ImportError as exc:
-        print(
+        print(  # noqa: T201  CLI output
             "z4j: mint-scheduler-cert requires the scheduler-grpc extra. "
             "Install with: pip install 'z4j[scheduler-grpc]'",
             file=sys.stderr,
         )
-        print(f"  underlying error: {exc}", file=sys.stderr)
+        print(f"  underlying error: {exc}", file=sys.stderr)  # noqa: T201  CLI output
         return 2
 
     ca_cert_path = Path(args.ca_cert)
@@ -1001,10 +1020,10 @@ def _run_mint_scheduler_cert(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
 
     if not ca_cert_path.is_file():
-        print(f"z4j: --ca-cert {ca_cert_path!s} not found", file=sys.stderr)
+        print(f"z4j: --ca-cert {ca_cert_path!s} not found", file=sys.stderr)  # noqa: T201  CLI output
         return 2
     if not ca_key_path.is_file():
-        print(f"z4j: --ca-key {ca_key_path!s} not found", file=sys.stderr)
+        print(f"z4j: --ca-key {ca_key_path!s} not found", file=sys.stderr)  # noqa: T201  CLI output
         return 2
 
     try:
@@ -1020,13 +1039,13 @@ def _run_mint_scheduler_cert(args: argparse.Namespace) -> int:
             cert_pem=cert_pem,
             key_pem=key_pem,
         )
-    except Exception as exc:  # noqa: BLE001
-        print(f"z4j mint-scheduler-cert failed: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"z4j mint-scheduler-cert failed: {exc}", file=sys.stderr)  # noqa: T201  CLI output
         return 1
 
-    print(f"wrote certificate: {cert_path}")
-    print(f"wrote private key: {key_path}")
-    print(
+    print(f"wrote certificate: {cert_path}")  # noqa: T201  CLI output
+    print(f"wrote private key: {key_path}")  # noqa: T201  CLI output
+    print(  # noqa: T201  CLI output
         f"\nNext steps:\n"
         f"  1. Add '{args.name}' to Z4J_SCHEDULER_GRPC_ALLOWED_CNS on the brain\n"
         f"  2. Restart the brain so the new allow-list takes effect\n"
@@ -1048,7 +1067,7 @@ def _run_metrics_token(args: argparse.Namespace) -> int:
     return _run_metrics_token_show(args)
 
 
-def _run_metrics_token_show(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _run_metrics_token_show(args: argparse.Namespace) -> int:
     """Print the ``/metrics`` bearer token.
 
     Resolution (first match wins):
@@ -1070,7 +1089,7 @@ def _run_metrics_token_show(args: argparse.Namespace) -> int:  # noqa: ARG001
     secret_env = z4j_home() / "secret.env"
     if secret_env.exists():
         for line in secret_env.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
+            line = line.strip()  # noqa: PLW2901  normalized in-loop
             if line.startswith("Z4J_METRICS_AUTH_TOKEN="):
                 print(line.split("=", 1)[1])  # noqa: T201
                 return 0
@@ -1084,7 +1103,7 @@ def _run_metrics_token_show(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 2
 
 
-def _run_metrics_token_rotate(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _run_metrics_token_rotate(args: argparse.Namespace) -> int:
     """Mint a fresh ``/metrics`` bearer token and replace it in
     ``~/.z4j/secret.env``.
 
@@ -1141,10 +1160,8 @@ def _run_metrics_token_rotate(args: argparse.Namespace) -> int:  # noqa: ARG001
     tmp = secret_env.with_suffix(secret_env.suffix + ".rotate-tmp")
     # If a previous rotate crashed mid-write, the EXCL would refuse
     # to overwrite a stale tmp. Best-effort cleanup first.
-    try:
+    with contextlib.suppress(FileNotFoundError):
         tmp.unlink()
-    except FileNotFoundError:
-        pass
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY  # Windows: no implicit \r\n translation
@@ -1156,17 +1173,15 @@ def _run_metrics_token_rotate(args: argparse.Namespace) -> int:  # noqa: ARG001
         # Roll back the tmp file if the write fails so we don't leave
         # a half-written sibling. Re-raise so the operator sees the
         # original error - rotation should fail loudly, not silently.
-        try:
+        with contextlib.suppress(FileNotFoundError):
             tmp.unlink()
-        except FileNotFoundError:
-            pass
         raise
     # On POSIX chmod is redundant (we already opened with 0o600) but
     # this defends against rare umask-application bugs. On Windows
     # chmod is a no-op; ACL handling is the file system's job.
     if hasattr(os, "chmod"):
         try:
-            os.chmod(tmp, 0o600)
+            tmp.chmod(0o600)
         except OSError as exc:
             print(  # noqa: T201
                 f"z4j metrics-token rotate: WARNING - chmod 0o600 on "
@@ -1175,7 +1190,7 @@ def _run_metrics_token_rotate(args: argparse.Namespace) -> int:  # noqa: ARG001
                 f"permissions manually.",
                 file=sys.stderr,
             )
-    os.replace(tmp, secret_env)
+    tmp.replace(secret_env)
 
     # Audit log (best-effort): log the rotation to structlog so the
     # operations team can correlate "Prometheus stopped scraping" with
@@ -1244,8 +1259,15 @@ def _run_doctor(args: argparse.Namespace) -> int:
     # an EXPLICIT Z4J_BIND_HOST != loopback set in the operator's
     # environment, which IS the dangerous combo.
     bind_host = os.environ.get("Z4J_BIND_HOST", "")
-    if env == "dev" and bind_host and bind_host not in (
-        "127.0.0.1", "localhost", "[::1]",
+    if (
+        env == "dev"
+        and bind_host
+        and bind_host
+        not in (
+            "127.0.0.1",
+            "localhost",
+            "[::1]",
+        )
     ):
         # As of v1.0.14 `z4j serve` refuses to start with this combo
         # (see _run_serve fail-closed gate). Doctor still flags it as
@@ -1305,6 +1327,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
     async def _row_warnings() -> None:
         from sqlalchemy import text
+
         from z4j_brain.persistence.database import DatabaseManager
 
         _settings, engine = _build_settings_from_env()
@@ -1342,14 +1365,13 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
     try:
         asyncio.run(_row_warnings())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         warnings.append(
-            f"could not enumerate users/projects/agents: "
-            f"{type(exc).__name__}: {exc}",
+            f"could not enumerate users/projects/agents: {type(exc).__name__}: {exc}",
         )
 
     if warnings:
-        print("\nz4j doctor: warnings ({}):".format(len(warnings)))  # noqa: T201
+        print(f"\nz4j doctor: warnings ({len(warnings)}):")  # noqa: T201
         for i, w in enumerate(warnings, 1):
             print(f"  {i}. {w}\n")  # noqa: T201
         return 0
@@ -1374,7 +1396,7 @@ def _run_backup(args: argparse.Namespace) -> int:
     except FileNotFoundError as exc:
         print(f"z4j: {exc}")  # noqa: T201
         return 1
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"z4j: backup failed: {exc}")  # noqa: T201
         return 1
     size_mb = result["size_bytes"] / (1024 * 1024)
@@ -1385,8 +1407,7 @@ def _run_backup(args: argparse.Namespace) -> int:
         f"  size:       {size_mb:.2f} MiB",
     )
     print(  # noqa: T201
-        f"z4j: move this file off-host (scp, rclone, S3, ...) for "
-        f"true disaster recovery.",
+        "z4j: move this file off-host (scp, rclone, S3, ...) for true disaster recovery.",
     )
     return 0
 
@@ -1411,7 +1432,7 @@ def _run_restore(args: argparse.Namespace) -> int:
     except FileNotFoundError as exc:
         print(f"z4j: {exc}")  # noqa: T201
         return 1
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"z4j: restore failed: {exc}")  # noqa: T201
         return 1
     print(  # noqa: T201
@@ -1420,8 +1441,8 @@ def _run_restore(args: argparse.Namespace) -> int:
         f"  source:     {result['source']}",
     )
     print(  # noqa: T201
-        f"z4j: start the brain (`systemctl start z4j` / `docker "
-        f"compose up -d z4j`) and verify with `z4j check && z4j status`.",
+        "z4j: start the brain (`systemctl start z4j` / `docker "
+        "compose up -d z4j`) and verify with `z4j check && z4j status`.",
     )
     return 0
 
@@ -1454,8 +1475,7 @@ def _run_allowed_hosts(args: argparse.Namespace) -> int:
         for h in hosts:
             print(f"  {h}")  # noqa: T201
         print(  # noqa: T201
-            "\nThese are merged into the auto-detected hostname/IP "
-            "set on every `z4j serve` start.",
+            "\nThese are merged into the auto-detected hostname/IP set on every `z4j serve` start.",
         )
         return 0
 
@@ -1467,8 +1487,7 @@ def _run_allowed_hosts(args: argparse.Namespace) -> int:
             print(f"  skipped: {h} (already present)")  # noqa: T201
         if added:
             print(  # noqa: T201
-                f"\nWrote {get_path()}. Restart `z4j serve` for the "
-                f"change to take effect.",
+                f"\nWrote {get_path()}. Restart `z4j serve` for the change to take effect.",
             )
         return 0
 
@@ -1480,8 +1499,7 @@ def _run_allowed_hosts(args: argparse.Namespace) -> int:
             print(f"  not found: {h}")  # noqa: T201
         if removed:
             print(  # noqa: T201
-                f"\nWrote {get_path()}. Restart `z4j serve` for the "
-                f"change to take effect.",
+                f"\nWrote {get_path()}. Restart `z4j serve` for the change to take effect.",
             )
         return 0
 
@@ -1522,20 +1540,16 @@ def _write_secret_env_atomic(path: Path, payload: bytes) -> None:
         flags |= os.O_NOFOLLOW
     # Tear down a stale .tmp from a crashed prior run before O_EXCL
     # would refuse it.
-    try:
+    with contextlib.suppress(FileNotFoundError):
         tmp_path.unlink()
-    except FileNotFoundError:
-        pass
     fd = os.open(str(tmp_path), flags, 0o600)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(payload)
-        os.replace(str(tmp_path), str(path))
+        tmp_path.replace(path)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
         raise
 
 
@@ -1557,12 +1571,9 @@ def _append_secret_env_atomic(path: Path, payload: bytes) -> None:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    try:
-        fd = os.open(str(path), flags)
-    except OSError:
-        # File missing or symlink rejected, fall through to
-        # caller. Caller handles missing-file by minting fresh.
-        raise
+    # File missing or symlink rejected, propagates to caller.
+    # Caller handles missing-file by minting fresh.
+    fd = os.open(str(path), flags)
     try:
         with os.fdopen(fd, "rb") as fh:
             existing = fh.read()
@@ -1577,7 +1588,93 @@ def _append_secret_env_atomic(path: Path, payload: bytes) -> None:
     _write_secret_env_atomic(path, new_payload)
 
 
-def _run_serve(args: argparse.Namespace) -> int:
+def _setup_multiprocess_metrics_env(
+    workers: int,
+    *,
+    reload_mode: bool,
+) -> str | None:
+    """Point prometheus_client at a shared mmap dir for multi-worker serve.
+
+    R3-M8 (external audit, reproduced): the default ``z4j serve``
+    runs min(4, cpu) uvicorn worker PROCESSES, but the brain's
+    Prometheus registry is in-process, so a load-balanced
+    ``/metrics`` scrape lands on ONE worker and misses counters
+    incremented in the others (agent-offline and automation incident
+    counters appear to reset or never fire). prometheus_client's
+    multiprocess mode fixes this: with ``PROMETHEUS_MULTIPROC_DIR``
+    set, every process writes metric values to mmap files in that
+    directory and the scrape handler aggregates across all of them
+    (see ``z4j_brain.api.metrics``).
+
+    Import-order guarantee (prometheus_client binds its value
+    backend AT IMPORT TIME from this env var):
+
+    - The parent process (this one) does not import
+      prometheus_client before ``uvicorn.run``: the serve path
+      touches only uvicorn, z4j_core.paths, and z4j_brain's
+      ``__init__`` / ``allowed_hosts`` / ``startup`` modules, none of
+      which import the metrics module. With ``workers > 1`` uvicorn's
+      supervisor never loads the app in the parent either
+      (``Config.load`` runs inside ``Server.serve``, i.e. in the
+      workers).
+    - uvicorn spawns workers with multiprocessing's "spawn" context
+      (``uvicorn._subprocess``), so each worker is a FRESH
+      interpreter that inherits ``os.environ`` and imports
+      prometheus_client with the env var already set. The workers,
+      the processes actually serving scrapes, therefore always get
+      multiprocess-backed values; even if a future refactor imported
+      the metrics module in the parent early, only the parent's
+      (non-serving) registry would stay in-process.
+
+    Lifecycle:
+
+    - ``mkdtemp`` mints a fresh per-run directory, so stale value
+      files from a previous serve run can never leak into this run's
+      aggregation (a stale counter file would resurrect ghost
+      increments under a recycled PID).
+    - The directory is removed via ``atexit`` on normal shutdown; a
+      SIGKILL'd parent leaves it behind for the OS tmp cleaner.
+    - Worker-death cleanup: prometheus_client's
+      ``multiprocess.mark_process_dead`` is designed to run from a
+      child-exit hook, which uvicorn does not expose cleanly. The
+      accepted bound is this fresh-dir-per-run policy: a worker that
+      dies mid-run leaves its files until the run ends -- its counter
+      contributions remain correctly counted, and its live-mode gauge
+      samples linger for the remainder of the run.
+    - Operators who export ``PROMETHEUS_MULTIPROC_DIR`` themselves
+      own that directory's lifecycle; it is left untouched.
+
+    Returns the directory created, or ``None`` when multiprocess
+    mode was not activated here (single worker, ``--reload``, or an
+    operator-managed directory).
+    """
+    if workers <= 1 or reload_mode:
+        # Single process serves every scrape, so the in-process
+        # registry is already complete. --reload is dev-only and
+        # runs a single worker under the reloader regardless of the
+        # workers flag; reloader restarts would also churn PIDs and
+        # accumulate stale mmap files within one run.
+        return None
+    if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        # Operator-managed directory: respect it and its lifecycle.
+        return None
+
+    import atexit
+    import shutil
+    import tempfile
+
+    multiproc_dir = tempfile.mkdtemp(prefix="z4j-prometheus-multiproc-")
+    os.environ["PROMETHEUS_MULTIPROC_DIR"] = multiproc_dir
+    atexit.register(shutil.rmtree, multiproc_dir, ignore_errors=True)
+    print(  # noqa: T201
+        f"z4j: multiprocess metrics active for {workers} workers "
+        f"(PROMETHEUS_MULTIPROC_DIR={multiproc_dir}); /metrics "
+        "scrapes aggregate across all worker processes.",
+    )
+    return multiproc_dir
+
+
+def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serve flag handling
     """Run uvicorn programmatically.
 
     We import uvicorn lazily so ``z4j version`` and
@@ -1659,6 +1756,7 @@ def _run_serve(args: argparse.Namespace) -> int:
                 "before serving.",
             )
         from z4j_brain import startup as _startup
+
         _startup.set_cli_bootstrap_password(args.admin_password)
 
     # Default to SQLite if no DATABASE_URL is set (bare-metal mode).
@@ -1673,8 +1771,7 @@ def _run_serve(args: argparse.Namespace) -> int:
         os.environ["Z4J_DATABASE_URL"] = f"sqlite+aiosqlite:///{db_path}"
         os.environ.setdefault("Z4J_REGISTRY_BACKEND", "local")
         print(  # noqa: T201
-            f"z4j: using SQLite at {db_path} "
-            "(set Z4J_DATABASE_URL for Postgres)",
+            f"z4j: using SQLite at {db_path} (set Z4J_DATABASE_URL for Postgres)",
         )
 
     # Auto-bootstrap HMAC secrets so ``pip install z4j && z4j
@@ -1695,7 +1792,7 @@ def _run_serve(args: argparse.Namespace) -> int:
         secret_env = data_dir / "secret.env"
         if secret_env.exists():
             for line in secret_env.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
+                line = line.strip()  # noqa: PLW2901  normalized in-loop
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
@@ -1718,7 +1815,7 @@ def _run_serve(args: argparse.Namespace) -> int:
                 # follow a planted symlink and we keep mode 0o600.
                 _append_secret_env_atomic(
                     secret_env,
-                    f"Z4J_METRICS_AUTH_TOKEN={new_metrics}\n".encode("utf-8"),
+                    f"Z4J_METRICS_AUTH_TOKEN={new_metrics}\n".encode(),
                 )
                 os.environ["Z4J_METRICS_AUTH_TOKEN"] = new_metrics
                 print(  # noqa: T201
@@ -1776,7 +1873,7 @@ def _run_serve(args: argparse.Namespace) -> int:
                 f"Z4J_SECRET={new_secret}\n"
                 f"Z4J_SESSION_SECRET={new_session}\n"
                 f"Z4J_METRICS_AUTH_TOKEN={new_metrics}\n"
-            ).encode("utf-8")
+            ).encode()
             # Atomic mode-0o600 mint via
             # O_CREAT|O_EXCL|O_NOFOLLOW. A naive write with the
             # process umask (typically 0o644) and chmod afterward
@@ -1848,7 +1945,7 @@ def _run_serve(args: argparse.Namespace) -> int:
                     h = getattr(_socket, fn_name)()
                     if h and h.lower() not in {x.lower() for x in auto_hosts}:
                         auto_hosts.append(h)
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: S110  best-effort hostname discovery
                     pass
 
             # 2) IPv4 addresses bound on the host. Covers the common
@@ -1872,7 +1969,7 @@ def _run_serve(args: argparse.Namespace) -> int:
                 for ip in addrs:
                     if ip and ip.lower() not in {x.lower() for x in auto_hosts}:
                         auto_hosts.append(ip)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S110  best-effort resolver IP discovery
                 pass
             try:
                 with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as _s:
@@ -1882,7 +1979,7 @@ def _run_serve(args: argparse.Namespace) -> int:
                     primary_ip = _s.getsockname()[0]
                     if primary_ip and primary_ip not in auto_hosts:
                         auto_hosts.append(primary_ip)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S110  best-effort primary IP discovery
                 pass
 
             # 3) Merge persisted allow-list from `~/.z4j/allowed-hosts`.
@@ -1909,10 +2006,7 @@ def _run_serve(args: argparse.Namespace) -> int:
         # accept off-loopback connections without explicit production
         # mode (Z4J_ENVIRONMENT=production + https Z4J_PUBLIC_URL +
         # explicit Z4J_ALLOWED_HOSTS).
-        if (
-            os.environ.get("Z4J_ENVIRONMENT") == "dev"
-            and "Z4J_BIND_HOST" not in os.environ
-        ):
+        if os.environ.get("Z4J_ENVIRONMENT") == "dev" and "Z4J_BIND_HOST" not in os.environ:
             os.environ["Z4J_BIND_HOST"] = "127.0.0.1"
 
         # PUBLIC_URL AUTO-DERIVATION (added v1.0.14): when the operator
@@ -1926,10 +2020,7 @@ def _run_serve(args: argparse.Namespace) -> int:
         # set explicitly (see Settings._enforce_security_invariants),
         # so this fires only in dev mode where the default is
         # operator-friendly rather than security-load-bearing.
-        if (
-            os.environ.get("Z4J_ENVIRONMENT") == "dev"
-            and "Z4J_PUBLIC_URL" not in os.environ
-        ):
+        if os.environ.get("Z4J_ENVIRONMENT") == "dev" and "Z4J_PUBLIC_URL" not in os.environ:
             # Mirror the precedence uvicorn will use:
             # --host > Z4J_BIND_HOST > settings default.
             # --port > Z4J_BIND_PORT > settings default (7700).
@@ -1942,9 +2033,7 @@ def _run_serve(args: argparse.Namespace) -> int:
             # dev mode is fail-closed anyway, so this branch is mostly
             # belt-and-suspenders.
             _display = (
-                "localhost"
-                if _bh in ("127.0.0.1", "localhost", "[::1]", "::1", "0.0.0.0")
-                else _bh
+                "localhost" if _bh in ("127.0.0.1", "localhost", "[::1]", "::1", "0.0.0.0") else _bh  # noqa: S104  membership check, not a bind
             )
             os.environ["Z4J_PUBLIC_URL"] = f"http://{_display}:{_bp}"
 
@@ -1981,7 +2070,7 @@ def _run_serve(args: argparse.Namespace) -> int:
             existing = _json.loads(current) if current else []
             if not isinstance(existing, list):
                 existing = []
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Tolerate a comma-separated string in the env var - some
             # operators reach for the shell-native form.
             existing = [s.strip() for s in current.split(",") if s.strip()]
@@ -2060,8 +2149,8 @@ def _run_serve(args: argparse.Namespace) -> int:
     # only fires when the operator has neither: dev mode AND a
     # non-loopback bind WITHOUT the production-shaped config.
     bind = args.host or settings.bind_host
-    _LOOPBACK = ("127.0.0.1", "localhost", "[::1]", "::1")
-    if settings.environment == "dev" and bind not in _LOOPBACK:
+    _loopback = ("127.0.0.1", "localhost", "[::1]", "::1")
+    if settings.environment == "dev" and bind not in _loopback:
         print(  # noqa: T201
             "z4j: REFUSING TO START.\n"
             "\n"
@@ -2079,7 +2168,7 @@ def _run_serve(args: argparse.Namespace) -> int:
             "  2. Docker / k8s dev stack on an internal network:\n"
             "       Z4J_ENVIRONMENT=production \\\n"
             "       Z4J_PUBLIC_URL=http://localhost:7700 \\\n"
-            "       Z4J_ALLOWED_HOSTS='[\"localhost\",\"127.0.0.1\"]' \\\n"
+            '       Z4J_ALLOWED_HOSTS=\'["localhost","127.0.0.1"]\' \\\n'
             "       Z4J_ALLOW_HTTP_PUBLIC_URL=true \\\n"
             "       z4j serve --host 0.0.0.0\n"
             "     (Z4J_ALLOW_HTTP_PUBLIC_URL=true is the explicit\n"
@@ -2119,12 +2208,10 @@ def _run_serve(args: argparse.Namespace) -> int:
         persisted = _ah_read()
         if persisted:
             print(  # noqa: T201
-                f"z4j: persisted from {_ah_path()}: "
-                f"{', '.join(persisted)}",
+                f"z4j: persisted from {_ah_path()}: {', '.join(persisted)}",
             )
         print(  # noqa: T201
-            f"z4j: to add more, run `z4j allowed-hosts add <name>` "
-            f"(persists across restarts).",
+            "z4j: to add more, run `z4j allowed-hosts add <name>` (persists across restarts).",
         )
 
     # Default workers count is now min(4, cpu) instead
@@ -2139,7 +2226,7 @@ def _run_serve(args: argparse.Namespace) -> int:
     if args.workers is None:
         try:
             cpu = os.cpu_count() or 2
-        except Exception:  # noqa: BLE001
+        except Exception:
             cpu = 2
         workers_resolved = max(1, min(4, cpu))
     else:
@@ -2155,6 +2242,18 @@ def _run_serve(args: argparse.Namespace) -> int:
             "event-loop contention at higher counts. Pass "
             "--workers=4 (or --workers=$(nproc)) for production.",
         )
+
+    # R3-M8: with multiple worker processes, per-process Prometheus
+    # registries shard the operational counters (a load-balanced
+    # scrape sees one worker's view). Flip on prometheus_client
+    # multiprocess mode BEFORE uvicorn spawns the workers so the env
+    # var is inherited by every fresh worker interpreter; see the
+    # helper's docstring for the import-order reasoning and the
+    # worker-death cleanup tradeoff.
+    _setup_multiprocess_metrics_env(
+        workers_resolved,
+        reload_mode=bool(args.reload),
+    )
 
     uvicorn.run(
         "z4j_brain.main:create_app",
@@ -2173,7 +2272,7 @@ def _run_serve(args: argparse.Namespace) -> int:
         # Widen the brain-side WebSocket PING/PONG cadence so the
         # outbound PING gets plenty of headroom when ingest is
         # bursty. uvicorn's defaults (20s/20s) are too tight under
-        # sustained 100 task/s × 10 agent fanout: the underlying
+        # sustained 100 task/s x 10 agent fanout: the underlying
         # ``websockets`` library serializes PING with application
         # sends on the same connection task, and a busy ingest
         # path will starve PING dispatch within the default
@@ -2199,6 +2298,7 @@ def _run_migrate(args: argparse.Namespace) -> int:
        fallback for editable installs).
     """
     import os
+
     from alembic.config import main as alembic_main
 
     # Bootstrap env (DB URL + secrets) so alembic's env.py can
@@ -2224,8 +2324,7 @@ def _run_migrate(args: argparse.Namespace) -> int:
     config_path = next((p for p in candidates if p.exists()), None)
     if config_path is None:
         print(  # noqa: T201
-            "z4j: alembic.ini not found in any of: "
-            + ", ".join(str(p) for p in candidates),
+            "z4j: alembic.ini not found in any of: " + ", ".join(str(p) for p in candidates),
             file=sys.stderr,
         )
         return 2
@@ -2235,7 +2334,9 @@ def _run_migrate(args: argparse.Namespace) -> int:
             config_path,
             allow_future=getattr(args, "allow_future_schema", False),
             confirm_destructive=getattr(
-                args, "i_know_this_can_corrupt_data", False,
+                args,
+                "i_know_this_can_corrupt_data",
+                False,
             ),
         )
 
@@ -2326,15 +2427,12 @@ def _run_migrate_sync(
     # known shape.
     from sqlalchemy import create_engine, inspect, text
 
-    from z4j_brain.persistence.base import Base
     from z4j_brain.persistence import models  # noqa: F401
+    from z4j_brain.persistence.base import Base
 
     db_url = os.environ.get("Z4J_DATABASE_URL")
     if db_url:
-        sync_url = (
-            db_url.replace("+asyncpg", "")
-            .replace("+aiosqlite", "")
-        )
+        sync_url = db_url.replace("+asyncpg", "").replace("+aiosqlite", "")
         engine = create_engine(sync_url, future=True)
         try:
             with engine.connect() as conn:
@@ -2350,13 +2448,13 @@ def _run_migrate_sync(
                 # operator-controlled, but a future code path that
                 # widens the source could introduce SQL-injection if
                 # this guard is missing.
-                import re as _re  # noqa: PLC0415
-                _IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+                import re as _re
+
+                _ident_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
                 for tbl in sorted(extra_tables):
-                    if not _IDENT_RE.fullmatch(tbl):
+                    if not _ident_re.fullmatch(tbl):
                         print(  # noqa: T201
-                            f"  refusing to drop table with unsafe "
-                            f"identifier: {tbl!r}",
+                            f"  refusing to drop table with unsafe identifier: {tbl!r}",
                         )
                         continue
                     print(  # noqa: T201
@@ -2387,8 +2485,7 @@ class _UnknownDBRevisionError(RuntimeError):
 
     def __init__(self, db_head: str) -> None:
         super().__init__(
-            f"DB alembic_version={db_head!r} not present in this "
-            f"code's migration scripts",
+            f"DB alembic_version={db_head!r} not present in this code's migration scripts",
         )
         self.db_head = db_head
 
@@ -2406,6 +2503,7 @@ def _auto_migrate() -> None:
     (DB unreachable, malformed revision, etc.).
     """
     import os
+
     from alembic.config import main as alembic_main
 
     candidates: list[Path] = []
@@ -2440,7 +2538,7 @@ def _auto_migrate() -> None:
     # below will surface the same error consistently.
     try:
         unknown = _detect_unknown_db_head(config_path)
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Pre-flight is best-effort. Any failure here just falls
         # through to the regular alembic path.
         unknown = None
@@ -2486,10 +2584,7 @@ def _detect_unknown_db_head(config_path: Path) -> str | None:
 
     # Strip the asyncpg / aiosqlite driver suffix - we just want a
     # sync read of one row.
-    sync_url = (
-        db_url.replace("+asyncpg", "")
-        .replace("+aiosqlite", "")
-    )
+    sync_url = db_url.replace("+asyncpg", "").replace("+aiosqlite", "")
     engine = create_engine(sync_url, future=True)
     try:
         with engine.connect() as conn:
@@ -2497,7 +2592,7 @@ def _detect_unknown_db_head(config_path: Path) -> str | None:
                 text("SELECT version_num FROM alembic_version LIMIT 1"),
             )
             row = result.first()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     finally:
         engine.dispose()
@@ -2527,8 +2622,7 @@ def _run_projects(args: argparse.Namespace) -> int:
     if args.projects_command == "rewrite-scheduler":
         return _run_projects_rewrite_scheduler(args)
     print(  # noqa: T201
-        f"z4j projects: unknown subcommand "
-        f"{args.projects_command!r}",
+        f"z4j projects: unknown subcommand {args.projects_command!r}",
         file=sys.stderr,
     )
     return 2
@@ -2554,7 +2648,6 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
         2 - misconfiguration (bad slug, can't connect to DB)
     """
     import asyncio
-    import uuid as _uuid
 
     _bootstrap_env_for_management_commands()
 
@@ -2571,10 +2664,9 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
 
     try:
         settings = Settings()  # type: ignore[call-arg]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(  # noqa: T201
-            f"z4j projects rewrite-scheduler: failed to "
-            f"load settings: {type(exc).__name__}",
+            f"z4j projects rewrite-scheduler: failed to load settings: {type(exc).__name__}",
             file=sys.stderr,
         )
         return 2
@@ -2594,8 +2686,7 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
                 project = await projects_repo.get_by_slug(args.slug)
                 if project is None:
                     print(  # noqa: T201
-                        f"z4j projects rewrite-scheduler: "
-                        f"project {args.slug!r} not found",
+                        f"z4j projects rewrite-scheduler: project {args.slug!r} not found",
                         file=sys.stderr,
                     )
                     return 2
@@ -2616,28 +2707,32 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
                             source_lower == "declarative",
                             source_lower == "imported",
                             source_lower.like(
-                                "declarative:%", escape="\\",
+                                "declarative:%",
+                                escape="\\",
                             ),
                             source_lower.like(
-                                "declarative\\_%", escape="\\",
+                                "declarative\\_%",
+                                escape="\\",
                             ),
                             source_lower.like(
-                                "imported\\_%", escape="\\",
+                                "imported\\_%",
+                                escape="\\",
                             ),
                         ),
                     )
 
                 if args.dry_run:
                     from sqlalchemy import select
-                    count_q = select(func.count()).select_from(
-                        Schedule,
-                    ).where(*where_clauses)
-                    n_rows = (await session.execute(count_q)).scalar() or 0
-                    scope = (
-                        "all sources"
-                        if args.all_sources
-                        else "declarative/imported sources"
+
+                    count_q = (
+                        select(func.count())
+                        .select_from(
+                            Schedule,
+                        )
+                        .where(*where_clauses)
                     )
+                    n_rows = (await session.execute(count_q)).scalar() or 0
+                    scope = "all sources" if args.all_sources else "declarative/imported sources"
                     print(  # noqa: T201
                         f"z4j projects rewrite-scheduler "
                         f"(dry-run): would rewrite {n_rows} schedule(s) "
@@ -2648,9 +2743,7 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
                     return 0
 
                 result = await session.execute(
-                    update(Schedule)
-                    .where(*where_clauses)
-                    .values(scheduler=args.to_scheduler),
+                    update(Schedule).where(*where_clauses).values(scheduler=args.to_scheduler),
                 )
                 rewrote_n = result.rowcount or 0
 
@@ -2677,11 +2770,7 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
                     },
                 )
                 await session.commit()
-                scope = (
-                    "all sources"
-                    if args.all_sources
-                    else "declarative/imported sources"
-                )
+                scope = "all sources" if args.all_sources else "declarative/imported sources"
                 print(  # noqa: T201
                     f"z4j projects rewrite-scheduler: "
                     f"rewrote {rewrote_n} schedule(s) in project "
@@ -2695,7 +2784,7 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
-def _run_audit_verify(args: argparse.Namespace) -> int:
+def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit chain verification
     """Stream the audit log and report any HMAC mismatches.
 
     Returns 0 on clean verification, 1 on at least one mismatch,
@@ -2718,17 +2807,16 @@ def _run_audit_verify(args: argparse.Namespace) -> int:
 
     try:
         settings = Settings()  # type: ignore[call-arg]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(  # noqa: T201
-            f"z4j audit verify: failed to load settings: "
-            f"{type(exc).__name__}",
+            f"z4j audit verify: failed to load settings: {type(exc).__name__}",
             file=sys.stderr,
         )
         return 2
 
     audit = AuditService(settings)
 
-    async def _run() -> int:
+    async def _run() -> int:  # noqa: PLR0912  chain verification branches
         engine = create_engine_from_settings(settings)
         db = DatabaseManager(engine)
         verified = 0
@@ -2743,39 +2831,56 @@ def _run_audit_verify(args: argparse.Namespace) -> int:
         # the CLI tool operators actually run.)
         first_row = True
         prev_hmac: str | None = None
+        # Keyset cursor over the chain order (occurred_at, id). We page
+        # through the ENTIRE log so a chain longer than one page is fully
+        # verified. Previously this loaded a single fixed slice
+        # (stream_for_verify(chunk=--limit)) and every row past the cap
+        # went unverified -- a silent gap for any audit log over ~5000
+        # rows, i.e. exactly the case a compliance audit cares about.
+        cursor_occurred_at = None
+        cursor_id = None
+        page_size = args.limit
+        if not 1 <= page_size <= 5000:
+            print(  # noqa: T201  CLI output
+                f"z4j audit verify: --limit must be between 1 and 5000 (got {page_size})",
+                file=sys.stderr,
+            )
+            return 2
         try:
             async with db.session() as session:
                 repo = AuditLogRepository(session)
-                rows = await repo.stream_for_verify(chunk=args.limit)
-                for row in rows:
-                    if first_row:
-                        first_row = False
-                        if row.prev_row_hmac is not None:
+                while True:
+                    rows = await repo.stream_for_verify(
+                        chunk=page_size,
+                        after_occurred_at=cursor_occurred_at,
+                        after_id=cursor_id,
+                    )
+                    if not rows:
+                        break
+                    for row in rows:
+                        if first_row:
+                            first_row = False
+                            if row.prev_row_hmac is not None:
+                                mismatches.append(
+                                    f"{row.id} (chain truncation: first "
+                                    f"row has non-null prev_row_hmac; "
+                                    f"genesis anchor missing)",
+                                )
+                        elif row.prev_row_hmac != prev_hmac:
+                            saw = row.prev_row_hmac[:12] if row.prev_row_hmac else "None"
+                            want = prev_hmac[:12] if prev_hmac else "None"
                             mismatches.append(
-                                f"{row.id} (chain truncation: first "
-                                f"row has non-null prev_row_hmac; "
-                                f"genesis anchor missing)",
+                                f"{row.id} (chain break: prev_row_hmac={saw}, expected={want})",
                             )
-                    else:
-                        if row.prev_row_hmac != prev_hmac:
-                            saw = (
-                                row.prev_row_hmac[:12]
-                                if row.prev_row_hmac
-                                else "None"
-                            )
-                            want = (
-                                prev_hmac[:12] if prev_hmac else "None"
-                            )
-                            mismatches.append(
-                                f"{row.id} (chain break: "
-                                f"prev_row_hmac={saw}, "
-                                f"expected={want})",
-                            )
-                    if audit.verify_row(row):
-                        verified += 1
-                    else:
-                        mismatches.append(str(row.id))
-                    prev_hmac = row.row_hmac
+                        if audit.verify_row(row):
+                            verified += 1
+                        else:
+                            mismatches.append(str(row.id))
+                        prev_hmac = row.row_hmac
+                    cursor_occurred_at = rows[-1].occurred_at
+                    cursor_id = rows[-1].id
+                    if len(rows) < page_size:
+                        break
         finally:
             await db.dispose()
         print(f"verified: {verified}")  # noqa: T201
@@ -2789,7 +2894,7 @@ def _run_audit_verify(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
-def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:
+def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:  # noqa: PLR0915  fork quarantine dispatch
     """Quarantine duplicate ``prev_row_hmac`` rows so the v1.1.0
     UNIQUE chain index can apply.
 
@@ -2836,10 +2941,9 @@ def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:
 
     try:
         settings = Settings()  # type: ignore[call-arg]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(  # noqa: T201
-            f"z4j audit fork-cleanup: failed to load settings: "
-            f"{type(exc).__name__}",
+            f"z4j audit fork-cleanup: failed to load settings: {type(exc).__name__}",
             file=sys.stderr,
         )
         return 2
@@ -2893,9 +2997,13 @@ def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:
 
     if not args.apply:
         try:
-            answer = input(
-                "Proceed with quarantine? [y/N] ",
-            ).strip().lower()
+            answer = (
+                input(
+                    "Proceed with quarantine? [y/N] ",
+                )
+                .strip()
+                .lower()
+            )
         except EOFError:
             answer = ""
         if answer != "y":
@@ -2906,10 +3014,11 @@ def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:
     if not args.no_backup:
         if is_sqlite:
             sqlite_path = db_url.split("///", 1)[-1]
-            if sqlite_path.startswith("/"):
-                src_path = sqlite_path
-            else:
-                src_path = sqlite_path
+            # A three-slash sqlite URL carries a CWD-relative path;
+            # resolve it so the copy below and the printed backup
+            # location are unambiguous regardless of where the
+            # operator ran the command from.
+            src_path = str(Path(sqlite_path).resolve())
             backup_path = f"{src_path}.pre-fork-cleanup.{int(time.time())}"
             try:
                 shutil.copy2(src_path, backup_path)
@@ -3062,9 +3171,7 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
     async def _run() -> int:
         try:
             async with db.session() as session:
-                first_admin = (
-                    await session.execute(select(User).limit(1))
-                ).scalars().first()
+                first_admin = (await session.execute(select(User).limit(1))).scalars().first()
                 if first_admin is not None:
                     print(  # noqa: T201
                         "z4j reset-setup: REFUSED - an admin user "
@@ -3087,9 +3194,7 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
                     )
                     return 1
 
-                tokens_deleted = (
-                    await session.execute(delete(FirstBootToken))
-                ).rowcount
+                tokens_deleted = (await session.execute(delete(FirstBootToken))).rowcount
                 audit_deleted = (
                     await session.execute(
                         delete(AuditLog).where(
@@ -3139,7 +3244,6 @@ _TABLES_TO_WIPE_ORDER: tuple[str, ...] = (
     "user_channels",
     "user_preferences",
     "notification_channels",
-    "alert_events",
     "project_default_subscriptions",
     "project_config",
     "memberships",
@@ -3185,7 +3289,7 @@ def _bootstrap_env_for_management_commands() -> None:
         secret_env = z4j_home() / "secret.env"
         if secret_env.exists():
             for line in secret_env.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
+                line = line.strip()  # noqa: PLW2901  normalized in-loop
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
@@ -3201,11 +3305,12 @@ def _bootstrap_env_for_management_commands() -> None:
 
     os.environ.setdefault("Z4J_ENVIRONMENT", "dev")
     os.environ.setdefault(
-        "Z4J_ALLOWED_HOSTS", '["localhost","127.0.0.1"]',
+        "Z4J_ALLOWED_HOSTS",
+        '["localhost","127.0.0.1"]',
     )
 
 
-def _build_settings_from_env() -> tuple["Any", "Any"]:
+def _build_settings_from_env() -> tuple[Any, Any]:
     """Shared bootstrap for commands that need a DB engine.
 
     Calls :func:`_bootstrap_env_for_management_commands` then
@@ -3242,10 +3347,8 @@ def _run_reset(args: argparse.Namespace) -> int:
     """
     import asyncio
     import sys
-    from pathlib import Path
 
     import structlog
-
     from sqlalchemy import text
 
     if not args.force:
@@ -3263,7 +3366,7 @@ def _run_reset(args: argparse.Namespace) -> int:
         )
         return 1
 
-    settings, engine = _build_settings_from_env()
+    _settings, engine = _build_settings_from_env()
 
     async def _wipe() -> int:
         from z4j_brain.persistence.database import DatabaseManager
@@ -3275,16 +3378,15 @@ def _run_reset(args: argparse.Namespace) -> int:
                 for table in _TABLES_TO_WIPE_ORDER:
                     try:
                         result = await session.execute(
-                            text(f"DELETE FROM {table}"),
+                            text(f"DELETE FROM {table}"),  # noqa: S608  internal table name, not user input
                         )
                         wiped_total += result.rowcount or 0
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         # Table might not exist in older schemas.
                         # Log and continue - other tables still need
                         # to be wiped.
                         print(  # noqa: T201
-                            f"  warning: skipping {table}: "
-                            f"{type(exc).__name__}: {exc}",
+                            f"  warning: skipping {table}: {type(exc).__name__}: {exc}",
                             file=sys.stderr,
                         )
                 await session.commit()
@@ -3300,13 +3402,11 @@ def _run_reset(args: argparse.Namespace) -> int:
             if secret_env.exists():
                 secret_env.unlink()
                 print(  # noqa: T201
-                    f"z4j reset: deleted {secret_env} "
-                    "(next serve will mint fresh HMAC keys)",
+                    f"z4j reset: deleted {secret_env} (next serve will mint fresh HMAC keys)",
                 )
 
         print(  # noqa: T201
-            "z4j reset: done. Run `z4j serve` to see "
-            "the new first-boot setup URL.",
+            "z4j reset: done. Run `z4j serve` to see the new first-boot setup URL.",
         )
         return 0
 
@@ -3323,7 +3423,6 @@ def _run_changepassword(args: argparse.Namespace) -> int:
     command fail the live-session check on their next request.
     """
     import asyncio
-    import getpass
     import sys
     from datetime import UTC, datetime
 
@@ -3343,7 +3442,7 @@ def _run_changepassword(args: argparse.Namespace) -> int:
         hasher = PasswordHasher(settings)
         try:
             hasher.validate_policy(password)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(  # noqa: T201
                 f"z4j changepassword: password rejected: {exc}",
                 file=sys.stderr,
@@ -3354,14 +3453,17 @@ def _run_changepassword(args: argparse.Namespace) -> int:
         try:
             async with db.session() as session:
                 user = (
-                    await session.execute(
-                        select(User).where(User.email == args.email.lower()),
+                    (
+                        await session.execute(
+                            select(User).where(User.email == args.email.lower()),
+                        )
                     )
-                ).scalars().first()
+                    .scalars()
+                    .first()
+                )
                 if user is None:
                     print(  # noqa: T201
-                        f"z4j changepassword: no user with email "
-                        f"{args.email!r}",
+                        f"z4j changepassword: no user with email {args.email!r}",
                         file=sys.stderr,
                     )
                     return 4
@@ -3435,9 +3537,11 @@ def _run_reset_mfa(args: argparse.Namespace) -> int:
         from z4j_brain.persistence.database import DatabaseManager
         from z4j_brain.persistence.models import (
             MfaRecoveryCode,
-            Session as SessionRow,
             TrustedDevice,
             User,
+        )
+        from z4j_brain.persistence.models import (
+            Session as SessionRow,
         )
         from z4j_brain.persistence.repositories import AuditLogRepository
 
@@ -3445,10 +3549,14 @@ def _run_reset_mfa(args: argparse.Namespace) -> int:
         try:
             async with db.session() as db_session:
                 user = (
-                    await db_session.execute(
-                        select(User).where(User.email == email),
+                    (
+                        await db_session.execute(
+                            select(User).where(User.email == email),
+                        )
                     )
-                ).scalars().first()
+                    .scalars()
+                    .first()
+                )
                 if user is None:
                     print(  # noqa: T201
                         f"z4j reset-mfa: no user with email {email!r}",
@@ -3457,8 +3565,7 @@ def _run_reset_mfa(args: argparse.Namespace) -> int:
                     return 4
                 if user.mfa_secret_encrypted is None and user.mfa_enrolled_at is None:
                     print(  # noqa: T201
-                        f"z4j reset-mfa: {email} has no MFA enrolled; "
-                        "nothing to do",
+                        f"z4j reset-mfa: {email} has no MFA enrolled; nothing to do",
                     )
                     return 0
 
@@ -3569,10 +3676,9 @@ def _run_check(args: argparse.Namespace) -> int:
             else "dev (loopback-only, relaxed cookies, no HSTS)"
         )
         checks.append(("environment", f"{settings.environment}  -  {env_tag}"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(  # noqa: T201
-            f"z4j check: config INVALID: "
-            f"{type(exc).__name__}: {exc}",
+            f"z4j check: config INVALID: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
         return 1
@@ -3586,10 +3692,9 @@ def _run_check(args: argparse.Namespace) -> int:
                 async with db.session() as session:
                     await session.execute(text("SELECT 1"))
                 checks.append(("database connectivity", "OK"))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(  # noqa: T201
-                    f"z4j check: DB unreachable: "
-                    f"{type(exc).__name__}: {exc}",
+                    f"z4j check: DB unreachable: {type(exc).__name__}: {exc}",
                     file=sys.stderr,
                 )
                 return 2
@@ -3614,7 +3719,7 @@ def _run_check(args: argparse.Namespace) -> int:
                     checks.append(
                         ("alembic version", f"at {row[0]}"),
                     )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 # alembic_version table missing = fresh DB, not an error.
                 checks.append(
                     ("alembic version", f"not present ({exc})"),
@@ -3650,15 +3755,18 @@ def _run_status(args: argparse.Namespace) -> int:
             Agent,
             AuditLog,
             Project,
-            Session as SessionModel,
             Task,
             User,
+        )
+        from z4j_brain.persistence.models import (
+            Session as SessionModel,
         )
 
         db = DatabaseManager(engine)
         try:
             async with db.session() as session:
-                async def _count(model: type) -> "int | str":
+
+                async def _count(model: type) -> int | str:
                     """Return row count, or 'n/a' if the table doesn't
                     exist yet (fresh DB, never migrated). Each call uses
                     a SAVEPOINT so a missing table on one model doesn't
@@ -3672,7 +3780,7 @@ def _run_status(args: argparse.Namespace) -> int:
                                 )
                             ).scalar_one()
                             return int(row or 0)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         return "n/a"
 
                 users = await _count(User)
@@ -3691,10 +3799,10 @@ def _run_status(args: argparse.Namespace) -> int:
                         )
                     ).first()
                     rev = rev_row[0] if rev_row else "(none)"
-                except Exception:  # noqa: BLE001
+                except Exception:
                     rev = "(alembic_version missing)"
 
-            def _fmt(v: "int | str") -> str:
+            def _fmt(v: int | str) -> str:
                 return f"{v:>8,}" if isinstance(v, int) else f"{v:>8}"
 
             env_tag = (
@@ -3718,8 +3826,7 @@ def _run_status(args: argparse.Namespace) -> int:
             if any(v == "n/a" for v in (users, projects, agents, tasks, sessions, audit_rows)):
                 print("")  # noqa: T201
                 print(  # noqa: T201
-                    "  (n/a = table not present yet; run "
-                    "`z4j migrate upgrade head`)",
+                    "  (n/a = table not present yet; run `z4j migrate upgrade head`)",
                 )
             return 0
         finally:
@@ -3800,6 +3907,7 @@ def _run_bootstrap_admin(args: argparse.Namespace) -> int:
     # subprocess inheritance).
     os.environ["Z4J_BOOTSTRAP_ADMIN_EMAIL"] = args.email
     from z4j_brain import startup as _startup
+
     _startup.set_cli_bootstrap_password(password)
     if args.display_name:
         os.environ["Z4J_BOOTSTRAP_ADMIN_DISPLAY_NAME"] = args.display_name
@@ -3810,7 +3918,9 @@ def _run_bootstrap_admin(args: argparse.Namespace) -> int:
         hasher = PasswordHasher(settings)
         audit = AuditService(settings)
         setup_service = SetupService(
-            settings=settings, hasher=hasher, audit=audit,
+            settings=settings,
+            hasher=hasher,
+            audit=audit,
         )
 
         # Detect "already set up" so we can return a distinct exit
@@ -3823,14 +3933,15 @@ def _run_bootstrap_admin(args: argparse.Namespace) -> int:
             users = UserRepository(session)
             if not await setup_service.is_first_boot(users):
                 print(  # noqa: T201
-                    "error: brain is already initialised; "
-                    "use the admin UI to manage users",
+                    "error: brain is already initialised; use the admin UI to manage users",
                     file=sys.stderr,
                 )
                 return 3
 
         await run_first_boot_check(
-            db=db, setup_service=setup_service, settings=settings,
+            db=db,
+            setup_service=setup_service,
+            settings=settings,
         )
         print(f"z4j: admin {args.email} provisioned")  # noqa: T201
         return 0
@@ -3911,10 +4022,8 @@ def _run_init(args: argparse.Namespace) -> int:
 
     ensure_z4j_home()
     config_env.write_text(_CONFIG_ENV_TEMPLATE, encoding="utf-8")
-    try:
+    with contextlib.suppress(OSError):
         config_env.chmod(0o644)
-    except OSError:
-        pass
     print(  # noqa: T201
         f"z4j init: created {config_env} with the documented "
         "tunables template. Edit it to change runtime behavior, "
@@ -3940,7 +4049,7 @@ def _config_source(field: str, settings: object, env: dict[str, str]) -> str:
 
         value = getattr(settings, field, None)
         is_secret = isinstance(value, SecretStr)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: S110  best-effort secret-field detection
         pass
     return _shared(field, env=env, is_secret_field=is_secret)
 
@@ -3961,7 +4070,7 @@ def _run_config_show(args: argparse.Namespace) -> int:
 
     try:
         settings = Settings()  # type: ignore[call-arg]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(  # noqa: T201
             f"z4j config show: failed to load Settings: {exc}",
             file=sys.stderr,
@@ -3980,10 +4089,7 @@ def _run_config_show(args: argparse.Namespace) -> int:
     for field_name in sorted(settings.model_fields):
         value: Any = getattr(settings, field_name)
         if isinstance(value, SecretStr):
-            display = (
-                value.get_secret_value() if args.reveal_secrets
-                else "***"
-            )
+            display = value.get_secret_value() if args.reveal_secrets else "***"
         elif isinstance(value, list) and not value:
             display = "[]"
         elif isinstance(value, dict) and not value:
@@ -4005,13 +4111,11 @@ def _run_config_validate(args: argparse.Namespace) -> int:
     errors with line numbers and validation errors with field
     locations. Exits 0 if the file would build a valid Settings.
     """
-    import os
 
     candidate = Path(args.path) if args.path else (z4j_home() / "config.env")
     if not candidate.exists():
         print(  # noqa: T201
-            f"z4j config validate: {candidate} does not exist. "
-            "Run `z4j init` to scaffold it.",
+            f"z4j config validate: {candidate} does not exist. Run `z4j init` to scaffold it.",
             file=sys.stderr,
         )
         return 2
@@ -4047,8 +4151,7 @@ def _run_config_validate(args: argparse.Namespace) -> int:
 
     if parse_errors:
         print(  # noqa: T201
-            f"z4j config validate: {len(parse_errors)} parse error(s) "
-            f"in {candidate}:",
+            f"z4j config validate: {len(parse_errors)} parse error(s) in {candidate}:",
             file=sys.stderr,
         )
         for err in parse_errors:
@@ -4079,7 +4182,8 @@ def _run_config_validate(args: argparse.Namespace) -> int:
     # placeholder values so Settings construction reaches the
     # cross-field validators (which is what we are actually testing).
     init_kwargs.setdefault(
-        "database_url", "sqlite+aiosqlite:///:memory:",
+        "database_url",
+        "sqlite+aiosqlite:///:memory:",
     )
     init_kwargs.setdefault("secret", "x" * 48)
     init_kwargs.setdefault("session_secret", "y" * 48)
@@ -4088,7 +4192,7 @@ def _run_config_validate(args: argparse.Namespace) -> int:
 
     try:
         Settings(**init_kwargs)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(  # noqa: T201
             f"z4j config validate: {candidate} failed validation: {exc}",
             file=sys.stderr,
@@ -4096,8 +4200,7 @@ def _run_config_validate(args: argparse.Namespace) -> int:
         return 1
 
     print(  # noqa: T201
-        f"z4j config validate: {candidate} is valid "
-        f"({len(parsed)} setting(s) parsed).",
+        f"z4j config validate: {candidate} is valid ({len(parsed)} setting(s) parsed).",
     )
     return 0
 

@@ -17,7 +17,7 @@ from z4j_brain.persistence.models import User
 from z4j_brain.persistence.repositories._base import BaseRepository
 
 #: Argument used to sentinel "ip not supplied / unknown".
-_UNKNOWN_IP = "0.0.0.0"
+_UNKNOWN_IP = "0.0.0.0"  # noqa: S104  sentinel for unknown IP, never used as a bind address
 
 
 class UserRepository(BaseRepository[User]):
@@ -127,11 +127,7 @@ class UserRepository(BaseRepository[User]):
         """
         from sqlalchemy import select as _select
 
-        stmt = (
-            _select(User.id)
-            .where(User.id == user_id)
-            .with_for_update(of=User)
-        )
+        stmt = _select(User.id).where(User.id == user_id).with_for_update(of=User)
         await self.session.execute(stmt)
 
     # ------------------------------------------------------------------
@@ -196,9 +192,7 @@ class UserRepository(BaseRepository[User]):
             new_count = int(row[0])
             if new_count >= lockout_threshold:
                 await self.session.execute(
-                    update(User)
-                    .where(User.id == user_id)
-                    .values(locked_until=locked_boundary),
+                    update(User).where(User.id == user_id).values(locked_until=locked_boundary),
                 )
             await self.session.flush()
             return await self.get(user_id)
@@ -250,15 +244,15 @@ class UserRepository(BaseRepository[User]):
         fields it does not want to change. Returns the refreshed
         User row, or None if the user_id is unknown.
         """
-        _SENTINEL = ...
+        sentinel = ...
         values: dict[str, object] = {}
-        if first_name is not _SENTINEL:
+        if first_name is not sentinel:
             values["first_name"] = first_name
-        if last_name is not _SENTINEL:
+        if last_name is not sentinel:
             values["last_name"] = last_name
-        if display_name is not _SENTINEL:
+        if display_name is not sentinel:
             values["display_name"] = display_name
-        if timezone is not _SENTINEL:
+        if timezone is not sentinel:
             values["timezone"] = timezone
         if not values:
             return await self.get(user_id)
@@ -297,12 +291,46 @@ class UserRepository(BaseRepository[User]):
         enrolled_at=<existing value>``.
         """
         await self.session.execute(
-            update(User).where(User.id == user_id).values(
+            update(User)
+            .where(User.id == user_id)
+            .values(
                 mfa_secret_encrypted=secret_encrypted,
                 mfa_enrolled_at=enrolled_at,
                 updated_at=datetime.now(UTC),
             ),
         )
+
+    async def set_mfa_enforcement_started(
+        self,
+        user_id: UUID,
+        *,
+        when: datetime,
+    ) -> bool:
+        """Stamp ``mfa_enforcement_started_at`` iff it is still NULL.
+
+        Atomic stamp-once: the ``WHERE ... IS NULL`` clause makes the
+        database arbitrate between concurrent first logins under a
+        freshly-enabled enforcement policy, so exactly one caller
+        returns True (and writes the grace-started audit row); every
+        later caller returns False and the original grace anchor is
+        never moved. Deliberately NO clear counterpart -- the anchor
+        is a one-way historical fact, so a user cannot reset their
+        grace window by cycling MFA off and on.
+
+        Returns True when this call performed the stamp.
+        """
+        result = await self.session.execute(
+            update(User)
+            .where(
+                User.id == user_id,
+                User.mfa_enforcement_started_at.is_(None),
+            )
+            .values(
+                mfa_enforcement_started_at=when,
+                updated_at=datetime.now(UTC),
+            ),
+        )
+        return int(result.rowcount or 0) == 1
 
     async def update_password_hash(
         self,

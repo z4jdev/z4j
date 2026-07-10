@@ -32,7 +32,6 @@ from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
-
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.settings import Settings
 from z4j_brain.websocket.registry import PostgresNotifyRegistry
@@ -66,13 +65,12 @@ async def _build_registry(
         deliver_calls.append((command_id, getattr(ws, "name", "?")))
         return True
 
-    registry = PostgresNotifyRegistry(
+    return PostgresNotifyRegistry(
         settings=settings,
         db=db,
         dsn_provider=lambda: settings.database_url,
         deliver_local=deliver,
     )
-    return registry
 
 
 class TestNotifyRoundTrip:
@@ -151,7 +149,8 @@ class TestNotifyRoundTrip:
             # fans out to every listening worker; only A has the
             # agent in its local map, so only A's deliver fires.
             await registry_b._publish_command_notify(  # type: ignore[attr-defined]
-                command_id, agent_id,
+                command_id,
+                agent_id,
             )
 
             for _ in range(30):

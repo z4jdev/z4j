@@ -19,6 +19,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -28,30 +29,28 @@ import pytest
 pytest.importorskip("grpc")
 pytest.importorskip("cryptography")
 
-from cryptography import x509  # noqa: E402
-from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
-from cryptography.x509.oid import NameOID  # noqa: E402
-from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
-
-from z4j_brain.persistence.base import Base  # noqa: E402
-from z4j_brain.persistence.database import DatabaseManager  # noqa: E402
-from z4j_brain.persistence.enums import ScheduleKind  # noqa: E402
-from z4j_brain.persistence.models import Project, Schedule  # noqa: E402
-from z4j_brain.scheduler_grpc.auth import (  # noqa: E402
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+from sqlalchemy.ext.asyncio import create_async_engine
+from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.database import DatabaseManager
+from z4j_brain.persistence.enums import ScheduleKind
+from z4j_brain.persistence.models import Project, Schedule
+from z4j_brain.scheduler_grpc.auth import (
     SchedulerAllowlistInterceptor,
     mint_scheduler_cert,
     write_minted_cert,
 )
-from z4j_brain.scheduler_grpc.handlers import (  # noqa: E402
+from z4j_brain.scheduler_grpc.handlers import (
     SchedulerServiceImpl,
     _schedule_to_pb,
     _ts_iso,
 )
-from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb  # noqa: E402
-from z4j_brain.scheduler_grpc.server import SchedulerGrpcServer  # noqa: E402
-from z4j_brain.settings import Settings  # noqa: E402
-
+from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
+from z4j_brain.scheduler_grpc.server import SchedulerGrpcServer
+from z4j_brain.settings import Settings
 
 # =====================================================================
 # Helpers
@@ -176,11 +175,14 @@ class TestMintCert:
             )
 
     def test_write_minted_cert_writes_files_with_strict_mode(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         ca_cert, ca_key = _self_signed_ca()
         cert_pem, key_pem = mint_scheduler_cert(
-            name="sch", ca_cert_pem=ca_cert, ca_key_pem=ca_key,
+            name="sch",
+            ca_cert_pem=ca_cert,
+            ca_key_pem=ca_key,
         )
         cert_path, key_path = write_minted_cert(
             out_dir=tmp_path / "out",
@@ -252,14 +254,12 @@ class TestEnforceCnAuthContextShape:
                     "transport_security_type": [b"ssl"],
                 }
 
-            async def abort(self, code, msg) -> None:  # noqa: ANN001, D401
+            async def abort(self, code, msg) -> None:
                 self.aborted = True
 
         ctx = _Ctx()
         await _enforce_cn(ctx, frozenset({"scheduler-1"}))  # type: ignore[arg-type]
-        assert not ctx.aborted, (
-            "str-keyed AuthContext path failed to accept a known CN"
-        )
+        assert not ctx.aborted, "str-keyed AuthContext path failed to accept a known CN"
 
     @pytest.mark.asyncio
     async def test_bytes_keyed_auth_context_accepts_known_cn(
@@ -277,14 +277,12 @@ class TestEnforceCnAuthContextShape:
                     b"transport_security_type": [b"ssl"],
                 }
 
-            async def abort(self, code, msg) -> None:  # noqa: ANN001, D401
+            async def abort(self, code, msg) -> None:
                 self.aborted = True
 
         ctx = _Ctx()
         await _enforce_cn(ctx, frozenset({"scheduler-1"}))  # type: ignore[arg-type]
-        assert not ctx.aborted, (
-            "bytes-keyed AuthContext path failed to accept a known CN"
-        )
+        assert not ctx.aborted, "bytes-keyed AuthContext path failed to accept a known CN"
 
     @pytest.mark.asyncio
     async def test_san_dns_prefix_stripped(self) -> None:
@@ -302,7 +300,7 @@ class TestEnforceCnAuthContextShape:
                     "x509_subject_alternative_name": [b"DNS:scheduler-1"],
                 }
 
-            async def abort(self, code, msg) -> None:  # noqa: ANN001, D401
+            async def abort(self, code, msg) -> None:
                 self.aborted = True
 
         ctx = _Ctx()
@@ -319,7 +317,7 @@ class TestEnforceCnAuthContextShape:
             def auth_context(self) -> dict[str, list[bytes]]:
                 return {"x509_common_name": [b"intruder"]}
 
-            async def abort(self, code, msg) -> None:  # noqa: ANN001
+            async def abort(self, code, msg) -> None:
                 captured["code"] = code
                 captured["msg"] = msg
                 # Real gRPC abort raises; mirror the behaviour so the
@@ -349,7 +347,7 @@ class TestEnforceCnAuthContextShape:
             def auth_context(self) -> dict[str, list[bytes]]:
                 return {"x509_common_name": [b"Drone-1"]}
 
-            async def abort(self, code, msg) -> None:  # noqa: ANN001, D401
+            async def abort(self, code, msg) -> None:
                 self.aborted = True
 
         ctx = _Ctx()
@@ -400,7 +398,8 @@ class TestServerLifecycleDisabled:
 class TestServerLifecycleEnabledMissingTls:
     @pytest.mark.asyncio
     async def test_enabled_without_tls_material_raises(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # Operator set ENABLED=true but didn't supply cert paths.
         # We expect a clear RuntimeError pointing at the env var.
@@ -436,7 +435,8 @@ class TestServerLifecycleEnabledMissingTls:
 class TestPingHandler:
     @pytest.mark.asyncio
     async def test_ping_returns_brain_version(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         engine = create_async_engine(settings.database_url, future=True)
         try:
@@ -460,7 +460,8 @@ class TestPingHandler:
 class TestListSchedulesHandler:
     @pytest.mark.asyncio
     async def test_lists_only_z4j_scheduler_rows(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         engine = create_async_engine(settings.database_url, future=True)
         try:
@@ -474,7 +475,9 @@ class TestListSchedulesHandler:
 
             async with db.session() as session:
                 project = Project(
-                    id=project_id, slug="test-project", name="test",
+                    id=project_id,
+                    slug="test-project",
+                    name="test",
                 )
                 session.add(project)
                 # One row that belongs to z4j-scheduler.
@@ -487,7 +490,8 @@ class TestListSchedulesHandler:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 )
                 # Another row owned by celery-beat - must be filtered out.
@@ -500,14 +504,16 @@ class TestListSchedulesHandler:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 )
                 session.add_all([ours, theirs])
                 await session.commit()
 
             servicer = SchedulerServiceImpl(
-                settings=settings, db=db,
+                settings=settings,
+                db=db,
                 command_dispatcher=None,  # type: ignore[arg-type]
                 audit_service=None,  # type: ignore[arg-type]
             )
@@ -528,6 +534,7 @@ class TestListSchedulesHandler:
 
 def _make_schedule_obj() -> object:
     """Light schedule-shaped object covering the fields _schedule_to_pb reads."""
+
     class _S:
         id = uuid.uuid4()
         project_id = uuid.uuid4()
@@ -538,8 +545,8 @@ def _make_schedule_obj() -> object:
         expression = "0 * * * *"
         timezone = "UTC"
         queue = ""
-        args = []
-        kwargs = {}
+        args: ClassVar[list] = []
+        kwargs: ClassVar[dict] = {}
         is_enabled = True
         last_run_at = None
         next_run_at = None
@@ -616,8 +623,7 @@ class TestNormaliseCnDoesNotMangle:
 
         for cn in ("Drone-1", "Node-A", "Scheduler-1", ":weird-cn"):
             assert _normalise_cn(cn) == cn, (
-                f"{cn!r} corrupted to {_normalise_cn(cn)!r}; "
-                "regression to lstrip()?"
+                f"{cn!r} corrupted to {_normalise_cn(cn)!r}; regression to lstrip()?"
             )
 
     def test_strips_surrounding_whitespace(self) -> None:

@@ -11,12 +11,11 @@ import secrets
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import User
 from z4j_brain.settings import Settings
 
@@ -64,7 +63,7 @@ async def brain_app(settings: Settings):
 
 
 @pytest.fixture
-async def seeded_user(settings: Settings, brain_app):  # noqa: ARG001
+async def seeded_user(settings: Settings, brain_app):
     """Insert one active user with a known password."""
     db = brain_app.state.db
     hasher = PasswordHasher(settings)
@@ -96,7 +95,10 @@ async def client(brain_app):
 @pytest.mark.asyncio
 class TestLoginHappy:
     async def test_login_sets_session_cookie(
-        self, client, settings: Settings, seeded_user,
+        self,
+        client,
+        settings: Settings,
+        seeded_user,
     ) -> None:
         response = await client.post(
             "/api/v1/auth/login",
@@ -122,7 +124,7 @@ class TestLoginHappy:
 class TestLoginFailureShape:
     """Wrong password and unknown email return byte-identical envelopes."""
 
-    async def test_wrong_password(self, client, seeded_user) -> None:  # noqa: ARG002
+    async def test_wrong_password(self, client, seeded_user) -> None:
         response = await client.post(
             "/api/v1/auth/login",
             json={"email": "alice@example.com", "password": "WRONG"},
@@ -132,7 +134,7 @@ class TestLoginFailureShape:
         assert body["error"] == "unauthenticated"
         assert body["message"] == "invalid_credentials"
 
-    async def test_unknown_email(self, client, seeded_user) -> None:  # noqa: ARG002
+    async def test_unknown_email(self, client, seeded_user) -> None:
         response = await client.post(
             "/api/v1/auth/login",
             json={"email": "nobody@example.com", "password": "WRONG"},
@@ -143,7 +145,9 @@ class TestLoginFailureShape:
         assert body["message"] == "invalid_credentials"
 
     async def test_failure_responses_byte_identical_modulo_request_id(
-        self, client, seeded_user,  # noqa: ARG002
+        self,
+        client,
+        seeded_user,
     ) -> None:
         r1 = await client.post(
             "/api/v1/auth/login",
@@ -196,7 +200,7 @@ class TestPasswordResetRequest:
         self,
         client,
         settings: Settings,
-        seeded_user,  # noqa: ARG002
+        seeded_user,
         monkeypatch,
     ) -> None:
         from z4j_brain.api import auth as auth_api
@@ -238,7 +242,11 @@ class TestPasswordResetConfirmR5M2:
     """
 
     async def _mint_token_directly(
-        self, brain_app, settings: "Settings", user_id, plaintext: str,
+        self,
+        brain_app,
+        settings: Settings,
+        user_id,
+        plaintext: str,
     ) -> None:
         """Insert a fresh, unconsumed, unexpired reset token row.
 
@@ -262,12 +270,19 @@ class TestPasswordResetConfirmR5M2:
             await s.commit()
 
     async def test_replay_after_consume_returns_404(
-        self, client, settings: "Settings", brain_app, seeded_user,
+        self,
+        client,
+        settings: Settings,
+        brain_app,
+        seeded_user,
     ) -> None:
         """Sequential single-use invariant: consume once, replay 404."""
         plaintext = "test-token-r5m2-sequential-0123456789abcdef"
         await self._mint_token_directly(
-            brain_app, settings, seeded_user.id, plaintext,
+            brain_app,
+            settings,
+            seeded_user.id,
+            plaintext,
         )
 
         r1 = await client.post(
@@ -285,7 +300,11 @@ class TestPasswordResetConfirmR5M2:
         assert r2.json()["message"] == "invalid_or_expired"
 
     async def test_concurrent_confirm_exactly_one_succeeds(
-        self, client, settings: "Settings", brain_app, seeded_user,
+        self,
+        client,
+        settings: Settings,
+        brain_app,
+        seeded_user,
     ) -> None:
         """N concurrent confirms with the same token: exactly one
         wins, the rest get 404. The database UPDATE is the
@@ -295,7 +314,10 @@ class TestPasswordResetConfirmR5M2:
 
         plaintext = "test-token-r5m2-concurrent-0123456789abcdef"
         await self._mint_token_directly(
-            brain_app, settings, seeded_user.id, plaintext,
+            brain_app,
+            settings,
+            seeded_user.id,
+            plaintext,
         )
 
         # Each attempt uses a distinct password so the user-visible
@@ -339,7 +361,11 @@ class TestPasswordResetConfirmR5M2:
                 assert r.json()["message"] == "invalid_or_expired"
 
     async def test_expired_token_rejected(
-        self, client, settings: "Settings", brain_app, seeded_user,
+        self,
+        client,
+        settings: Settings,
+        brain_app,
+        seeded_user,
     ) -> None:
         """An already-expired token is rejected by the atomic
         WHERE clause even before the consumed_at check fires.
@@ -372,7 +398,10 @@ class TestPasswordResetConfirmR5M2:
 @pytest.mark.asyncio
 class TestLockout:
     async def test_lockout_triggers_after_threshold(
-        self, client, settings: Settings, seeded_user,  # noqa: ARG002
+        self,
+        client,
+        settings: Settings,
+        seeded_user,
     ) -> None:
         # threshold is 4 in the fixture; 4 wrong attempts → locked.
         for _ in range(settings.login_lockout_threshold):
@@ -403,7 +432,7 @@ class TestMe:
         response = await client.get("/api/v1/auth/me")
         assert response.status_code == 401
 
-    async def test_me_after_login(self, client, seeded_user) -> None:  # noqa: ARG002
+    async def test_me_after_login(self, client, seeded_user) -> None:
         login = await client.post(
             "/api/v1/auth/login",
             json={
@@ -434,7 +463,10 @@ class TestMe:
 @pytest.mark.asyncio
 class TestLogout:
     async def test_logout_revokes_session(
-        self, client, settings: Settings, seeded_user,  # noqa: ARG002
+        self,
+        client,
+        settings: Settings,
+        seeded_user,
     ) -> None:
         login = await client.post(
             "/api/v1/auth/login",
@@ -460,7 +492,9 @@ class TestLogout:
         assert me.status_code == 401
 
     async def test_logout_without_csrf_is_403(
-        self, client, seeded_user,  # noqa: ARG002
+        self,
+        client,
+        seeded_user,
     ) -> None:
         await client.post(
             "/api/v1/auth/login",

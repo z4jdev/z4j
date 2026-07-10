@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import update
 
 from z4j_brain.api.deps import (
     get_audit_log_repo,
@@ -62,7 +61,6 @@ class ProjectPublic(BaseModel):
     description: str | None
     environment: str
     timezone: str
-    retention_days: int
     is_active: bool
     # 1.2.2+: which scheduler owns newly-created schedules in this
     # project when the operator didn't pick explicitly. Free-form
@@ -133,7 +131,6 @@ class CreateProjectRequest(BaseModel):
         pattern=_ENVIRONMENT_PATTERN,
     )
     timezone: str = Field(default="UTC", max_length=64)
-    retention_days: int = Field(default=30, ge=1, le=3650)
     default_scheduler_owner: str = Field(
         default="z4j-scheduler",
         max_length=40,
@@ -151,7 +148,8 @@ class CreateProjectRequest(BaseModel):
     @field_validator("allowed_schedulers")
     @classmethod
     def _validate_allowed_schedulers(
-        cls, v: list[str] | None,
+        cls,
+        v: list[str] | None,
     ) -> list[str] | None:
         return _validate_allowed_schedulers_elements(v)
 
@@ -166,7 +164,6 @@ class UpdateProjectRequest(BaseModel):
         pattern=_ENVIRONMENT_PATTERN,
     )
     timezone: str | None = Field(default=None, max_length=64)
-    retention_days: int | None = Field(default=None, ge=1, le=3650)
     default_scheduler_owner: str | None = Field(
         default=None,
         max_length=40,
@@ -180,12 +177,13 @@ class UpdateProjectRequest(BaseModel):
     @field_validator("allowed_schedulers")
     @classmethod
     def _validate_allowed_schedulers(
-        cls, v: list[str] | None,
+        cls,
+        v: list[str] | None,
     ) -> list[str] | None:
         return _validate_allowed_schedulers_elements(v)
 
 
-def _project_payload(project: "Project") -> ProjectPublic:
+def _project_payload(project: Project) -> ProjectPublic:
     return ProjectPublic(
         id=project.id,
         slug=project.slug,
@@ -193,10 +191,11 @@ def _project_payload(project: "Project") -> ProjectPublic:
         description=project.description,
         environment=project.environment,
         timezone=project.timezone,
-        retention_days=project.retention_days,
         is_active=project.is_active,
         default_scheduler_owner=getattr(
-            project, "default_scheduler_owner", "z4j-scheduler",
+            project,
+            "default_scheduler_owner",
+            "z4j-scheduler",
         ),
         allowed_schedulers=getattr(project, "allowed_schedulers", None),
         created_at=project.created_at,
@@ -212,10 +211,10 @@ def _project_payload(project: "Project") -> ProjectPublic:
 @router.get("", response_model=list[ProjectPublic])
 async def list_projects(
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    settings: Settings = Depends(get_settings),
 ) -> list[ProjectPublic]:
     """List the projects the current user has access to.
 
@@ -227,7 +226,9 @@ async def list_projects(
     key could enumerate every project the owner user can see.
     """
     bound_slug: str | None = getattr(
-        request.state, "api_key_project_slug", None,
+        request.state,
+        "api_key_project_slug",
+        None,
     )
 
     if user.is_admin:
@@ -249,9 +250,9 @@ async def list_projects(
 @router.get("/{slug}", response_model=ProjectPublic)
 async def get_project(
     slug: str,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
 ) -> ProjectPublic:
     from z4j_brain.domain.policy_engine import PolicyEngine
 
@@ -279,11 +280,11 @@ async def get_project(
 )
 async def create_project(
     body: CreateProjectRequest,
-    admin: "User" = Depends(require_admin),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    admin: User = Depends(require_admin),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> ProjectPublic:
     if not _SLUG_RE.match(body.slug):
@@ -306,8 +307,7 @@ async def create_project(
         and body.default_scheduler_owner not in body.allowed_schedulers
     ):
         raise ConflictError(
-            "default_scheduler_owner must be in allowed_schedulers "
-            "when both are set",
+            "default_scheduler_owner must be in allowed_schedulers when both are set",
             details={
                 "default_scheduler_owner": body.default_scheduler_owner,
                 "allowed_schedulers": list(body.allowed_schedulers),
@@ -322,7 +322,6 @@ async def create_project(
         description=body.description,
         environment=body.environment,
         timezone=body.timezone,
-        retention_days=body.retention_days,
         default_scheduler_owner=body.default_scheduler_owner,
         allowed_schedulers=body.allowed_schedulers,
     )
@@ -352,11 +351,11 @@ async def create_project(
 async def update_project(
     slug: str,
     body: UpdateProjectRequest,
-    admin: "User" = Depends(require_admin),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    admin: User = Depends(require_admin),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> ProjectPublic:
     """PATCH the project's mutable settings.
@@ -408,7 +407,10 @@ async def update_project(
         changed["slug"] = body.slug
         project.slug = body.slug
     for field in (
-        "name", "description", "environment", "timezone", "retention_days",
+        "name",
+        "description",
+        "environment",
+        "timezone",
         "default_scheduler_owner",
     ):
         value = getattr(body, field, None)
@@ -423,12 +425,15 @@ async def update_project(
     if "allowed_schedulers" in body.model_fields_set:
         # Empty list = strict-deny (no scheduler allowed), that's
         # likely a misconfig, so we reject it. ``None`` = unrestricted.
-        if body.allowed_schedulers is not None and len(
-            body.allowed_schedulers,
-        ) == 0:
+        if (
+            body.allowed_schedulers is not None
+            and len(
+                body.allowed_schedulers,
+            )
+            == 0
+        ):
             raise ConflictError(
-                "allowed_schedulers cannot be an empty list "
-                "(use null to remove the restriction)",
+                "allowed_schedulers cannot be an empty list (use null to remove the restriction)",
                 details={"allowed_schedulers": []},
             )
         changed["allowed_schedulers"] = body.allowed_schedulers
@@ -480,11 +485,11 @@ async def update_project(
 )
 async def archive_project(
     slug: str,
-    admin: "User" = Depends(require_admin),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    admin: User = Depends(require_admin),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> None:
     """Soft-archive a project (sets ``is_active=False``).

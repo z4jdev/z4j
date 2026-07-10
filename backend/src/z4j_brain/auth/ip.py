@@ -27,7 +27,7 @@ This module is FastAPI-free. The middleware in
 from __future__ import annotations
 
 import ipaddress
-from typing import Iterable
+from collections.abc import Iterable
 
 
 class TrustedProxyResolver:

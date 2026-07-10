@@ -13,10 +13,8 @@ from __future__ import annotations
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
 
 import pytest
-
 
 # =====================================================================
 # H-R4-1: total_runs SQL-side increment (atomicity)
@@ -39,7 +37,10 @@ class TestR4TotalRunsAtomicIncrement:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "scheduler_grpc" / "handlers.py"
+            / "src"
+            / "z4j_brain"
+            / "scheduler_grpc"
+            / "handlers.py"
         ).read_text()
         # Verify the SQL-expression form is in the handler. A
         # regression to ``(schedule.total_runs or 0) + 1`` would
@@ -74,7 +75,6 @@ class TestR4CommandInsertIdempotent:
 
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy.pool import StaticPool
-
         from z4j_brain.persistence.base import Base
         from z4j_brain.persistence.database import DatabaseManager
         from z4j_brain.persistence.models import Project
@@ -131,8 +131,7 @@ class TestR4CommandInsertIdempotent:
                 # The existing row's id is returned; the new payload
                 # is NOT applied (idempotent semantics).
                 assert row2.id == first_id, (
-                    "duplicate idempotency_key must return existing "
-                    "row, not raise"
+                    "duplicate idempotency_key must return existing row, not raise"
                 )
         finally:
             await engine.dispose()
@@ -151,8 +150,11 @@ class TestR4CommandInsertIdempotent:
         from pathlib import Path
 
         src = (
-            Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "persistence" / "repositories"
+            Path(__file__).resolve().parents[2]  # noqa: ASYNC240  one-shot source read in test, not hot loop
+            / "src"
+            / "z4j_brain"
+            / "persistence"
+            / "repositories"
             / "commands.py"
         ).read_text()
         assert "if idempotency_key is None:" in src, (
@@ -179,12 +181,14 @@ class TestR4SavepointPattern:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "persistence" / "repositories"
+            / "src"
+            / "z4j_brain"
+            / "persistence"
+            / "repositories"
             / "schedule_fires.py"
         ).read_text()
         assert "begin_nested" in src, (
-            "schedule_fires.record must use SAVEPOINT to scope "
-            "rollback to the failed insert"
+            "schedule_fires.record must use SAVEPOINT to scope rollback to the failed insert"
         )
 
     def test_commands_uses_begin_nested(self) -> None:
@@ -192,12 +196,14 @@ class TestR4SavepointPattern:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "persistence" / "repositories"
+            / "src"
+            / "z4j_brain"
+            / "persistence"
+            / "repositories"
             / "commands.py"
         ).read_text()
         assert "begin_nested" in src, (
-            "commands.insert must use SAVEPOINT to scope rollback "
-            "to the failed insert"
+            "commands.insert must use SAVEPOINT to scope rollback to the failed insert"
         )
 
     def test_pending_fires_uses_begin_nested(self) -> None:
@@ -205,12 +211,14 @@ class TestR4SavepointPattern:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "persistence" / "repositories"
+            / "src"
+            / "z4j_brain"
+            / "persistence"
+            / "repositories"
             / "pending_fires.py"
         ).read_text()
         assert "begin_nested" in src, (
-            "pending_fires.buffer must use SAVEPOINT to scope "
-            "rollback to the failed insert"
+            "pending_fires.buffer must use SAVEPOINT to scope rollback to the failed insert"
         )
 
 
@@ -233,7 +241,6 @@ class TestR4CircuitBreakerReReadInDisableTxn:
     ) -> None:
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy.pool import StaticPool
-
         from z4j_brain.domain.audit_service import AuditService
         from z4j_brain.domain.workers.schedule_circuit_breaker import (
             ScheduleCircuitBreakerWorker,
@@ -242,10 +249,9 @@ class TestR4CircuitBreakerReReadInDisableTxn:
         from z4j_brain.persistence.database import DatabaseManager
         from z4j_brain.persistence.enums import ScheduleKind
         from z4j_brain.persistence.models import (
-            Project, Schedule, ScheduleFire,
-        )
-        from z4j_brain.persistence.repositories import (
-            ScheduleFireRepository,
+            Project,
+            Schedule,
+            ScheduleFire,
         )
         from z4j_brain.settings import Settings
 
@@ -262,7 +268,8 @@ class TestR4CircuitBreakerReReadInDisableTxn:
                 database_url="sqlite+aiosqlite:///:memory:",
                 secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
                 session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-                environment="dev", log_json=False,
+                environment="dev",
+                log_json=False,
                 schedule_circuit_breaker_threshold=3,
             )
             project_id = uuid.uuid4()
@@ -271,29 +278,41 @@ class TestR4CircuitBreakerReReadInDisableTxn:
             now = datetime.now(UTC)
             async with db.session() as s:
                 s.add(Project(id=project_id, slug="p", name="P"))
-                s.add(Schedule(
-                    id=schedule_id, project_id=project_id,
-                    engine="celery", scheduler="z4j-scheduler",
-                    name="x", task_name="t",
-                    kind=ScheduleKind.CRON, expression="* * * * *",
-                    timezone="UTC", args=[], kwargs={},
-                    is_enabled=True,
-                ))
+                s.add(
+                    Schedule(
+                        id=schedule_id,
+                        project_id=project_id,
+                        engine="celery",
+                        scheduler="z4j-scheduler",
+                        name="x",
+                        task_name="t",
+                        kind=ScheduleKind.CRON,
+                        expression="* * * * *",
+                        timezone="UTC",
+                        args=[],
+                        kwargs={},
+                        is_enabled=True,
+                    )
+                )
                 # Three failures in a row - breaker SHOULD trip.
                 for offset_min in (3, 2, 1):
-                    s.add(ScheduleFire(
-                        fire_id=uuid.uuid4(),
-                        schedule_id=schedule_id,
-                        project_id=project_id,
-                        command_id=None,
-                        status="acked_failed",
-                        scheduled_for=now,
-                        fired_at=now - timedelta(minutes=offset_min),
-                    ))
+                    s.add(
+                        ScheduleFire(
+                            fire_id=uuid.uuid4(),
+                            schedule_id=schedule_id,
+                            project_id=project_id,
+                            command_id=None,
+                            status="acked_failed",
+                            scheduled_for=now,
+                            fired_at=now - timedelta(minutes=offset_min),
+                        )
+                    )
                 await s.commit()
 
             worker = ScheduleCircuitBreakerWorker(
-                db=db, settings=settings, audit=AuditService(settings),
+                db=db,
+                settings=settings,
+                audit=AuditService(settings),
             )
 
             # Race simulation: between the worker's tick() read
@@ -305,15 +324,17 @@ class TestR4CircuitBreakerReReadInDisableTxn:
                 # Insert a NEWER successful fire - this turns the
                 # streak from "3 fails" into "1 success + 3 fails"
                 # (newest first: success → fail → fail → fail).
-                s.add(ScheduleFire(
-                    fire_id=uuid.uuid4(),
-                    schedule_id=schedule_id,
-                    project_id=project_id,
-                    command_id=None,
-                    status="acked_success",
-                    scheduled_for=now,
-                    fired_at=now,
-                ))
+                s.add(
+                    ScheduleFire(
+                        fire_id=uuid.uuid4(),
+                        schedule_id=schedule_id,
+                        project_id=project_id,
+                        command_id=None,
+                        status="acked_success",
+                        scheduled_for=now,
+                        fired_at=now,
+                    )
+                )
                 await s.commit()
 
             # Now call _disable_and_audit as the breaker would have
@@ -330,8 +351,7 @@ class TestR4CircuitBreakerReReadInDisableTxn:
             async with db.session() as s:
                 row = await s.get(Schedule, schedule_id)
                 assert row.is_enabled is True, (
-                    "circuit breaker tripped a healthy schedule "
-                    "(round-4 race fix regressed)"
+                    "circuit breaker tripped a healthy schedule (round-4 race fix regressed)"
                 )
         finally:
             await engine.dispose()
@@ -355,15 +375,13 @@ class TestR4WorkerLeaderLock:
 
         # Same worker name → same id (so multi-replica race for
         # the same lock).
-        assert (
-            _lock_id_for("pending_fires_replay_worker")
-            == _lock_id_for("pending_fires_replay_worker")
+        assert _lock_id_for("pending_fires_replay_worker") == _lock_id_for(
+            "pending_fires_replay_worker"
         )
         # Different worker names → different ids (so prune +
         # breaker can run on different replicas in same window).
-        assert (
-            _lock_id_for("pending_fires_replay_worker")
-            != _lock_id_for("schedule_circuit_breaker_worker")
+        assert _lock_id_for("pending_fires_replay_worker") != _lock_id_for(
+            "schedule_circuit_breaker_worker"
         )
 
     def test_lock_id_in_signed_int_range(self) -> None:
@@ -372,16 +390,15 @@ class TestR4WorkerLeaderLock:
         from z4j_brain.domain.workers._leader_lock import _lock_id_for
 
         ids = [
-            _lock_id_for(name) for name in (
+            _lock_id_for(name)
+            for name in (
                 "pending_fires_replay_worker",
                 "schedule_circuit_breaker_worker",
                 "schedule_fires_prune_worker",
             )
         ]
         for lock_id in ids:
-            assert 0 <= lock_id < (1 << 63), (
-                f"lock id {lock_id} out of signed bigint range"
-            )
+            assert 0 <= lock_id < (1 << 63), f"lock id {lock_id} out of signed bigint range"
 
     @pytest.mark.asyncio
     async def test_sqlite_no_op_yields_true(self) -> None:
@@ -389,7 +406,6 @@ class TestR4WorkerLeaderLock:
         unconditionally (single-writer DB → no contention possible)."""
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy.pool import StaticPool
-
         from z4j_brain.domain.workers._leader_lock import (
             acquire_per_worker_lock,
         )
@@ -430,12 +446,13 @@ class TestR4NotificationDedupOnDuplicateAck:
     async def test_acknowledge_returns_was_first_ack(self) -> None:
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy.pool import StaticPool
-
         from z4j_brain.persistence.base import Base
         from z4j_brain.persistence.database import DatabaseManager
         from z4j_brain.persistence.enums import ScheduleKind
         from z4j_brain.persistence.models import (
-            Project, Schedule, ScheduleFire,
+            Project,
+            Schedule,
+            ScheduleFire,
         )
         from z4j_brain.persistence.repositories import (
             ScheduleFireRepository,
@@ -457,37 +474,52 @@ class TestR4NotificationDedupOnDuplicateAck:
             now = datetime.now(UTC)
             async with db.session() as s:
                 s.add(Project(id=project_id, slug="p", name="P"))
-                s.add(Schedule(
-                    id=schedule_id, project_id=project_id,
-                    engine="celery", scheduler="z4j-scheduler",
-                    name="x", task_name="t",
-                    kind=ScheduleKind.CRON, expression="* * * * *",
-                    timezone="UTC", args=[], kwargs={},
-                    is_enabled=True,
-                ))
-                s.add(ScheduleFire(
-                    fire_id=fire_id, schedule_id=schedule_id,
-                    project_id=project_id, command_id=None,
-                    status="delivered",
-                    scheduled_for=now, fired_at=now,
-                ))
+                s.add(
+                    Schedule(
+                        id=schedule_id,
+                        project_id=project_id,
+                        engine="celery",
+                        scheduler="z4j-scheduler",
+                        name="x",
+                        task_name="t",
+                        kind=ScheduleKind.CRON,
+                        expression="* * * * *",
+                        timezone="UTC",
+                        args=[],
+                        kwargs={},
+                        is_enabled=True,
+                    )
+                )
+                s.add(
+                    ScheduleFire(
+                        fire_id=fire_id,
+                        schedule_id=schedule_id,
+                        project_id=project_id,
+                        command_id=None,
+                        status="delivered",
+                        scheduled_for=now,
+                        fired_at=now,
+                    )
+                )
                 await s.commit()
 
             async with db.session() as s:
-                row1, first1 = await ScheduleFireRepository(
+                _row1, first1 = await ScheduleFireRepository(
                     s,
                 ).acknowledge(
-                    fire_id=fire_id, status="acked_failed",
+                    fire_id=fire_id,
+                    status="acked_failed",
                 )
                 await s.commit()
             assert first1 is True
 
             # Second ack for the same fire_id - duplicate.
             async with db.session() as s:
-                row2, first2 = await ScheduleFireRepository(
+                _row2, first2 = await ScheduleFireRepository(
                     s,
                 ).acknowledge(
-                    fire_id=fire_id, status="acked_failed",
+                    fire_id=fire_id,
+                    status="acked_failed",
                 )
                 await s.commit()
             assert first2 is False, (
@@ -520,7 +552,6 @@ class TestR4RateLimiterRefund:
     async def test_refund_restores_token(self) -> None:
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy.pool import StaticPool
-
         from z4j_brain.domain.scheduler_rate_limiter import (
             SchedulerRateLimiter,
         )
@@ -541,7 +572,8 @@ class TestR4RateLimiterRefund:
                 database_url="sqlite+aiosqlite:///:memory:",
                 secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
                 session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-                environment="dev", log_json=False,
+                environment="dev",
+                log_json=False,
                 scheduler_grpc_fire_rate_capacity=10.0,
                 scheduler_grpc_fire_rate_per_second=0.01,
             )
@@ -575,7 +607,8 @@ class TestR4AuditQueue:
     @pytest.mark.asyncio
     async def test_queue_drops_oldest_on_overflow(self) -> None:
         from z4j_brain.middleware._audit_queue import (
-            AuditQueue, DenialAuditEvent,
+            AuditQueue,
+            DenialAuditEvent,
         )
 
         q = AuditQueue()
@@ -598,6 +631,5 @@ class TestR4AuditQueue:
         for _ in range(1100):
             q.enqueue(ev)
         assert q.dropped_count > 0, (
-            "queue must drop on overflow - pre-fix path would have "
-            "blocked the request handler"
+            "queue must drop on overflow - pre-fix path would have blocked the request handler"
         )

@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+import structlog
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from z4j_brain.persistence.enums import TaskState
+from z4j_brain.persistence.enums import TERMINAL_TASK_STATES, TaskState
 from z4j_brain.persistence.models import Task
 from z4j_brain.persistence.repositories._base import BaseRepository
+
+logger = structlog.get_logger("z4j.brain.repositories.tasks")
 
 
 class TaskRepository(BaseRepository[Task]):
@@ -129,7 +132,9 @@ class TaskRepository(BaseRepository[Task]):
 
         if not existing_loaded:
             existing = await self.get_by_engine_task_id(
-                project_id=project_id, engine=engine, task_id=task_id,
+                project_id=project_id,
+                engine=engine,
+                task_id=task_id,
             )
         if existing is None:
             merged: dict[str, Any] = {**defaults, **updates}
@@ -152,7 +157,9 @@ class TaskRepository(BaseRepository[Task]):
                     await self.session.flush()
             except IntegrityError:
                 existing = await self.get_by_engine_task_id(
-                    project_id=project_id, engine=engine, task_id=task_id,
+                    project_id=project_id,
+                    engine=engine,
+                    task_id=task_id,
                 )
                 if existing is None:
                     raise  # genuinely couldn't insert or read back
@@ -172,6 +179,7 @@ class TaskRepository(BaseRepository[Task]):
         engine_state: str,
         finished_at: datetime | None = None,
         exception_text: str | None = None,
+        probe_issued_at: datetime | None = None,
     ) -> bool:
         """Apply a reconciliation probe result to the task row.
 
@@ -180,14 +188,42 @@ class TaskRepository(BaseRepository[Task]):
         set the brain expects from any adapter. ``"unknown"`` is a
         no-op (the adapter has no result-backend to consult).
 
-        Returns ``True`` when the row was actually updated, ``False``
-        when the brain's state already matches or the task isn't
-        known to the brain. Idempotent: running twice produces the
-        same final state.
-        """
-        if engine_state == "unknown":
-            return False
+        Transition matrix (R3 H1). Reconciliation may only move a
+        task OUT of a non-terminal state:
 
+        - current TERMINAL (success / failure / revoked) → any:
+          REJECTED. Terminal states are terminal. Pre-fix, a stale
+          "pending" probe response regressed a SUCCESS row back to
+          PENDING (``finished_at`` retained!), and the next success
+          response then looked like a fresh terminal correction -
+          firing ``task.orphaned`` a second time and letting an
+          automation rule duplicate already-completed work.
+        - current non-terminal → TERMINAL: applied (the probe found
+          the engine's terminal truth; timestamps don't argue, same
+          rule as the EventIngestor's out-of-order guard).
+        - current non-terminal → non-terminal: applied only when the
+          response is not stale - if the row was written after the
+          probe was issued (``updated_at > probe_issued_at``) the
+          brain has observed fresher information than the probe saw,
+          so the response is dropped.
+        - current == new: no-op (idempotent replay).
+
+        The UPDATE itself is conditional and atomic: the terminal
+        guard is re-checked in the WHERE clause so a concurrent
+        writer (fresh event, duplicate probe response on another
+        replica) cannot interleave between our read and our write.
+        A lost race returns ``False`` exactly like a rejected
+        transition.
+
+        Returns ``True`` when the row was actually updated, ``False``
+        when the transition was rejected, the brain's state already
+        matches, or the task isn't known to the brain. The caller's
+        apply-once contract (``task.orphaned`` fires at most once per
+        correction, audit "correction" rows only on real changes)
+        rests on this: a rejected or replayed response MUST return
+        ``False``. Idempotent: running twice produces the same final
+        state.
+        """
         mapping = {
             "pending": TaskState.PENDING,
             "started": TaskState.STARTED,
@@ -196,10 +232,14 @@ class TaskRepository(BaseRepository[Task]):
         }
         new_state = mapping.get(engine_state)
         if new_state is None:
+            # Covers ``"unknown"`` (no result backend to consult) and
+            # any out-of-vocabulary string from a hostile agent.
             return False
 
         existing = await self.get_by_engine_task_id(
-            project_id=project_id, engine=engine, task_id=task_id,
+            project_id=project_id,
+            engine=engine,
+            task_id=task_id,
         )
         if existing is None:
             return False
@@ -208,14 +248,98 @@ class TaskRepository(BaseRepository[Task]):
             # ``updated_at`` timestamp and don't emit a meaningless
             # audit row.
             return False
+        if existing.state in TERMINAL_TASK_STATES:
+            # Terminal is terminal. A late probe response can never
+            # demote (or sideways-move) a finished task.
+            logger.info(
+                "z4j tasks: rejecting reconciliation of terminal task",
+                project_id=str(project_id),
+                task_id=task_id,
+                current_state=existing.state.value,
+                engine_state=engine_state,
+            )
+            return False
+        if new_state not in TERMINAL_TASK_STATES and _observed_after(
+            existing.updated_at,
+            probe_issued_at,
+        ):
+            # Stale non-terminal response: the row was written after
+            # the probe was issued, so the brain already holds fresher
+            # information than the probe observed. Terminal responses
+            # are exempt (terminal wins regardless of timestamps).
+            logger.info(
+                "z4j tasks: rejecting stale reconciliation response",
+                project_id=str(project_id),
+                task_id=task_id,
+                current_state=existing.state.value,
+                engine_state=engine_state,
+            )
+            return False
 
-        existing.state = new_state
-        if finished_at is not None and existing.finished_at is None:
-            existing.finished_at = finished_at
-        if exception_text and not existing.exception:
-            existing.exception = exception_text[:500]
-        await self.session.flush()
-        return True
+        values: dict[str, Any] = {"state": new_state}
+        if finished_at is not None:
+            # Keep the earliest observed finish - same semantics as
+            # the pre-R3 ``if existing.finished_at is None`` guard,
+            # but race-safe inside the single UPDATE.
+            values["finished_at"] = func.coalesce(Task.finished_at, finished_at)
+        if exception_text:
+            # Preserve a non-empty stored exception; fill it from the
+            # probe otherwise (NULLIF folds legacy '' into NULL).
+            values["exception"] = func.coalesce(
+                func.nullif(Task.exception, ""),
+                exception_text[:500],
+            )
+
+        # CONDITIONAL ATOMIC update (R3 H1): the WHERE clause
+        # re-asserts the eligibility rules so two racing appliers (or
+        # an applier racing a fresh terminal event) serialize on the
+        # row - the loser matches zero rows and reports False, and the
+        # ``task.orphaned`` apply-once semantics survive the race.
+        conditions = [
+            Task.project_id == project_id,
+            Task.engine == engine,
+            Task.task_id == task_id,
+            Task.state.not_in(TERMINAL_TASK_STATES),
+            Task.state != new_state,
+        ]
+        if new_state not in TERMINAL_TASK_STATES:
+            # Optimistic snapshot guards (R4-M1 + round-4 LOW
+            # residual): the staleness check above ran against the
+            # row we READ, but a fresh event can commit between that
+            # read and this UPDATE. Two predicates close the gap:
+            #
+            # 1. STATE snapshot -- catches any state-changing gap
+            #    write (round 4 reproduced a stale "pending"
+            #    overwriting a fresh RETRY). A timestamp EQUALITY
+            #    would false-negative on SQLite (string comparison,
+            #    server-default second precision vs microsecond
+            #    binds), so the enum is the equality token.
+            # 2. ``updated_at <= probe_issued_at`` -- catches a gap
+            #    write that refreshes freshness WITHOUT changing
+            #    state (a duplicate TASK_STARTED advancing
+            #    started_at; round-4's remaining LOW). The
+            #    INEQUALITY form is dialect-safe where equality is
+            #    not: ISO-8601 text ordering is chronological under
+            #    SQLite's string comparison even across mixed
+            #    precision, and Postgres compares timestamptz
+            #    natively.
+            #
+            # Terminal responses stay exempt from both: terminal
+            # wins regardless of timestamps.
+            conditions.append(Task.state == existing.state)
+            if probe_issued_at is not None:
+                conditions.append(Task.updated_at <= probe_issued_at)
+        result = await self.session.execute(
+            update(Task)
+            .where(*conditions)
+            .values(**values)
+            .execution_options(synchronize_session=False),
+        )
+        # The in-session instance is stale after the core UPDATE;
+        # expire it so any later read in this transaction (e.g. the
+        # orphaned-automation field build) refetches fresh values.
+        self.session.expire(existing)
+        return bool(result.rowcount or 0)
 
     async def list_for_project(
         self,
@@ -296,9 +420,12 @@ class TaskRepository(BaseRepository[Task]):
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-
     async def get_priority_label(
-        self, *, project_id: UUID, engine: str, task_id: str,
+        self,
+        *,
+        project_id: UUID,
+        engine: str,
+        task_id: str,
     ) -> str | None:
         """Return the user-facing priority label for one task.
 
@@ -332,13 +459,10 @@ class TaskRepository(BaseRepository[Task]):
         """Bulk-retry companion: ``{task_id: priority_label}`` for the input set."""
         if not task_ids:
             return {}
-        stmt = (
-            select(Task.task_id, Task.priority)
-            .where(
-                Task.project_id == project_id,
-                Task.engine == engine,
-                Task.task_id.in_(task_ids),
-            )
+        stmt = select(Task.task_id, Task.priority).where(
+            Task.project_id == project_id,
+            Task.engine == engine,
+            Task.task_id.in_(task_ids),
         )
         result = await self.session.execute(stmt)
         out: dict[str, str] = {}
@@ -368,13 +492,10 @@ class TaskRepository(BaseRepository[Task]):
         """
         if not task_ids:
             return {}
-        stmt = (
-            select(Task.task_id, Task.name)
-            .where(
-                Task.project_id == project_id,
-                Task.engine == engine,
-                Task.task_id.in_(task_ids),
-            )
+        stmt = select(Task.task_id, Task.name).where(
+            Task.project_id == project_id,
+            Task.engine == engine,
+            Task.task_id.in_(task_ids),
         )
         result = await self.session.execute(stmt)
         out: dict[str, str] = {}
@@ -411,7 +532,9 @@ class TaskRepository(BaseRepository[Task]):
         chain that happens to have exactly ``max_nodes`` rows.
         """
         anchor = await self.get_by_engine_task_id(
-            project_id=project_id, engine=engine, task_id=task_id,
+            project_id=project_id,
+            engine=engine,
+            task_id=task_id,
         )
         if anchor is None:
             return [], None, False
@@ -448,31 +571,66 @@ class TaskRepository(BaseRepository[Task]):
     ) -> list[Task]:
         """Return tasks likely-stuck in ``pending`` or ``started``.
 
-        A "stuck" task is one whose ``started_at`` (or ``created_at``
-        fallback) is older than ``stuck_before`` AND whose current
-        state is not terminal. The ReconciliationWorker probes each
-        of these via the agent's ``reconcile_task(task_id)`` to see
-        whether the engine's result backend has a more recent state.
+        A "stuck" task is one whose age anchor is older than
+        ``stuck_before`` AND whose current state is not terminal. The
+        age anchor is ``COALESCE(started_at, received_at,
+        created_at)`` - R3 M2(a): the previous ``started_at IS NOT
+        NULL`` filter silently excluded tasks that never started, so
+        an old PENDING task whose start event was lost could sit
+        un-reconciled forever. ``created_at`` is NOT NULL, so the
+        chain always yields a value. The ReconciliationWorker probes
+        each candidate via the agent's ``reconcile_task(task_id)`` to
+        see whether the engine's result backend has a more recent
+        state.
 
-        Ordered by ``started_at ASC`` so the oldest stuck tasks are
+        Ordered by the age anchor ASC so the oldest stuck tasks are
         reconciled first.
         """
         from z4j_brain.persistence.enums import TaskState
 
+        age_anchor = func.coalesce(
+            Task.started_at,
+            Task.received_at,
+            Task.created_at,
+        )
         stmt = (
             select(Task)
             .where(
                 Task.state.in_(
                     [TaskState.STARTED, TaskState.PENDING, TaskState.RETRY],
                 ),
-                Task.started_at.is_not(None),
-                Task.started_at < stuck_before,
+                age_anchor < stuck_before,
             )
-            .order_by(Task.started_at.asc())
+            .order_by(age_anchor.asc())
             .limit(limit)
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+
+def _observed_after(
+    row_updated_at: datetime | None,
+    probe_issued_at: datetime | None,
+) -> bool:
+    """True iff the task row was written AFTER the probe was issued.
+
+    Staleness heuristic for ``apply_reconciled_state``: any write to
+    the task row lands through the event ingestor or a previous
+    reconciliation, so ``updated_at > probe_issued_at`` means the
+    brain holds a fresher observation than the probe could have seen.
+
+    Timestamps are normalized to aware-UTC before comparing because
+    the two values may cross the SQLite / Postgres divide: SQLite's
+    ``CURRENT_TIMESTAMP`` yields naive UTC while Postgres
+    ``timestamptz`` yields aware datetimes, and comparing the two
+    raises ``TypeError``. Missing either timestamp fails open (not
+    stale) - the terminal-state guard is the hard backstop.
+    """
+    if row_updated_at is None or probe_issued_at is None:
+        return False
+    row = row_updated_at if row_updated_at.tzinfo else row_updated_at.replace(tzinfo=UTC)
+    probe = probe_issued_at if probe_issued_at.tzinfo else probe_issued_at.replace(tzinfo=UTC)
+    return row > probe
 
 
 def _priority_label(value: object) -> str | None:

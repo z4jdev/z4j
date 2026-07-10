@@ -25,27 +25,26 @@ import pytest
 pytest.importorskip("grpc")
 pytest.importorskip("cryptography")
 
-from cryptography import x509  # noqa: E402
-from cryptography.hazmat.primitives import hashes  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
-from cryptography.x509.oid import NameOID  # noqa: E402
-from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
-
-from z4j_brain.persistence.base import Base  # noqa: E402
-from z4j_brain.persistence.database import DatabaseManager  # noqa: E402
-from z4j_brain.persistence.enums import ScheduleKind  # noqa: E402
-from z4j_brain.persistence.models import Project, Schedule  # noqa: E402
-from z4j_brain.scheduler_grpc.auth import (  # noqa: E402
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+from sqlalchemy.ext.asyncio import create_async_engine
+from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.database import DatabaseManager
+from z4j_brain.persistence.enums import ScheduleKind
+from z4j_brain.persistence.models import Project, Schedule
+from z4j_brain.scheduler_grpc.auth import (
     mint_scheduler_cert,
     write_minted_cert,
 )
-from z4j_brain.scheduler_grpc.handlers import (  # noqa: E402
+from z4j_brain.scheduler_grpc.handlers import (
     _DEFAULT_LIST_PAGE_SIZE,
     _MAX_LIST_PAGE_SIZE,
     SchedulerServiceImpl,
 )
-from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb  # noqa: E402
-from z4j_brain.settings import Settings  # noqa: E402
+from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
+from z4j_brain.settings import Settings
 
 
 def _self_signed_ca() -> tuple[bytes, bytes]:
@@ -114,7 +113,8 @@ class TestS001PageSizeClamp:
 
     @pytest.mark.asyncio
     async def test_oversized_page_size_clamped(
-        self, brain_settings: Settings,
+        self,
+        brain_settings: Settings,
     ) -> None:
         """Request with page_size = 10**9 must not OOM the brain.
 
@@ -144,7 +144,9 @@ class TestS001PageSizeClamp:
 
             async with db.session() as session:
                 project = Project(
-                    id=project_id, slug="s001-test", name="s001",
+                    id=project_id,
+                    slug="s001-test",
+                    name="s001",
                 )
                 session.add(project)
                 # Insert _MAX_LIST_PAGE_SIZE + 5 rows so a working
@@ -160,14 +162,16 @@ class TestS001PageSizeClamp:
                             kind=ScheduleKind.CRON,
                             expression="0 * * * *",
                             timezone="UTC",
-                            args=[], kwargs={},
+                            args=[],
+                            kwargs={},
                             is_enabled=True,
                         ),
                     )
                 await session.commit()
 
             servicer = SchedulerServiceImpl(
-                settings=brain_settings, db=db,
+                settings=brain_settings,
+                db=db,
                 command_dispatcher=None,  # type: ignore[arg-type]
                 audit_service=None,  # type: ignore[arg-type]
             )
@@ -177,7 +181,8 @@ class TestS001PageSizeClamp:
             )
             results = []
             async for sched in servicer.ListSchedules(
-                request, _NoopContext(),
+                request,
+                _NoopContext(),
             ):
                 results.append(sched)
 
@@ -191,7 +196,8 @@ class TestS001PageSizeClamp:
 
     @pytest.mark.asyncio
     async def test_zero_page_size_uses_default(
-        self, brain_settings: Settings,
+        self,
+        brain_settings: Settings,
     ) -> None:
         """Empty/zero page_size falls back to the default, not 0.
 
@@ -208,7 +214,9 @@ class TestS001PageSizeClamp:
             async with db.session() as session:
                 session.add(
                     Project(
-                        id=project_id, slug="s001-zero", name="zero",
+                        id=project_id,
+                        slug="s001-zero",
+                        name="zero",
                     ),
                 )
                 session.add(
@@ -221,25 +229,29 @@ class TestS001PageSizeClamp:
                         kind=ScheduleKind.CRON,
                         expression="0 * * * *",
                         timezone="UTC",
-                        args=[], kwargs={},
+                        args=[],
+                        kwargs={},
                         is_enabled=True,
                     ),
                 )
                 await session.commit()
 
             servicer = SchedulerServiceImpl(
-                settings=brain_settings, db=db,
+                settings=brain_settings,
+                db=db,
                 command_dispatcher=None,  # type: ignore[arg-type]
                 audit_service=None,  # type: ignore[arg-type]
             )
             # page_size=0 in proto3 is the default-int value, so this
             # also covers "field not set on the wire".
             request = pb.ListSchedulesRequest(
-                project_id=str(project_id), page_size=0,
+                project_id=str(project_id),
+                page_size=0,
             )
             results = []
             async for sched in servicer.ListSchedules(
-                request, _NoopContext(),
+                request,
+                _NoopContext(),
             ):
                 results.append(sched)
             assert len(results) == 1
@@ -271,7 +283,9 @@ class TestS004RequireAllowlist:
 
     @pytest.mark.asyncio
     async def test_start_raises_when_required_and_empty(
-        self, brain_settings: Settings, tmp_path: Path,
+        self,
+        brain_settings: Settings,
+        tmp_path: Path,
     ) -> None:
         """``SchedulerGrpcServer.start`` raises before binding the port."""
         from z4j_brain.scheduler_grpc.server import SchedulerGrpcServer
@@ -279,7 +293,9 @@ class TestS004RequireAllowlist:
         # Need TLS material to get past the cert-loading guards.
         ca_cert, ca_key = _self_signed_ca()
         cert_pem, key_pem = mint_scheduler_cert(
-            name="srv", ca_cert_pem=ca_cert, ca_key_pem=ca_key,
+            name="srv",
+            ca_cert_pem=ca_cert,
+            ca_key_pem=ca_key,
         )
         ca_path = tmp_path / "ca.crt"
         cert_path = tmp_path / "srv.crt"
@@ -307,12 +323,14 @@ class TestS004RequireAllowlist:
         try:
             db = DatabaseManager(engine)
             server = SchedulerGrpcServer(
-                settings=s, db=db,
+                settings=s,
+                db=db,
                 command_dispatcher=None,  # type: ignore[arg-type]
                 audit_service=None,  # type: ignore[arg-type]
             )
             with pytest.raises(
-                RuntimeError, match="require_allowlist",
+                RuntimeError,
+                match="require_allowlist",
             ):
                 await server.start()
         finally:
@@ -331,7 +349,8 @@ class TestS005WriteMintedCertHardensExistingDir:
     """
 
     def test_pre_existing_loose_dir_gets_tightened(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         if os.name != "posix":
             pytest.skip("POSIX-only mode bits assertion")
@@ -345,7 +364,9 @@ class TestS005WriteMintedCertHardensExistingDir:
 
         ca_cert, ca_key = _self_signed_ca()
         cert_pem, key_pem = mint_scheduler_cert(
-            name="sch", ca_cert_pem=ca_cert, ca_key_pem=ca_key,
+            name="sch",
+            ca_cert_pem=ca_cert,
+            ca_key_pem=ca_key,
         )
         cert_path, key_path = write_minted_cert(
             out_dir=out_dir,
@@ -364,7 +385,8 @@ class TestS005WriteMintedCertHardensExistingDir:
         assert oct(key_path.stat().st_mode)[-3:] == "600"
 
     def test_files_use_atomic_secure_write_helper(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """Round-trip: bytes written must equal bytes read.
 
@@ -376,7 +398,9 @@ class TestS005WriteMintedCertHardensExistingDir:
         """
         ca_cert, ca_key = _self_signed_ca()
         cert_pem, key_pem = mint_scheduler_cert(
-            name="sch", ca_cert_pem=ca_cert, ca_key_pem=ca_key,
+            name="sch",
+            ca_cert_pem=ca_cert,
+            ca_key_pem=ca_key,
         )
         cert_path, key_path = write_minted_cert(
             out_dir=tmp_path / "out2",
@@ -430,11 +454,11 @@ class TestS007DnsCacheLRU:
         try:
             for i in range(10):
                 channels._set_dns_cache_entry(
-                    f"host-{i}.example.com", time.monotonic() + 10_000, [f"10.0.0.{i}"],
+                    f"host-{i}.example.com",
+                    time.monotonic() + 10_000,
+                    [f"10.0.0.{i}"],
                 )
-            assert len(channels._DNS_CACHE) == 5, (
-                "cache must be capped at the configured max"
-            )
+            assert len(channels._DNS_CACHE) == 5, "cache must be capped at the configured max"
             # Oldest (host-0..host-4) must be evicted; newest 5 remain.
             for i in range(5):
                 assert f"host-{i}.example.com" not in channels._DNS_CACHE
@@ -443,7 +467,7 @@ class TestS007DnsCacheLRU:
         finally:
             channels._DNS_CACHE_MAX = original_cap
             channels._DNS_CACHE.clear()
-            assert channels._DNS_CACHE_MAX == cap
+            assert cap == channels._DNS_CACHE_MAX
 
     @pytest.mark.asyncio
     async def test_hot_entry_survives_eviction(self) -> None:
@@ -456,7 +480,9 @@ class TestS007DnsCacheLRU:
             # Seed three distinct entries.
             for i in range(3):
                 channels._set_dns_cache_entry(
-                    f"host-{i}.example.com", time.monotonic() + 10_000, [f"10.0.0.{i}"],
+                    f"host-{i}.example.com",
+                    time.monotonic() + 10_000,
+                    [f"10.0.0.{i}"],
                 )
             # Touch host-0 via _resolve_cached: it's still within
             # TTL so we get a cache hit, which moves it to MRU end.
@@ -465,10 +491,14 @@ class TestS007DnsCacheLRU:
             # Now insert two NEW entries -- this should evict host-1
             # and host-2 (the actually-oldest), NOT host-0 (touched).
             channels._set_dns_cache_entry(
-                "host-new1.example.com", time.monotonic() + 10_000, ["10.1.0.1"],
+                "host-new1.example.com",
+                time.monotonic() + 10_000,
+                ["10.1.0.1"],
             )
             channels._set_dns_cache_entry(
-                "host-new2.example.com", time.monotonic() + 10_000, ["10.1.0.2"],
+                "host-new2.example.com",
+                time.monotonic() + 10_000,
+                ["10.1.0.2"],
             )
             assert "host-0.example.com" in channels._DNS_CACHE, (
                 "MRU touch must protect a hot entry from eviction"
@@ -532,7 +562,8 @@ class TestM1InvitationAcceptPasswordPolicy:
         )
 
     def test_validate_policy_rejects_invitation_grade_weak_passwords(
-        self, brain_settings,
+        self,
+        brain_settings,
     ) -> None:
         """Behavior guard: validate_policy actually rejects the
         weak-but-12-char passwords that pre-M1 invitation accept

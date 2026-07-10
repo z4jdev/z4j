@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 pytestmark = pytest.mark.asyncio
@@ -19,7 +20,8 @@ pytestmark = pytest.mark.asyncio
 
 class TestCitextUniqueness:
     async def test_case_insensitive_unique(
-        self, migrated_engine: AsyncEngine,
+        self,
+        migrated_engine: AsyncEngine,
     ) -> None:
         async with migrated_engine.begin() as conn:
             await conn.execute(
@@ -31,7 +33,7 @@ class TestCitextUniqueness:
             )
 
         # Inserting the same email with different case must fail.
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             async with migrated_engine.begin() as conn:
                 await conn.execute(
                     text(
@@ -42,7 +44,8 @@ class TestCitextUniqueness:
                 )
 
     async def test_select_case_insensitive(
-        self, migrated_engine: AsyncEngine,
+        self,
+        migrated_engine: AsyncEngine,
     ) -> None:
         async with migrated_engine.begin() as conn:
             await conn.execute(

@@ -130,7 +130,8 @@ class SchedulerRateLimiter:
             if last_refill.tzinfo is None:
                 last_refill = last_refill.replace(tzinfo=UTC)
             elapsed_seconds = max(
-                0.0, (now - last_refill).total_seconds(),
+                0.0,
+                (now - last_refill).total_seconds(),
             )
             refilled = min(
                 bucket.capacity,
@@ -191,15 +192,17 @@ class SchedulerRateLimiter:
                     # Refund without prior consume - nothing to do.
                     return
                 bucket.tokens = min(
-                    bucket.capacity, bucket.tokens + tokens,
+                    bucket.capacity,
+                    bucket.tokens + tokens,
                 )
                 await session.commit()
-        except Exception:  # noqa: BLE001
-            import logging  # noqa: PLC0415
+        except Exception:
+            import logging
 
             logging.getLogger(__name__).warning(
-                "SchedulerRateLimiter.refund failed for cert_cn=%r "
-                "(non-fatal)", cert_cn, exc_info=True,
+                "SchedulerRateLimiter.refund failed for cert_cn=%r (non-fatal)",
+                cert_cn,
+                exc_info=True,
             )
 
 

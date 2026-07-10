@@ -55,9 +55,14 @@ _AUDITED_PATH_RE = re.compile(
 # Methods we audit denials/validation failures for. Read paths
 # (GET / HEAD) leave too much noise in the audit log without
 # operational value.
-_AUDITED_METHODS: frozenset[str] = frozenset({
-    "POST", "PUT", "PATCH", "DELETE",
-})
+_AUDITED_METHODS: frozenset[str] = frozenset(
+    {
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+    }
+)
 
 
 class ErrorMiddleware(BaseHTTPMiddleware):
@@ -76,7 +81,7 @@ class ErrorMiddleware(BaseHTTPMiddleware):
         except PydanticValidationError as exc:
             await _record_denial_if_relevant(request, exc=exc)
             return _pydantic_validation_response(request, exc)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return _unexpected_error_response(request, exc)
 
 
@@ -137,9 +142,9 @@ async def _record_denial_if_relevant(
     else:
         return
 
-    from datetime import UTC, datetime  # noqa: PLC0415
+    from datetime import UTC, datetime
 
-    from z4j_brain.middleware._audit_queue import (  # noqa: PLC0415
+    from z4j_brain.middleware._audit_queue import (
         DenialAuditEvent,
     )
 

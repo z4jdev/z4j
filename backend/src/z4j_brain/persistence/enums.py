@@ -20,6 +20,22 @@ from z4j_core.models.task import TaskPriority, TaskState
 from z4j_core.models.user import ProjectRole
 from z4j_core.models.worker import WorkerState
 
+#: Task states that are TERMINAL. Once a task row reaches one of
+#: these, no late event and no reconciliation probe result may move
+#: it back to a non-terminal state - terminal states are terminal.
+#: Shared by the EventIngestor's out-of-order-event guard and by
+#: ``TaskRepository.apply_reconciled_state`` (R3 H1) so the two
+#: write paths cannot drift on what "terminal" means. RETRY and
+#: REJECTED are deliberately NOT terminal: both can legitimately
+#: re-enter the queue (Celery retries; reject with requeue).
+TERMINAL_TASK_STATES: frozenset[TaskState] = frozenset(
+    {
+        TaskState.SUCCESS,
+        TaskState.FAILURE,
+        TaskState.REVOKED,
+    },
+)
+
 #: Postgres ``CREATE TYPE`` name → Python enum class.
 #: Used by the alembic migration to render ``CREATE TYPE`` /
 #: ``DROP TYPE`` statements deterministically.
@@ -35,10 +51,11 @@ SQL_ENUM_NAMES: dict[str, type] = {
 
 
 __all__ = [
+    "SQL_ENUM_NAMES",
+    "TERMINAL_TASK_STATES",
     "AgentState",
     "CommandStatus",
     "ProjectRole",
-    "SQL_ENUM_NAMES",
     "ScheduleKind",
     "TaskPriority",
     "TaskState",

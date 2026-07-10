@@ -44,7 +44,6 @@ from z4j_brain.api.deps import (
     get_session,
     get_settings,
     get_user_repo,
-    require_admin,
     require_csrf,
     require_fresh_mfa,
 )
@@ -91,7 +90,9 @@ class InvitationCreateRequest(BaseModel):
     email: EmailStr
     role: str = Field(default="viewer", max_length=20)
     ttl_days: int = Field(
-        default=_DEFAULT_TTL_DAYS, ge=_MIN_TTL_DAYS, le=_MAX_TTL_DAYS,
+        default=_DEFAULT_TTL_DAYS,
+        ge=_MIN_TTL_DAYS,
+        le=_MAX_TTL_DAYS,
     )
 
     @field_validator("role")
@@ -175,7 +176,7 @@ class InvitationAcceptPublic(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _hash_token(plaintext: str, settings: "Settings") -> str:
+def _hash_token(plaintext: str, settings: Settings) -> str:
     """HMAC-SHA256 digest of a plaintext token, keyed by the server secret."""
     secret = settings.secret.get_secret_value().encode()
     return hmac.new(secret, plaintext.encode(), sha256).hexdigest()
@@ -192,11 +193,7 @@ def _is_pending(inv) -> bool:  # type: ignore[no-untyped-def]
     expires_at = inv.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
-    return (
-        inv.accepted_at is None
-        and inv.revoked_at is None
-        and expires_at > now
-    )
+    return inv.accepted_at is None and inv.revoked_at is None and expires_at > now
 
 
 def _invitation_public(inv) -> InvitationPublic:  # type: ignore[no-untyped-def]
@@ -227,15 +224,15 @@ def _invitation_public(inv) -> InvitationPublic:  # type: ignore[no-untyped-def]
 async def mint_invitation(
     slug: str,
     body: InvitationCreateRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    invitations: "InvitationRepository" = Depends(get_invitation_repo),
-    users: "UserRepository" = Depends(get_user_repo),
-    settings: "Settings" = Depends(get_settings),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    invitations: InvitationRepository = Depends(get_invitation_repo),
+    users: UserRepository = Depends(get_user_repo),
+    settings: Settings = Depends(get_settings),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> InvitationMintPublic:
     """Admin-only: mint a single-use invitation token for ``email``."""
@@ -244,20 +241,23 @@ async def mint_invitation(
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
     await policy.require_member(
-        memberships, user=user, project=project,
+        memberships,
+        user=user,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
 
     # Canonicalize the invitee email at mint time. ``get_by_email``
     # casefolds but does NOT NFKC/IDNA normalize, so without this
-    # an admin who pasted ``Ｕｓｅｒ@example.com`` (full-width)
+    # an admin who pasted a full-width Unicode variant of
+    # ``user@example.com`` (e.g. full-width "User" glyphs)
     # while ``user@example.com`` already existed would get a "no
     # existing user" response, the invite would be minted, and
     # accept-time TOCTOU re-canonicalization would eventually
     # 409 - wasted invite + confusing UX. Canonicalize before
     # the dup-check AND store the canonical form on the row so
     # the accept path sees consistent state.
-    from z4j_brain.domain.auth_service import canonicalize_email  # noqa: PLC0415
+    from z4j_brain.domain.auth_service import canonicalize_email
 
     canonical_email = canonicalize_email(body.email)
 
@@ -268,7 +268,8 @@ async def mint_invitation(
     existing_user = await users.get_by_email(canonical_email)
     if existing_user is not None:
         existing = await memberships.get_for_user_project(
-            user_id=existing_user.id, project_id=project.id,
+            user_id=existing_user.id,
+            project_id=project.id,
         )
         if existing is not None:
             raise ConflictError(
@@ -331,8 +332,8 @@ async def mint_invitation(
 
 async def _try_send_invitation_email(
     *,
-    db_session: "AsyncSession",
-    settings: "Settings",
+    db_session: AsyncSession,
+    settings: Settings,
     project_id: uuid.UUID,
     project_name: str,
     invitee_email: str,
@@ -358,9 +359,10 @@ async def _try_send_invitation_email(
     try:
         channel_repo = NotificationChannelRepository(db_session)
         channels = await channel_repo.list_for_project(
-            project_id, active_only=True,
+            project_id,
+            active_only=True,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception(
             "z4j: invitation email - failed to list channels",
         )
@@ -400,11 +402,13 @@ async def _try_send_invitation_email(
                 return True
             logger.warning(
                 "z4j: invitation email channel %s failed: %s",
-                channel.id, result.error,
+                channel.id,
+                result.error,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
-                "z4j: invitation email channel %s crashed", channel.id,
+                "z4j: invitation email channel %s crashed",
+                channel.id,
             )
     return False
 
@@ -412,10 +416,10 @@ async def _try_send_invitation_email(
 @admin_router.get("", response_model=list[InvitationPublic])
 async def list_pending_invitations(
     slug: str,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    invitations: "InvitationRepository" = Depends(get_invitation_repo),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    invitations: InvitationRepository = Depends(get_invitation_repo),
 ) -> list[InvitationPublic]:
     """Admin-only: list non-accepted, non-revoked, non-expired invitations."""
     from z4j_brain.domain.policy_engine import PolicyEngine
@@ -423,7 +427,9 @@ async def list_pending_invitations(
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
     await policy.require_member(
-        memberships, user=user, project=project,
+        memberships,
+        user=user,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
     rows = await invitations.list_for_project(project.id)
@@ -438,13 +444,13 @@ async def list_pending_invitations(
 async def revoke_invitation(
     slug: str,
     invitation_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    invitations: "InvitationRepository" = Depends(get_invitation_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    invitations: InvitationRepository = Depends(get_invitation_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> Response:
     """Admin-only: revoke a pending invitation."""
@@ -453,7 +459,9 @@ async def revoke_invitation(
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
     await policy.require_member(
-        memberships, user=user, project=project,
+        memberships,
+        user=user,
+        project=project,
         min_role=ProjectRole.ADMIN,
     )
     row = await invitations.get(invitation_id)
@@ -492,9 +500,9 @@ async def revoke_invitation(
 )
 async def preview_invitation(
     token: str = Query(min_length=10, max_length=256),
-    invitations: "InvitationRepository" = Depends(get_invitation_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    settings: "Settings" = Depends(get_settings),
+    invitations: InvitationRepository = Depends(get_invitation_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    settings: Settings = Depends(get_settings),
 ) -> InvitationPreviewPublic:
     """Anonymous endpoint - lets the accept page render "invited to X"."""
     token_hash = _hash_token(token, settings)
@@ -521,14 +529,14 @@ async def preview_invitation(
 )
 async def accept_invitation(
     body: InvitationAcceptRequest,
-    invitations: "InvitationRepository" = Depends(get_invitation_repo),
-    users: "UserRepository" = Depends(get_user_repo),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    settings: "Settings" = Depends(get_settings),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    invitations: InvitationRepository = Depends(get_invitation_repo),
+    users: UserRepository = Depends(get_user_repo),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    settings: Settings = Depends(get_settings),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> InvitationAcceptPublic:
     """Anonymous endpoint - consumes the token + creates user + grants membership.
@@ -601,13 +609,15 @@ async def accept_invitation(
         role=row.role,
     )
     await invitations.accept(
-        row.id, accepted_by_user_id=new_user.id,
+        row.id,
+        accepted_by_user_id=new_user.id,
     )
 
     # Materialize the project's default subscriptions so the new
     # member starts getting bell notifications immediately - same
     # post-join hook used by the direct-membership path.
     from z4j_brain.domain.notifications import NotificationService
+
     await NotificationService().materialize_defaults_for_member(
         session=db_session,
         user_id=new_user.id,

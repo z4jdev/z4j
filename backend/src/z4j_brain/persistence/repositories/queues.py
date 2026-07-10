@@ -20,9 +20,7 @@ class QueueRepository(BaseRepository[Queue]):
 
     async def list_for_project(self, project_id: UUID) -> list[Queue]:
         result = await self.session.execute(
-            select(Queue)
-            .where(Queue.project_id == project_id)
-            .order_by(Queue.name),
+            select(Queue).where(Queue.project_id == project_id).order_by(Queue.name),
         )
         return list(result.scalars().all())
 
@@ -79,7 +77,6 @@ class QueueRepository(BaseRepository[Queue]):
         existing.last_seen_at = now
         await self.session.flush()
         return existing
-
 
     async def update_depth(
         self,

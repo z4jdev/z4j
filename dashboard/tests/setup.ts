@@ -30,3 +30,14 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     dispatchEvent: () => false,
   }) as MediaQueryList;
 }
+
+// jsdom has no ResizeObserver; Radix primitives (Select/Switch measure
+// themselves via react-use-size) need it at mount. A no-op stub is enough
+// for component tests that render but don't assert on measured sizes.
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}

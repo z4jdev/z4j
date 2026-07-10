@@ -25,7 +25,6 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
-
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.settings import Settings
 from z4j_brain.websocket.registry import PostgresNotifyRegistry

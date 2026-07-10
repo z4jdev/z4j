@@ -162,9 +162,9 @@ class RecentFailuresPublic(BaseModel):
 
 async def _visible_projects(
     *,
-    user: "User",
-    memberships: "MembershipRepository",
-    projects_repo: "ProjectRepository",
+    user: User,
+    memberships: MembershipRepository,
+    projects_repo: ProjectRepository,
     admin_project_cap: int,
     bound_slug: str | None = None,
 ) -> tuple[list[Project], dict[uuid.UUID, str | None]]:
@@ -191,9 +191,7 @@ async def _visible_projects(
             m.project_id: m.role.value if hasattr(m.role, "value") else str(m.role)
             for m in member_rows
         }
-        role_by_project: dict[uuid.UUID, str | None] = {
-            p.id: role_map.get(p.id) for p in active
-        }
+        role_by_project: dict[uuid.UUID, str | None] = {p.id: role_map.get(p.id) for p in active}
         if bound_slug is not None:
             active = [p for p in active if p.slug == bound_slug]
             role_by_project = {p.id: role_by_project.get(p.id) for p in active}
@@ -203,8 +201,7 @@ async def _visible_projects(
     if not member_rows:
         return [], {}
     role_by_project = {
-        m.project_id: m.role.value if hasattr(m.role, "value") else str(m.role)
-        for m in member_rows
+        m.project_id: m.role.value if hasattr(m.role, "value") else str(m.role) for m in member_rows
     }
     # Single IN-query for the member's projects instead of N round
     # trips. Keeps this endpoint O(1) regardless of how many
@@ -212,13 +209,17 @@ async def _visible_projects(
     from sqlalchemy import select as _select
 
     rows = (
-        await projects_repo.session.execute(
-            _select(Project).where(
-                Project.id.in_(role_by_project.keys()),
-                Project.is_active.is_(True),
-            ),
+        (
+            await projects_repo.session.execute(
+                _select(Project).where(
+                    Project.id.in_(role_by_project.keys()),
+                    Project.is_active.is_(True),
+                ),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     visible = list(rows)
     if bound_slug is not None:
         visible = [p for p in visible if p.slug == bound_slug]
@@ -268,17 +269,19 @@ def _severity_rank(severity: str) -> int:
 
 
 @router.get("/summary", response_model=HomeSummaryPublic)
-async def get_summary(
+async def get_summary(  # noqa: PLR0915  home summary aggregation
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects_repo: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects_repo: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> HomeSummaryPublic:
     """Home dashboard summary - one blob the SPA renders as cards."""
     bound_slug: str | None = getattr(
-        request.state, "api_key_project_slug", None,
+        request.state,
+        "api_key_project_slug",
+        None,
     )
     visible, role_by_project = await _visible_projects(
         user=user,
@@ -458,9 +461,7 @@ async def get_summary(
         # > 1.0 and the UI would otherwise render "120%". Cap here
         # so every downstream consumer (per-project card, aggregate
         # banner, health heuristic) sees a sensible number.
-        failure_rate = (
-            min(failures_24h / tasks_24h, 1.0) if tasks_24h > 0 else 0.0
-        )
+        failure_rate = min(failures_24h / tasks_24h, 1.0) if tasks_24h > 0 else 0.0
         health = _compute_health(
             failure_rate_24h=failure_rate,
             stuck_commands=stuck,
@@ -507,9 +508,7 @@ async def get_summary(
             offline_count = agents_total - agents_online
             if agents_online == 0:
                 msg = (
-                    f"All {agents_total} agent(s) offline"
-                    if agents_total != 1
-                    else "Agent offline"
+                    f"All {agents_total} agent(s) offline" if agents_total != 1 else "Agent offline"
                 )
             else:
                 msg = f"{offline_count} of {agents_total} agents offline"
@@ -537,10 +536,7 @@ async def get_summary(
                     project_id=project.id,
                     project_slug=project.slug,
                     project_name=project.name,
-                    message=(
-                        f"Failure rate {failure_rate:.1%} "
-                        f"over {tasks_24h} tasks (24h)"
-                    ),
+                    message=(f"Failure rate {failure_rate:.1%} over {tasks_24h} tasks (24h)"),
                     count=failures_24h,
                 ),
             )
@@ -577,10 +573,7 @@ async def get_summary(
     cards.sort(key=lambda c: c.name)
 
     total_tasks = agg_tasks_24h
-    agg_failure_rate = (
-        min(agg_failures_24h / total_tasks, 1.0)
-        if total_tasks > 0 else 0.0
-    )
+    agg_failure_rate = min(agg_failures_24h / total_tasks, 1.0) if total_tasks > 0 else 0.0
 
     return HomeSummaryPublic(
         user=user_mini,
@@ -642,11 +635,11 @@ async def get_recent_failures(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = Query(default=None),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects_repo: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects_repo: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> RecentFailuresPublic:
     """Recent ``task.failed`` events across every visible project.
 
@@ -657,7 +650,9 @@ async def get_recent_failures(
     encoded as ``"<iso8601>|<uuid_hex>"`` (R4 follow-up).
     """
     bound_slug: str | None = getattr(
-        request.state, "api_key_project_slug", None,
+        request.state,
+        "api_key_project_slug",
+        None,
     )
     visible, _role_by_project = await _visible_projects(
         user=user,
@@ -692,19 +687,24 @@ async def get_recent_failures(
         )
 
     rows = (
-        await db_session.execute(
-            select(Event)
-            .where(and_(*where_conds))
-            .order_by(Event.occurred_at.desc(), Event.id.desc())
-            .limit(limit + 1),
+        (
+            await db_session.execute(
+                select(Event)
+                .where(and_(*where_conds))
+                .order_by(Event.occurred_at.desc(), Event.id.desc())
+                .limit(limit + 1),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     next_cursor: str | None = None
     if len(rows) > limit:
         overflow = rows[limit]
         next_cursor = _encode_recent_failures_cursor(
-            overflow.occurred_at, overflow.id,
+            overflow.occurred_at,
+            overflow.id,
         )
         rows = rows[:limit]
 

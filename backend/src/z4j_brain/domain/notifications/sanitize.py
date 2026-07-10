@@ -101,10 +101,7 @@ def sanitize_audit_text(
     """
     if text is None:
         return None
-    cleaned = "".join(
-        ch if (ch in "\t\n\r" or ord(ch) >= 0x20) else " "
-        for ch in text
-    )
+    cleaned = "".join(ch if (ch in "\t\n\r" or ord(ch) >= 0x20) else " " for ch in text)
     if channel_config:
         for key in _URL_BEARING_KEYS:
             value = channel_config.get(key)

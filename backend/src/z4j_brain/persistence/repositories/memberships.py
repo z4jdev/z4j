@@ -63,7 +63,10 @@ class MembershipRepository(BaseRepository[Membership]):
         return list(result.scalars().all())
 
     async def get_for_user_project(
-        self, *, user_id: UUID, project_id: UUID,
+        self,
+        *,
+        user_id: UUID,
+        project_id: UUID,
     ) -> Membership | None:
         """Return the membership for a specific user on a specific project."""
         result = await self.session.execute(
@@ -95,7 +98,8 @@ class MembershipRepository(BaseRepository[Membership]):
         return int(result.scalar_one() or 0)
 
     async def count_admins_for_project_for_update(
-        self, project_id: UUID,
+        self,
+        project_id: UUID,
     ) -> int:
         """Row-locking variant of :meth:`count_admins_for_project`.
 
@@ -117,7 +121,8 @@ class MembershipRepository(BaseRepository[Membership]):
         return len(list(result.scalars().all()))
 
     async def list_active_user_ids_for_project(
-        self, project_id: UUID,
+        self,
+        project_id: UUID,
     ) -> set[UUID]:
         """Return the set of user_ids that are currently members of
         the project. Used by the notification dispatcher to batch the

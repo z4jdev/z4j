@@ -14,15 +14,12 @@ command, the brain reconciles each into the DB scoped to
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
-from z4j_brain.persistence.enums import ScheduleKind
 from z4j_brain.persistence.models import Project, Schedule
 from z4j_brain.persistence.repositories import ScheduleRepository
 
@@ -33,7 +30,9 @@ async def session():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False,
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
     )
     async with factory() as s:
         yield s
@@ -74,7 +73,9 @@ def _schedule_dict(
 @pytest.mark.asyncio
 class TestReconcileSnapshotInsert:
     async def test_first_snapshot_inserts_every_row(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         """The picker case: agent boots for the first time, calls
         ``list_schedules()`` on celery-beat, sends snapshot with 3
@@ -95,22 +96,29 @@ class TestReconcileSnapshotInsert:
         assert summary == {"inserted": 3, "updated": 0, "deleted": 0}
 
         result = await session.execute(
-            select(func.count()).select_from(Schedule).where(
+            select(func.count())
+            .select_from(Schedule)
+            .where(
                 Schedule.project_id == project.id,
             ),
         )
         assert result.scalar_one() == 3
         names = {
-            row[0] for row in (await session.execute(
-                select(Schedule.name).where(
-                    Schedule.project_id == project.id,
-                ),
-            )).all()
+            row[0]
+            for row in (
+                await session.execute(
+                    select(Schedule.name).where(
+                        Schedule.project_id == project.id,
+                    ),
+                )
+            ).all()
         }
         assert names == {"nightly-report", "hourly-cleanup", "daily-billing"}
 
     async def test_empty_snapshot_inserts_nothing(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         repo = ScheduleRepository(session)
         summary = await repo.reconcile_snapshot(
@@ -124,7 +132,9 @@ class TestReconcileSnapshotInsert:
 @pytest.mark.asyncio
 class TestReconcileSnapshotUpdate:
     async def test_second_snapshot_updates_existing_rows(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         repo = ScheduleRepository(session)
         # First snapshot: 2 rows
@@ -164,7 +174,9 @@ class TestReconcileSnapshotUpdate:
 @pytest.mark.asyncio
 class TestReconcileSnapshotDelete:
     async def test_missing_rows_get_deleted(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         """A schedule deleted via Django admin while the agent was
         offline: it's in the brain's DB but not in the snapshot. The
@@ -195,14 +207,14 @@ class TestReconcileSnapshotDelete:
 
         assert summary["deleted"] == 1
         result = await session.execute(
-            select(Schedule.name)
-            .where(Schedule.project_id == project.id)
-            .order_by(Schedule.name),
+            select(Schedule.name).where(Schedule.project_id == project.id).order_by(Schedule.name),
         )
         assert [r[0] for r in result.all()] == ["a", "c"]
 
     async def test_empty_snapshot_deletes_all_for_that_scheduler(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         """Operator nuked celery-beat config and reloaded; agent
         snapshots with zero schedules. Reconcile must remove all
@@ -224,7 +236,9 @@ class TestReconcileSnapshotDelete:
 
         assert summary == {"inserted": 0, "updated": 0, "deleted": 2}
         result = await session.execute(
-            select(func.count()).select_from(Schedule).where(
+            select(func.count())
+            .select_from(Schedule)
+            .where(
                 Schedule.project_id == project.id,
             ),
         )
@@ -234,7 +248,9 @@ class TestReconcileSnapshotDelete:
 @pytest.mark.asyncio
 class TestReconcileSnapshotScoping:
     async def test_does_not_cross_prune_other_schedulers(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         """A project running BOTH celery-beat AND apscheduler must
         get per-scheduler reconciliation. A snapshot from celery-beat
@@ -259,7 +275,9 @@ class TestReconcileSnapshotScoping:
         await session.commit()
 
         result = await session.execute(
-            select(func.count()).select_from(Schedule).where(
+            select(func.count())
+            .select_from(Schedule)
+            .where(
                 Schedule.project_id == project.id,
             ),
         )
@@ -290,7 +308,8 @@ class TestReconcileSnapshotScoping:
         ]
 
     async def test_does_not_cross_prune_other_projects(
-        self, session: AsyncSession,
+        self,
+        session: AsyncSession,
     ) -> None:
         """Two projects each running celery-beat: a snapshot for one
         project must never affect the other's rows."""
@@ -323,7 +342,9 @@ class TestReconcileSnapshotScoping:
 
         # beta untouched.
         result = await session.execute(
-            select(func.count()).select_from(Schedule).where(
+            select(func.count())
+            .select_from(Schedule)
+            .where(
                 Schedule.project_id == beta.id,
             ),
         )

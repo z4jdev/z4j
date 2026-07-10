@@ -26,6 +26,17 @@ LICENSE files for details.
 
 from __future__ import annotations
 
-from z4j_core.version import __version__
+import importlib.metadata
+
+try:
+    # Authoritative for an installed dist: report z4j's OWN version, not a
+    # dependency's (a bare ``from z4j_core.version import __version__``
+    # re-export silently reported z4j-core's version instead).
+    __version__ = importlib.metadata.version("z4j")
+except importlib.metadata.PackageNotFoundError:
+    # Source checkout without an installed dist: fall back to the
+    # pyproject version literal, which scripts/check-versions.py keeps in
+    # sync with [project].version.
+    __version__ = "1.7.0"
 
 __all__ = ["__version__"]

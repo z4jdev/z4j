@@ -18,11 +18,12 @@ brain-wide overview surface.
 from __future__ import annotations
 
 import uuid
+from collections import OrderedDict as _OrderedDict
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 
 from z4j_brain.api.deps import (
@@ -63,8 +64,7 @@ _RATE_LIMIT_USER_CAP: int = 50_000
 # Uses OrderedDict so we can pop the LRU entry when the cap is
 # exceeded. ``move_to_end`` on each access keeps the eviction
 # order accurate.
-from collections import OrderedDict as _OrderedDict
-_user_bucket: "_OrderedDict[str, list[float]]" = _OrderedDict()
+_user_bucket: _OrderedDict[str, list[float]] = _OrderedDict()
 
 
 def _rate_limit_check(user_id: str) -> bool:
@@ -77,6 +77,7 @@ def _rate_limit_check(user_id: str) -> bool:
     multi-tenant brain with high user churn cannot leak memory.
     """
     import time
+
     now = time.monotonic()
     window_start = now - 60.0
     bucket = _user_bucket.get(user_id)
@@ -115,11 +116,7 @@ def _escape_like(pattern: str) -> str:
     only literal ``task.`` and not ``task_`` (single-char wildcard)
     or ``tas%`` (multi-char wildcard). (v1.6 audit M16.)
     """
-    return (
-        pattern.replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-    )
+    return pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class ActivityItem(BaseModel):
@@ -165,6 +162,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
     otherwise produce a 500 the docstring promises won't happen.
     """
     from datetime import UTC
+
     try:
         iso_part, id_part = cursor.split("|", 1)
         dt = datetime.fromisoformat(iso_part)
@@ -173,12 +171,14 @@ def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
         return (dt, uuid.UUID(id_part))
     except (ValueError, AttributeError) as exc:
         raise HTTPException(
-            status_code=422, detail="malformed cursor",
+            status_code=422,
+            detail="malformed cursor",
         ) from exc
 
 
 def _slug_for(
-    project_ids_to_slug: dict[uuid.UUID, str], pid: uuid.UUID | None,
+    project_ids_to_slug: dict[uuid.UUID, str],
+    pid: uuid.UUID | None,
 ) -> str | None:
     if pid is None:
         return None
@@ -186,10 +186,10 @@ def _slug_for(
 
 
 @router.get("", response_model=ActivityListResponse)
-async def list_activity(
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    session: "AsyncSession" = Depends(get_session),
+async def list_activity(  # noqa: PLR0912  branch-heavy activity aggregation
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    session: AsyncSession = Depends(get_session),
     limit: int = Query(50, ge=1, le=200),
     since_cursor: str | None = Query(
         None,
@@ -261,10 +261,7 @@ async def list_activity(
                 next_before_cursor=None,
                 newest_cursor=None,
             )
-        if (
-            accessible_project_ids is not None
-            and target.id not in accessible_project_ids
-        ):
+        if accessible_project_ids is not None and target.id not in accessible_project_ids:
             return ActivityListResponse(
                 items=[],
                 next_before_cursor=None,
@@ -277,11 +274,7 @@ async def list_activity(
     # every page. The (occurred_at, id) tuple is monotonic and
     # stable across replicas; the secondary id key handles ties when
     # two rows share microsecond-precision timestamps.
-    stmt = (
-        select(AuditLog)
-        .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
-        .limit(limit)
-    )
+    stmt = select(AuditLog).order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(limit)
     if project_id_filter is not None:
         # v1.6 Round 5 G fix: include the caller's OWN user-scoped
         # audit rows (e.g., their own MFA enroll / verify / recovery
@@ -375,9 +368,7 @@ async def list_activity(
         for row in rows
     ]
 
-    next_before_cursor = (
-        _encode_cursor(rows[-1]) if len(rows) == limit else None
-    )
+    next_before_cursor = _encode_cursor(rows[-1]) if len(rows) == limit else None
     newest_cursor = _encode_cursor(rows[0]) if rows else None
 
     return ActivityListResponse(

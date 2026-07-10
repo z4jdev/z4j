@@ -75,8 +75,8 @@ class FleetResponse(BaseModel):
 
 @router.get("", response_model=FleetResponse)
 async def list_fleet(
-    user: "User" = Depends(get_current_user),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
 ) -> FleetResponse:
     """Return one entry per configured scheduler URL.
 
@@ -92,7 +92,7 @@ async def list_fleet(
         # configured", obscuring both the audit trail (no
         # failed-auth row) and the operator UX (the page implies
         # there's nothing here when actually they're forbidden).
-        from z4j_brain.errors import AuthorizationError  # noqa: PLC0415
+        from z4j_brain.errors import AuthorizationError
 
         raise AuthorizationError(
             "scheduler-fleet visibility requires global admin",
@@ -104,10 +104,7 @@ async def list_fleet(
     # ``embedded_scheduler`` is on AND no explicit URL list was
     # configured. This makes the homelab single-container deploy
     # show up in the dashboard out of the box.
-    if (
-        not urls
-        and getattr(settings, "embedded_scheduler", False)
-    ):
+    if not urls and getattr(settings, "embedded_scheduler", False):
         urls = ["http://127.0.0.1:7800"]
 
     if not urls:
@@ -138,8 +135,9 @@ async def list_fleet(
     )
 
 
-async def _probe_scheduler(
-    client: httpx.AsyncClient, url: str,
+async def _probe_scheduler(  # noqa: PLR0911  probe result status mapping
+    client: httpx.AsyncClient,
+    url: str,
 ) -> FleetEntry:
     """Hit one scheduler's /info endpoint. Never raises.
 
@@ -150,12 +148,13 @@ async def _probe_scheduler(
     services. We reject anything that isn't ``http``/``https``
     BEFORE the GET.
     """
-    from urllib.parse import urlparse  # noqa: PLC0415
+    from urllib.parse import urlparse
 
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return FleetEntry(
-            url=url, ok=False,
+            url=url,
+            ok=False,
             error=(
                 f"refused to probe non-http(s) scheme {parsed.scheme!r}; "
                 "Z4J_SCHEDULER_INFO_URLS entries must use http or https"
@@ -166,26 +165,34 @@ async def _probe_scheduler(
         response = await client.get(info_url)
     except httpx.TimeoutException:
         return FleetEntry(
-            url=url, ok=None, error="timeout (no response within 3s)",
+            url=url,
+            ok=None,
+            error="timeout (no response within 3s)",
         )
     except httpx.HTTPError as exc:
         return FleetEntry(
-            url=url, ok=None, error=f"connection error: {exc}",
+            url=url,
+            ok=None,
+            error=f"connection error: {exc}",
         )
     if response.status_code != 200:
         return FleetEntry(
-            url=url, ok=False,
+            url=url,
+            ok=False,
             error=f"HTTP {response.status_code}: {response.text[:200]}",
         )
     try:
         payload = response.json()
     except ValueError as exc:
         return FleetEntry(
-            url=url, ok=False, error=f"invalid JSON: {exc}",
+            url=url,
+            ok=False,
+            error=f"invalid JSON: {exc}",
         )
     if not isinstance(payload, dict):
         return FleetEntry(
-            url=url, ok=False,
+            url=url,
+            ok=False,
             error=f"expected JSON object, got {type(payload).__name__}",
         )
     return FleetEntry(url=url, ok=True, info=payload)

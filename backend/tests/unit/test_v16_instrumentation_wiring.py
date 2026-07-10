@@ -17,7 +17,6 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-
 from z4j_brain.api import metrics as metrics_mod
 from z4j_brain.websocket.registry.local import LocalRegistry
 
@@ -47,22 +46,10 @@ class TestFleetGaugeProvider:
         metrics_mod.register_fleet_gauge_provider(lambda: snapshot)
         metrics_mod._refresh_fleet_gauges()
         # Both projects appear with the expected counts.
-        assert (
-            metrics_mod.z4j_agents_online.labels(project="alpha")._value.get()
-            == 3
-        )
-        assert (
-            metrics_mod.z4j_agents_online.labels(project="bravo")._value.get()
-            == 1
-        )
-        assert (
-            metrics_mod.z4j_workers_online.labels(project="alpha")._value.get()
-            == 9
-        )
-        assert (
-            metrics_mod.z4j_workers_online.labels(project="bravo")._value.get()
-            == 2
-        )
+        assert metrics_mod.z4j_agents_online.labels(project="alpha")._value.get() == 3
+        assert metrics_mod.z4j_agents_online.labels(project="bravo")._value.get() == 1
+        assert metrics_mod.z4j_workers_online.labels(project="alpha")._value.get() == 9
+        assert metrics_mod.z4j_workers_online.labels(project="bravo")._value.get() == 2
 
     def test_provider_clears_stale_labels_between_refreshes(self) -> None:
         """A project that goes from N agents to zero must reflect zero,
@@ -79,10 +66,7 @@ class TestFleetGaugeProvider:
         # After clear, querying the label returns a freshly-defaulted
         # zero (the label set is empty so prometheus_client returns a
         # new 0-initialised gauge on access).
-        assert (
-            metrics_mod.z4j_agents_online.labels(project="alpha")._value.get()
-            == 0
-        )
+        assert metrics_mod.z4j_agents_online.labels(project="alpha")._value.get() == 0
 
     def test_provider_exception_is_swallowed(self) -> None:
         """A broken provider must NOT break the scrape endpoint."""
@@ -185,8 +169,13 @@ class TestNotificationStatusValues:
         # the cheapest reliable contract.
         from pathlib import Path
 
-        source = Path(
-            "src/z4j_brain/domain/notifications/service.py",
+        import z4j_brain
+
+        # Anchor on the installed package, not the cwd, so this passes
+        # whether pytest runs from the repo root or from
+        # packages/z4j/backend.
+        source = (
+            Path(z4j_brain.__file__).resolve().parent / "domain" / "notifications" / "service.py"
         ).read_text(encoding="utf-8")
         # The instrumentation block must reference all three vocab
         # values; if a future refactor drops one, the dashboard

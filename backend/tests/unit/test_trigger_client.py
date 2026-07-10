@@ -24,11 +24,11 @@ import pytest
 
 pytest.importorskip("grpc")
 
-from z4j_brain.scheduler_grpc.trigger_client import (  # noqa: E402
+from z4j_brain.scheduler_grpc.trigger_client import (
     TriggerScheduleClient,
     _read_required_pem,
 )
-from z4j_brain.settings import Settings  # noqa: E402
+from z4j_brain.settings import Settings
 
 
 def _settings(**overrides) -> Settings:
@@ -77,7 +77,8 @@ class TestConnectErrors:
 
     @pytest.mark.asyncio
     async def test_missing_tls_cert_raises_clear_error(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         client = TriggerScheduleClient(
             settings=_settings(scheduler_trigger_url="scheduler:7802"),
@@ -87,7 +88,8 @@ class TestConnectErrors:
 
     @pytest.mark.asyncio
     async def test_tls_path_does_not_exist_clear_error(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # Three required paths; missing files raise per-file errors
         # so the operator sees exactly which path is wrong.
@@ -111,7 +113,8 @@ class TestConnectErrors:
 class TestRequestShape:
     @pytest.mark.asyncio
     async def test_trigger_passes_uuids_and_idempotency_key(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # Patch the stub so we can inspect the request without a
         # real server.
@@ -133,8 +136,10 @@ class TestRequestShape:
         captured: dict = {}
 
         class _FakeStub:
-            async def TriggerSchedule(
-                self, request, timeout: float | None = None,
+            async def TriggerSchedule(  # noqa: N802  mirrors gRPC-generated stub method name
+                self,
+                request,
+                timeout: float | None = None,  # noqa: ASYNC109  mirrors gRPC stub timeout kwarg
             ):
                 captured["request"] = request
                 captured["timeout"] = timeout
@@ -172,7 +177,8 @@ class TestRequestShape:
 
     @pytest.mark.asyncio
     async def test_trigger_with_none_user_id_sends_empty_string(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # Background-trigger paths (no operator) send user_id=None.
         # The proto field is non-optional string so we must send
@@ -195,7 +201,7 @@ class TestRequestShape:
         captured: dict = {}
 
         class _FakeStub:
-            async def TriggerSchedule(self, request, timeout=None):
+            async def TriggerSchedule(self, request, timeout=None):  # noqa: N802, ASYNC109  mirrors gRPC-generated TriggerSchedule stub
                 captured["request"] = request
 
                 class _R:
@@ -274,7 +280,8 @@ class TestReconnectOnStaleChannel:
 
     @pytest.mark.asyncio
     async def test_unavailable_triggers_reconnect_and_retry(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         import grpc
 
@@ -300,7 +307,7 @@ class TestReconnectOnStaleChannel:
             def __init__(self) -> None:
                 self.call_count = 0
 
-            async def TriggerSchedule(self, request, timeout=None):
+            async def TriggerSchedule(self, request, timeout=None):  # noqa: N802, ASYNC109  mirrors gRPC-generated TriggerSchedule stub
                 self.call_count += 1
                 if self.call_count == 1:
                     err = grpc.aio.AioRpcError(
@@ -341,15 +348,15 @@ class TestReconnectOnStaleChannel:
 
         # First call (lazy connect) + reconnect after the UNAVAILABLE
         assert connect_calls["count"] == 2, (
-            f"expected exactly one reconnect; got {connect_calls['count']} "
-            "connect calls"
+            f"expected exactly one reconnect; got {connect_calls['count']} connect calls"
         )
         assert flaky.call_count == 2  # original + retry
         assert response.command_id == "after-reconnect"
 
     @pytest.mark.asyncio
     async def test_non_retriable_status_propagates(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """PERMISSION_DENIED is NOT a stale-channel signal; the client
         must not retry, propagate to the caller.
@@ -375,7 +382,7 @@ class TestReconnectOnStaleChannel:
             def __init__(self) -> None:
                 self.call_count = 0
 
-            async def TriggerSchedule(self, request, timeout=None):
+            async def TriggerSchedule(self, request, timeout=None):  # noqa: N802, ASYNC109  mirrors gRPC-generated TriggerSchedule stub
                 self.call_count += 1
                 raise grpc.aio.AioRpcError(
                     code=grpc.StatusCode.PERMISSION_DENIED,
@@ -390,13 +397,15 @@ class TestReconnectOnStaleChannel:
             client._stub = denied  # type: ignore[assignment]
             client._channel = object()  # type: ignore[assignment]
 
-        with patch.object(client, "connect", _fake_connect):
-            with pytest.raises(grpc.aio.AioRpcError) as exc:
-                await client.trigger(
-                    schedule_id=uuid.uuid4(),
-                    user_id=None,
-                    idempotency_key=None,
-                )
+        with (
+            patch.object(client, "connect", _fake_connect),
+            pytest.raises(grpc.aio.AioRpcError) as exc,
+        ):
+            await client.trigger(
+                schedule_id=uuid.uuid4(),
+                user_id=None,
+                idempotency_key=None,
+            )
 
         assert exc.value.code() == grpc.StatusCode.PERMISSION_DENIED
         # Must not retry, exactly one call.

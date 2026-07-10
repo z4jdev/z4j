@@ -46,8 +46,7 @@ class EventRepository(BaseRepository[Event]):
         from a re-connecting agent.
         """
         is_postgres = (
-            self.session.bind is not None
-            and self.session.bind.dialect.name == "postgresql"
+            self.session.bind is not None and self.session.bind.dialect.name == "postgresql"
         )
         if is_postgres:
             stmt = (
@@ -128,10 +127,7 @@ class EventRepository(BaseRepository[Event]):
                     ),
                 ),
             )
-        stmt = (
-            stmt.order_by(Event.occurred_at.desc(), Event.id.desc())
-            .limit(limit)
-        )
+        stmt = stmt.order_by(Event.occurred_at.desc(), Event.id.desc()).limit(limit)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 

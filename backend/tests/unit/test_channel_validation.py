@@ -5,7 +5,6 @@ user-managed channel paths."""
 from __future__ import annotations
 
 import pytest
-
 from z4j_brain.domain.notifications.channels import (
     _SMTP_PORT_ALLOWLIST,
     validate_smtp_config,
@@ -20,15 +19,15 @@ class TestTelegramValidation:
         "token",
         [
             "123:abc@attacker.internal",  # userinfo-smuggle
-            "1/2:ok",                       # slash - path break
-            "12.34:ok",                     # dot in id
-            "abc:def",                       # id must be digits
-            "12345",                         # missing secret
-            "12345:",                        # empty secret
-            ":abc",                          # empty id
-            " 12345:abc",                   # leading whitespace
-            "12345:abc\n",                  # trailing newline
-            "12345:abc#fragment",           # hash
+            "1/2:ok",  # slash - path break
+            "12.34:ok",  # dot in id
+            "abc:def",  # id must be digits
+            "12345",  # missing secret
+            "12345:",  # empty secret
+            ":abc",  # empty id
+            " 12345:abc",  # leading whitespace
+            "12345:abc\n",  # trailing newline
+            "12345:abc#fragment",  # hash
         ],
     )
     def test_malformed_bot_token_rejected(self, token: str) -> None:
@@ -53,7 +52,7 @@ class TestTelegramValidation:
             "path/traversal",
             "spaces in id",
             "",
-            "@-bad-handle",   # handle must start alpha-num
+            "@-bad-handle",  # handle must start alpha-num
         ],
     )
     def test_malformed_chat_id_rejected(self, chat: str) -> None:
@@ -84,7 +83,7 @@ class TestSmtpValidation:
     def test_port_allowlist_is_standard_smtp(self) -> None:
         """Document + pin the allowlist so a regression can't
         silently open port 22 / 6379 / etc."""
-        assert _SMTP_PORT_ALLOWLIST == frozenset({25, 465, 587, 2525})
+        assert frozenset({25, 465, 587, 2525}) == _SMTP_PORT_ALLOWLIST
 
     @pytest.mark.parametrize(
         "port",
@@ -118,7 +117,7 @@ class TestSmtpValidation:
         [
             "127.0.0.1",
             "::1",
-            "169.254.169.254",   # AWS / cloud metadata
+            "169.254.169.254",  # AWS / cloud metadata
             "10.0.0.1",
             "192.168.1.1",
             "172.16.0.1",
@@ -131,9 +130,7 @@ class TestSmtpValidation:
             {"smtp_host": host, "smtp_port": 587},
         )
         assert err is not None
-        assert "block" in err.lower() or "private" in err.lower() or (
-            "IP" in err
-        )
+        assert "block" in err.lower() or "private" in err.lower() or ("IP" in err)
 
     @pytest.mark.asyncio
     async def test_empty_host_rejected(self) -> None:

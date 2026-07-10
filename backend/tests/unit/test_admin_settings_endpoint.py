@@ -18,7 +18,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
@@ -60,7 +59,11 @@ async def brain_app(settings: Settings):
 
 
 async def _seed_user(
-    brain_app, settings: Settings, *, is_admin: bool, email: str,
+    brain_app,
+    settings: Settings,
+    *,
+    is_admin: bool,
+    email: str,
 ) -> dict:
     """Insert a user + active session, return cookie material."""
     db = brain_app.state.db
@@ -124,7 +127,10 @@ class TestAdminSettingsEndpoint:
 
     async def test_non_admin_gets_403(self, brain_app, settings) -> None:
         seeded = await _seed_user(
-            brain_app, settings, is_admin=False, email="user@example.com",
+            brain_app,
+            settings,
+            is_admin=False,
+            email="user@example.com",
         )
         async with _client_for(brain_app, settings, seeded) as ac:
             r = await ac.get("/api/v1/admin/settings")
@@ -132,10 +138,15 @@ class TestAdminSettingsEndpoint:
         assert r.status_code == 403
 
     async def test_admin_gets_200_with_settings(
-        self, brain_app, settings,
+        self,
+        brain_app,
+        settings,
     ) -> None:
         seeded = await _seed_user(
-            brain_app, settings, is_admin=True, email="admin@example.com",
+            brain_app,
+            settings,
+            is_admin=True,
+            email="admin@example.com",
         )
         async with _client_for(brain_app, settings, seeded) as ac:
             r = await ac.get("/api/v1/admin/settings")
@@ -151,7 +162,11 @@ class TestAdminSettingsEndpoint:
         valid_sources = {"env", "config.env", "secret.env", ".env", "default"}
         for row in body["settings"]:
             assert set(row.keys()) == {
-                "name", "value", "source", "is_secret", "description",
+                "name",
+                "value",
+                "source",
+                "is_secret",
+                "description",
             }
             assert row["source"] in valid_sources
             assert isinstance(row["is_secret"], bool)
@@ -175,14 +190,19 @@ class TestAdminSettingsEndpoint:
         assert names == sorted(names)
 
     async def test_settings_includes_known_field(
-        self, brain_app, settings,
+        self,
+        brain_app,
+        settings,
     ) -> None:
         """``event_retention_days`` is a stable public field; any
         rename to it should fail this test loudly so the dashboard
         doesn't silently lose its row.
         """
         seeded = await _seed_user(
-            brain_app, settings, is_admin=True, email="admin2@example.com",
+            brain_app,
+            settings,
+            is_admin=True,
+            email="admin2@example.com",
         )
         async with _client_for(brain_app, settings, seeded) as ac:
             r = await ac.get("/api/v1/admin/settings")

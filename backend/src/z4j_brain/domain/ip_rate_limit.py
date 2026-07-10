@@ -4,7 +4,7 @@ Use as a FastAPI ``Depends(...)`` on individual endpoints that
 need IP-level throttling but aren't worth the operational cost
 of an external rate-limit store. v1 scope: a single brain
 process; if the brain ever scales horizontally each replica gets
-its own bucket and a determined attacker can multiply N×.
+its own bucket and a determined attacker can multiply Nx.
 
 Memory bound: one ``deque`` per IP per bucket name. ``_BUCKET_TTL``
 prunes entries idle for >5 min so a botnet hitting random IPs
@@ -23,7 +23,6 @@ from fastapi import Depends, HTTPException, Request, status
 
 from z4j_brain.api.deps import get_client_ip
 
-
 _IP_KEY_MAX_LEN = 120
 """Audit M1: cap the length of IP-bucket keys. ``get_client_ip``
 returns whatever the X-Forwarded-For middleware produced; a 10KB
@@ -33,7 +32,7 @@ forged XFF would otherwise become a 10KB dict key."""
 class _IPBucket:
     """Sliding-window counter keyed by IP."""
 
-    __slots__ = ("_window_seconds", "_max_hits", "_hits", "_lock", "_hits_since_prune")
+    __slots__ = ("_hits", "_hits_since_prune", "_lock", "_max_hits", "_window_seconds")
 
     def __init__(self, window_seconds: int, max_hits: int) -> None:
         self._window_seconds = window_seconds
@@ -45,13 +44,20 @@ class _IPBucket:
         # until OOM.
         self._hits_since_prune = 0
 
-    async def hit(self, key: str) -> bool:
-        """Record a hit for ``key``; return True if within budget."""
+    async def hit(self, key: str, *, max_hits: int | None = None) -> bool:
+        """Record a hit for ``key``; return True if within budget.
+
+        ``max_hits`` overrides the constructed cap for THIS call.
+        Settings-driven throttles (the MFA verify family) read their
+        cap from operator configuration at request time, while the
+        bucket object itself stays import-time constructible.
+        """
         # Clamp the key so an attacker can't burn memory
         # by submitting arbitrarily long ``X-Forwarded-For`` values.
         if len(key) > _IP_KEY_MAX_LEN:
             key = key[:_IP_KEY_MAX_LEN]
 
+        cap = self._max_hits if max_hits is None else max_hits
         now = time.monotonic()
         cutoff = now - self._window_seconds
         async with self._lock:
@@ -66,7 +72,7 @@ class _IPBucket:
             dq = self._hits[key]
             while dq and dq[0] < cutoff:
                 dq.popleft()
-            if len(dq) >= self._max_hits:
+            if len(dq) >= cap:
                 return False
             dq.append(now)
             return True
@@ -76,10 +82,7 @@ class _IPBucket:
 
         Must be called with ``_lock`` held.
         """
-        stale = [
-            k for k, dq in self._hits.items()
-            if not dq or dq[-1] < cutoff
-        ]
+        stale = [k for k, dq in self._hits.items() if not dq or dq[-1] < cutoff]
         for k in stale:
             del self._hits[k]
 
@@ -218,7 +221,7 @@ within the code's 30s validity window. Operators can dial this up via
 
 def _make_dependency(bucket: _IPBucket, name: str) -> Callable[..., Coroutine[Any, Any, None]]:
     async def _check(
-        request: Request,  # noqa: ARG001
+        request: Request,
         ip: str = Depends(get_client_ip),
     ) -> None:
         ok = await bucket.hit(ip)
@@ -232,32 +235,68 @@ def _make_dependency(bucket: _IPBucket, name: str) -> Callable[..., Coroutine[An
 
 
 require_invitation_throttle = _make_dependency(
-    _invitation_bucket, "invitation",
+    _invitation_bucket,
+    "invitation",
 )
 require_login_throttle = _make_dependency(_login_bucket, "login")
 require_password_reset_throttle = _make_dependency(
-    _password_reset_bucket, "password-reset",
+    _password_reset_bucket,
+    "password-reset",
 )
 require_channel_test_throttle = _make_dependency(
-    _channel_test_bucket, "channel-test",
+    _channel_test_bucket,
+    "channel-test",
 )
 require_channel_import_throttle = _make_dependency(
-    _channel_import_bucket, "channel-import",
+    _channel_import_bucket,
+    "channel-import",
 )
 require_bulk_action_throttle = _make_dependency(
-    _bulk_action_bucket, "bulk-action",
+    _bulk_action_bucket,
+    "bulk-action",
 )
 require_agent_connect_throttle = _make_dependency(
-    _agent_connect_bucket, "agent-connect",
+    _agent_connect_bucket,
+    "agent-connect",
 )
-require_mfa_verify_throttle = _make_dependency(
-    _mfa_verify_bucket, "mfa-verify",
-)
+
+
+async def require_mfa_verify_throttle(
+    request: Request,
+    ip: str = Depends(get_client_ip),
+) -> None:
+    """Settings-driven throttle for the MFA verify family.
+
+    Unlike the fixed-cap dependencies below, the cap comes from
+    ``Z4J_MFA_VERIFICATION_RATE_PER_MIN`` at request time -- the
+    setting was documented as configurable but the bucket was
+    constructed with a hardcoded 10/min, so operator configuration
+    was silently ignored (round-4 LOW). Settings are read off
+    ``app.state`` rather than via ``api.deps.get_settings`` to keep
+    this domain module free of an api-layer import cycle; the
+    default (10) is preserved when state carries no settings (unit
+    tests that hit the bucket directly).
+    """
+    settings = getattr(request.app.state, "settings", None)
+    cap = getattr(settings, "mfa_verification_rate_per_min", None)
+    ok = await _mfa_verify_bucket.hit(
+        ip,
+        max_hits=cap if isinstance(cap, int) and cap >= 1 else None,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too many requests; please try again in a minute (mfa-verify)",
+        )
+
+
 require_openapi_throttle = _make_dependency(
-    _openapi_bucket, "openapi",
+    _openapi_bucket,
+    "openapi",
 )
 require_setup_throttle = _make_dependency(
-    _setup_bucket, "setup-complete",
+    _setup_bucket,
+    "setup-complete",
 )
 
 
@@ -269,9 +308,9 @@ __all__ = [
     "_channel_test_bucket",
     "_invitation_bucket",
     "_login_bucket",
+    "_mfa_verify_bucket",
     "_openapi_bucket",
     "_password_reset_bucket",
-    "_mfa_verify_bucket",
     "_setup_bucket",
     "require_agent_connect_throttle",
     "require_bulk_action_throttle",
@@ -281,6 +320,6 @@ __all__ = [
     "require_login_throttle",
     "require_mfa_verify_throttle",
     "require_openapi_throttle",
-    "require_setup_throttle",
     "require_password_reset_throttle",
+    "require_setup_throttle",
 ]

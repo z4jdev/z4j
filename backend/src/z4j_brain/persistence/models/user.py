@@ -54,19 +54,32 @@ class User(PKMixin, TimestampsMixin, Base):
     first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_admin: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="false",
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
     )
     is_active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default="true",
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
     )
     last_login_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     force_password_change: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="false",
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
     )
     timezone: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="UTC", server_default="UTC",
+        String(64),
+        nullable=False,
+        default="UTC",
+        server_default="UTC",
     )
 
     # ------------------------------------------------------------------
@@ -105,20 +118,23 @@ class User(PKMixin, TimestampsMixin, Base):
     #: ``Z4J_SECRET`` via HKDF. Stored as ``nonce || ciphertext`` in
     #: a single bytea column. NULL when MFA is not enrolled.
     mfa_secret_encrypted: Mapped[bytes | None] = mapped_column(
-        LargeBinary, nullable=True,
+        LargeBinary,
+        nullable=True,
     )
     #: Timestamp of successful enrollment. ``NULL`` means MFA is off.
     #: The presence of a value (with a non-null ``mfa_secret_encrypted``)
     #: is the canonical "MFA is enabled" predicate.
     mfa_enrolled_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     #: When the enforcement policy was first observed for this user.
     #: Used to compute the grace-window deadline. Set on the first
     #: login that finds the user is enforcement-targeted but not yet
     #: enrolled.
     mfa_enforcement_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     # ------------------------------------------------------------------

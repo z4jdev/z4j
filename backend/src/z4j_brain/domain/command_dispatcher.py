@@ -56,7 +56,7 @@ logger = structlog.get_logger("z4j.brain.command_dispatcher")
 class CommandDispatcher:
     """Operator → agent command issuance + result handling."""
 
-    __slots__ = ("_settings", "_registry", "_audit", "_dashboard_hub")
+    __slots__ = ("_audit", "_dashboard_hub", "_registry", "_settings")
 
     def __init__(
         self,
@@ -64,12 +64,22 @@ class CommandDispatcher:
         settings: Settings,
         registry: BrainRegistry,
         audit: AuditService,
-        dashboard_hub: "DashboardHub | None" = None,
+        dashboard_hub: DashboardHub | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
         self._audit = audit
         self._dashboard_hub = dashboard_hub
+
+    @property
+    def audit(self) -> AuditService:
+        """The audit service backing this dispatcher.
+
+        Exposed so the automation executor wired on the same connection
+        can reuse it (rather than re-reading settings + secrets per
+        event) while still writing audit rows through the one HMAC chain.
+        """
+        return self._audit
 
     # ------------------------------------------------------------------
     # Dashboard fan-out
@@ -91,7 +101,7 @@ class CommandDispatcher:
             return
         try:
             await self._dashboard_hub.publish_command_change(project_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j command_dispatcher: dashboard publish failed",
                 project_id=str(project_id),
@@ -181,7 +191,7 @@ class CommandDispatcher:
                 command_id=command.id,
                 agent_id=agent_id,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j command_dispatcher: registry deliver crashed",
                 command_id=str(command.id),
@@ -215,7 +225,7 @@ class CommandDispatcher:
                 action=action,
                 status="dispatched" if result and result.delivered_locally else "pending",
             ).inc()
-        except Exception:  # noqa: BLE001
+        except Exception:
             from z4j_brain.api.metrics import record_swallowed
 
             record_swallowed("command_dispatcher", "counter_inc")
@@ -309,7 +319,7 @@ class CommandDispatcher:
                 )
 
                 z4j_command_late_results_total.labels(status=status).inc()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 from z4j_brain.api.metrics import record_swallowed
 
                 record_swallowed("command_dispatcher", "late_result_metric")
@@ -330,9 +340,7 @@ class CommandDispatcher:
             project_id=command.project_id,
             metadata={
                 "command_id": str(command_id),
-                "agent_id": (
-                    str(command.agent_id) if command.agent_id else None
-                ),
+                "agent_id": (str(command.agent_id) if command.agent_id else None),
                 "error": error,
             },
         )
@@ -407,6 +415,11 @@ class CommandDispatcher:
             engine_state=engine_state,
             finished_at=finished_at,
             exception_text=result_payload.get("exception"),
+            # R3 H1 staleness anchor: the probe cannot have observed
+            # anything newer than its own issuance, so a task row
+            # written after ``issued_at`` outranks a non-terminal
+            # probe response.
+            probe_issued_at=command.issued_at,
         )
         if changed:
             await self._audit.record(
@@ -430,6 +443,101 @@ class CommandDispatcher:
                 engine_state=engine_state,
                 project_id=str(command.project_id),
             )
+            # ``task.orphaned`` emit site: the task was stuck non-terminal
+            # (started-but-never-finished; the terminal event was lost) and
+            # reconciliation just confirmed + applied the engine's terminal
+            # truth. ``apply_reconciled_state`` returns True exactly once
+            # per correction (a replayed probe result is a no-op), so this
+            # fires once per orphan episode with no extra dedup ledger.
+            # Only TERMINAL outcomes count as an orphan: a probe that finds
+            # the task legitimately still pending/started is not one. The
+            # ``task.reconciled`` audit row above is the durable detection
+            # record; rule firing is a best-effort side effect of it, same
+            # isolation the misfire detector uses.
+            if engine_state in ("success", "failure"):
+                try:
+                    await self._fire_orphaned_automation(
+                        commands=commands,
+                        command=command,
+                        engine=engine,
+                        task_id=task_id,
+                        engine_state=engine_state,
+                    )
+                except Exception:
+                    await commands.session.rollback()
+                    logger.exception(
+                        "z4j reconciliation: task.orphaned automation failed "
+                        "(reconciliation audited; not re-run)",
+                        task_id=task_id,
+                        project_id=str(command.project_id),
+                    )
+
+    async def _fire_orphaned_automation(
+        self,
+        *,
+        commands: CommandRepository,
+        command: Command,
+        engine: str,
+        task_id: str,
+        engine_state: str,
+    ) -> None:
+        """Run ``task.orphaned`` automation rules for one corrected task.
+
+        Reuses the caller's session AFTER the reconciliation commit (the
+        session is clean at this point); ``run_matching`` owns its own
+        per-rule transaction boundary + the per-project kill-switch check,
+        exactly as on the task-event path.
+        """
+        from z4j_brain.domain.automation import (
+            AutomationActionRunner,
+            AutomationExecutor,
+        )
+        from z4j_brain.persistence.repositories import (
+            AuditLogRepository,
+            AutomationRuleRepository,
+            TaskRepository,
+        )
+
+        task_repo = TaskRepository(commands.session)
+        # Identity-map hit: apply_reconciled_state just loaded this row.
+        task = await task_repo.get_by_engine_task_id(
+            project_id=command.project_id,
+            engine=engine,
+            task_id=task_id,
+        )
+        priority = await task_repo.get_priority_label(
+            project_id=command.project_id,
+            engine=engine,
+            task_id=task_id,
+        )
+        fields: dict[str, Any] = {
+            "task_id": task_id,
+            "task_name": task.name if task is not None else None,
+            "engine": engine,
+            "queue": task.queue if task is not None else None,
+            "priority": priority,
+            "exception": task.exception if task is not None else None,
+            "runtime_ms": None,
+            # The agent that answered the probe is the command target for
+            # retry / cancel actions.
+            "agent_id": command.agent_id,
+            # Extra context for notify templates: what the engine said.
+            "engine_state": engine_state,
+        }
+        executor = AutomationExecutor(
+            audit=self._audit,
+            runner=AutomationActionRunner(dispatcher=self),
+        )
+        await executor.run_matching(
+            session=commands.session,
+            rules_repo=AutomationRuleRepository(commands.session),
+            audit_log=AuditLogRepository(commands.session),
+            project_id=command.project_id,
+            trigger="task.orphaned",
+            fields=fields,
+            now=datetime.now(UTC),
+            notify_coalesce_seconds=self._settings.automation_notify_coalesce_seconds,
+        )
 
 
 __all__ = ["CommandDispatcher"]

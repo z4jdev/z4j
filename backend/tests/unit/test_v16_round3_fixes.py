@@ -7,23 +7,9 @@ landed; this file pins each.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
-from z4j_core.models.event import EventKind
-
-from z4j_brain.observability import sentry as sentry_mod
-from z4j_brain.observability.sentry import (
-    _is_token_path_host,
-    _redact_list,
-    _redact_mapping,
-    _scrub_url,
-    scrub_event,
-)
-from z4j_brain.observability import otel as otel_mod
 from z4j_brain.domain.event_ingestor import (
     _METRIC_TASK_NAME_MAX_LEN,
     _METRIC_TASK_NAME_OVERFLOW,
@@ -31,7 +17,14 @@ from z4j_brain.domain.event_ingestor import (
     _reset_metric_task_name_seen_for_tests,
     _safe_metric_task_name,
 )
-
+from z4j_brain.observability import otel as otel_mod
+from z4j_brain.observability.sentry import (
+    _is_token_path_host,
+    _redact_list,
+    _scrub_url,
+    scrub_event,
+)
+from z4j_core.models.event import EventKind
 
 # ---------------------------------------------------------------------------
 # Round 3 Crit-1 -- task_name cardinality cap
@@ -123,8 +116,7 @@ class TestTeamsValidatorBranchWired:
             "teams",
             {
                 "webhook_url": (
-                    "https://contoso.webhook.office.com/webhookb2/"
-                    "abc/IncomingWebhook/x/y"
+                    "https://contoso.webhook.office.com/webhookb2/abc/IncomingWebhook/x/y"
                 ),
             },
         )
@@ -211,10 +203,7 @@ class TestSentryExceptionMechanismScrubbing:
             },
         }
         out = scrub_event(event)
-        assert (
-            "leak"
-            not in out["exception"]["values"][0]["mechanism"]["help_link"]
-        )
+        assert "leak" not in out["exception"]["values"][0]["mechanism"]["help_link"]
 
 
 # ---------------------------------------------------------------------------

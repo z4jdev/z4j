@@ -7,11 +7,10 @@ import uuid
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 from z4j_brain.domain.policy_engine import PolicyEngine, role_rank
 from z4j_brain.errors import AuthorizationError, NotFoundError
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.persistence.models import Membership, Project, User
 from z4j_brain.persistence.repositories import (
@@ -93,7 +92,9 @@ async def global_admin(session: AsyncSession) -> User:
 @pytest.mark.asyncio
 class TestGetProject:
     async def test_get_project_or_404_found(
-        self, session: AsyncSession, project: Project,  # noqa: ARG002
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         policy = PolicyEngine()
         projects = ProjectRepository(session)
@@ -101,7 +102,8 @@ class TestGetProject:
         assert result.slug == "default"
 
     async def test_get_project_or_404_missing(
-        self, session: AsyncSession,
+        self,
+        session: AsyncSession,
     ) -> None:
         policy = PolicyEngine()
         projects = ProjectRepository(session)

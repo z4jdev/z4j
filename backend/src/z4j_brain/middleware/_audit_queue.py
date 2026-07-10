@@ -25,6 +25,7 @@ Lifecycle:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -108,12 +109,10 @@ class AuditQueue:
         self._stop_event.set()
         try:
             await asyncio.wait_for(self._drain_task, timeout=5.0)
-        except (TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
+        except (TimeoutError, asyncio.CancelledError, Exception):
             self._drain_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._drain_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
         self._drain_task = None
 
     def enqueue(self, event: DenialAuditEvent) -> None:
@@ -141,7 +140,8 @@ class AuditQueue:
         while not self._stop_event.is_set() or not self._queue.empty():
             try:
                 event = await asyncio.wait_for(
-                    self._queue.get(), timeout=0.5,
+                    self._queue.get(),
+                    timeout=0.5,
                 )
             except TimeoutError:
                 continue
@@ -164,11 +164,12 @@ class AuditQueue:
                 except asyncio.QueueFull:
                     self._dropped += 1
                 raise
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning(
                     "z4j.brain.audit_queue: drain write failed for "
                     "action=%r path=%r (event dropped)",
-                    event.action, event.target_id,
+                    event.action,
+                    event.target_id,
                     exc_info=True,
                 )
 
@@ -176,13 +177,13 @@ class AuditQueue:
         """Persist one denial-audit event to ``audit_log``."""
         if self._db is None or self._settings is None:
             return
-        from sqlalchemy import select  # noqa: PLC0415
+        from sqlalchemy import select
 
-        from z4j_brain.domain.audit_service import (  # noqa: PLC0415
+        from z4j_brain.domain.audit_service import (
             AuditService,
         )
-        from z4j_brain.persistence.models import Project  # noqa: PLC0415
-        from z4j_brain.persistence.repositories import (  # noqa: PLC0415
+        from z4j_brain.persistence.models import Project
+        from z4j_brain.persistence.repositories import (
             AuditLogRepository,
         )
 

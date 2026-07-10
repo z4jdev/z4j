@@ -1983,11 +1983,6 @@ export interface components {
              * @default UTC
              */
             readonly timezone: string;
-            /**
-             * Retention Days
-             * @default 30
-             */
-            readonly retention_days: number;
         };
         /** CreateUserRequest */
         readonly CreateUserRequest: {
@@ -2312,8 +2307,6 @@ export interface components {
             readonly environment: string;
             /** Timezone */
             readonly timezone: string;
-            /** Retention Days */
-            readonly retention_days: number;
             /** Is Active */
             readonly is_active: boolean;
             /**
@@ -2872,8 +2865,6 @@ export interface components {
             readonly environment?: string | null;
             /** Timezone */
             readonly timezone?: string | null;
-            /** Retention Days */
-            readonly retention_days?: number | null;
         };
         /** UpdateUserRequest */
         readonly UpdateUserRequest: {

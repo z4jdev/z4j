@@ -79,8 +79,8 @@ def configure_logging(*, level: str, json_output: bool) -> None:
 
 
 def _drop_secrets(
-    logger: Any,  # noqa: ARG001
-    method_name: str,  # noqa: ARG001
+    logger: Any,
+    method_name: str,
     event_dict: EventDict,
 ) -> EventDict:
     """Strip well-known secret-bearing keys from every log record.

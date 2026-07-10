@@ -61,6 +61,7 @@ export function useCan(
     | "bulk_action"
     | "purge_queue"
     | "manage_schedules"
+    | "manage_automation"
     | "manage_agents"
     | "manage_members"
     | "manage_channels"

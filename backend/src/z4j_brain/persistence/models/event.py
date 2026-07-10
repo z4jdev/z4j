@@ -1,8 +1,9 @@
 """``events`` table - raw lifecycle events, partitioned by day.
 
 This table is the hot path. It is range-partitioned on
-``occurred_at`` so retention is O(1) - the RetentionWorker simply
-drops yesterday's partition once it ages out. The composite primary
+``occurred_at`` so retention is O(1) - the ``PartitionCreatorWorker``
+simply drops a day's partition once it ages past
+``settings.event_retention_days``. The composite primary
 key ``(occurred_at, id)`` is required because Postgres demands the
 partition column be part of the PK.
 
@@ -85,14 +86,21 @@ class Event(Base):
     )
     engine: Mapped[str] = mapped_column(String(40), nullable=False)
     task_id: Mapped[str] = mapped_column(
-        String(200), nullable=False, default="", server_default="",
+        String(200),
+        nullable=False,
+        default="",
+        server_default="",
     )
     kind: Mapped[str] = mapped_column(String(80), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
     payload: Mapped[dict[str, Any]] = mapped_column(
-        jsonb(), nullable=False, default=dict, server_default="{}",
+        jsonb(),
+        nullable=False,
+        default=dict,
+        server_default="{}",
     )
 
     __table_args__ = (
@@ -107,15 +115,22 @@ class Event(Base):
         # ``occurred_at`` must remain in the PK because Postgres
         # partitioned tables require the partition column.
         PrimaryKeyConstraint(
-            "project_id", "occurred_at", "id", name="pk_events",
+            "project_id",
+            "occurred_at",
+            "id",
+            name="pk_events",
         ),
         Index(
             "ix_events_project_task",
-            "project_id", "task_id", "occurred_at",
+            "project_id",
+            "task_id",
+            "occurred_at",
         ),
         Index(
             "ix_events_project_kind",
-            "project_id", "kind", "occurred_at",
+            "project_id",
+            "kind",
+            "occurred_at",
         ),
         # The PARTITION BY RANGE (occurred_at) is added in the
         # alembic migration via raw SQL - SQLAlchemy's

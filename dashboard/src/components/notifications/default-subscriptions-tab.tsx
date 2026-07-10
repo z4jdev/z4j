@@ -56,7 +56,6 @@ const TRIGGERS: { value: TriggerType; label: string }[] = [
   { value: "task.failed", label: "Task failed" },
   { value: "task.succeeded", label: "Task succeeded" },
   { value: "task.retried", label: "Task retried" },
-  { value: "task.slow", label: "Task slow" },
   { value: "agent.offline", label: "Agent offline" },
   { value: "agent.online", label: "Agent online" },
 ];

@@ -63,50 +63,54 @@ _initialised: bool = False
 # Sensitive-header names. Lowercased; we lowercase incoming names
 # before comparison. Anything that grants authentication, identifies
 # a session, or carries a delivery signature lives here.
-_SENSITIVE_HEADERS: frozenset[str] = frozenset({
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-    "x-z4j-signature",
-    "x-z4j-audit-signature",
-    "x-z4j-api-key",
-    "x-api-key",
-    "x-auth-token",
-    "x-csrftoken",
-    "x-csrf-token",
-    # IP-chain headers carry the real client IP behind a trusted
-    # proxy. The brain's "user.ip_address" promise (line below) is
-    # honoured only if we ALSO strip these. (Round 2 H5.)
-    "x-forwarded-for",
-    "x-real-ip",
-    "forwarded",
-    "cf-connecting-ip",
-    "true-client-ip",
-    "fastly-client-ip",
-    "x-cluster-client-ip",
-    "remote-user",
-})
+_SENSITIVE_HEADERS: frozenset[str] = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-z4j-signature",
+        "x-z4j-audit-signature",
+        "x-z4j-api-key",
+        "x-api-key",
+        "x-auth-token",
+        "x-csrftoken",
+        "x-csrf-token",
+        # IP-chain headers carry the real client IP behind a trusted
+        # proxy. The brain's "user.ip_address" promise (line below) is
+        # honoured only if we ALSO strip these. (Round 2 H5.)
+        "x-forwarded-for",
+        "x-real-ip",
+        "forwarded",
+        "cf-connecting-ip",
+        "true-client-ip",
+        "fastly-client-ip",
+        "x-cluster-client-ip",
+        "remote-user",
+    }
+)
 
 #: Query-parameter names whose VALUES are stripped from Sentry events.
 #: The names themselves stay so the operator can still see "a token
 #: was on this request" without seeing the token itself.
-_SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset({
-    "token",
-    "access_token",
-    "refresh_token",
-    "id_token",
-    "api_key",
-    "apikey",
-    "key",
-    "secret",
-    "password",
-    "code",            # OAuth + MFA verification codes
-    "signature",
-    "sig",
-    "session",
-    "csrf",
-})
+_SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset(
+    {
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "api_key",
+        "apikey",
+        "key",
+        "secret",
+        "password",
+        "code",  # OAuth + MFA verification codes
+        "signature",
+        "sig",
+        "session",
+        "csrf",
+    }
+)
 
 #: Setting / env-style key patterns whose values are scrubbed when they
 #: appear in ``extra`` / ``tags`` / ``contexts``. Substring match,
@@ -130,7 +134,7 @@ _SENSITIVE_VALUE_KEY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"signature",
         r"private[_-]?key",
         r"bot[_-]?token",
-        r"webhook[_-]?url",       # webhook URLs often embed tokens in path
+        r"webhook[_-]?url",  # webhook URLs often embed tokens in path
         r"integration[_-]?key",
         r"recovery[_-]?code",
         r"mfa[_-]?secret",
@@ -169,7 +173,9 @@ def _redact_list(items: list[Any], *, _depth: int = 0) -> list[Any]:
 
 
 def _redact_mapping(
-    mapping: dict[str, Any], *, _depth: int = 0,
+    mapping: dict[str, Any],
+    *,
+    _depth: int = 0,
 ) -> dict[str, Any]:
     """Walk ``mapping`` and redact any key matching the value-key
     patterns. Nested dicts are recursed. Lists are walked deeply
@@ -181,9 +187,7 @@ def _redact_mapping(
         return {"_z4j_truncated": _REDACTED}
     out: dict[str, Any] = {}
     for k, v in mapping.items():
-        if isinstance(k, str) and any(
-            p.search(k) for p in _SENSITIVE_VALUE_KEY_PATTERNS
-        ):
+        if isinstance(k, str) and any(p.search(k) for p in _SENSITIVE_VALUE_KEY_PATTERNS):
             out[k] = _REDACTED
             continue
         if isinstance(v, dict):
@@ -228,7 +232,7 @@ def _scrub_query_string(qs: str) -> str:
         return qs
     try:
         pairs = parse_qsl(qs, keep_blank_values=True)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return qs
     if not pairs:
         return qs
@@ -256,7 +260,7 @@ def _scrub_url(url: str) -> str:
         return url
     try:
         parts = urlsplit(url)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return url
     host = (parts.hostname or "").lower().rstrip(".")
     # Drop tokens-in-path for known credential-bearing hosts.
@@ -296,13 +300,15 @@ _TOKEN_PATH_HOST_SUFFIXES: tuple[str, ...] = (
     ".discord.com",
     ".pagerduty.com",
 )
-_TOKEN_PATH_HOSTS_EXACT: frozenset[str] = frozenset({
-    "outlook.office.com",
-    "hooks.slack.com",
-    "events.pagerduty.com",
-    "discord.com",
-    "discordapp.com",
-})
+_TOKEN_PATH_HOSTS_EXACT: frozenset[str] = frozenset(
+    {
+        "outlook.office.com",
+        "hooks.slack.com",
+        "events.pagerduty.com",
+        "discord.com",
+        "discordapp.com",
+    }
+)
 
 
 def _is_token_path_host(host: str) -> bool:
@@ -333,10 +339,12 @@ def _scrub_inline_urls(text: str) -> str:
     ``_scrub_url`` skips them)."""
     if not isinstance(text, str) or not text:
         return text
+
     def _sub(m: re.Match[str]) -> str:
         host = m.group(1)
         scheme = m.group(0).split(":", 1)[0]
         return f"{scheme}://{host}/[REDACTED by z4j]"
+
     return _PATH_TOKEN_HOST_RE.sub(_sub, text)
 
 
@@ -396,22 +404,19 @@ def _scrub_stacktrace_frames(frames: list[Any]) -> list[Any]:
             ctx = frame.get(ctx_list_key)
             if isinstance(ctx, list):
                 frame[ctx_list_key] = [
-                    _scrub_inline_urls(_scrub_url(line))
-                    if isinstance(line, str) else line
+                    _scrub_inline_urls(_scrub_url(line)) if isinstance(line, str) else line
                     for line in ctx
                 ]
         # Path-like fields. Sentry uses these to render filenames in
         # the issue UI; a path containing a token is a recon leak.
         for path_key in ("filename", "abs_path", "module"):
             val = frame.get(path_key)
-            if isinstance(val, str) and any(
-                p.search(val) for p in _SENSITIVE_VALUE_KEY_PATTERNS
-            ):
+            if isinstance(val, str) and any(p.search(val) for p in _SENSITIVE_VALUE_KEY_PATTERNS):
                 frame[path_key] = _REDACTED
     return frames
 
 
-def scrub_event(
+def scrub_event(  # noqa: PLR0912, PLR0915  event redaction dispatch
     event: Any,
     hint: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -452,8 +457,7 @@ def scrub_event(
                 request["query_string"] = _scrub_query_string(qs)
             elif isinstance(qs, list):
                 request["query_string"] = [
-                    (k, _REDACTED if k.lower() in _SENSITIVE_QUERY_KEYS else v)
-                    for k, v in qs
+                    (k, _REDACTED if k.lower() in _SENSITIVE_QUERY_KEYS else v) for k, v in qs
                 ]
         if "url" in request and isinstance(request["url"], str):
             request["url"] = _scrub_url(request["url"])
@@ -624,7 +628,7 @@ def init_sentry(settings: Any) -> bool:
     refused the configuration). Never raises; a failure is logged
     at WARNING and the brain continues to boot.
     """
-    global _initialised
+    global _initialised  # noqa: PLW0603  module-level singleton lazy-init
 
     dsn_secret = getattr(settings, "sentry_dsn", None)
     if dsn_secret is None:
@@ -652,9 +656,8 @@ def init_sentry(settings: Any) -> bool:
         )
         return False
 
-    environment = (
-        getattr(settings, "sentry_environment", None)
-        or getattr(settings, "environment", None)
+    environment = getattr(settings, "sentry_environment", None) or getattr(
+        settings, "environment", None
     )
     release = _detect_release()
 
@@ -684,7 +687,7 @@ def init_sentry(settings: Any) -> bool:
             # event. Operators who do not want that flip it off through
             # the SDK's own knobs; we do not override here.
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning(
             "z4j observability.sentry: sentry_sdk.init failed; the "
             "brain will continue without Sentry. Check the DSN and "
@@ -727,15 +730,15 @@ def _detect_release() -> str | None:
 def _reset_for_tests() -> None:
     """Test hook: clear the module's idempotency flag so a test that
     asserts on init behaviour can run init twice."""
-    global _initialised
+    global _initialised  # noqa: PLW0603  module-level singleton lazy-init
     _initialised = False
 
 
 __all__ = [
-    "init_sentry",
-    "scrub_event",
-    "_reset_for_tests",
     "_REDACTED",
     "_SENSITIVE_HEADERS",
     "_SENSITIVE_QUERY_KEYS",
+    "_reset_for_tests",
+    "init_sentry",
+    "scrub_event",
 ]

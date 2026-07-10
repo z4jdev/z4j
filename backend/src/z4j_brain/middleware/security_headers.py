@@ -164,19 +164,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 nonce = headers.get("X-Z4J-CSP-Nonce")
                 if nonce is not None:
                     del headers["X-Z4J-CSP-Nonce"]
-                csp = (
-                    _SETUP_CSP_TEMPLATE.format(nonce=nonce)
-                    if nonce
-                    else _SETUP_CSP_FALLBACK
-                )
+                csp = _SETUP_CSP_TEMPLATE.format(nonce=nonce) if nonce else _SETUP_CSP_FALLBACK
             else:
                 csp = _BASE_CSP
             headers.setdefault("Content-Security-Policy", csp)
 
         # HSTS only in production HTTPS deployments.
-        if (
-            self._settings.environment == "production"
-            and self._settings.public_url.startswith("https://")
+        if self._settings.environment == "production" and self._settings.public_url.startswith(
+            "https://"
         ):
             hsts_value = f"max-age={self._settings.hsts_max_age_seconds}"
             if self._settings.hsts_include_subdomains:

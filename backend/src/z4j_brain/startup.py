@@ -55,12 +55,12 @@ def set_cli_bootstrap_password(password: str) -> None:
     via :func:`_consume_cli_bootstrap_password`. Never written
     to disk, never copied into ``os.environ``.
     """
-    global _CLI_BOOTSTRAP_PASSWORD
+    global _CLI_BOOTSTRAP_PASSWORD  # noqa: PLW0603  module-level singleton lazy-init
     _CLI_BOOTSTRAP_PASSWORD = password
 
 
 def _consume_cli_bootstrap_password() -> str | None:
-    global _CLI_BOOTSTRAP_PASSWORD
+    global _CLI_BOOTSTRAP_PASSWORD  # noqa: PLW0603  module-level singleton lazy-init
     value = _CLI_BOOTSTRAP_PASSWORD
     _CLI_BOOTSTRAP_PASSWORD = None
     return value
@@ -99,9 +99,7 @@ async def run_first_boot_check(
     """
     bootstrap_email = os.environ.get("Z4J_BOOTSTRAP_ADMIN_EMAIL", "").strip()
     bootstrap_password = os.environ.get("Z4J_BOOTSTRAP_ADMIN_PASSWORD", "")
-    bootstrap_name = (
-        os.environ.get("Z4J_BOOTSTRAP_ADMIN_DISPLAY_NAME", "").strip() or None
-    )
+    bootstrap_name = os.environ.get("Z4J_BOOTSTRAP_ADMIN_DISPLAY_NAME", "").strip() or None
     # Consume the cli-supplied
     # password from the in-process holder. cli.py never puts it into
     # ``os.environ`` so /proc/<pid>/environ leakage and subprocess
@@ -136,9 +134,8 @@ async def run_first_boot_check(
         try:
             bootstrap_email = validate_admin_email(bootstrap_email)
         except ValueError as exc:
-            logger.error(
-                "z4j auto-bootstrap email rejected, falling back "
-                "to setup-token banner",
+            logger.exception(
+                "z4j auto-bootstrap email rejected, falling back to setup-token banner",
                 reason=str(exc),
             )
             bootstrap_email = ""  # falls through to banner path
@@ -159,11 +156,10 @@ async def run_first_boot_check(
                     display_name=bootstrap_name,
                 )
                 await bootstrap_session.commit()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 await bootstrap_session.rollback()
                 logger.exception(
-                    "z4j auto-bootstrap failed, falling back "
-                    "to setup-token banner",
+                    "z4j auto-bootstrap failed, falling back to setup-token banner",
                 )
             else:
                 logger.info(
@@ -227,10 +223,10 @@ async def _auto_bootstrap_admin(
 
     # Validate password policy up front. If it fails, argon2 never
     # runs - saves a second of pointless hashing on a bad config.
-    setup_service._hasher.validate_policy(password)  # noqa: SLF001
+    setup_service._hasher.validate_policy(password)
 
     email_canonical = canonicalize_email(email)
-    password_hash = setup_service._hasher.hash(password)  # noqa: SLF001
+    password_hash = setup_service._hasher.hash(password)
 
     users_repo = UserRepository(session)
     projects_repo = ProjectRepository(session)
@@ -249,7 +245,9 @@ async def _auto_bootstrap_admin(
     project = Project(slug="default", name="Default")
     await projects_repo.add(project)
     await memberships_repo.grant(
-        user_id=user.id, project_id=project.id, role=ProjectRole.ADMIN,
+        user_id=user.id,
+        project_id=project.id,
+        role=ProjectRole.ADMIN,
     )
 
     # Same default subscription pattern as the UI path: every new
@@ -298,31 +296,31 @@ def _print_setup_banner(
     url = f"{base}/setup?token={token}"
     bar = "═" * 70
     out = _sys.stderr
-    print(file=out)  # noqa: T201
-    print(f"╔{bar}╗", file=out)  # noqa: T201
-    print("║" + " z4j first-boot setup ".center(70) + "║", file=out)  # noqa: T201
-    print(f"║{' ' * 70}║", file=out)  # noqa: T201
+    print(file=out)
+    print(f"╔{bar}╗", file=out)
+    print("║" + " z4j first-boot setup ".center(70) + "║", file=out)
+    print(f"║{' ' * 70}║", file=out)
     print(
         "║" + " Open this URL in your browser to create the admin: ".ljust(70) + "║",
         file=out,
-    )  # noqa: T201
-    print(f"║{' ' * 70}║", file=out)  # noqa: T201
-    print(f"║ {url}".ljust(71) + "║", file=out)  # noqa: T201
-    print(f"║{' ' * 70}║", file=out)  # noqa: T201
+    )
+    print(f"║{' ' * 70}║", file=out)
+    print(f"║ {url}".ljust(71) + "║", file=out)
+    print(f"║{' ' * 70}║", file=out)
     print(
         "║" + f" Token expires at: {expires_at} (UTC) ".ljust(70) + "║",
         file=out,
-    )  # noqa: T201
+    )
     print(
         "║" + " Single-use. Restart the brain to generate a new one. ".ljust(70) + "║",
         file=out,
-    )  # noqa: T201
+    )
     print(
         "║" + " For zero-log-exposure setup, use Z4J_BOOTSTRAP_ADMIN_*. ".ljust(70) + "║",
         file=out,
-    )  # noqa: T201
-    print(f"╚{bar}╝", file=out)  # noqa: T201
-    print(file=out)  # noqa: T201
+    )
+    print(f"╚{bar}╝", file=out)
+    print(file=out)
 
 
 __all__ = ["run_first_boot_check"]

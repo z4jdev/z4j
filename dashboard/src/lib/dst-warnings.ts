@@ -83,7 +83,7 @@ export function computeDstWarning(
           `${pad2(ambig + 1)}:00 back to ${pad2(ambig)}:00. ` +
           `This schedule fires at ${pad2(ambig)}:00, so it will fire ` +
           `TWICE on that day. To pick a non-ambiguous time, use any ` +
-          `hour outside ${pad2(ambig)}:00–${pad2(ambig + 1)}:00 ` +
+          `hour outside ${pad2(ambig)}:00-${pad2(ambig + 1)}:00 ` +
           `(e.g. ${pad2((ambig + 2) % 24)}:00).`,
       };
     }
@@ -106,7 +106,7 @@ export function computeDstWarning(
           `skips from ${pad2(skipped)}:00 directly to ${pad2(skipped + 1)}:00. ` +
           `This schedule fires at ${pad2(skipped)}:00. The fire is not ` +
           `lost - z4j-scheduler shifts it to the next valid wall-clock ` +
-          `time. Pick an hour outside ${pad2(skipped)}:00–${pad2(skipped + 1)}:00 ` +
+          `time. Pick an hour outside ${pad2(skipped)}:00-${pad2(skipped + 1)}:00 ` +
           `if you want to avoid the shift.`,
       };
     }

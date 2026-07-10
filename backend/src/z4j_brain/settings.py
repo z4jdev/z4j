@@ -17,7 +17,6 @@ from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 from z4j_core.paths import z4j_home
 
 
@@ -90,6 +89,10 @@ class Settings(BaseSettings):
             are marked timed-out by the background worker.
         agent_offline_timeout_seconds: Heartbeats older than this
             mark the agent offline.
+        agent_offline_alert_grace_seconds: Extra grace past the
+            offline timeout before the offline episode is alerted
+            (audit row + worker.offline rules + agent.offline
+            subscriptions).
         ratelimit_commands_per_minute: Per-project upper bound for
             command issuance.
         ratelimit_events_per_second: Per-project upper bound for
@@ -169,16 +172,13 @@ class Settings(BaseSettings):
     #: :attr:`previous_secrets` for rotation semantics.
     previous_session_secrets: SecretStr | None = Field(
         default=None,
-        description=(
-            "Comma-separated previous session secrets accepted during "
-            "rotation."
-        ),
+        description=("Comma-separated previous session secrets accepted during rotation."),
     )
 
     # ------------------------------------------------------------------
     # Network
     # ------------------------------------------------------------------
-    bind_host: str = "0.0.0.0"
+    bind_host: str = "0.0.0.0"  # noqa: S104  container bind
     bind_port: int = Field(default=7700, ge=1, le=65535)
     public_url: str = "http://localhost:7700"
     cors_origins: list[str] = Field(default_factory=list)
@@ -200,30 +200,53 @@ class Settings(BaseSettings):
     #: noisiest brain (~1M rows/day). Operators worried about
     #: vacuum churn on Postgres can lengthen this freely.
     audit_retention_sweep_interval_seconds: int = Field(
-        default=3600, ge=60, le=86_400,
+        default=3600,
+        ge=60,
+        le=86_400,
     )
     #: Per-pass batch size. Smaller batches = shorter transactions
     #: at the cost of more passes to drain a backlog. 5_000 is a
     #: good balance for both SQLite and Postgres on a homelab box.
     audit_retention_sweep_batch_size: int = Field(
-        default=5_000, ge=100, le=100_000,
+        default=5_000,
+        ge=100,
+        le=100_000,
     )
     #: Hard cap on rows deleted in one sweep pass. Prevents a
     #: million-row backlog from running as one runaway transaction
     #: window, the next pass picks up the remaining rows. Audit
     #: fix MED-18.
     audit_retention_sweep_max_per_pass: int = Field(
-        default=200_000, ge=1_000, le=10_000_000,
+        default=200_000,
+        ge=1_000,
+        le=10_000_000,
     )
     #: SQLite-only periodic ``PRAGMA wal_checkpoint(TRUNCATE)`` cadence
     #: (1.2.2+). 5 minutes is enough to keep the ``-wal`` sidecar from
     #: growing unbounded under normal load. The task is a no-op on
     #: Postgres deployments.
     wal_checkpoint_interval_seconds: int = Field(
-        default=300, ge=60, le=86_400,
+        default=300,
+        ge=60,
+        le=86_400,
     )
     command_timeout_seconds: int = Field(default=60, ge=1, le=86_400)
     agent_offline_timeout_seconds: int = Field(default=30, ge=1, le=3600)
+    #: EXTRA grace on top of ``agent_offline_timeout_seconds`` before an
+    #: offline agent is treated as a confirmed-down EPISODE by the
+    #: :class:`AgentHealthWorker`: an ``agent.offline_detected`` audit
+    #: row is written, ``worker.offline`` automation rules fire and the
+    #: alert fans out to ``agent.offline`` subscriptions. The state flip
+    #: on the Agents page still happens at the plain timeout; the grace
+    #: only delays ALERTING so a deploy-restart or reconnect blip (agent
+    #: back within timeout + grace) never pages anyone. Mirrors the
+    #: misfire detector's grace posture: absorb normal churn, never
+    #: silence a real outage.
+    agent_offline_alert_grace_seconds: int = Field(
+        default=60,
+        ge=0,
+        le=86_400,
+    )
     #: Delete agent rows that have been offline for more than this
     #: many days. Keeps the Agents page tidy after removed
     #: containers. Set to 0 to disable pruning (useful for long
@@ -254,10 +277,7 @@ class Settings(BaseSettings):
     #: only when a logged-in admin clicks the button. There is no
     #: background polling. There is no telemetry.
     version_check_url: str = Field(
-        default=(
-            "https://raw.githubusercontent.com/z4jdev/z4j/main/"
-            "versions.json"
-        ),
+        default=("https://raw.githubusercontent.com/z4jdev/z4j/main/versions.json"),
         max_length=2048,
     )
 
@@ -308,7 +328,7 @@ class Settings(BaseSettings):
     # grew 1.5 GB under sustained 100+ t/s burst. The delta is
     # C-level memory in asyncpg's per-connection state -- chiefly the
     # prepared-statement cache. asyncpg's default
-    # ``statement_cache_size=100`` × ~30 connections × diverse query
+    # ``statement_cache_size=100`` x ~30 connections x diverse query
     # set (events INSERT, agents UPDATE, workers upsert, schedules
     # SELECT, audit_log INSERT, partition mgmt, ...) accumulates
     # 300 MB - 1.5 GB depending on plan complexity.
@@ -325,14 +345,18 @@ class Settings(BaseSettings):
     # rotate under sustained load instead of sticking until pool
     # recycle.
     database_statement_cache_size: int = Field(
-        default=50, ge=0, le=10_000,
+        default=50,
+        ge=0,
+        le=10_000,
         description=(
             "Cap on asyncpg per-connection prepared-statement cache. "
             "Set to 0 to disable. See 1.5.1 leak fix notes."
         ),
     )
     database_max_inactive_connection_lifetime_seconds: float = Field(
-        default=60.0, ge=1.0, le=3600.0,
+        default=60.0,
+        ge=1.0,
+        le=3600.0,
         description=(
             "Seconds an idle asyncpg connection lives in the pool "
             "before being closed + reopened. Shorter = better memory "
@@ -603,15 +627,27 @@ class Settings(BaseSettings):
     #: Require every user with global ``is_admin=true`` to enroll in
     #: MFA within the grace window. Existing admins who upgrade to a
     #: brain with this flag set get the grace clock starting from the
-    #: first login that observes the policy.
+    #: first login that observes the policy (stamped once into
+    #: ``users.mfa_enforcement_started_at``). Global bit only:
+    #: project-level ``admin`` memberships are not targeted.
     mfa_enforce_for_admins: bool = False
     #: Require every user (admins and non-admins) to enroll in MFA
     #: within the grace window. Stricter superset of
     #: :attr:`mfa_enforce_for_admins`.
     mfa_enforce_for_all: bool = False
-    #: Days an enforcement-targeted user has to enroll before login
-    #: is blocked with ``mfa_enrollment_required``.
-    mfa_enrollment_grace_days: int = Field(default=7, ge=1, le=90)
+    #: Days an enforcement-targeted user has to enroll once their
+    #: grace clock starts. Within the window, login responses carry
+    #: ``mfa_enrollment_required`` + ``mfa_enrollment_deadline`` so
+    #: the dashboard can show the enroll-by banner. Past the deadline
+    #: login still succeeds (a hard refusal would make enrollment
+    #: impossible - enrollment needs an authenticated session) but the
+    #: session is restricted to the MFA-enrollment endpoints, whoami,
+    #: and logout; every other authenticated call answers 403 with the
+    #: stable error code ``mfa_enrollment_required``. ``0`` means no
+    #: grace: targeted users are restricted from their first
+    #: post-policy login onward. API-key (Bearer) callers are exempt -
+    #: programmatic accounts have no second-factor ceremony.
+    mfa_enrollment_grace_days: int = Field(default=7, ge=0, le=90)
     #: Number of single-use recovery codes minted at enrollment time.
     mfa_recovery_code_count: int = Field(default=10, ge=5, le=50)
     #: How long a successful MFA verify is valid for the sensitive-
@@ -721,7 +757,9 @@ class Settings(BaseSettings):
     #: against the queue-lock failure mode.
     registry_listener_heartbeat_seconds: int = Field(default=10, ge=1, le=300)
     registry_listener_heartbeat_timeout_seconds: int = Field(
-        default=25, ge=2, le=600,
+        default=25,
+        ge=2,
+        le=600,
     )
     #: Hard recycle interval for the listener connection. Belt-and-
     #: braces against silent NAT/proxy wedges and hung backends.
@@ -785,7 +823,9 @@ class Settings(BaseSettings):
     #: Cadence for :class:`AgentHygieneWorker`. Once a day is
     #: enough; the prune target is "weeks stale", not "minutes".
     agent_hygiene_sweep_seconds: int = Field(
-        default=86_400, ge=60, le=604_800,
+        default=86_400,
+        ge=60,
+        le=604_800,
     )
     #: Cadence for :class:`ReconciliationWorker`. Every 5 min is a
     #: good compromise between prompt stuck-task resolution and
@@ -796,7 +836,9 @@ class Settings(BaseSettings):
     #: long tasks without scheduling a reconcile for every in-flight
     #: retry.
     reconciliation_stale_threshold_seconds: int = Field(
-        default=900, ge=60, le=86_400,
+        default=900,
+        ge=60,
+        le=86_400,
     )
     #: Default per-page cap on REST list endpoints.
     rest_default_page_size: int = Field(default=50, ge=1, le=1000)
@@ -919,7 +961,9 @@ class Settings(BaseSettings):
     #: refill cap kicks in. Sized for a fleet of ~100 schedules
     #: triggering simultaneously at the top of an hour.
     scheduler_grpc_fire_rate_capacity: float = Field(
-        default=600.0, ge=1.0, le=1_000_000.0,
+        default=600.0,
+        ge=1.0,
+        le=1_000_000.0,
     )
     #: Sustained refill rate (tokens/second). Default 10 fires/sec
     #: per cert, well above any normal scheduler workload; the cap
@@ -927,7 +971,9 @@ class Settings(BaseSettings):
     #: high-volume single-cert deployments raise this; operators with
     #: a leaked-cert scenario in mind lower it.
     scheduler_grpc_fire_rate_per_second: float = Field(
-        default=10.0, ge=0.01, le=10_000.0,
+        default=10.0,
+        ge=0.01,
+        le=10_000.0,
     )
     #: Hard cap on concurrent ``WatchSchedules`` streams per brain
     #: process. Each stream holds a dedicated asyncpg connection for
@@ -942,20 +988,26 @@ class Settings(BaseSettings):
     #: fleets; tune down to be conservative on shared Postgres
     #: deployments where ``max_connections`` is tight.
     scheduler_grpc_watch_max_concurrent: int = Field(
-        default=64, ge=1, le=10_000,
+        default=64,
+        ge=1,
+        le=10_000,
     )
     #: Per-CN cap on concurrent ``WatchSchedules`` streams. One
     #: scheduler should not need many streams at once - the cap
     #: stops a single misbehaving / compromised cert from filling
     #: the global limit and starving the rest of the fleet.
     scheduler_grpc_watch_max_per_cert: int = Field(
-        default=4, ge=1, le=1_000,
+        default=4,
+        ge=1,
+        le=1_000,
     )
     #: Watch-stream poll cadence. Brain polls ``schedules.updated_at``
     #: every N seconds and emits diff events. 2s gives sub-3s
     #: cache-freshness end-to-end after the scheduler's tick budget.
     scheduler_grpc_watch_poll_seconds: float = Field(
-        default=2.0, ge=0.5, le=60.0,
+        default=2.0,
+        ge=0.5,
+        le=60.0,
     )
     #: Graceful drain window on shutdown. In-flight RPCs get this
     #: long to complete before the runtime is torn down.
@@ -972,7 +1024,9 @@ class Settings(BaseSettings):
     #: matching online agent and replays them through the existing
     #: command dispatcher.
     pending_fires_replay_interval_seconds: int = Field(
-        default=10, ge=1, le=300,
+        default=10,
+        ge=1,
+        le=300,
     )
 
     # ------------------------------------------------------------------
@@ -996,22 +1050,87 @@ class Settings(BaseSettings):
     #: ``PATCH /schedules/{id} {"is_enabled": true}``) once the
     #: underlying bug is fixed.
     schedule_circuit_breaker_threshold: int = Field(
-        default=5, ge=0, le=100,
+        default=5,
+        ge=0,
+        le=100,
     )
     #: Cadence for :class:`ScheduleCircuitBreakerWorker`. Each tick
     #: scans every enabled schedule with at least N recent fires
     #: and disables those past the threshold.
     schedule_circuit_breaker_interval_seconds: int = Field(
-        default=60, ge=5, le=3600,
+        default=60,
+        ge=5,
+        le=3600,
     )
     #: Retention for :class:`ScheduleFire` rows. After this many
     #: days the periodic prune worker drops them. 30 days at
-    #: 10 schedules × 1 fire/min is ~430k rows - well under
+    #: 10 schedules x 1 fire/min is ~430k rows - well under
     #: Postgres single-table comfort. Operators with longer
     #: forensic windows raise this; operators with high-frequency
     #: schedules + tight disk budgets lower it.
     schedule_fires_retention_days: int = Field(
-        default=30, ge=1, le=3650,
+        default=30,
+        ge=1,
+        le=3650,
+    )
+    #: Grace window before an enabled schedule whose expected next
+    #: fire has passed is treated as MISFIRED by
+    #: :class:`MisfireDetector`. A fire that lands within this many
+    #: seconds of its expected slot is on-time; past it, the schedule
+    #: is misfired -- the brain writes a ``scheduler.misfire_detected``
+    #: audit row and fires any ``schedule.misfired`` automation rule.
+    #: This is a BRAIN-side check (not scheduler-side) precisely so a
+    #: DOWN scheduler is caught -- a scheduler-side check cannot report
+    #: its own death. 60s covers normal fire latency + gRPC jitter +
+    #: small clock skew; below that risks false positives on healthy
+    #: schedules that fire a hair late.
+    scheduler_misfire_grace_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+    )
+    #: Cadence for :class:`MisfireDetector`. Each tick scans every
+    #: enabled interval / cron schedule and flags those past their
+    #: expected fire + grace. Set to 0 to disable misfire detection
+    #: entirely (the detector short-circuits its tick). Only runs when
+    #: ``scheduler_grpc_enabled`` (no schedules to watch otherwise).
+    scheduler_misfire_sweep_seconds: int = Field(
+        default=60,
+        ge=0,
+        le=3600,
+    )
+
+    # ------------------------------------------------------------------
+    # Automation rule engine
+    # ------------------------------------------------------------------
+    #: Notify-coalesce window. When > 0, a rule that already emitted a
+    #: notify action within this many seconds suppresses further notifies
+    #: (counted on ``z4j_automation_notify_coalesced_total``) so a
+    #: distinct-event flood cannot fan out one notification per event per
+    #: member. 0 (default) preserves the notify-every-matching-event
+    #: behaviour. The first alert in each window always goes out.
+    automation_notify_coalesce_seconds: int = Field(
+        default=0,
+        ge=0,
+        le=86400,
+    )
+    #: Cadence for the automation firing-outbox drain worker. Each tick
+    #: replays firings the frame router deferred to the outbox under
+    #: backpressure. Leader-only; cheap no-op when the outbox is empty.
+    automation_outbox_drain_interval_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=3600,
+    )
+    #: Hard ceiling on rows in ``automation_firing_outbox`` PER PROJECT.
+    #: Above it the frame router stops deferring firings to the outbox and
+    #: counts them as hard drops (z4j_automation_firings_dropped_total),
+    #: so a sustained flood cannot grow the outbox without bound faster
+    #: than the drain can clear it.
+    automation_outbox_max_rows_per_project: int = Field(
+        default=10_000,
+        ge=100,
+        le=1_000_000,
     )
 
     # ------------------------------------------------------------------
@@ -1077,12 +1196,16 @@ class Settings(BaseSettings):
     #: (a single crash is permanent). Operators wanting
     #: kubernetes-style "always restart" set this very high.
     embedded_scheduler_restart_max_attempts: int = Field(
-        default=10, ge=0, le=10_000,
+        default=10,
+        ge=0,
+        le=10_000,
     )
     #: Backoff between auto-restart attempts. Doubles up to a
     #: 60-second cap.
     embedded_scheduler_restart_backoff_seconds: float = Field(
-        default=2.0, ge=0.1, le=60.0,
+        default=2.0,
+        ge=0.1,
+        le=60.0,
     )
     #: Grace window for SIGTERM before SIGKILL during shutdown.
     #: The scheduler's own teardown takes a few seconds (cancel
@@ -1090,7 +1213,9 @@ class Settings(BaseSettings):
     #: covers the slowest reasonable case while still bounding
     #: brain's overall shutdown time.
     embedded_scheduler_shutdown_grace_seconds: float = Field(
-        default=10.0, ge=0.5, le=60.0,
+        default=10.0,
+        ge=0.5,
+        le=60.0,
     )
 
     # ------------------------------------------------------------------
@@ -1115,11 +1240,7 @@ class Settings(BaseSettings):
             raw = data.get(field_name)
             if raw is None:
                 continue
-            value = (
-                raw.get_secret_value()
-                if isinstance(raw, SecretStr)
-                else str(raw)
-            )
+            value = raw.get_secret_value() if isinstance(raw, SecretStr) else str(raw)
             if len(value.encode("utf-8")) < 32:
                 raise ValueError(
                     f"{field_name} must be at least 32 bytes long",
@@ -1132,21 +1253,16 @@ class Settings(BaseSettings):
             raw = data.get(field_name)
             if raw is None:
                 continue
-            value = (
-                raw.get_secret_value()
-                if isinstance(raw, SecretStr)
-                else str(raw)
-            )
+            value = raw.get_secret_value() if isinstance(raw, SecretStr) else str(raw)
             if not value.strip():
                 continue
             for entry in value.split(","):
-                entry = entry.strip()
+                entry = entry.strip()  # noqa: PLW2901  normalized in-loop
                 if not entry:
                     continue
                 if len(entry.encode("utf-8")) < 32:
                     raise ValueError(
-                        f"every entry in {field_name} must be at "
-                        f"least 32 bytes long",
+                        f"every entry in {field_name} must be at least 32 bytes long",
                     )
         return data
 
@@ -1227,15 +1343,14 @@ class Settings(BaseSettings):
         super().__init__(**values)
         self._enforce_security_invariants()
 
-    def _enforce_security_invariants(self) -> None:
+    def _enforce_security_invariants(self) -> None:  # noqa: PLR0912  cross-field security checks
         """Cross-field security checks. See :meth:`__init__`."""
         is_dev = self.environment == "dev"
 
         # CORS: never wildcard with credentials.
         if self.cors_allow_credentials and "*" in self.cors_origins:
             raise ConfigError(
-                "cors_origins must not contain '*' when "
-                "cors_allow_credentials is True",
+                "cors_origins must not contain '*' when cors_allow_credentials is True",
             )
 
         # Production: allowed_hosts must be explicit.
@@ -1280,10 +1395,7 @@ class Settings(BaseSettings):
                 "that shape would redirect users to attacker-controlled "
                 "hosts when emailed",
             )
-        if not (
-            self.public_url.startswith("http://")
-            or self.public_url.startswith("https://")
-        ):
+        if not (self.public_url.startswith("http://") or self.public_url.startswith("https://")):
             raise ConfigError(
                 "public_url must start with http:// or https://",
             )
@@ -1319,9 +1431,7 @@ class Settings(BaseSettings):
         if audit_url_value:
             audit_hmac_value: str = ""
             if self.audit_webhook_hmac_secret is not None:
-                audit_hmac_value = (
-                    self.audit_webhook_hmac_secret.get_secret_value().strip()
-                )
+                audit_hmac_value = self.audit_webhook_hmac_secret.get_secret_value().strip()
             if not audit_hmac_value:
                 raise ConfigError(
                     "audit_webhook_url is set but "
@@ -1334,8 +1444,8 @@ class Settings(BaseSettings):
             if len(audit_hmac_value.encode("utf-8")) < 32:
                 raise ConfigError(
                     "audit_webhook_hmac_secret must be at least 32 bytes "
-                    "(use `python -c \"import secrets; "
-                    "print(secrets.token_urlsafe(48))\"`).",
+                    '(use `python -c "import secrets; '
+                    'print(secrets.token_urlsafe(48))"`).',
                 )
 
     # ------------------------------------------------------------------
@@ -1375,14 +1485,12 @@ class Settings(BaseSettings):
         out: list[bytes] = []
         seen: set[str] = set()
         for entry in text.split(","):
-            entry = entry.strip()
+            entry = entry.strip()  # noqa: PLW2901  normalized in-loop
             if not entry or entry in seen:
                 continue
             seen.add(entry)
             out.append(entry.encode("utf-8"))
         return out
-
-
 
     @field_validator("scheduler_grpc_cn_project_bindings", mode="before")
     @classmethod
@@ -1398,7 +1506,7 @@ class Settings(BaseSettings):
         if v is None or v == "":
             return {}
         if isinstance(v, str):
-            import json  # noqa: PLC0415
+            import json
 
             try:
                 parsed = json.loads(v)
@@ -1409,7 +1517,7 @@ class Settings(BaseSettings):
                 ) from exc
             v = parsed
         if not isinstance(v, dict):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004  pydantic validator must raise ValueError
                 "scheduler_grpc_cn_project_bindings must be a JSON "
                 "object mapping CN -> list of slugs",
             )
@@ -1417,12 +1525,9 @@ class Settings(BaseSettings):
         for cn, slugs in v.items():
             if not isinstance(cn, str) or not cn:
                 raise ValueError(
-                    "scheduler_grpc_cn_project_bindings keys must be "
-                    "non-empty strings (CNs)",
+                    "scheduler_grpc_cn_project_bindings keys must be non-empty strings (CNs)",
                 )
-            if not isinstance(slugs, list) or not all(
-                isinstance(s, str) and s for s in slugs
-            ):
+            if not isinstance(slugs, list) or not all(isinstance(s, str) and s for s in slugs):
                 raise ValueError(
                     f"scheduler_grpc_cn_project_bindings[{cn!r}] must be "
                     "a list of non-empty project slugs",
@@ -1439,13 +1544,9 @@ class Settings(BaseSettings):
         at the first ``await session.execute(...)`` call with an
         unhelpful traceback. Catch it here.
         """
-        if not (
-            v.startswith("postgresql+asyncpg://")
-            or v.startswith("sqlite+aiosqlite://")
-        ):
+        if not (v.startswith("postgresql+asyncpg://") or v.startswith("sqlite+aiosqlite://")):
             raise ValueError(
-                "database_url must use postgresql+asyncpg:// "
-                "(or sqlite+aiosqlite:// for tests)",
+                "database_url must use postgresql+asyncpg:// (or sqlite+aiosqlite:// for tests)",
             )
         return v
 

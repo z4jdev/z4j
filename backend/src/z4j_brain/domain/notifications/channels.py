@@ -24,12 +24,13 @@ Channel config shapes:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import ipaddress
-import re
 import json
 import logging
+import re
 import socket
 import time
 from collections import OrderedDict
@@ -63,7 +64,7 @@ def set_shared_client(client: httpx.AsyncClient | None) -> None:
     Called from the FastAPI lifespan at startup with the pooled
     client, and again at shutdown with ``None``.
     """
-    global _shared_client
+    global _shared_client  # noqa: PLW0603  module-level shared-client singleton set by lifespan
     _shared_client = client
 
 
@@ -84,7 +85,7 @@ def set_allow_http_webhooks(allow: bool) -> None:
     ``settings.notifications_webhook_allow_http``. Tests can also
     flip this directly to exercise both modes.
     """
-    global _allow_http_webhooks
+    global _allow_http_webhooks  # noqa: PLW0603  module-level policy singleton set by lifespan
     _allow_http_webhooks = bool(allow)
 
 
@@ -165,7 +166,7 @@ async def _post(
     url: str,
     *,
     pin_ip: str | None = None,
-    timeout: float | httpx.Timeout | None = None,
+    timeout: float | httpx.Timeout | None = None,  # noqa: ASYNC109  forwarded to httpx, not an asyncio deadline
     **kwargs: Any,
 ) -> httpx.Response:
     """POST ``url`` and return the response with body bounded.
@@ -225,8 +226,7 @@ async def _post(
     build_kwargs: dict[str, Any] = dict(kwargs)
     if timeout is not None:
         timeout_obj = (
-            timeout if isinstance(timeout, httpx.Timeout)
-            else httpx.Timeout(float(timeout))
+            timeout if isinstance(timeout, httpx.Timeout) else httpx.Timeout(float(timeout))
         )
         build_kwargs["timeout"] = timeout_obj
 
@@ -251,24 +251,24 @@ async def _post(
         # Re-attach the bounded body so callers can use the public
         # httpx API (``resp.text``, ``resp.json()``) without
         # touching the streaming machinery themselves.
-        resp = httpx.Response(
+        return httpx.Response(
             status_code=resp.status_code,
             headers=resp.headers,
             content=bytes(buf),
             request=req,
         )
-        return resp
     finally:
         if not using_shared:
             # Shield the ad-hoc client close so a request-cancel
             # mid-aclose doesn't leak the client + its connection pool.
             try:
                 await asyncio.shield(client_owner.aclose())
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.debug(
                     "z4j notifications._post: shielded aclose raised",
                     exc_info=True,
                 )
+
 
 #: Allowed URL schemes for webhook targets. ``https`` is always
 #: permitted; ``http`` is gated by :data:`_allow_http_webhooks`
@@ -279,10 +279,8 @@ _HTTPS_PLUS_HTTP_SCHEMES = frozenset({"https", "http"})
 
 def _allowed_schemes() -> frozenset[str]:
     """Return the active scheme allow-list based on operator policy."""
-    return (
-        _HTTPS_PLUS_HTTP_SCHEMES if _allow_http_webhooks
-        else _HTTPS_ONLY_SCHEMES
-    )
+    return _HTTPS_PLUS_HTTP_SCHEMES if _allow_http_webhooks else _HTTPS_ONLY_SCHEMES
+
 
 #: Private/reserved IP ranges that must never be targeted by webhooks.
 #:
@@ -302,15 +300,15 @@ def _allowed_schemes() -> frozenset[str]:
 #: 6to4, NAT64) and additionally check the semantic predicates below
 #: in :func:`_ip_is_blocked` so a single helper covers every shape.
 _BLOCKED_NETWORKS = [
-    ipaddress.ip_network("0.0.0.0/8"),        # "this network" (RFC 1122)
+    ipaddress.ip_network("0.0.0.0/8"),  # "this network" (RFC 1122)
     ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("100.64.0.0/10"),    # R7-MED: CGNAT (RFC 6598)
+    ipaddress.ip_network("100.64.0.0/10"),  # R7-MED: CGNAT (RFC 6598)
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("198.18.0.0/15"),    # R7-MED: benchmark (RFC 2544)
+    ipaddress.ip_network("198.18.0.0/15"),  # R7-MED: benchmark (RFC 2544)
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),  # link-local / AWS metadata
-    ipaddress.ip_network("::/128"),           # IPv6 unspecified
+    ipaddress.ip_network("::/128"),  # IPv6 unspecified
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),  # IPv6 private
     ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
@@ -319,7 +317,7 @@ _BLOCKED_NETWORKS = [
 ]
 
 
-def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:  # noqa: PLR0911  SSRF block-reason dispatch
     """Return a human-readable block reason or None if ``ip`` is OK.
 
     Unifies the SSRF checks the codebase used to repeat
@@ -384,9 +382,7 @@ def _static_url_checks(url: str) -> tuple[str | None, str | None]:
                 "in (the operator policy default is HTTPS-only "
                 "to prevent payload + header leakage in transit)"
             ), None
-        return (
-            f"scheme '{parsed.scheme}' not allowed (use {sorted(schemes)})"
-        ), None
+        return (f"scheme '{parsed.scheme}' not allowed (use {sorted(schemes)})"), None
 
     hostname = parsed.hostname
     if not hostname:
@@ -412,7 +408,7 @@ def _static_url_checks(url: str) -> tuple[str | None, str | None]:
 # hundreds), and ~10K * (~80 bytes hostname + ~200 bytes value)
 # tops out at ~3 MB. LRU eviction order is "oldest insert first"
 # via the OrderedDict + move_to_end pattern.
-_DNS_CACHE: "OrderedDict[str, tuple[float, list[str]]]" = OrderedDict()
+_DNS_CACHE: OrderedDict[str, tuple[float, list[str]]] = OrderedDict()
 _DNS_CACHE_MAX = 10_000
 _DNS_TTL = 30.0
 
@@ -450,7 +446,10 @@ async def _resolve_cached(hostname: str) -> list[str]:
     try:
         infos = await asyncio.wait_for(
             asyncio.to_thread(
-                socket.getaddrinfo, hostname, None, socket.AF_UNSPEC,
+                socket.getaddrinfo,
+                hostname,
+                None,
+                socket.AF_UNSPEC,
             ),
             timeout=_DNS_RESOLVE_TIMEOUT,
         )
@@ -468,7 +467,9 @@ async def _resolve_cached(hostname: str) -> list[str]:
 
 
 def _set_dns_cache_entry(
-    hostname: str, expires_at: float, ips: list[str],
+    hostname: str,
+    expires_at: float,
+    ips: list[str],
 ) -> None:
     """Insert into ``_DNS_CACHE`` and enforce the LRU cap.
 
@@ -543,11 +544,10 @@ def validate_telegram_config(config: dict[str, Any]) -> str | None:
     managed channel path MUST call this.
     """
     bot_token = config.get("bot_token")
-    if bot_token is not None:
-        if not isinstance(bot_token, str) or not _TELEGRAM_BOT_TOKEN_RE.fullmatch(
-            bot_token,
-        ):
-            return "telegram bot_token must match \\d+:[A-Za-z0-9_-]+"
+    if bot_token is not None and (
+        not isinstance(bot_token, str) or not _TELEGRAM_BOT_TOKEN_RE.fullmatch(bot_token)
+    ):
+        return "telegram bot_token must match \\d+:[A-Za-z0-9_-]+"
     chat_id = config.get("chat_id")
     if chat_id is not None:
         if isinstance(chat_id, int):
@@ -555,10 +555,7 @@ def validate_telegram_config(config: dict[str, Any]) -> str | None:
         if not isinstance(chat_id, str) or not _TELEGRAM_CHAT_ID_RE.fullmatch(
             chat_id,
         ):
-            return (
-                "telegram chat_id must be a signed integer "
-                "or @-prefixed handle"
-            )
+            return "telegram chat_id must be a signed integer or @-prefixed handle"
     return None
 
 
@@ -566,15 +563,17 @@ def validate_telegram_config(config: dict[str, Any]) -> str | None:
 #: common + the Postfix submission port. Rejects Redis (6379),
 #: Postgres (5432), SSH (22), HTTP admin panels (8000-8999),
 #: cloud metadata (80 on 169.254.169.254), etc.
-_SMTP_PORT_ALLOWLIST: frozenset[int] = frozenset({
-    25,   # classic SMTP (rare for egress but kept for legacy)
-    465,  # SMTPS (implicit TLS)
-    587,  # submission port (STARTTLS) - the modern default
-    2525, # common alternate for residential ISPs / cloud providers
-})
+_SMTP_PORT_ALLOWLIST: frozenset[int] = frozenset(
+    {
+        25,  # classic SMTP (rare for egress but kept for legacy)
+        465,  # SMTPS (implicit TLS)
+        587,  # submission port (STARTTLS) - the modern default
+        2525,  # common alternate for residential ISPs / cloud providers
+    }
+)
 
 
-async def validate_smtp_config(config: dict[str, Any]) -> str | None:
+async def validate_smtp_config(config: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR0912  SMTP config validation
     """Validate an email/SMTP channel config. Returns None if safe.
 
     Email channels were an unrestricted server-side egress
@@ -621,10 +620,7 @@ async def validate_smtp_config(config: dict[str, Any]) -> str | None:
                     continue
                 block_reason = _ip_is_blocked(resolved)
                 if block_reason is not None:
-                    return (
-                        f"smtp_host '{stripped}' resolves to a blocked "
-                        f"address: {block_reason}"
-                    )
+                    return f"smtp_host '{stripped}' resolves to a blocked address: {block_reason}"
     port_raw = config.get("smtp_port")
     if port_raw is not None:
         try:
@@ -632,10 +628,7 @@ async def validate_smtp_config(config: dict[str, Any]) -> str | None:
         except (TypeError, ValueError):
             return "smtp_port must be an integer"
         if port not in _SMTP_PORT_ALLOWLIST:
-            return (
-                f"smtp_port {port} is not in the allowlist "
-                f"{sorted(_SMTP_PORT_ALLOWLIST)}"
-            )
+            return f"smtp_port {port} is not in the allowlist {sorted(_SMTP_PORT_ALLOWLIST)}"
     return None
 
 
@@ -665,24 +658,26 @@ def _validate_webhook_url(url: str) -> str | None:
 
 # Header names that are NEVER allowed to be set by user config.
 # Prevents auth-header injection and request-smuggling tricks.
-_BLOCKED_HEADER_NAMES = frozenset({
-    "host",
-    "authorization",
-    "cookie",
-    "proxy-authorization",
-    "x-forwarded-for",
-    "x-forwarded-host",
-    "x-forwarded-proto",
-    "x-real-ip",
-    "content-length",
-    "transfer-encoding",
-    "connection",
-    "upgrade",
-    "te",
-})
+_BLOCKED_HEADER_NAMES = frozenset(
+    {
+        "host",
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "upgrade",
+        "te",
+    }
+)
 
 
-def validate_webhook_headers(
+def validate_webhook_headers(  # noqa: PLR0911  header validation dispatch
     headers: dict[str, Any] | None,
 ) -> tuple[str | None, dict[str, str]]:
     """Sanitize a user-supplied custom-header dict.
@@ -781,34 +776,26 @@ async def deliver_webhook(
         # signature is HMAC(secret, "{timestamp}.{body}") matching
         # the audit-forwarder pattern (already used since 1.6.0).
         #
-        # Both signatures ship simultaneously during the 1.6.x line
-        # so legacy receivers (verifying the old format) keep
-        # working through the deprecation window. The legacy header
-        # will be removed in 1.7. Receivers should verify the new
-        # ``X-Z4J-Signature`` and reject the request if the
-        # ``X-Z4J-Timestamp`` deviates from the current time by
-        # more than the receiver's chosen window (300s is the
-        # documented default for ``@z4j/webhook-verify``).
+        # 1.7 REMOVED the legacy body-only ``X-Z4J-Signature-V1`` header
+        # (it shipped through the 1.6.x deprecation window). ``X-Z4J-
+        # Signature`` is now the only signature: receivers verify it and
+        # reject the request if ``X-Z4J-Timestamp`` deviates from the
+        # current time by more than the receiver's chosen window (300s is
+        # the documented default for ``@z4j/webhook-verify``).
         import time
 
         secret_bytes = hmac_secret.encode("utf-8")
         timestamp = str(int(time.time()))
-        signed_payload = f"{timestamp}.{body}".encode("utf-8")
+        signed_payload = f"{timestamp}.{body}".encode()
 
         # v2 (new): timestamp + body. Authoritative signature.
         sig_v2 = hmac.new(
-            secret_bytes, signed_payload, hashlib.sha256,
+            secret_bytes,
+            signed_payload,
+            hashlib.sha256,
         ).hexdigest()
         headers["X-Z4J-Timestamp"] = timestamp
         headers["X-Z4J-Signature"] = f"sha256={sig_v2}"
-
-        # v1 (legacy): body-only. Ships only during the 1.6.x
-        # backwards-compat window so existing receivers do not
-        # break on the upgrade. Removed in 1.7.
-        sig_v1 = hmac.new(
-            secret_bytes, body.encode("utf-8"), hashlib.sha256,
-        ).hexdigest()
-        headers["X-Z4J-Signature-V1"] = f"sha256={sig_v1}"
 
     try:
         # Re-validate + pin the target IP at dispatch time (M15
@@ -820,10 +807,14 @@ async def deliver_webhook(
         err, safe_ip = await resolve_and_pin(url)
         if err is not None:
             return DeliveryResult(
-                success=False, error=f"unsafe URL at dispatch: {err}",
+                success=False,
+                error=f"unsafe URL at dispatch: {err}",
             )
         resp = await _post(
-            url, content=body, headers=headers, pin_ip=safe_ip,
+            url,
+            content=body,
+            headers=headers,
+            pin_ip=safe_ip,
         )
         return DeliveryResult(
             success=200 <= resp.status_code < 300,
@@ -839,7 +830,7 @@ async def deliver_webhook(
 # ---------------------------------------------------------------------------
 
 
-async def deliver_email(
+async def deliver_email(  # noqa: PLR0911, PLR0912, PLR0915  SMTP delivery
     config: dict[str, Any],
     payload: dict[str, Any],
 ) -> DeliveryResult:
@@ -850,8 +841,9 @@ async def deliver_email(
     (port 465). No OAuth - just SMTP credentials.
     """
     try:
-        import aiosmtplib
         from email.mime.text import MIMEText
+
+        import aiosmtplib
     except ImportError:
         return DeliveryResult(
             success=False,
@@ -937,9 +929,10 @@ async def deliver_email(
                             f"address at dispatch: {block_reason}"
                         ),
                     )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return DeliveryResult(
-            success=False, error=f"smtp_host validation failed: {exc}",
+            success=False,
+            error=f"smtp_host validation failed: {exc}",
         )
 
     subject = _build_email_subject(payload)
@@ -1006,15 +999,13 @@ async def deliver_email(
                 await client.login(user, password)
             await client.send_message(msg)
         finally:
-            try:
+            # ``quit()`` can throw after a successful send if the
+            # server closes the socket fast; the send already
+            # succeeded, don't mask that.
+            with contextlib.suppress(Exception):
                 await client.quit()
-            except Exception:  # noqa: BLE001
-                # ``quit()`` can throw after a successful send
-                # if the server closes the socket fast; the
-                # send already succeeded, don't mask that.
-                pass
         return DeliveryResult(success=True, status_code=250)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return DeliveryResult(success=False, error=str(exc)[:500])
 
 
@@ -1051,7 +1042,7 @@ def _build_email_body(payload: dict[str, Any]) -> str:
     traceback = payload.get("traceback")
     if traceback:
         lines.append(f"\nTraceback:\n{traceback[:2000]}")
-    lines.append(f"\n- z4j notification engine")
+    lines.append("\n- z4j notification engine")
     return "\n".join(lines)
 
 
@@ -1084,7 +1075,7 @@ async def deliver_slack(
     # PRIVATE addresses; a public attacker host passes it.
     try:
         slack_host = urlparse(webhook_url).hostname or ""
-    except Exception:  # noqa: BLE001
+    except Exception:
         slack_host = ""
     if slack_host.lower() != "hooks.slack.com":
         return DeliveryResult(
@@ -1103,7 +1094,8 @@ async def deliver_slack(
     task_id = payload.get("task_id", "")
 
     emoji = {"critical": "🔴", "high": "🟠", "normal": "🔵", "low": "⚪"}.get(
-        priority, "🔵",
+        priority,
+        "🔵",
     )
 
     blocks = [
@@ -1127,13 +1119,15 @@ async def deliver_slack(
 
     exception = payload.get("exception")
     if exception:
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Exception:*\n```{exception[:500]}```",
-            },
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Exception:*\n```{exception[:500]}```",
+                },
+            }
+        )
 
     body = {"blocks": blocks}
 
@@ -1191,7 +1185,8 @@ async def deliver_telegram(
     state = payload.get("state", "")
 
     emoji = {"critical": "🔴", "high": "🟠", "normal": "🔵", "low": "⚪"}.get(
-        priority, "🔵",
+        priority,
+        "🔵",
     )
 
     lines = [
@@ -1251,19 +1246,19 @@ _PAGERDUTY_SEVERITIES = frozenset({"critical", "error", "warning", "info"})
 #: can override per-trigger via config["severity_map"]. Choices:
 #: agent.offline -> critical (production outage signal)
 #: task.failed -> error (something is wrong but the system is up)
-#: task.retried, task.slow -> warning (degraded but recovering)
+#: task.retried -> warning (degraded but recovering)
 #: task.succeeded, agent.online -> info (audit-trail level)
+#: Anything unmapped falls back to config["severity_default"].
 _DEFAULT_SEVERITY_MAP: dict[str, str] = {
     "agent.offline": "critical",
     "agent.online": "info",
     "task.failed": "error",
     "task.retried": "warning",
-    "task.slow": "warning",
     "task.succeeded": "info",
 }
 
 
-def validate_pagerduty_config(config: dict[str, Any]) -> str | None:
+def validate_pagerduty_config(config: dict[str, Any]) -> str | None:  # noqa: PLR0911  PagerDuty config validation
     """Return error string or None if config is acceptable.
 
     Required: integration_key (32-char routing key from a PD service's
@@ -1294,7 +1289,7 @@ def validate_pagerduty_config(config: dict[str, Any]) -> str | None:
     # plus the synthetic "test.dispatch" so test rows can be mapped
     # to a custom severity if the operator wants.
     _trigger_pattern = re.compile(
-        r"^(task\.failed|task\.succeeded|task\.retried|task\.slow|"
+        r"^(task\.failed|task\.succeeded|task\.retried|"
         r"agent\.offline|agent\.online|test\.dispatch)$",
     )
     for trig, mapped in smap.items():
@@ -1303,9 +1298,7 @@ def validate_pagerduty_config(config: dict[str, Any]) -> str | None:
         # (None, ints, bools) which would crash the dispatcher mid-
         # loop on str-only ops elsewhere.
         if not isinstance(trig, str):
-            return (
-                f"severity_map keys must be strings (got {type(trig).__name__})"
-            )
+            return f"severity_map keys must be strings (got {type(trig).__name__})"
         if not _trigger_pattern.fullmatch(trig):
             return (
                 f"severity_map[{trig!r}] is not a recognized trigger "
@@ -1389,7 +1382,8 @@ async def deliver_pagerduty(
             "group": trigger,
             "class": "z4j.notification",
             "custom_details": {
-                k: v for k, v in payload.items()
+                k: v
+                for k, v in payload.items()
                 # PD's UI handles ~64KB of custom_details; trim very
                 # large fields to keep page-load fast.
                 if not (isinstance(v, str) and len(v) > 4096)
@@ -1475,17 +1469,19 @@ async def deliver_discord(
     # discordapp.com / canary.discord.com / ptb.discord.com
     # (the four official webhook hosts). Same threat model as
     # the Slack host-lock above.
-    _DISCORD_ALLOWED_HOSTS = frozenset({
-        "discord.com",
-        "discordapp.com",
-        "canary.discord.com",
-        "ptb.discord.com",
-    })
+    discord_allowed_hosts = frozenset(
+        {
+            "discord.com",
+            "discordapp.com",
+            "canary.discord.com",
+            "ptb.discord.com",
+        }
+    )
     try:
         discord_host = (urlparse(webhook_url).hostname or "").lower()
-    except Exception:  # noqa: BLE001
+    except Exception:
         discord_host = ""
-    if discord_host not in _DISCORD_ALLOWED_HOSTS:
+    if discord_host not in discord_allowed_hosts:
         return DeliveryResult(
             success=False,
             error=(
@@ -1507,7 +1503,8 @@ async def deliver_discord(
     task_id = payload.get("task_id", "")
 
     emoji = {"critical": "🔴", "high": "🟠", "normal": "🔵", "low": "⚪"}.get(
-        priority, "🔵",
+        priority,
+        "🔵",
     )
     lines = [
         f"{emoji} **z4j: {trigger}**",
@@ -1577,12 +1574,14 @@ async def deliver_discord(
 # it as a data-exfil sink that LOOKS like Teams in the audit log
 # (same threat model as the Slack / Discord host locks).
 _TEAMS_ALLOWED_HOST_SUFFIXES: tuple[str, ...] = (
-    ".webhook.office.com",   # workflow webhooks (current)
-    ".logic.azure.com",      # power automate (underlying platform)
+    ".webhook.office.com",  # workflow webhooks (current)
+    ".logic.azure.com",  # power automate (underlying platform)
 )
-_TEAMS_ALLOWED_HOSTS_EXACT: frozenset[str] = frozenset({
-    "outlook.office.com",    # classic O365 connector (legacy)
-})
+_TEAMS_ALLOWED_HOSTS_EXACT: frozenset[str] = frozenset(
+    {
+        "outlook.office.com",  # classic O365 connector (legacy)
+    }
+)
 
 
 def _teams_host_allowed(host: str) -> bool:
@@ -1619,7 +1618,7 @@ def validate_teams_config(config: dict[str, Any]) -> str | None:
         return "missing webhook_url"
     try:
         host = (urlparse(url).hostname or "").strip()
-    except Exception:  # noqa: BLE001
+    except Exception:
         host = ""
     if not host:
         return "webhook_url has no resolvable host"
@@ -1668,7 +1667,7 @@ async def deliver_teams(
     # runs this on save).
     try:
         teams_host = (urlparse(webhook_url).hostname or "").lower()
-    except Exception:  # noqa: BLE001
+    except Exception:
         teams_host = ""
     if not _teams_host_allowed(teams_host):
         return DeliveryResult(
@@ -1741,13 +1740,15 @@ async def deliver_teams(
         # triple-backticks with a visually similar but inert
         # sequence before embedding.
         safe_exc = str(exception).replace("```", "'''")[:1500]
-        card_body.append({
-            "type": "TextBlock",
-            "text": f"```\n{safe_exc}\n```",
-            "wrap": True,
-            "fontType": "Monospace",
-            "isSubtle": True,
-        })
+        card_body.append(
+            {
+                "type": "TextBlock",
+                "text": f"```\n{safe_exc}\n```",
+                "wrap": True,
+                "fontType": "Monospace",
+                "isSubtle": True,
+            }
+        )
 
     body = {
         "type": "message",
@@ -1788,7 +1789,7 @@ async def deliver_teams(
             status_code=resp.status_code,
             response_body=resp.text[:500],
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return DeliveryResult(success=False, error=str(exc)[:500])
 
 

@@ -57,7 +57,6 @@ agents to one worker via their load balancer.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import uuid
 from collections import OrderedDict
@@ -65,29 +64,23 @@ from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-
-from z4j_brain.domain.ip_rate_limit import require_agent_connect_throttle
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
-
 from z4j_core.errors import SignatureError
 from z4j_core.transport.frames import (
     CommandFrame,
     CommandPayload,
     Frame,
-    parse_frame,
-    serialize_frame,
 )
 from z4j_core.transport.framing import FrameSigner, FrameVerifier
 from z4j_core.transport.hmac import derive_project_secret
 
+from z4j_brain.domain.ip_rate_limit import require_agent_connect_throttle
 from z4j_brain.persistence.enums import CommandStatus
 from z4j_brain.websocket.auth import resolve_agent_by_bearer
 from z4j_brain.websocket.frame_router import FrameRouter
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
-
     from z4j_brain.persistence.models import Agent, Command
 
 
@@ -134,12 +127,10 @@ _SESSION_PER_AGENT_MAX = 16
 #: identity-equality is the safety property here.
 _LEGACY_NONCE_SENTINEL = object()
 
-_sessions: "OrderedDict[tuple[uuid.UUID, object], tuple[FrameSigner, FrameVerifier]]" = (
-    OrderedDict()
-)
+_sessions: OrderedDict[tuple[uuid.UUID, object], tuple[FrameSigner, FrameVerifier]] = OrderedDict()
 #: Per-agent session counter - used for the per-agent eviction cap.
 #: Maintained in lockstep with ``_sessions``; cleaned on drop.
-_sessions_per_agent: "dict[uuid.UUID, int]" = {}
+_sessions_per_agent: dict[uuid.UUID, int] = {}
 _registry_lock = asyncio.Lock()
 
 
@@ -154,14 +145,15 @@ try:
     from z4j_brain.api.metrics import register_inmemory_subsystem
 
     register_inmemory_subsystem("longpoll_sessions", _longpoll_session_count)
-except Exception:  # noqa: BLE001  pragma: no cover
+except Exception:  # noqa: S110  best-effort metrics registration, retried on next import
     # metrics module not importable yet (very early in test bootstrap);
     # the next import of this module will retry.
     pass
 
 
 def _session_key(
-    agent_id: uuid.UUID, session_nonce: str | None,
+    agent_id: uuid.UUID,
+    session_nonce: str | None,
 ) -> tuple[uuid.UUID, object]:
     """Compute the registry key. Empty/missing nonce maps to a sentinel
     object so legacy agents that don't send the header still get a single
@@ -173,7 +165,7 @@ def _session_key(
 
 async def _get_or_create_session(
     *,
-    agent: "Agent",
+    agent: Agent,
     master_secret: bytes,
     session_nonce: str | None,
 ) -> tuple[FrameSigner, FrameVerifier]:
@@ -214,10 +206,7 @@ async def _get_or_create_session(
         # The legacy sentinel (no-nonce client) gets an empty
         # binding string, those clients are documented as
         # "remain susceptible to H1/H2".
-        binding = (
-            session_nonce if isinstance(session_nonce, str)
-            else ""
-        )
+        binding = session_nonce if isinstance(session_nonce, str) else ""
         signer = FrameSigner(
             secret=project_secret,
             agent_id=agent.id,
@@ -266,11 +255,10 @@ async def _drop_session(agent_id: uuid.UUID, session_nonce: str | None) -> None:
     consistent."""
     key = _session_key(agent_id, session_nonce)
     async with _registry_lock:
-        if _sessions.pop(key, None) is not None:
-            if agent_id in _sessions_per_agent:
-                _sessions_per_agent[agent_id] -= 1
-                if _sessions_per_agent[agent_id] <= 0:
-                    _sessions_per_agent.pop(agent_id, None)
+        if _sessions.pop(key, None) is not None and agent_id in _sessions_per_agent:
+            _sessions_per_agent[agent_id] -= 1
+            if _sessions_per_agent[agent_id] <= 0:
+                _sessions_per_agent.pop(agent_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +283,7 @@ class FrameUploadBody(BaseModel):
 
         Without this, the 500-element list cap is the only
         bound and each string is unlimited, so a single request
-        could carry 500 × 100 MB and OOM the brain before any
+        could carry 500 x 100 MB and OOM the brain before any
         downstream validator ran. Per-frame ceiling matches the
         wire frame cap (default 1 MiB).
         """
@@ -303,8 +291,7 @@ class FrameUploadBody(BaseModel):
         for idx, frame in enumerate(v):
             if len(frame) > max_per_frame:
                 raise ValueError(
-                    f"frames[{idx}] is {len(frame)} bytes; cap is "
-                    f"{max_per_frame}",
+                    f"frames[{idx}] is {len(frame)} bytes; cap is {max_per_frame}",
                 )
         return v
 
@@ -360,7 +347,9 @@ async def agent_events(
 
     master_bytes = settings.secret.get_secret_value().encode("utf-8")
     _, verifier = await _get_or_create_session(
-        agent=agent, master_secret=master_bytes, session_nonce=session_nonce,
+        agent=agent,
+        master_secret=master_bytes,
+        session_nonce=session_nonce,
     )
 
     ingestor = request.app.state.event_ingestor
@@ -374,6 +363,8 @@ async def agent_events(
         project_id=agent.project_id,
         agent_id=agent.id,
         dashboard_hub=dashboard_hub,
+        automation_notify_coalesce_seconds=settings.automation_notify_coalesce_seconds,
+        automation_outbox_max_rows_per_project=settings.automation_outbox_max_rows_per_project,
     )
 
     accepted = 0
@@ -406,7 +397,7 @@ async def agent_events(
             session_invalidated = True
             rejected += total - idx
             break
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             rejected += 1
             errors.append(f"parse failed: {type(exc).__name__}")
             continue
@@ -414,7 +405,7 @@ async def agent_events(
         try:
             await frame_router.dispatch(frame)
             accepted += 1
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             rejected += 1
             errors.append(f"dispatch failed: {type(exc).__name__}")
             logger.exception(
@@ -435,12 +426,14 @@ async def agent_events(
         await _drop_session(agent.id, session_nonce)
 
     return FrameUploadResponse(
-        accepted=accepted, rejected=rejected, errors=errors[:10],
+        accepted=accepted,
+        rejected=rejected,
+        errors=errors[:10],
     )
 
 
 @router.get("/commands", response_model=CommandPullResponse)
-async def agent_commands(
+async def agent_commands(  # noqa: PLR0915  long-poll command handler
     request: Request,
     response: Response,
     wait: int = Query(default=30, ge=0, le=60),
@@ -467,7 +460,9 @@ async def agent_commands(
 
     master_bytes = settings.secret.get_secret_value().encode("utf-8")
     signer, _ = await _get_or_create_session(
-        agent=agent, master_secret=master_bytes, session_nonce=session_nonce,
+        agent=agent,
+        master_secret=master_bytes,
+        session_nonce=session_nonce,
     )
 
     # Inner helper that does ONE pass over the commands table for
@@ -486,15 +481,17 @@ async def agent_commands(
     # process. The redispatch only re-fires for commands the
     # agent never processed because the network dropped before
     # delivery completed.
-    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+    from datetime import UTC, datetime, timedelta
 
     redispatch_cutoff = datetime.now(UTC) - timedelta(
         seconds=getattr(
-            settings, "agent_longpoll_redispatch_seconds", 60.0,
+            settings,
+            "agent_longpoll_redispatch_seconds",
+            60.0,
         ),
     )
 
-    async def _pull_pending() -> list["Command"]:
+    async def _pull_pending() -> list[Command]:
         from sqlalchemy import or_
 
         from z4j_brain.persistence.models import Command
@@ -596,7 +593,7 @@ async def agent_commands(
                 frame = CommandFrame(id=str(cmd.id), payload=payload)
                 signed_bytes = signer.sign_and_serialize(frame)
                 out_frames.append(signed_bytes.decode("utf-8"))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.exception(
                     "z4j longpoll: failed to sign command after claim",
                     command_id=str(cmd.id),
@@ -608,9 +605,10 @@ async def agent_commands(
                     # PENDING and DISPATCHED as legal predecessors.
                     try:
                         await commands_repo.mark_failed(
-                            cmd.id, error=f"longpoll sign failed: {type(exc).__name__}",
+                            cmd.id,
+                            error=f"longpoll sign failed: {type(exc).__name__}",
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.exception(
                             "z4j longpoll: also failed to mark command failed",
                             command_id=str(cmd.id),

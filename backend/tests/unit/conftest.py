@@ -13,7 +13,6 @@ from collections.abc import AsyncIterator
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
-
 from z4j_brain.main import create_app
 from z4j_brain.settings import Settings
 
@@ -79,10 +78,16 @@ async def _reset_per_ip_rate_limits() -> None:
     from z4j_brain.domain import ip_rate_limit as ipl
 
     for bucket_attr in (
-        "_invitation_bucket", "_login_bucket", "_password_reset_bucket",
-        "_channel_test_bucket", "_channel_import_bucket",
-        "_agent_connect_bucket", "_bulk_action_bucket",
-        "_mfa_verify_bucket", "_openapi_bucket", "_setup_bucket",
+        "_invitation_bucket",
+        "_login_bucket",
+        "_password_reset_bucket",
+        "_channel_test_bucket",
+        "_channel_import_bucket",
+        "_agent_connect_bucket",
+        "_bulk_action_bucket",
+        "_mfa_verify_bucket",
+        "_openapi_bucket",
+        "_setup_bucket",
     ):
         bucket = getattr(ipl, bucket_attr, None)
         if bucket is not None:

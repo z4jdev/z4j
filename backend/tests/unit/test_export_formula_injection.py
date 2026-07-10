@@ -4,7 +4,6 @@ execute attacker-controlled strings as spreadsheet formulas."""
 from __future__ import annotations
 
 import pytest
-
 from z4j_brain.api.tasks import (
     _SPREADSHEET_FORMULA_PREFIXES,
     _neutralise_formula,
@@ -57,7 +56,11 @@ class TestNeutraliseFormula:
         """Pin the prefix tuple - OWASP + Google guidance require
         these five (=, +, -, @, tab). CR is defence in depth."""
         assert set(_SPREADSHEET_FORMULA_PREFIXES) >= {
-            "=", "+", "-", "@", "\t",
+            "=",
+            "+",
+            "-",
+            "@",
+            "\t",
         }
 
 
@@ -75,9 +78,9 @@ class TestXlsxFormulaDisabled:
         from z4j_brain.api import tasks
 
         src = inspect.getsource(tasks._export_xlsx)
-        assert '"strings_to_formulas": False' in src or (
-            "'strings_to_formulas': False" in src
-        ), "xlsxwriter default auto-converts '='-prefixed strings to formulas"
+        assert '"strings_to_formulas": False' in src or ("'strings_to_formulas': False" in src), (
+            "xlsxwriter default auto-converts '='-prefixed strings to formulas"
+        )
 
     def test_csv_runs_neutraliser_on_every_cell(self) -> None:
         """Every row write in ``_export_csv`` must route through

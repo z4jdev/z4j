@@ -95,7 +95,7 @@ class TrendsResponse(BaseModel):
     series: list[TrendBucket]
 
 
-def _bucket_expr(session: "AsyncSession", bucket_seconds: int):
+def _bucket_expr(session: AsyncSession, bucket_seconds: int):
     """Return a dialect-appropriate bucket-start expression for
     ``Task.finished_at``.
 
@@ -133,10 +133,10 @@ async def get_trends(
     slug: str,
     window: Literal["1h", "6h", "24h", "72h", "7d"] = Query("24h"),
     bucket: Literal["1m", "5m", "15m", "1h", "1d"] = Query("1h"),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> TrendsResponse:
     """Return per-bucket task outcome counts + avg runtime.
 
@@ -153,8 +153,7 @@ async def get_trends(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"window/bucket ratio too fine ({window}/{bucket}); max "
-                f"500 buckets per response"
+                f"window/bucket ratio too fine ({window}/{bucket}); max 500 buckets per response"
             ),
         )
 
@@ -182,12 +181,14 @@ async def get_trends(
                 Task.project_id == project.id,
                 Task.finished_at.is_not(None),
                 Task.finished_at >= cutoff,
-                Task.state.in_([
-                    TaskState.SUCCESS,
-                    TaskState.FAILURE,
-                    TaskState.RETRY,
-                    TaskState.REVOKED,
-                ]),
+                Task.state.in_(
+                    [
+                        TaskState.SUCCESS,
+                        TaskState.FAILURE,
+                        TaskState.RETRY,
+                        TaskState.REVOKED,
+                    ]
+                ),
             )
             .group_by(b_expr, Task.state)
             .order_by(b_expr),
@@ -211,13 +212,8 @@ async def get_trends(
         setattr(bucket_row, state_name, int(cnt))
         bucket_row.total += int(cnt)
         if avg_ms is not None:
-            running_runtime_sum[key] = (
-                running_runtime_sum.get(key, 0.0)
-                + float(avg_ms) * int(cnt)
-            )
-            running_runtime_count[key] = (
-                running_runtime_count.get(key, 0) + int(cnt)
-            )
+            running_runtime_sum[key] = running_runtime_sum.get(key, 0.0) + float(avg_ms) * int(cnt)
+            running_runtime_count[key] = running_runtime_count.get(key, 0) + int(cnt)
 
     for key, bucket_row in buckets.items():
         n = running_runtime_count.get(key, 0)

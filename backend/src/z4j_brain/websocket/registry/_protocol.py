@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from fastapi import WebSocket
 
 
-class WorkerCapExceeded(Exception):
+class WorkerCapExceeded(Exception):  # noqa: N818  public registry exception, imported across modules
     """Registering a new worker would exceed the per-agent cap.
 
     Raised by ``register`` when:
@@ -79,8 +79,7 @@ class WorkerCapExceeded(Exception):
 
     def __init__(self, agent_id: UUID, current: int, cap: int) -> None:
         super().__init__(
-            f"agent {agent_id} already has {current} worker connections; "
-            f"cap is {cap}",
+            f"agent {agent_id} already has {current} worker connections; cap is {cap}",
         )
         self.agent_id = agent_id
         self.current = current
@@ -118,7 +117,7 @@ class BrainRegistry(Protocol):
         *,
         project_id: UUID,
         agent_id: UUID,
-        ws: "WebSocket",
+        ws: WebSocket,
         worker_id: str | None = None,
         cap: int = 0,
     ) -> None:
@@ -135,7 +134,7 @@ class BrainRegistry(Protocol):
         self,
         agent_id: UUID,
         *,
-        ws: "WebSocket | None" = None,
+        ws: WebSocket | None = None,
         worker_id: str | None = None,
     ) -> bool:
         """Drop one slot for ``agent_id``. Returns ``True`` if the

@@ -52,7 +52,8 @@ class AgentHygieneWorker:
         ttl_days = self._settings.agent_stale_prune_days
         if ttl_days <= 0:
             logger.debug(
-                "z4j agent hygiene: pruning disabled (ttl_days=%d)", ttl_days,
+                "z4j agent hygiene: pruning disabled (ttl_days=%d)",
+                ttl_days,
             )
             return
 
@@ -65,7 +66,9 @@ class AgentHygieneWorker:
 
         if pruned:
             logger.info(
-                "z4j agent hygiene swept", pruned=pruned, ttl_days=ttl_days,
+                "z4j agent hygiene swept",
+                pruned=pruned,
+                ttl_days=ttl_days,
             )
 
 

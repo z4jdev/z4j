@@ -19,15 +19,12 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
-from z4j_core.redaction import RedactionConfig, RedactionEngine
-
 from z4j_brain.domain.event_ingestor import (
     EventIngestor,
     _coerce_event_id,
 )
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import AgentState
 from z4j_brain.persistence.models import Agent, Event, Project, Task
 from z4j_brain.persistence.repositories import (
@@ -36,6 +33,7 @@ from z4j_brain.persistence.repositories import (
     QueueRepository,
     TaskRepository,
 )
+from z4j_core.redaction import RedactionConfig, RedactionEngine
 
 
 @pytest.fixture
@@ -189,9 +187,7 @@ class TestCrossProjectNamespacing:
         await session.commit()
 
         # Both projects get their own events row; no collision.
-        count = (
-            await session.execute(select(func.count()).select_from(Event))
-        ).scalar_one()
+        count = (await session.execute(select(func.count()).select_from(Event))).scalar_one()
         assert count == 2, (
             "Project-A and Project-B should each have their own row; "
             "they must NOT collide via a shared agent-supplied event_id."
@@ -219,9 +215,7 @@ class TestCrossProjectNamespacing:
             )
             await session.commit()
 
-        count = (
-            await session.execute(select(func.count()).select_from(Event))
-        ).scalar_one()
+        count = (await session.execute(select(func.count()).select_from(Event))).scalar_one()
         assert count == 1, "Replay in the same project should dedupe."
 
 
@@ -256,7 +250,7 @@ class TestSavepointBatchIsolation:
         good_c = _received(str(uuid.uuid4()), task_id="task-C")
 
         # Ingest a 4-event batch with a duplicate in the middle.
-        new_count = await ingestor.ingest_batch(
+        new_events = await ingestor.ingest_batch(
             events=[good_a, dup_1, dup_2, good_c],
             project_id=proj.id,
             agent_id=agent.id,
@@ -268,17 +262,13 @@ class TestSavepointBatchIsolation:
         await session.commit()
 
         # Exactly 3 rows landed in events (dup_2 deduped).
-        event_count = (
-            await session.execute(select(func.count()).select_from(Event))
-        ).scalar_one()
+        event_count = (await session.execute(select(func.count()).select_from(Event))).scalar_one()
         assert event_count == 3
-        assert new_count == 3
+        # ingest_batch now returns the NEW events (dup_2 deduped -> 3).
+        assert len(new_events) == 3
 
         # Tasks for A, B, C all projected (dup did NOT poison the batch).
-        task_ids = sorted(
-            t.task_id
-            for t in (await session.execute(select(Task))).scalars().all()
-        )
+        task_ids = sorted(t.task_id for t in (await session.execute(select(Task))).scalars().all())
         assert task_ids == ["task-A", "task-B", "task-C"]
 
 
@@ -301,7 +291,7 @@ class TestCanvasRefSanitization:
         proj_a = await _make_project(session, "alpha")
         proj_b = await _make_project(session, "beta")
         agent_a = await _make_agent(session, proj_a)
-        agent_b = await _make_agent(session, proj_b)
+        await _make_agent(session, proj_b)  # side effect: agent exists in project B
 
         # Landmark task in project-B so the attacker can reference it.
         victim = Task(
@@ -424,8 +414,7 @@ class TestOccurredAtClamp:
             stored = stored.replace(tzinfo=UTC)
         now = datetime.now(UTC)
         assert abs((stored - now).total_seconds()) < 60, (
-            f"far-future occurred_at should have been clamped to now; "
-            f"got {stored}"
+            f"far-future occurred_at should have been clamped to now; got {stored}"
         )
 
     async def test_far_past_clamped_to_now(

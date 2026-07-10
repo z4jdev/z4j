@@ -14,22 +14,17 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import (
-    CommandStatus,
-    ProjectRole,
     ScheduleKind,
     TaskState,
 )
 from z4j_brain.persistence.models import (
     AuditLog,
-    Command,
-    Membership,
     Project,
     Schedule,
     Session,
@@ -116,7 +111,6 @@ async def seeded(settings: Settings, brain_app):
 @pytest.fixture
 async def client(brain_app, settings: Settings, seeded):
     from httpx import ASGITransport, AsyncClient
-
     from z4j_brain.auth.csrf import csrf_cookie_name
 
     transport = ASGITransport(app=brain_app)
@@ -151,7 +145,10 @@ class TestSchedulesRouter:
         assert body == {"items": [], "next_cursor": None}
 
     async def test_list_with_seeded_schedule(
-        self, brain_app, client, seeded,
+        self,
+        brain_app,
+        client,
+        seeded,
     ) -> None:
         async with brain_app.state.db.session() as s:
             s.add(
@@ -193,7 +190,10 @@ class TestStatsRouter:
         assert body["failure_rate_24h"] == 0.0
 
     async def test_stats_reflect_seeded_tasks(
-        self, brain_app, client, seeded,
+        self,
+        brain_app,
+        client,
+        seeded,
     ) -> None:
         async with brain_app.state.db.session() as s:
             now = datetime.now(UTC)
@@ -227,7 +227,9 @@ class TestStatsRouter:
 @pytest.mark.asyncio
 class TestAuditRouter:
     async def test_audit_returns_recorded_events(
-        self, client, seeded,
+        self,
+        client,
+        seeded,
     ) -> None:
         # Issue an action that writes to the audit log first.
         r1 = await client.post(
@@ -244,7 +246,10 @@ class TestAuditRouter:
         assert "agent.token.minted" in actions
 
     async def test_audit_export_csv(
-        self, brain_app, client, seeded,
+        self,
+        brain_app,
+        client,
+        seeded,
     ) -> None:
         # Seed two audit rows; one has an action value that begins
         # with ``=`` so we also verify CSV-formula injection is
@@ -275,7 +280,8 @@ class TestAuditRouter:
         assert r.headers["content-type"].startswith("text/csv")
         assert "attachment" in r.headers.get("content-disposition", "")
         assert "z4j-audit-default.csv" in r.headers.get(
-            "content-disposition", "",
+            "content-disposition",
+            "",
         )
         body = r.text
         assert "action" in body.splitlines()[0]  # header row
@@ -286,7 +292,10 @@ class TestAuditRouter:
         assert ",=danger()" not in body
 
     async def test_audit_export_json_with_field_selection(
-        self, brain_app, client, seeded,
+        self,
+        brain_app,
+        client,
+        seeded,
     ) -> None:
         async with brain_app.state.db.session() as s:
             s.add(
@@ -306,8 +315,7 @@ class TestAuditRouter:
             await s.commit()
 
         r = await client.get(
-            "/api/v1/projects/default/audit"
-            "?format=json&fields=action,result",
+            "/api/v1/projects/default/audit?format=json&fields=action,result",
         )
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("application/json")
@@ -339,7 +347,9 @@ class TestProjectsCRUD:
         assert r.json()["slug"] == "staging"
 
     async def test_create_project_duplicate_slug_409(
-        self, client, seeded,
+        self,
+        client,
+        seeded,
     ) -> None:
         r = await client.post(
             "/api/v1/projects",
@@ -349,7 +359,9 @@ class TestProjectsCRUD:
         assert r.status_code == 409
 
     async def test_create_project_bad_slug_409(
-        self, client, seeded,
+        self,
+        client,
+        seeded,
     ) -> None:
         r = await client.post(
             "/api/v1/projects",
@@ -362,12 +374,12 @@ class TestProjectsCRUD:
         r = await client.patch(
             "/api/v1/projects/default",
             headers={"X-CSRF-Token": seeded["csrf"]},
-            json={"name": "Default Updated", "retention_days": 60},
+            json={"name": "Default Updated", "timezone": "Europe/Berlin"},
         )
         assert r.status_code == 200
         body = r.json()
         assert body["name"] == "Default Updated"
-        assert body["retention_days"] == 60
+        assert body["timezone"] == "Europe/Berlin"
 
     async def test_archive_project(self, client, seeded) -> None:
         # Create a fresh project to archive (don't archive default,
@@ -415,7 +427,9 @@ class TestUsersRouter:
         assert r.json()["email"] == "bob@example.com"
 
     async def test_create_user_weak_password_rejected(
-        self, client, seeded,
+        self,
+        client,
+        seeded,
     ) -> None:
         r = await client.post(
             "/api/v1/users",
@@ -430,7 +444,9 @@ class TestUsersRouter:
         assert r.status_code != 201
 
     async def test_create_user_duplicate_email_409(
-        self, client, seeded,
+        self,
+        client,
+        seeded,
     ) -> None:
         r = await client.post(
             "/api/v1/users",
@@ -451,7 +467,8 @@ class TestUsersRouter:
 @pytest.mark.asyncio
 class TestMembershipsRouter:
     async def test_list_memberships_initially_empty(
-        self, client,
+        self,
+        client,
     ) -> None:
         r = await client.get("/api/v1/projects/default/memberships")
         assert r.status_code == 200
@@ -509,7 +526,8 @@ class TestMetricsEndpoint:
         assert "z4j_agents_online" in body
 
     async def test_metrics_returns_401_without_bearer_when_fail_secure(
-        self, brain_settings,
+        self,
+        brain_settings,
     ) -> None:
         """v1.0.13 fail-secure regression test.
 
@@ -519,9 +537,8 @@ class TestMetricsEndpoint:
         added; this test catches any future regression that
         accidentally re-opens the endpoint to anonymous scrapes.
         """
-        from sqlalchemy.ext.asyncio import create_async_engine
         from httpx import ASGITransport, AsyncClient
-
+        from sqlalchemy.ext.asyncio import create_async_engine
         from z4j_brain.main import create_app
 
         # Override: lock down /metrics for this one test.
@@ -533,7 +550,8 @@ class TestMetricsEndpoint:
             app = create_app(secure_settings, engine=engine)
             transport = ASGITransport(app=app)
             async with AsyncClient(
-                transport=transport, base_url="http://testserver",
+                transport=transport,
+                base_url="http://testserver",
             ) as ac:
                 r = await ac.get("/metrics")
                 assert r.status_code == 401
@@ -547,13 +565,13 @@ class TestMetricsEndpoint:
             await engine.dispose()
 
     async def test_metrics_accepts_correct_bearer_token(
-        self, brain_settings,
+        self,
+        brain_settings,
     ) -> None:
         """Operators with a configured token + matching bearer get 200."""
+        from httpx import ASGITransport, AsyncClient
         from pydantic import SecretStr
         from sqlalchemy.ext.asyncio import create_async_engine
-        from httpx import ASGITransport, AsyncClient
-
         from z4j_brain.main import create_app
 
         token = "test-token-" + secrets.token_urlsafe(16)
@@ -568,7 +586,8 @@ class TestMetricsEndpoint:
             app = create_app(secure_settings, engine=engine)
             transport = ASGITransport(app=app)
             async with AsyncClient(
-                transport=transport, base_url="http://testserver",
+                transport=transport,
+                base_url="http://testserver",
             ) as ac:
                 r = await ac.get(
                     "/metrics",

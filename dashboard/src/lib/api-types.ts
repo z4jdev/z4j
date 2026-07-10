@@ -71,7 +71,6 @@ export interface ProjectPublic {
   description: string | null;
   environment: string;
   timezone: string;
-  retention_days: number;
   is_active: boolean;
   created_at: string;
   updated_at: string;

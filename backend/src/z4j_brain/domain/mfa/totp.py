@@ -85,7 +85,7 @@ def _hotp(secret: bytes, counter: int) -> str:
         | (digest[offset + 2] & 0xFF) << 8
         | (digest[offset + 3] & 0xFF)
     )
-    return str(truncated % (10 ** TOTP_DIGITS)).zfill(TOTP_DIGITS)
+    return str(truncated % (10**TOTP_DIGITS)).zfill(TOTP_DIGITS)
 
 
 def current_totp_code(secret: bytes, *, at_time: float | None = None) -> str:
@@ -114,7 +114,12 @@ def verify_totp_code(
     avoid timing oracles.
     """
     code = code.strip()
-    if len(code) != TOTP_DIGITS or not code.isdigit():
+    # isascii() BEFORE isdigit(): str.isdigit() accepts unicode digit
+    # forms (Arabic-Indic, fullwidth), but hmac.compare_digest raises
+    # TypeError on non-ASCII str -- so a fullwidth code reached the
+    # compare and 500'd the verify/enroll routes instead of being
+    # refused. Fail closed to False like every other malformed code.
+    if len(code) != TOTP_DIGITS or not code.isascii() or not code.isdigit():
         return False
 
     t = time.time() if at_time is None else at_time

@@ -22,7 +22,6 @@ from typing import Any
 
 import httpx
 import pytest
-
 from z4j_brain.domain.notifications import channels as ch_mod
 from z4j_brain.domain.notifications.channels import (
     CHANNEL_DISPATCHERS,
@@ -41,12 +40,12 @@ class TestTeamsHostAllowlist:
     @pytest.mark.parametrize(
         "host",
         [
-            "outlook.office.com",                                     # classic
-            "contoso.webhook.office.com",                             # workflow
+            "outlook.office.com",  # classic
+            "contoso.webhook.office.com",  # workflow
             "tenant-name.webhook.office.com",
-            "prod-12.westus.logic.azure.com",                         # power automate
+            "prod-12.westus.logic.azure.com",  # power automate
             "prod-04.eastus2.logic.azure.com",
-            "OUTLOOK.OFFICE.COM",                                     # case fold
+            "OUTLOOK.OFFICE.COM",  # case fold
         ],
     )
     def test_official_hosts_accepted(self, host: str) -> None:
@@ -56,12 +55,12 @@ class TestTeamsHostAllowlist:
         "host",
         [
             "attacker.example.com",
-            "webhook.office.com.attacker.com",                        # suffix smuggle
+            "webhook.office.com.attacker.com",  # suffix smuggle
             "outlook.office.com.evil.com",
-            "hooks.slack.com",                                        # other vendor
+            "hooks.slack.com",  # other vendor
             "discord.com",
             "logic.azure.com.evil.com",
-            "outlook-office.com",                                     # not the same host
+            "outlook-office.com",  # not the same host
             "",
         ],
     )
@@ -98,7 +97,7 @@ class TestValidateTeamsConfig:
             "https://attacker.example.com/in",
             "https://hooks.slack.com/services/aaa/bbb/ccc",
             "https://webhook.office.com.evil.com/in",
-            "not-a-url",                                              # no host
+            "not-a-url",  # no host
         ],
     )
     def test_non_microsoft_urls_rejected(self, url: str) -> None:
@@ -155,7 +154,8 @@ class TestDeliverTeams:
 
     @pytest.mark.asyncio
     async def test_ssrf_blocks_loopback(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A literal loopback URL must be rejected by the real
         ``validate_webhook_url`` before any TCP attempt."""
@@ -172,7 +172,8 @@ class TestDeliverTeams:
 
     @pytest.mark.asyncio
     async def test_non_microsoft_host_blocked_at_dispatch(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Belt-and-braces: even if the validator was bypassed (direct
         DB write), the dispatcher must refuse to fan out to a
@@ -181,7 +182,9 @@ class TestDeliverTeams:
         monkeypatch.setattr(ch_mod, "_post", recorder)
         # Make SSRF check pass for the public-looking host.
         monkeypatch.setattr(
-            ch_mod, "validate_webhook_url", _noop_validate_webhook_url,
+            ch_mod,
+            "validate_webhook_url",
+            _noop_validate_webhook_url,
         )
         monkeypatch.setattr(ch_mod, "resolve_and_pin", _noop_resolve_and_pin)
 
@@ -195,12 +198,15 @@ class TestDeliverTeams:
 
     @pytest.mark.asyncio
     async def test_happy_path_posts_adaptive_card(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         recorder = _RecordingPost(status_code=200, body="1")
         monkeypatch.setattr(ch_mod, "_post", recorder)
         monkeypatch.setattr(
-            ch_mod, "validate_webhook_url", _noop_validate_webhook_url,
+            ch_mod,
+            "validate_webhook_url",
+            _noop_validate_webhook_url,
         )
         monkeypatch.setattr(ch_mod, "resolve_and_pin", _noop_resolve_and_pin)
 
@@ -249,12 +255,15 @@ class TestDeliverTeams:
 
     @pytest.mark.asyncio
     async def test_priority_to_style_mapping(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         recorder = _RecordingPost()
         monkeypatch.setattr(ch_mod, "_post", recorder)
         monkeypatch.setattr(
-            ch_mod, "validate_webhook_url", _noop_validate_webhook_url,
+            ch_mod,
+            "validate_webhook_url",
+            _noop_validate_webhook_url,
         )
         monkeypatch.setattr(ch_mod, "resolve_and_pin", _noop_resolve_and_pin)
         url = "https://outlook.office.com/webhook/abc/IncomingWebhook/x/y"
@@ -271,45 +280,52 @@ class TestDeliverTeams:
                 {"trigger": "t", "priority": priority},
             )
             body = recorder.last_kwargs["json"]
-            assert (
-                body["attachments"][0]["content"]["body"][0]["style"]
-                == expected_style
-            ), f"priority={priority!r} should map to {expected_style!r}"
+            assert body["attachments"][0]["content"]["body"][0]["style"] == expected_style, (
+                f"priority={priority!r} should map to {expected_style!r}"
+            )
 
     @pytest.mark.asyncio
     async def test_202_accepted_as_success(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Workflow / Power Automate endpoints often return 202; the
         dispatcher must not flag those as failures."""
         recorder = _RecordingPost(status_code=202, body="{}")
         monkeypatch.setattr(ch_mod, "_post", recorder)
         monkeypatch.setattr(
-            ch_mod, "validate_webhook_url", _noop_validate_webhook_url,
+            ch_mod,
+            "validate_webhook_url",
+            _noop_validate_webhook_url,
         )
         monkeypatch.setattr(ch_mod, "resolve_and_pin", _noop_resolve_and_pin)
 
         url = "https://prod-04.eastus2.logic.azure.com/workflows/x/triggers/manual/paths/invoke"
         result = await deliver_teams(
-            {"webhook_url": url}, {"trigger": "t"},
+            {"webhook_url": url},
+            {"trigger": "t"},
         )
         assert result.success is True
         assert result.status_code == 202
 
     @pytest.mark.asyncio
     async def test_5xx_marked_failure(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         recorder = _RecordingPost(status_code=500, body="boom")
         monkeypatch.setattr(ch_mod, "_post", recorder)
         monkeypatch.setattr(
-            ch_mod, "validate_webhook_url", _noop_validate_webhook_url,
+            ch_mod,
+            "validate_webhook_url",
+            _noop_validate_webhook_url,
         )
         monkeypatch.setattr(ch_mod, "resolve_and_pin", _noop_resolve_and_pin)
 
         url = "https://outlook.office.com/webhook/abc/IncomingWebhook/x/y"
         result = await deliver_teams(
-            {"webhook_url": url}, {"trigger": "t"},
+            {"webhook_url": url},
+            {"trigger": "t"},
         )
         assert result.success is False
         assert result.status_code == 500
@@ -317,12 +333,15 @@ class TestDeliverTeams:
 
     @pytest.mark.asyncio
     async def test_dispatch_time_resolve_failure_surfaces(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         recorder = _RecordingPost()
         monkeypatch.setattr(ch_mod, "_post", recorder)
         monkeypatch.setattr(
-            ch_mod, "validate_webhook_url", _noop_validate_webhook_url,
+            ch_mod,
+            "validate_webhook_url",
+            _noop_validate_webhook_url,
         )
 
         async def _failing_resolve(url: str) -> tuple[str | None, str | None]:
@@ -332,7 +351,8 @@ class TestDeliverTeams:
 
         url = "https://outlook.office.com/webhook/abc/IncomingWebhook/x/y"
         result = await deliver_teams(
-            {"webhook_url": url}, {"trigger": "t"},
+            {"webhook_url": url},
+            {"trigger": "t"},
         )
         assert result.success is False
         assert "unsafe teams URL" in (result.error or "")
@@ -345,7 +365,8 @@ class TestSecurityHardening:
 
     @pytest.mark.asyncio
     async def test_exception_with_triple_backticks_does_not_escape_fence(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A crafted exception message containing ``` would close the
         Markdown code fence and let an attacker inject Adaptive Card
@@ -354,15 +375,13 @@ class TestSecurityHardening:
         recorder = _RecordingPost()
         monkeypatch.setattr(ch_mod, "_post", recorder)
         monkeypatch.setattr(
-            ch_mod, "validate_webhook_url", _noop_validate_webhook_url,
+            ch_mod,
+            "validate_webhook_url",
+            _noop_validate_webhook_url,
         )
         monkeypatch.setattr(ch_mod, "resolve_and_pin", _noop_resolve_and_pin)
         url = "https://contoso.webhook.office.com/webhookb2/abc/x/y"
-        injected = (
-            "RuntimeError: done\n```\n"
-            "[phish](https://attacker.example/x)\n"
-            "```"
-        )
+        injected = "RuntimeError: done\n```\n[phish](https://attacker.example/x)\n```"
         await deliver_teams(
             {"webhook_url": url},
             {"trigger": "task_failure", "exception": injected},
@@ -387,10 +406,10 @@ class TestSecurityHardening:
     @pytest.mark.parametrize(
         "host",
         [
-            "outlook.office.com.",                      # trailing dot
-            "contoso.webhook.office.com.",              # trailing dot + tenant
-            "prod-04.eastus2.logic.azure.com.",         # trailing dot + power-automate
-            "OUTLOOK.office.com.",                       # case + trailing dot
+            "outlook.office.com.",  # trailing dot
+            "contoso.webhook.office.com.",  # trailing dot + tenant
+            "prod-04.eastus2.logic.azure.com.",  # trailing dot + power-automate
+            "OUTLOOK.office.com.",  # case + trailing dot
         ],
     )
     def test_trailing_dot_hosts_accepted_after_strip(self, host: str) -> None:
@@ -412,6 +431,7 @@ def test_delivery_result_type_is_returned_for_empty_url() -> None:
     """Defensive: empty-URL branch is sync-async but still returns a
     proper :class:`DeliveryResult`."""
     import asyncio
+
     result = asyncio.run(deliver_teams({}, {}))
     assert isinstance(result, DeliveryResult)
     assert result.success is False

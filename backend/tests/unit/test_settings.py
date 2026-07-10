@@ -6,7 +6,6 @@ import os
 
 import pytest
 from pydantic import ValidationError
-
 from z4j_brain.settings import Settings
 
 

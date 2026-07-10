@@ -76,7 +76,8 @@ class PendingFire(Base):
         default=uuid.uuid4,
     )
     fire_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False,
+        Uuid(as_uuid=True),
+        nullable=False,
     )
     schedule_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -91,10 +92,12 @@ class PendingFire(Base):
     engine: Mapped[str] = mapped_column(String(40), nullable=False)
     payload: Mapped[Any] = mapped_column(jsonb(), nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
     enqueued_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -106,7 +109,9 @@ class PendingFire(Base):
         UniqueConstraint("fire_id", name="uq_pending_fires_fire_id"),
         Index(
             "ix_pending_fires_replay",
-            "project_id", "engine", "scheduled_for",
+            "project_id",
+            "engine",
+            "scheduled_for",
         ),
         Index("ix_pending_fires_expires", "expires_at"),
     )

@@ -34,7 +34,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.csrf import csrf_cookie_name
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
@@ -81,7 +80,8 @@ async def brain_app(settings: Settings):
 
 
 async def _seed_global_admin_no_membership(
-    brain_app, settings: Settings,
+    brain_app,
+    settings: Settings,
 ) -> dict:
     """Seed exactly the production scenario:
 
@@ -101,25 +101,27 @@ async def _seed_global_admin_no_membership(
     project_id = uuid.uuid4()
 
     async with db.session() as s:
-        s.add_all([
-            Project(id=project_id, slug="picker", name="Picker"),
-            User(
-                id=user_id,
-                email=f"admin-{uuid.uuid4().hex[:8]}@example.com",
-                password_hash=hasher.hash("a strong-enough-password 9"),
-                is_admin=True,  # <-- the critical bit
-                is_active=True,
-            ),
-            Session(
-                id=session_id,
-                user_id=user_id,
-                csrf_token=csrf,
-                expires_at=datetime.now(UTC) + timedelta(hours=1),
-                ip_at_issue="127.0.0.1",
-                user_agent_at_issue="test",
-            ),
-            # NO Membership row inserted: this is the whole point.
-        ])
+        s.add_all(
+            [
+                Project(id=project_id, slug="picker", name="Picker"),
+                User(
+                    id=user_id,
+                    email=f"admin-{uuid.uuid4().hex[:8]}@example.com",
+                    password_hash=hasher.hash("a strong-enough-password 9"),
+                    is_admin=True,  # <-- the critical bit
+                    is_active=True,
+                ),
+                Session(
+                    id=session_id,
+                    user_id=user_id,
+                    csrf_token=csrf,
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    ip_at_issue="127.0.0.1",
+                    user_agent_at_issue="test",
+                ),
+                # NO Membership row inserted: this is the whole point.
+            ]
+        )
         await s.commit()
 
     return {
@@ -152,7 +154,9 @@ def _admin_client(brain_app, settings: Settings, seed: dict) -> AsyncClient:
 @pytest.mark.asyncio
 class TestSubscriptionCreateGlobalAdmin:
     async def test_global_admin_can_create_subscription_without_membership(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Pre-1.3.2 this returned 403 *you are not a member of this
         project*. Post-1.3.2 it must return 201."""
@@ -186,7 +190,9 @@ class TestSubscriptionCreateGlobalAdmin:
             assert body["in_app"] is True
 
     async def test_non_admin_non_member_still_blocked(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Sanity check: the bypass is gated on ``is_admin``. A regular
         user with no Membership row MUST still be blocked, otherwise
@@ -200,30 +206,34 @@ class TestSubscriptionCreateGlobalAdmin:
         project_id = uuid.uuid4()
 
         async with db.session() as s:
-            s.add_all([
-                Project(id=project_id, slug="picker", name="Picker"),
-                User(
-                    id=user_id,
-                    email=f"user-{uuid.uuid4().hex[:8]}@example.com",
-                    password_hash=hasher.hash("a strong-enough-password 9"),
-                    is_admin=False,  # <-- NOT a global admin
-                    is_active=True,
-                ),
-                Session(
-                    id=session_id,
-                    user_id=user_id,
-                    csrf_token=csrf,
-                    expires_at=datetime.now(UTC) + timedelta(hours=1),
-                    ip_at_issue="127.0.0.1",
-                    user_agent_at_issue="test",
-                ),
-                # No Membership.
-            ])
+            s.add_all(
+                [
+                    Project(id=project_id, slug="picker", name="Picker"),
+                    User(
+                        id=user_id,
+                        email=f"user-{uuid.uuid4().hex[:8]}@example.com",
+                        password_hash=hasher.hash("a strong-enough-password 9"),
+                        is_admin=False,  # <-- NOT a global admin
+                        is_active=True,
+                    ),
+                    Session(
+                        id=session_id,
+                        user_id=user_id,
+                        csrf_token=csrf,
+                        expires_at=datetime.now(UTC) + timedelta(hours=1),
+                        ip_at_issue="127.0.0.1",
+                        user_agent_at_issue="test",
+                    ),
+                    # No Membership.
+                ]
+            )
             await s.commit()
 
         seed = {
-            "user_id": user_id, "session_id": session_id,
-            "csrf": csrf, "project_id": project_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "csrf": csrf,
+            "project_id": project_id,
         }
         async with _admin_client(brain_app, settings, seed) as client:
             resp = await client.post(

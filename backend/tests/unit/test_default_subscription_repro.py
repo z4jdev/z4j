@@ -28,20 +28,17 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import (
-    Membership,
     NotificationChannel,
     Project,
     Session,
     User,
 )
-from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.settings import Settings
 
 
@@ -148,7 +145,6 @@ async def _seed(brain_app, settings: Settings):
 
 def _client(brain_app, settings: Settings, seed: dict):
     from httpx import ASGITransport, AsyncClient
-
     from z4j_brain.auth.csrf import csrf_cookie_name
 
     transport = ASGITransport(app=brain_app)
@@ -172,7 +168,9 @@ def _client(brain_app, settings: Settings, seed: dict):
 class TestProductionRepro:
     @pytest.mark.asyncio
     async def test_create_default_with_three_channels(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Exact shape from the screenshot.
         seed = await _seed(brain_app, settings)
@@ -192,7 +190,7 @@ class TestProductionRepro:
             )
         # Print the body so the failure surfaces the actual error.
         if r.status_code != 201:
-            print(f"\n!!! status={r.status_code}\nbody={r.text}")
+            print(f"\n!!! status={r.status_code}\nbody={r.text}")  # noqa: T201  diagnostic on assertion failure
         assert r.status_code == 201, r.text
 
 
@@ -206,7 +204,9 @@ class TestBadInputShapes:
 
     @pytest.mark.asyncio
     async def test_dashboard_label_instead_of_value_returns_422_not_500(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # The dashboard might send the LABEL ("Task failed") instead
         # of the VALUE ("task.failed"). Should be a clean 422.
@@ -227,7 +227,9 @@ class TestBadInputShapes:
 
     @pytest.mark.asyncio
     async def test_invalid_uuid_in_channel_list_clean_status(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Sending a non-UUID string in project_channel_ids.
         seed = await _seed(brain_app, settings)
@@ -241,20 +243,24 @@ class TestBadInputShapes:
                     "cooldown_seconds": 300,
                 },
             )
-        assert r.status_code == 422, (
-            f"bad uuid should be 422, got {r.status_code}: {r.text}"
-        )
+        assert r.status_code == 422, f"bad uuid should be 422, got {r.status_code}: {r.text}"
 
     @pytest.mark.asyncio
     async def test_channel_id_from_other_project_returns_clean_409(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Sending a channel id that exists but belongs to a
         # different project. Should hit the validator and return
         # 409, NOT 500. Tests the IDOR scoping path.
         seed = await _seed(brain_app, settings)
         # Create a second project + channel.
-        from z4j_brain.persistence.models import Project as P, NotificationChannel as NC
+        from z4j_brain.persistence.models import (
+            NotificationChannel as NC,  # noqa: N817  short local alias
+        )
+        from z4j_brain.persistence.models import Project as P  # noqa: N817  short local alias
+
         other_project_id = uuid.uuid4()
         other_channel_id = uuid.uuid4()
         async with brain_app.state.db.session() as s:
@@ -287,13 +293,14 @@ class TestBadInputShapes:
         # broken and returns a generic error instead of a clean
         # ConflictError.
         assert r.status_code == 409, (
-            f"cross-project channel id should be 409, got "
-            f"{r.status_code}: {r.text}"
+            f"cross-project channel id should be 409, got {r.status_code}: {r.text}"
         )
 
     @pytest.mark.asyncio
     async def test_duplicate_trigger_returns_409_on_second_post(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # First create succeeds; second with same trigger must
         # return 409, not 500.
@@ -315,13 +322,14 @@ class TestBadInputShapes:
                 json=body,
             )
         assert r2.status_code == 409, (
-            f"duplicate trigger should be 409, got "
-            f"{r2.status_code}: {r2.text}"
+            f"duplicate trigger should be 409, got {r2.status_code}: {r2.text}"
         )
 
     @pytest.mark.asyncio
     async def test_unknown_filter_field_silently_dropped(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """v1.0.19 H2 fix: ``SubscriptionFilters`` switched from
         ``extra="forbid"`` to ``extra="ignore"`` so a newer dashboard

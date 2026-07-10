@@ -27,7 +27,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 from z4j_brain.audit_retention import AuditRetentionSweeper
 from z4j_brain.persistence import models  # noqa: F401  - register mappers
 from z4j_brain.persistence.base import Base
@@ -41,7 +40,6 @@ from z4j_brain.persistence.repositories import AgentStatusHistoryRepository
 from z4j_brain.settings import Settings
 from z4j_brain.websocket.frame_router import FrameRouter
 from z4j_core.transport.frames import AgentStatusFrame, AgentStatusPayload
-
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -82,7 +80,9 @@ async def project_and_agent(
 ) -> tuple[uuid.UUID, uuid.UUID]:
     """Seed one project + one agent so FK constraints are satisfied."""
     factory = sessionmaker(
-        db_manager._engine, class_=AsyncSession, expire_on_commit=False,
+        db_manager._engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
     )
     async with factory() as s:
         p = Project(slug="status-test", name="Status Test")
@@ -216,7 +216,8 @@ class TestRepository:
         async with db_manager.session() as session:
             repo = AgentStatusHistoryRepository(session)
             rows = await repo.recent_for_agent(
-                agent_id=agent_id, limit=5,
+                agent_id=agent_id,
+                limit=5,
             )
             assert len(rows) == 5
             # Newest first: payload["i"] descends from 9 to 5.
@@ -271,9 +272,7 @@ class TestRepository:
             assert deleted == 3
 
         async with db_manager.session() as session:
-            remaining = (
-                await session.execute(select(AgentStatusHistory))
-            ).scalars().all()
+            remaining = (await session.execute(select(AgentStatusHistory))).scalars().all()
             assert len(remaining) == 2
             for r in remaining:
                 assert "fresh" in r.payload
@@ -287,11 +286,13 @@ class TestRepository:
             repo = AgentStatusHistoryRepository(session)
             with pytest.raises(ValueError):
                 await repo.delete_older_than(
-                    cutoff=datetime.now(UTC), batch_size=0,
+                    cutoff=datetime.now(UTC),
+                    batch_size=0,
                 )
             with pytest.raises(ValueError):
                 await repo.delete_older_than(
-                    cutoff=datetime.now(UTC), batch_size=200_000,
+                    cutoff=datetime.now(UTC),
+                    batch_size=200_000,
                 )
 
 
@@ -346,18 +347,14 @@ class TestFrameRouterIntegration:
         await router.dispatch(frame)
 
         async with db_manager.session() as session:
-            rows = (
-                await session.execute(select(AgentStatusHistory))
-            ).scalars().all()
+            rows = (await session.execute(select(AgentStatusHistory))).scalars().all()
             assert len(rows) == 1
             row = rows[0]
             assert row.project_id == project_id
             assert row.agent_id == agent_id
             # captured_at must be the frame's ``ts`` (agent clock),
             # not datetime.now() (brain clock).
-            assert row.captured_at.replace(tzinfo=UTC) == captured or (
-                row.captured_at == captured
-            )
+            assert row.captured_at.replace(tzinfo=UTC) == captured or (row.captured_at == captured)
             assert row.payload["auth_failure_streak"] == 2
             assert row.payload["connection_failure_streak"] == 5
             assert row.payload["buffer_depth"] == 42
@@ -376,7 +373,7 @@ class TestFrameRouterIntegration:
         relies on this contract per the audit fix in the heartbeat
         path).
         """
-        project_id, agent_id = project_and_agent
+        project_id, _agent_id = project_and_agent
 
         # Frame with an agent_id that has no FK target in agents.
         # The router uses self._agent_id, not the frame, so we
@@ -461,9 +458,7 @@ class TestRetentionSweep:
         assert sweeper.total_agent_status_deleted == 4
 
         async with db_manager.session() as session:
-            remaining = (
-                await session.execute(select(AgentStatusHistory))
-            ).scalars().all()
+            remaining = (await session.execute(select(AgentStatusHistory))).scalars().all()
             assert len(remaining) == 2
 
     async def test_sweeper_keeps_recent_status_rows(
@@ -493,9 +488,7 @@ class TestRetentionSweep:
         assert sweeper.last_agent_status_deleted == 0
 
         async with db_manager.session() as session:
-            remaining = (
-                await session.execute(select(AgentStatusHistory))
-            ).scalars().all()
+            remaining = (await session.execute(select(AgentStatusHistory))).scalars().all()
             assert len(remaining) == 3
 
     async def test_sweeper_disabled_when_event_retention_zero(
@@ -529,9 +522,7 @@ class TestRetentionSweep:
         assert sweeper.last_agent_status_deleted == 0
 
         async with db_manager.session() as session:
-            remaining = (
-                await session.execute(select(AgentStatusHistory))
-            ).scalars().all()
+            remaining = (await session.execute(select(AgentStatusHistory))).scalars().all()
             assert len(remaining) == 1  # ancient row survives
 
     async def test_sweeper_batches_large_backlog(
@@ -550,10 +541,7 @@ class TestRetentionSweep:
             db_manager,
             project_id=project_id,
             agent_id=agent_id,
-            when=[
-                now - timedelta(days=30, seconds=i)
-                for i in range(250)
-            ],
+            when=[now - timedelta(days=30, seconds=i) for i in range(250)],
         )
 
         sweeper = AuditRetentionSweeper()
@@ -563,7 +551,5 @@ class TestRetentionSweep:
         assert sweeper.last_agent_status_deleted == 250
 
         async with db_manager.session() as session:
-            remaining = (
-                await session.execute(select(AgentStatusHistory))
-            ).scalars().all()
+            remaining = (await session.execute(select(AgentStatusHistory))).scalars().all()
             assert remaining == []

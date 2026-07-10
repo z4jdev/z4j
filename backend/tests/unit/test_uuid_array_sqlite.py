@@ -32,7 +32,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import (
@@ -65,7 +64,8 @@ async def project(session: AsyncSession) -> Project:
 
 @pytest.fixture
 async def channels(
-    session: AsyncSession, project: Project,
+    session: AsyncSession,
+    project: Project,
 ) -> list[NotificationChannel]:
     chs = [
         NotificationChannel(
@@ -114,15 +114,17 @@ class TestProjectDefaultSubscriptionWithChannels:
         assert isinstance(sub.project_channel_ids, list)
         assert len(sub.project_channel_ids) == 3
         for stored, original in zip(
-            sub.project_channel_ids, channels, strict=True,
+            sub.project_channel_ids,
+            channels,
+            strict=True,
         ):
-            assert isinstance(stored, uuid.UUID), (
-                f"expected UUID, got {type(stored)}: {stored!r}"
-            )
+            assert isinstance(stored, uuid.UUID), f"expected UUID, got {type(stored)}: {stored!r}"
             assert stored == original.id
 
     async def test_empty_list_round_trips(
-        self, session: AsyncSession, project: Project,
+        self,
+        session: AsyncSession,
+        project: Project,
     ) -> None:
         """The other common case: in_app-only default with no channels."""
         sub = ProjectDefaultSubscription(
@@ -177,11 +179,10 @@ class TestProjectDefaultSubscriptionWithChannels:
                 ),
             )
             loaded = result.scalar_one()
-            assert all(
-                isinstance(i, uuid.UUID) for i in loaded.project_channel_ids
-            )
+            assert all(isinstance(i, uuid.UUID) for i in loaded.project_channel_ids)
             assert loaded.project_channel_ids == [
-                channels[0].id, channels[2].id,
+                channels[0].id,
+                channels[2].id,
             ]
 
 
@@ -217,8 +218,6 @@ class TestUserSubscriptionWithChannels:
         await session.commit()
         await session.refresh(sub)
 
-        assert all(
-            isinstance(i, uuid.UUID) for i in sub.project_channel_ids
-        )
+        assert all(isinstance(i, uuid.UUID) for i in sub.project_channel_ids)
         assert sub.project_channel_ids == [channels[0].id, channels[1].id]
         assert sub.user_channel_ids == []

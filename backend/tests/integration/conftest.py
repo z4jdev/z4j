@@ -22,9 +22,9 @@ Lifecycle:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import secrets
-import uuid
 from collections.abc import AsyncIterator, Iterator
 
 import pytest
@@ -55,13 +55,15 @@ if _SHARED_PG_URL is None:
 else:
     PostgresContainer = None  # type: ignore[assignment]
 
-import asyncpg
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-
-from z4j_brain.persistence.base import Base
-from z4j_brain.persistence import models  # noqa: F401  (registers metadata)
-from z4j_brain.settings import Settings
-
+import asyncpg  # noqa: E402  must follow testcontainers importorskip guard
+from sqlalchemy.ext.asyncio import (  # noqa: E402  must follow importorskip guard
+    AsyncEngine,
+    create_async_engine,
+)
+from z4j_brain.persistence import (  # noqa: E402  must follow importorskip guard
+    models,  # noqa: F401  must follow importorskip guard; registers metadata
+)
+from z4j_brain.settings import Settings  # noqa: E402  must follow importorskip guard
 
 # ---------------------------------------------------------------------------
 # Session-scoped Postgres container
@@ -87,15 +89,13 @@ def _postgres_container() -> Iterator[object | None]:
             dbname="z4j",
         )
         container.start()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         pytest.skip(f"docker / postgres container unavailable: {exc}")
     try:
         yield container
     finally:
-        try:
+        with contextlib.suppress(Exception):
             container.stop()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 @pytest.fixture(scope="session")
@@ -204,11 +204,12 @@ async def migrated_engine(
     Returns the same engine, but the schema is now in place. Most
     integration tests want this fixture, not the bare engine.
     """
-    from alembic import command
-    from alembic.config import Config
     from pathlib import Path
 
-    backend_root = Path(__file__).resolve().parents[2]
+    from alembic import command
+    from alembic.config import Config
+
+    backend_root = Path(__file__).resolve().parents[2]  # noqa: ASYNC240  test fixture setup, not hot loop
     cfg = Config(str(backend_root / "alembic.ini"))
     cfg.set_main_option(
         "script_location",
@@ -228,15 +229,14 @@ async def migrated_engine(
     try:
         os.environ["Z4J_DATABASE_URL"] = integration_settings.database_url
         os.environ["Z4J_SECRET"] = integration_settings.secret.get_secret_value()
-        os.environ["Z4J_SESSION_SECRET"] = (
-            integration_settings.session_secret.get_secret_value()
-        )
+        os.environ["Z4J_SESSION_SECRET"] = integration_settings.session_secret.get_secret_value()
         os.environ["Z4J_ENVIRONMENT"] = "dev"
         os.environ["Z4J_REQUIRE_DB_SSL"] = "false"
         # alembic.command.upgrade is sync - run it in an executor so
         # we don't block the asyncio loop.
         await asyncio.get_event_loop().run_in_executor(
-            None, lambda: command.upgrade(cfg, "head"),
+            None,
+            lambda: command.upgrade(cfg, "head"),
         )
     finally:
         for k, v in saved.items():

@@ -22,10 +22,8 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
-
 from z4j_brain.main import create_app
 from z4j_brain.settings import Settings
-
 
 # ---------------------------------------------------------------------------
 # Autouse fixture: reset the per-IP rate-limit buckets between tests.
@@ -50,15 +48,15 @@ async def _reset_rate_limit_buckets() -> None:
 
 
 def _settings(**overrides: Any) -> Settings:
-    base: dict[str, Any] = dict(
-        database_url="sqlite+aiosqlite:///:memory:",
-        secret=secrets.token_urlsafe(48),
-        session_secret=secrets.token_urlsafe(48),
-        log_json=False,
-        environment="dev",
-        metrics_public=True,
-        disable_spa_fallback=True,
-    )
+    base: dict[str, Any] = {
+        "database_url": "sqlite+aiosqlite:///:memory:",
+        "secret": secrets.token_urlsafe(48),
+        "session_secret": secrets.token_urlsafe(48),
+        "log_json": False,
+        "environment": "dev",
+        "metrics_public": True,
+        "disable_spa_fallback": True,
+    }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
 
@@ -147,7 +145,8 @@ class TestS1OpenAPIVisibilityMatrix:
         assert r.status_code == 401
 
     async def test_private_anon_response_has_no_schema_leak(
-        self, private_client,
+        self,
+        private_client,
     ) -> None:
         """The 401 body must not echo any z4j-route specifics."""
         r = await private_client.get("/api/v1/openapi.json")
@@ -181,9 +180,7 @@ class TestS1OpenAPIDefenseLayers:
         r = await public_client.get("/api/v1/openapi.json")
         assert r.status_code == 200
         info = r.json()["info"]
-        assert "x-z4j-build" in info, (
-            "schema must carry x-z4j-build watermark per 1.6.3 plan S1.5"
-        )
+        assert "x-z4j-build" in info, "schema must carry x-z4j-build watermark per 1.6.3 plan S1.5"
 
     async def test_schema_carries_etag(self, public_client) -> None:
         r = await public_client.get("/api/v1/openapi.json")
@@ -201,12 +198,11 @@ class TestS1OpenAPIDefenseLayers:
         assert r2.headers["etag"] == etag
 
     async def test_schema_response_carries_cache_control(
-        self, public_client,
+        self,
+        public_client,
     ) -> None:
         r = await public_client.get("/api/v1/openapi.json")
-        assert r.headers.get("cache-control"), (
-            "schema must carry Cache-Control per 1.6.3 plan S1.2"
-        )
+        assert r.headers.get("cache-control"), "schema must carry Cache-Control per 1.6.3 plan S1.2"
 
 
 # ---------------------------------------------------------------------------
@@ -256,8 +252,7 @@ class TestS4ApiKeyScopesAuth:
         """
         r = await client.get("/api/v1/api-keys/scopes")
         assert r.status_code == 401, (
-            "/api/v1/api-keys/scopes must require authentication "
-            "per 1.6.3 plan S4."
+            "/api/v1/api-keys/scopes must require authentication per 1.6.3 plan S4."
         )
 
 
@@ -288,6 +283,5 @@ class TestS5SetupThrottle:
         # 6th attempt: throttle MUST 429 regardless of body validity.
         r = await client.post("/api/v1/setup/complete", json=body)
         assert r.status_code == 429, (
-            "6th attempt within 15 min must hit the 1.6.3 setup-complete "
-            "throttle (5/15min/IP)."
+            "6th attempt within 15 min must hit the 1.6.3 setup-complete throttle (5/15min/IP)."
         )

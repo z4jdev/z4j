@@ -8,37 +8,25 @@ shipping.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
-import time
 import uuid
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
-
-from z4j_brain.observability import sentry as sentry_mod
+from z4j_brain.api import activity as activity_mod
+from z4j_brain.domain import audit_forwarder as af_mod
+from z4j_brain.domain.audit_forwarder import (
+    AuditForwarder,
+)
 from z4j_brain.observability.sentry import (
     _PATH_TOKEN_HOST_RE,
     _REDACT_MAX_DEPTH,
     _SENSITIVE_HEADERS,
     _redact_mapping,
     _scrub_inline_urls,
-    _scrub_url,
-    _scrub_stacktrace_frames,
     scrub_event,
 )
-from z4j_brain.domain import audit_forwarder as af_mod
-from z4j_brain.domain.audit_forwarder import (
-    AUDIT_SIGNATURE_HEADER,
-    AUDIT_TIMESTAMP_HEADER,
-    AuditForwarder,
-    row_to_payload,
-    sign_payload,
-)
-from z4j_brain.api import activity as activity_mod
-
 
 # ---------------------------------------------------------------------------
 # Round 2 A -- _post timeout via request.extensions (the SHIP-STOPPER)
@@ -214,10 +202,7 @@ class TestRound2SentryScrubbing:
             },
         }
         out = scrub_event(event)
-        assert (
-            "LEAK"
-            not in out["threads"]["values"][0]["stacktrace"]["frames"][0]["context_line"]
-        )
+        assert "LEAK" not in out["threads"]["values"][0]["stacktrace"]["frames"][0]["context_line"]
 
     def test_transaction_url_scrubbed(self) -> None:
         """Round 2 H-1: when FastAPI can't match a route the
@@ -309,7 +294,8 @@ class TestRound2OtelHookFailClosed:
 class TestRound2InFlightShutdownTracking:
     @pytest.mark.asyncio
     async def test_in_flight_row_counted_at_shutdown(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Round 2 Sev-5 / H10: a row that was pulled from the
         queue and is awaiting _send_one when cancellation lands is
@@ -333,26 +319,43 @@ class TestRound2InFlightShutdownTracking:
         )
         fwd.start()
         # Push a row; let the drain task pull it and park inside _send_one.
-        row = SimpleNamespace(
+        _row = SimpleNamespace(
             id=uuid.UUID("00000000-0000-0000-0000-00000000abcd"),
-            action="test.action", target_type="t", target_id=None,
-            result="success", outcome="allow", event_id=None,
-            user_id=None, api_key_id=None, project_id=None,
-            source_ip=None, user_agent=None, audit_metadata={},
-            occurred_at=None, prev_row_hmac=None, row_hmac="0" * 64,
+            action="test.action",
+            target_type="t",
+            target_id=None,
+            result="success",
+            outcome="allow",
+            event_id=None,
+            user_id=None,
+            api_key_id=None,
+            project_id=None,
+            source_ip=None,
+            user_agent=None,
+            audit_metadata={},
+            occurred_at=None,
+            prev_row_hmac=None,
+            row_hmac="0" * 64,
         )
         # Bypass _row_to_payload's occurred_at iso conversion.
         fwd.enqueue(
             {
                 "id": "00000000-0000-0000-0000-00000000abcd",
-                "action": "test.action", "target_type": "t",
-                "target_id": None, "result": "success",
-                "outcome": "allow", "event_id": None,
-                "user_id": None, "api_key_id": None,
-                "project_id": None, "source_ip": None,
-                "user_agent": None, "metadata": {},
+                "action": "test.action",
+                "target_type": "t",
+                "target_id": None,
+                "result": "success",
+                "outcome": "allow",
+                "event_id": None,
+                "user_id": None,
+                "api_key_id": None,
+                "project_id": None,
+                "source_ip": None,
+                "user_agent": None,
+                "metadata": {},
                 "occurred_at": "2026-05-12T12:00:00.000000+00:00",
-                "prev_row_hmac": None, "row_hmac": "0" * 64,
+                "prev_row_hmac": None,
+                "row_hmac": "0" * 64,
             },
         )
         await asyncio.sleep(0.05)  # let drain task pull + block
@@ -381,7 +384,8 @@ class TestRateLimitBucketCap:
         activity_mod._reset_rate_limit_for_tests()
 
     def test_lru_eviction_at_cap(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Patch the cap down so the test runs fast.
         monkeypatch.setattr(activity_mod, "_RATE_LIMIT_USER_CAP", 5)
@@ -395,7 +399,8 @@ class TestRateLimitBucketCap:
         assert len(activity_mod._user_bucket) == 5
 
     def test_recent_access_updates_lru_order(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(activity_mod, "_RATE_LIMIT_USER_CAP", 3)
         for uid in ("a", "b", "c"):
@@ -421,6 +426,7 @@ class TestRound2DocsAlignment:
 
     def test_audit_webhook_doc_uses_timestamp_signing(self) -> None:
         from pathlib import Path
+
         doc = Path(
             "../../sites/z4j-dev/src/content/docs/operations/audit-webhook.md",
         )
@@ -434,6 +440,7 @@ class TestRound2DocsAlignment:
 
     def test_activity_feed_doc_uses_cursor_names(self) -> None:
         from pathlib import Path
+
         doc = Path(
             "../../sites/z4j-dev/src/content/docs/operations/activity-feed.md",
         )
@@ -447,9 +454,7 @@ class TestRound2DocsAlignment:
             "?since_id=",
             "?before_id=",
         ):
-            assert legacy not in text, (
-                f"legacy cursor name remains in activity-feed.md: {legacy}"
-            )
+            assert legacy not in text, f"legacy cursor name remains in activity-feed.md: {legacy}"
         # New cursor names + rate-limit + source_ip RBAC documented.
         assert "next_before_cursor" in text
         assert "Rate limit" in text or "60 requests / minute" in text or "60/min per worker" in text

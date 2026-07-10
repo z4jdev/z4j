@@ -6,7 +6,6 @@ import secrets
 import time
 
 import pytest
-
 from z4j_brain.auth.passwords import PasswordError, PasswordHasher
 from z4j_brain.settings import Settings
 
@@ -35,13 +34,15 @@ class TestRoundTrip:
         assert hasher.verify(h, "wrong one") is False
 
     def test_verify_corrupt_hash_does_not_raise(
-        self, hasher: PasswordHasher,
+        self,
+        hasher: PasswordHasher,
     ) -> None:
         # Total nonsense - verify must return False, never raise.
         assert hasher.verify("not-a-real-hash", "anything") is False
 
     def test_verify_empty_hash_does_not_raise(
-        self, hasher: PasswordHasher,
+        self,
+        hasher: PasswordHasher,
     ) -> None:
         assert hasher.verify("", "anything") is False
 
@@ -66,7 +67,8 @@ class TestDummyHash:
         assert h1.dummy_hash != h2.dummy_hash
 
     def test_verify_dummy_hash_with_random_input(
-        self, hasher: PasswordHasher,
+        self,
+        hasher: PasswordHasher,
     ) -> None:
         # Dummy is a hash of a random string we don't know - verify
         # against a guess MUST return False.
@@ -82,7 +84,8 @@ class TestTiming:
     """
 
     def test_dummy_and_real_take_similar_time(
-        self, hasher: PasswordHasher,
+        self,
+        hasher: PasswordHasher,
     ) -> None:
         real = hasher.hash("real password 9")
 
@@ -101,13 +104,15 @@ class TestTiming:
 
 class TestNeedsRehash:
     def test_freshly_hashed_does_not_need_rehash(
-        self, hasher: PasswordHasher,
+        self,
+        hasher: PasswordHasher,
     ) -> None:
         h = hasher.hash("anything 9")
         assert hasher.needs_rehash(h) is False
 
     def test_corrupt_hash_treated_as_needing_rehash(
-        self, hasher: PasswordHasher,
+        self,
+        hasher: PasswordHasher,
     ) -> None:
         assert hasher.needs_rehash("not-a-real-hash") is True
 
@@ -147,14 +152,16 @@ class TestPolicy:
         assert exc.value.code == "password_in_breach_list"
 
     def test_in_breach_list_case_insensitive(
-        self, hasher: PasswordHasher,
+        self,
+        hasher: PasswordHasher,
     ) -> None:
         with pytest.raises(PasswordError) as exc:
             hasher.validate_policy("WELCOME2024!")
         assert exc.value.code == "password_in_breach_list"
 
     def test_three_of_four_character_classes_required(
-        self, hasher: PasswordHasher,
+        self,
+        hasher: PasswordHasher,
     ) -> None:
         # Audit A3: "letter + digit only" no longer passes.
         # 1.6.5 (audit F4): also lengthened past the new min=12

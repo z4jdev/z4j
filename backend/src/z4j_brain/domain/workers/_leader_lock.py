@@ -31,7 +31,8 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import logging
-from typing import TYPE_CHECKING, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from z4j_brain.persistence.database import DatabaseManager
@@ -85,7 +86,7 @@ async def acquire_per_worker_lock(
         yield True
         return
 
-    from sqlalchemy import text  # noqa: PLC0415
+    from sqlalchemy import text
 
     lock_id = _lock_id_for(worker_name)
     async with db.session() as session:
@@ -97,8 +98,8 @@ async def acquire_per_worker_lock(
         got_it = bool(result.scalar())
         if not got_it:
             logger.debug(
-                "z4j.brain.workers: skipping %r tick - another replica "
-                "holds the advisory lock", worker_name,
+                "z4j.brain.workers: skipping %r tick - another replica holds the advisory lock",
+                worker_name,
             )
             yield False
             return
@@ -113,7 +114,7 @@ async def acquire_per_worker_lock(
             # no-op for the caller's data.
             try:
                 await session.commit()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 await session.rollback()
 
 
@@ -148,7 +149,7 @@ async def try_acquire_singleton_lock(
     if db.engine.dialect.name != "postgresql":
         return True
 
-    from sqlalchemy import text  # noqa: PLC0415
+    from sqlalchemy import text
 
     lock_id = _lock_id_for(name)
     # Use the engine's raw connection pool so the lock persists
@@ -167,8 +168,7 @@ async def try_acquire_singleton_lock(
         if not got_it:
             await conn.close()
             logger.info(
-                "z4j.brain.workers: %r singleton lock held by another "
-                "worker; skipping",
+                "z4j.brain.workers: %r singleton lock held by another worker; skipping",
                 name,
             )
             return False
@@ -178,10 +178,11 @@ async def try_acquire_singleton_lock(
         # exit / SIGKILL) so no manual unlock is needed.
         logger.info(
             "z4j.brain.workers: acquired %r singleton lock (id=%d)",
-            name, lock_id,
+            name,
+            lock_id,
         )
         return True
-    except Exception:  # noqa: BLE001
+    except Exception:
         await conn.close()
         raise
 

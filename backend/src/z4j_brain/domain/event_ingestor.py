@@ -30,11 +30,14 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4, uuid5
 
 import structlog
-
 from z4j_core.models.event import EventKind
 from z4j_core.redaction import RedactionEngine
 
-from z4j_brain.persistence.enums import TaskPriority, TaskState
+from z4j_brain.persistence.enums import (
+    TERMINAL_TASK_STATES,
+    TaskPriority,
+    TaskState,
+)
 
 #: Namespace UUID used to derive the brain-side event id from the
 #: agent-supplied id + project_id. Generated once via
@@ -143,10 +146,16 @@ def _looks_like_deadlock(exc: BaseException) -> bool:
     if sqlstate in {"40P01", "40001"}:
         return True
     msg = str(exc).lower()
-    return any(token in msg for token in (
-        "deadlock", "could not serialize", "database is locked",
-        "lock_not_available", "current transaction is aborted",
-    ))
+    return any(
+        token in msg
+        for token in (
+            "deadlock",
+            "could not serialize",
+            "database is locked",
+            "lock_not_available",
+            "current transaction is aborted",
+        )
+    )
 
 
 #: Map from agent-side EventKind to the TaskState the brain should
@@ -158,11 +167,10 @@ def _looks_like_deadlock(exc: BaseException) -> bool:
 # be allowed to overwrite the current row's state. A terminal state
 # ALWAYS wins over a non-terminal state regardless of timestamp;
 # within the same tier the monotonic-timestamp guard applies.
-_TERMINAL_TASK_STATES = frozenset({
-    TaskState.SUCCESS,
-    TaskState.FAILURE,
-    TaskState.REVOKED,
-})
+# Canonical definition lives in ``z4j_brain.persistence.enums`` so
+# this guard and ``TaskRepository.apply_reconciled_state`` (R3 H1)
+# share one notion of "terminal".
+_TERMINAL_TASK_STATES = TERMINAL_TASK_STATES
 
 _STATE_FOR_KIND: dict[EventKind, TaskState | None] = {
     EventKind.TASK_RECEIVED: TaskState.RECEIVED,
@@ -188,13 +196,22 @@ class EventIngestor:
         events: list[dict[str, Any]],
         project_id: UUID,
         agent_id: UUID,
-        agents: "AgentRepository",
-        event_repo: "EventRepository",
-        task_repo: "TaskRepository",
-        queue_repo: "QueueRepository",
-        worker_repo: "WorkerRepository | None" = None,
-    ) -> int:
-        """Ingest a batch of events. Returns the number of NEW rows.
+        agents: AgentRepository,
+        event_repo: EventRepository,
+        task_repo: TaskRepository,
+        queue_repo: QueueRepository,
+        worker_repo: WorkerRepository | None = None,
+    ) -> list[dict[str, Any]]:
+        """Ingest a batch of events. Returns the NEW (non-duplicate)
+        events -- the ones actually inserted, with re-delivered
+        duplicates excluded (an agent reconnect re-flushes its buffered
+        events with the SAME event_id; those dedup at insert time).
+
+        Returning the new events (not just a count) lets the caller run
+        per-event hooks -- notably automation rule firing -- ONCE per
+        LOGICAL event instead of once per delivery, so a flaky WS that
+        re-delivers a ``task.failed`` cannot fire a rule (and its
+        notify/retry action) N times for one failure.
 
         The full batch participates in the caller's transaction.
         Per-event redaction failures do NOT poison the batch - the
@@ -208,7 +225,11 @@ class EventIngestor:
         the loop. Saves ~N round-trips per batch on the workers +
         agents tables.
         """
-        new_count = 0
+        # The NEW (actually-inserted) events, in arrival order. A
+        # re-delivered duplicate (same event_id) dedups at insert time
+        # and is NOT appended, so the caller's automation hook fires once
+        # per logical event, not once per delivery.
+        new_events: list[dict[str, Any]] = []
         # Accumulator for worker upserts. Key is (engine, name);
         # value is the latest occurred_at observed for that worker
         # in this batch. We pick max so a stale event late in the
@@ -240,6 +261,7 @@ class EventIngestor:
         # deadlocks we log + skip that single event; the rest of the
         # batch survives.
         from sqlalchemy.exc import DBAPIError, OperationalError
+
         session_obj = event_repo.session
         for raw_event in events:
             for _attempt in (1, 2):
@@ -285,7 +307,7 @@ class EventIngestor:
                         agent_id=str(agent_id),
                     )
                     break
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "z4j event_ingestor: per-event ingest failed; skipping",
                         project_id=str(project_id),
@@ -298,11 +320,8 @@ class EventIngestor:
                         break
                     inserted, occurred_at = event_max
                     if inserted:
-                        new_count += 1
-                    if (
-                        batch_max_occurred_at is None
-                        or occurred_at > batch_max_occurred_at
-                    ):
+                        new_events.append(raw_event)
+                    if batch_max_occurred_at is None or occurred_at > batch_max_occurred_at:
                         batch_max_occurred_at = occurred_at
                     break
 
@@ -318,35 +337,61 @@ class EventIngestor:
                 worker_seen=worker_seen,
             )
 
-        # One queue.touch per unique (engine, queue) pair seen in
-        # the batch. Each
-        # ``touch`` is wrapped to make a single failure non-fatal
-        # for the whole batch, matching the prior per-event
-        # try/except.
+        # Best-effort side writes (queue liveness + agent heartbeat).
+        # These are OBSERVABILITY, not event data, so each runs in its
+        # own savepoint via _best_effort_side_write: a deadlock there (a
+        # touch/heartbeat UPSERT lock-cycling with a concurrent agent, or
+        # a heartbeat vs an automation firing's row lock) rolls back ONLY
+        # that write, leaving the ingested events to commit and
+        # automation to fire. Live-test finding: an UNprotected deadlock
+        # on the heartbeat touch aborted the whole event batch.
         for engine_name, queue_name in queues_seen:
-            try:
-                await queue_repo.touch(
+            await self._best_effort_side_write(
+                session_obj,
+                queue_repo.touch(
                     project_id=project_id,
                     engine=engine_name,
                     name=queue_name,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "z4j event_ingestor: batched queue touch failed",
-                    queue=queue_name,
-                    engine=engine_name,
-                )
+                ),
+                write="queue.touch",
+                queue=queue_name,
+                engine=engine_name,
+            )
+        await self._best_effort_side_write(
+            session_obj,
+            agents.touch_heartbeat_at(agent_id, when=batch_max_occurred_at),
+            write="agent.heartbeat",
+            agent_id=str(agent_id),
+        )
+        return new_events
 
-        # Heartbeat: any event traffic counts as the agent being
-        # alive. Carries the batch's max occurred_at when available
-        # (avoids race with wall-clock now() across brain replicas).
-        await agents.touch_heartbeat_at(agent_id, when=batch_max_occurred_at)
-        return new_count
+    async def _best_effort_side_write(
+        self,
+        session_obj: Any,
+        coro: Any,
+        **ctx: Any,
+    ) -> None:
+        """Run a best-effort observability write in its own SAVEPOINT.
+
+        A deadlock or error rolls back only this write (never the
+        ingested events, which are the load-bearing data). A bare
+        try/except would catch the error but leave the transaction
+        aborted and poison the commit, so the savepoint is essential.
+        """
+        try:
+            async with session_obj.begin_nested():
+                await coro
+        except Exception:
+            logger.warning(
+                "z4j event_ingestor: best-effort side write failed "
+                "(non-fatal; events still commit)",
+                **ctx,
+            )
 
     async def _flush_worker_upserts(
         self,
         *,
-        worker_repo: "WorkerRepository",
+        worker_repo: WorkerRepository,
         project_id: UUID,
         worker_seen: dict[tuple[str, str], datetime],
     ) -> None:
@@ -397,23 +442,22 @@ class EventIngestor:
                             "last_heartbeat": row["last_heartbeat"],
                         },
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
-                        "z4j event_ingestor: per-row worker upsert "
-                        "fallback failed; skipping",
+                        "z4j event_ingestor: per-row worker upsert fallback failed; skipping",
                         engine=row["engine"],
                         worker=row["name"],
                     )
 
-    async def _ingest_one(
+    async def _ingest_one(  # noqa: PLR0912, PLR0915  event ingestion pipeline
         self,
         *,
         raw_event: dict[str, Any],
         project_id: UUID,
         agent_id: UUID,
-        event_repo: "EventRepository",
-        task_repo: "TaskRepository",
-        queue_repo: "QueueRepository",
+        event_repo: EventRepository,
+        task_repo: TaskRepository,
+        queue_repo: QueueRepository,
         worker_seen: dict[tuple[str, str], datetime],
         queues_seen: set[tuple[str, str]] | None = None,
     ) -> tuple[bool, datetime] | None:
@@ -483,13 +527,28 @@ class EventIngestor:
         # inserted 9 rows per task per kind). The new key collapses
         # them to ONE row.
         #
-        # Why second-precision: a real legitimate "duplicate" within
-        # the same second is impossible (same task can't run twice
-        # per second per worker for celery's lifecycle events). A
-        # genuine retry produces different occurred_at values seconds
-        # apart and gets a distinct id. Heartbeats / agent_status
-        # frames have no task_id and stay on the legacy agent-id key
-        # so per-agent freshness is preserved.
+        # Why second-precision: it collapses the celery-events fan-out
+        # (several agents / two brain replicas reporting one broker event
+        # within sub-seconds) to a single row. A genuine retry produces
+        # occurred_at values seconds apart and gets a distinct id.
+        # Heartbeats / agent_status frames have no task_id and stay on the
+        # legacy agent-id key so per-agent freshness is preserved.
+        #
+        # ACCEPTED-TRADEOFF (Codex round-2 Finding 3, documented not fixed):
+        # second-precision conflates two identities -- "logical event" and
+        # "fan-out duplicate" -- so it has two residual failure modes:
+        #   (a) two GENUINELY distinct same-(task,kind) events inside one
+        #       wall-clock second collapse to one row (a low-rate silent
+        #       drop, and a censorship vector if co-timed);
+        #   (b) a reconnect replay whose occurred_at jitters ACROSS a second
+        #       boundary mints a distinct id -> re-inserts -> can re-fire
+        #       automation (the per-rule circuit breaker is the backstop,
+        #       not this dedupe).
+        # SCOPED FOLLOW-UP: separate the two identities -- key event ROWS on
+        # a stable agent-supplied event/attempt/run id, and suppress the
+        # multi-agent broker fan-out with a SEPARATE (task,kind,window)
+        # dedupe key -- so neither distinct events nor jittered replays are
+        # mis-collapsed. Tracked for a post-1.7 ingestion revision.
         if task_id:
             occurred_at_int = int(occurred_at.timestamp())
             event_id = uuid5(
@@ -510,6 +569,16 @@ class EventIngestor:
                 f"{project_id}:{agent_event_id}",
             )
 
+        # The task-keyed event_id above is derived at SECOND precision, but
+        # the events conflict key is (project_id, occurred_at, id). Store
+        # occurred_at at that same granularity on this path so two
+        # deliveries of one logical event that differ only in sub-seconds
+        # (the celery-events fan-out where several agents report the same
+        # broker event, or two brain replicas) collapse to a single row
+        # instead of both inserting and firing automation twice. Non-task
+        # events keep full precision on their agent-id key.
+        stored_occurred_at = occurred_at.replace(microsecond=0) if task_id else occurred_at
+
         # 0) Prometheus counter. Best-effort: a metric-registry
         # hiccup must not break event ingestion. The bump below to
         # ``z4j_swallowed_exceptions_total`` keeps this visible in
@@ -518,9 +587,11 @@ class EventIngestor:
             from z4j_brain.api.metrics import z4j_events_ingested_total
 
             z4j_events_ingested_total.labels(
-                project=str(project_id), engine=engine, kind=kind_value,
+                project=str(project_id),
+                engine=engine,
+                kind=kind_value,
             ).inc()
-        except Exception:  # noqa: BLE001
+        except Exception:
             from z4j_brain.api.metrics import record_swallowed
 
             record_swallowed("event_ingestor", "counter_inc")
@@ -533,7 +604,7 @@ class EventIngestor:
             engine=engine,
             task_id=task_id,
             kind=kind.value,
-            occurred_at=occurred_at,
+            occurred_at=stored_occurred_at,
             payload=data if isinstance(data, dict) else {},
         )
 
@@ -553,7 +624,7 @@ class EventIngestor:
                         engine=engine,
                         name=queue_name,
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception("z4j event_ingestor: queue touch failed")
 
         # 3) Record the worker into the batch-level accumulator.
@@ -570,13 +641,29 @@ class EventIngestor:
 
         # 4) Project onto tasks (only for task-shaped events).
         if task_id and kind != EventKind.UNKNOWN:
+            task_data = data if isinstance(data, dict) else {}
+            if kind == EventKind.TASK_FAILED:
+                # Stamp the SAME fingerprint the task row stores onto the
+                # raw event, so the automation path (frame_router
+                # ._fingerprint_of, reading raw_event["data"]) matches the
+                # value the Issues view shows instead of recomputing from
+                # the raw, un-scrubbed, un-truncated data. Both call sites
+                # use fingerprint_from_data on the identical scrubbed
+                # ``data`` object, so shown == matched.
+                from z4j_brain.domain.fingerprint import (
+                    fingerprint_from_data,
+                )
+
+                event_data = raw_event.get("data")
+                if isinstance(event_data, dict):
+                    event_data["fingerprint"] = fingerprint_from_data(task_data)
             await self._project_task(
                 project_id=project_id,
                 engine=engine,
                 task_id=task_id,
                 kind=kind,
                 occurred_at=occurred_at,
-                data=data if isinstance(data, dict) else {},
+                data=task_data,
                 task_repo=task_repo,
             )
 
@@ -590,12 +677,9 @@ class EventIngestor:
         # rq-scheduler / apscheduler schedules were invisible until
         # they were edited (signal-based only).
         if kind_value == EventKind.SCHEDULE_SNAPSHOT.value:
-            schedules_in = (
-                data.get("schedules") if isinstance(data, dict) else None
-            )
+            schedules_in = data.get("schedules") if isinstance(data, dict) else None
             scheduler_name = (
-                str(data.get("scheduler") or engine)
-                if isinstance(data, dict) else engine
+                str(data.get("scheduler") or engine) if isinstance(data, dict) else engine
             )
             if isinstance(schedules_in, list):
                 try:
@@ -614,12 +698,13 @@ class EventIngestor:
                         project_id=str(project_id),
                         scheduler=scheduler_name,
                         reason=str(data.get("reason", "unknown"))
-                            if isinstance(data, dict) else "unknown",
+                        if isinstance(data, dict)
+                        else "unknown",
                         inserted=summary["inserted"],
                         updated=summary["updated"],
                         deleted=summary["deleted"],
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "z4j event_ingestor: schedule snapshot reconcile failed",
                         scheduler=scheduler_name,
@@ -630,9 +715,7 @@ class EventIngestor:
             EventKind.SCHEDULE_CREATED.value,
             EventKind.SCHEDULE_UPDATED.value,
         ):
-            schedule_data = (
-                data.get("schedule") if isinstance(data, dict) else None
-            )
+            schedule_data = data.get("schedule") if isinstance(data, dict) else None
             if isinstance(schedule_data, dict):
                 try:
                     from z4j_brain.persistence.repositories import (
@@ -659,14 +742,14 @@ class EventIngestor:
                         project_id=project_id,
                         data=enriched,
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "z4j event_ingestor: schedule upsert failed",
                     )
 
         return (inserted, occurred_at)
 
-    async def _project_task(
+    async def _project_task(  # noqa: PLR0912, PLR0915  task projection pipeline
         self,
         *,
         project_id: UUID,
@@ -698,7 +781,9 @@ class EventIngestor:
         # back-filled because they're informational, not
         # lifecycle-bearing).
         existing_task = await task_repo.get_by_engine_task_id(
-            project_id=project_id, engine=engine, task_id=task_id,
+            project_id=project_id,
+            engine=engine,
+            task_id=task_id,
         )
         existing_latest = _task_latest_lifecycle_at(existing_task)
 
@@ -734,9 +819,7 @@ class EventIngestor:
             # Within the non-terminal set, the timestamp ordering
             # also still applies (a stale .started does not
             # overwrite a fresher .received).
-            current_state = (
-                existing_task.state if existing_task else None
-            )
+            current_state = existing_task.state if existing_task else None
             current_terminal = current_state in _TERMINAL_TASK_STATES
             new_terminal = new_state in _TERMINAL_TASK_STATES
             if new_terminal and not current_terminal:
@@ -746,17 +829,13 @@ class EventIngestor:
             elif not new_terminal and current_terminal:
                 # Never demote terminal back to non-terminal.
                 logger.debug(
-                    "z4j event_ingestor: refusing to demote terminal "
-                    "state with non-terminal event",
+                    "z4j event_ingestor: refusing to demote terminal state with non-terminal event",
                     project_id=str(project_id),
                     task_id=task_id,
                     event_kind=kind.value,
                     current_state=current_state.value if current_state else None,
                 )
-            elif (
-                existing_latest is not None
-                and occurred_at < existing_latest
-            ):
+            elif existing_latest is not None and occurred_at < existing_latest:
                 # Same-tier transition (terminal->terminal or
                 # non-terminal->non-terminal): keep timestamp
                 # monotonicity. Stale event for the same tier is
@@ -779,13 +858,15 @@ class EventIngestor:
             updates["priority"] = priority
 
         if kind == EventKind.TASK_RECEIVED:
-            updates.update({
-                "received_at": occurred_at,
-                "args": data.get("args"),
-                "kwargs": data.get("kwargs"),
-                "queue": (str(data.get("queue")) if data.get("queue") else None),
-                "name": str(data.get("task_name") or "unknown"),
-            })
+            updates.update(
+                {
+                    "received_at": occurred_at,
+                    "args": data.get("args"),
+                    "kwargs": data.get("kwargs"),
+                    "queue": (str(data.get("queue")) if data.get("queue") else None),
+                    "name": str(data.get("task_name") or "unknown"),
+                }
+            )
             # Canvas linkage from Celery's request: ``parent_task_id``
             # is the task that called ``apply_async`` for me;
             # ``root_task_id`` is the original entry point of the
@@ -830,35 +911,57 @@ class EventIngestor:
                 if clean is not None:
                     updates["root_task_id"] = clean
         elif kind == EventKind.TASK_STARTED:
-            updates.update({
-                "started_at": occurred_at,
-                "worker_name": (
-                    str(data.get("worker")) if data.get("worker") else None
-                ),
-            })
+            updates.update(
+                {
+                    "started_at": occurred_at,
+                    "worker_name": (str(data.get("worker")) if data.get("worker") else None),
+                }
+            )
         elif kind == EventKind.TASK_SUCCEEDED:
-            updates.update({
-                "finished_at": occurred_at,
-                "result": data.get("result"),
-                "runtime_ms": _coerce_int(data.get("runtime_ms")),
-                "exception": None,
-                "traceback": None,
-            })
+            updates.update(
+                {
+                    "finished_at": occurred_at,
+                    "result": data.get("result"),
+                    "runtime_ms": _coerce_int(data.get("runtime_ms")),
+                    "exception": None,
+                    "traceback": None,
+                }
+            )
         elif kind == EventKind.TASK_FAILED:
-            updates.update({
-                "finished_at": occurred_at,
-                "exception": _coerce_str(data.get("exception")),
-                "traceback": _coerce_str(data.get("traceback")),
-            })
+            from z4j_brain.domain.fingerprint import fingerprint_from_data
+
+            updates.update(
+                {
+                    "finished_at": occurred_at,
+                    # Failure "seen" time for the Issues view. Kept across a
+                    # later recovery (TASK_SUCCEEDED overwrites finished_at
+                    # but NOT this), so the issue window tracks failure time,
+                    # not recovery time.
+                    "last_failed_at": occurred_at,
+                    "exception": _coerce_str(data.get("exception")),
+                    "traceback": _coerce_str(data.get("traceback")),
+                    # R4 fingerprint from the FULL scrubbed exception +
+                    # traceback (``fingerprint_from_data``), set on failure
+                    # and kept across a later recovery (TASK_SUCCEEDED does
+                    # not clear it) so the Issues view can show recovered
+                    # issues. ``_ingest_one`` stamps the SAME value onto the
+                    # raw event so the automation path matches what is
+                    # stored here.
+                    "fingerprint": fingerprint_from_data(data),
+                }
+            )
         elif kind == EventKind.TASK_RETRIED:
-            updates.update({
-                "retry_count": _coerce_int(data.get("retry_count"), default=0)
-                or 0,
-            })
+            updates.update(
+                {
+                    "retry_count": _coerce_int(data.get("retry_count"), default=0) or 0,
+                }
+            )
         elif kind == EventKind.TASK_REVOKED:
-            updates.update({
-                "finished_at": occurred_at,
-            })
+            updates.update(
+                {
+                    "finished_at": occurred_at,
+                }
+            )
 
         # Prometheus task metrics for terminal states.
         #
@@ -883,15 +986,18 @@ class EventIngestor:
             task_name = _safe_metric_task_name(project_id, raw_task_name)
             if kind in (EventKind.TASK_SUCCEEDED, EventKind.TASK_FAILED, EventKind.TASK_REVOKED):
                 z4j_tasks_total.labels(
-                    project=str(project_id), task_name=task_name, state=kind.value,
+                    project=str(project_id),
+                    task_name=task_name,
+                    state=kind.value,
                 ).inc()
             if kind == EventKind.TASK_SUCCEEDED:
                 runtime_ms = _coerce_int(data.get("runtime_ms"))
                 if runtime_ms is not None and runtime_ms > 0:
                     z4j_task_duration_seconds.labels(
-                        project=str(project_id), task_name=task_name,
+                        project=str(project_id),
+                        task_name=task_name,
                     ).observe(runtime_ms / 1000.0)
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Metric write failed; event ingestion must not block.
             from z4j_brain.api.metrics import record_swallowed
 
@@ -934,16 +1040,19 @@ class EventIngestor:
         if len(candidate) > 200 or "\x00" in candidate:
             logger.warning(
                 "z4j event_ingestor: dropped malformed canvas reference",
-                project_id=str(project_id), field=field,
+                project_id=str(project_id),
+                field=field,
             )
             return None
         if candidate == task_id:
             return None  # self-loop; meaningless
         try:
             elsewhere = await task_repo.other_project_owns(
-                project_id=project_id, engine=engine, task_id=candidate,
+                project_id=project_id,
+                engine=engine,
+                task_id=candidate,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             # If the lookup fails for any reason, fall back to
             # storing as-is - we'd rather keep the linkage than
             # silently drop it because of a transient DB hiccup.
@@ -958,7 +1067,8 @@ class EventIngestor:
             # fix for false "cross-project" drops.
             logger.warning(
                 "z4j event_ingestor: dropped cross-project canvas reference",
-                project_id=str(project_id), field=field,
+                project_id=str(project_id),
+                field=field,
             )
             return None
         return candidate
@@ -994,12 +1104,11 @@ def _task_latest_lifecycle_at(task: Any) -> datetime | None:
         if ts is None:
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
+            ts = ts.replace(tzinfo=UTC)  # noqa: PLW2901  normalized in-loop
         # Clamp future-dated lifecycle timestamps - a legacy row
         # (pre-R5) may have future stamps that would otherwise
         # freeze the state column against any legitimate event.
-        if ts > now:
-            ts = now
+        ts = min(ts, now)  # noqa: PLW2901  normalized in-loop
         if newest is None or ts > newest:
             newest = ts
     return newest
@@ -1046,7 +1155,10 @@ def _coerce_event_id(value: Any) -> UUID | None:
 
 
 def _clamp_occurred_at(
-    value: datetime, *, project_id: UUID, agent_id: UUID,
+    value: datetime,
+    *,
+    project_id: UUID,
+    agent_id: UUID,
 ) -> datetime:
     """Clamp ``occurred_at`` to ``[now - 400d, now + 5min]``.
 
@@ -1070,14 +1182,16 @@ def _clamp_occurred_at(
     if value < now - _OCCURRED_AT_PAST_LIMIT:
         logger.warning(
             "z4j event_ingestor: occurred_at clamped (too far in past)",
-            project_id=str(project_id), agent_id=str(agent_id),
+            project_id=str(project_id),
+            agent_id=str(agent_id),
             received=value.isoformat(),
         )
         return now
     if value > now + _OCCURRED_AT_FUTURE_LIMIT:
         logger.warning(
             "z4j event_ingestor: occurred_at clamped (too far in future)",
-            project_id=str(project_id), agent_id=str(agent_id),
+            project_id=str(project_id),
+            agent_id=str(agent_id),
             received=value.isoformat(),
         )
         return now

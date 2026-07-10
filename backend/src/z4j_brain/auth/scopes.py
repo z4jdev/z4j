@@ -37,6 +37,7 @@ ALL_SCOPES: Final[tuple[str, ...]] = (
     "audit:read",
     "memberships:read",
     "notifications:read",
+    "automation:read",
     # Write
     "tasks:write",
     "commands:write",
@@ -44,6 +45,7 @@ ALL_SCOPES: Final[tuple[str, ...]] = (
     "projects:write",
     "memberships:write",
     "notifications:write",
+    "automation:write",
     # Admin-gated (require is_admin on the owning user at mint time)
     "users:read",
     "users:write",
@@ -51,9 +53,14 @@ ALL_SCOPES: Final[tuple[str, ...]] = (
 )
 
 #: Scopes only a global admin can grant on a key they mint.
-ADMIN_ONLY_SCOPES: Final[frozenset[str]] = frozenset({
-    "users:read", "users:write", "projects:write", "admin:*",
-})
+ADMIN_ONLY_SCOPES: Final[frozenset[str]] = frozenset(
+    {
+        "users:read",
+        "users:write",
+        "projects:write",
+        "admin:*",
+    }
+)
 
 #: FastAPI tags that are always allowed regardless of scope. These
 #: are stateless / pre-auth endpoints where there is nothing to
@@ -64,32 +71,40 @@ ADMIN_ONLY_SCOPES: Final[frozenset[str]] = frozenset({
 #: the ``auth:read`` scope; every write endpoint under ``/auth``
 #: is rejected outright for Bearer auth by
 #: :data:`BEARER_DENY_TAGS` below.
-PUBLIC_TAGS: Final[frozenset[str]] = frozenset({
-    "health", "setup", "metrics",
-})
+PUBLIC_TAGS: Final[frozenset[str]] = frozenset(
+    {
+        "health",
+        "setup",
+        "metrics",
+    }
+)
 
 #: Tags that API-key (Bearer) auth may never touch at all.
 #: Session-cookie auth still works. These are user-identity-level
 #: operations (change my password, revoke my sessions) where an
 #: exfiltrated narrow-scope token must NOT be an escalation path.
-BEARER_DENY_TAGS: Final[frozenset[str]] = frozenset({
-    "auth",
-})
+BEARER_DENY_TAGS: Final[frozenset[str]] = frozenset(
+    {
+        "auth",
+    }
+)
 
 #: When a token is bound to a specific project, we only let it
 #: reach routes that either (a) carry a ``{slug}`` path param we
 #: can match against the bound project, or (b) are in this
 #: allowlist of cross-project read-only endpoints. Anything else
 #: returns 403.
-PROJECT_SCOPED_NONSLUG_ALLOWLIST: Final[frozenset[str]] = frozenset({
-    # Cross-project home cards come pre-filtered to the caller's
-    # visible projects; the scope itself (home:read) is still
-    # required on top.
-    "home",
-    # Listing projects returns only rows the caller can see; a
-    # project-scoped token sees only its bound project here.
-    "projects",
-})
+PROJECT_SCOPED_NONSLUG_ALLOWLIST: Final[frozenset[str]] = frozenset(
+    {
+        # Cross-project home cards come pre-filtered to the caller's
+        # visible projects; the scope itself (home:read) is still
+        # required on top.
+        "home",
+        # Listing projects returns only rows the caller can see; a
+        # project-scoped token sees only its bound project here.
+        "projects",
+    }
+)
 
 #: FastAPI tag → scope resource. Any tag not listed here is treated
 #: as admin-only (fail closed).
@@ -105,12 +120,13 @@ TAG_TO_RESOURCE: Final[dict[str, str]] = {
     "audit": "audit",
     "memberships": "memberships",
     "notifications": "notifications",
+    "automation": "automation",
     "user-notifications": "notifications",
     "users": "users",
     "api-keys": "admin",  # minting/revoking keys is an admin surface
-    "events": "tasks",    # raw event stream is a task-level surface
-    "stats": "tasks",     # aggregate task stats roll up under tasks
-    "auth": "auth",       # /auth/me read. Writes denied for Bearer.
+    "events": "tasks",  # raw event stream is a task-level surface
+    "stats": "tasks",  # aggregate task stats roll up under tasks
+    "auth": "auth",  # /auth/me read. Writes denied for Bearer.
 }
 
 

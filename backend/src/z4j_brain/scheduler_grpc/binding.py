@@ -81,16 +81,15 @@ async def resolve_project_slug(
     almost always already in the connection pool's hot set. Skip the
     cache for v1 simplicity.
     """
-    from sqlalchemy import select  # noqa: PLC0415
+    from sqlalchemy import select
 
-    from z4j_brain.persistence.models import Project  # noqa: PLC0415
+    from z4j_brain.persistence.models import Project
 
     async with db.session() as session:
         result = await session.execute(
             select(Project.slug).where(Project.id == project_id),
         )
-        row = result.scalar_one_or_none()
-    return row
+        return result.scalar_one_or_none()
 
 
 async def enforce_cn_project_binding(
@@ -129,7 +128,8 @@ async def enforce_cn_project_binding(
         logger.warning(
             "z4j.brain.scheduler_grpc.binding: rejected RPC for "
             "unknown project_id=%s from CN(s)=%r",
-            project_id, sorted(bound_for_peer),
+            project_id,
+            sorted(bound_for_peer),
         )
         await context.abort(
             grpc.StatusCode.PERMISSION_DENIED,
@@ -145,7 +145,9 @@ async def enforce_cn_project_binding(
             "z4j.brain.scheduler_grpc.binding: rejected RPC; CN(s)=%r "
             "are bound but project %r is not in their binding "
             "list (allowed=%r)",
-            sorted(bound_for_peer), project_slug, sorted(allowed_slugs),
+            sorted(bound_for_peer),
+            project_slug,
+            sorted(allowed_slugs),
         )
         await context.abort(
             grpc.StatusCode.PERMISSION_DENIED,
@@ -186,15 +188,15 @@ async def filter_project_ids_by_binding(
     if not allowed_slugs:
         return set()
 
-    from sqlalchemy import select  # noqa: PLC0415
+    from sqlalchemy import select
 
-    from z4j_brain.persistence.models import Project  # noqa: PLC0415
+    from z4j_brain.persistence.models import Project
 
     async with db.session() as session:
         result = await session.execute(
             select(Project.id).where(Project.slug.in_(allowed_slugs)),
         )
-        return {row for row in result.scalars().all()}
+        return set(result.scalars().all())
 
 
 __all__ = [

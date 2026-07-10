@@ -107,10 +107,7 @@ class MfaRecoveryCodeRepository(BaseRepository[MfaRecoveryCode]):
         if not hashed_codes:
             return
         self.session.add_all(
-            [
-                MfaRecoveryCode(user_id=user_id, code_hash=h)
-                for h in hashed_codes
-            ],
+            [MfaRecoveryCode(user_id=user_id, code_hash=h) for h in hashed_codes],
         )
 
 

@@ -9,11 +9,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.domain.command_dispatcher import CommandDispatcher
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import AgentState, CommandStatus
 from z4j_brain.persistence.models import Agent, Project
 from z4j_brain.persistence.repositories import (
@@ -111,7 +110,9 @@ class TestIssue:
         registry = FakeRegistry(notified_cluster=True, agent_was_known=True)
         audit = AuditService(settings)
         dispatcher = CommandDispatcher(
-            settings=settings, registry=registry, audit=audit,
+            settings=settings,
+            registry=registry,
+            audit=audit,
         )
 
         command = await dispatcher.issue(
@@ -149,7 +150,9 @@ class TestIssue:
         )
         audit = AuditService(settings)
         dispatcher = CommandDispatcher(
-            settings=settings, registry=registry, audit=audit,
+            settings=settings,
+            registry=registry,
+            audit=audit,
         )
 
         with pytest.raises(AgentOfflineError):
@@ -180,7 +183,9 @@ class TestHandleAck:
         registry = FakeRegistry(notified_cluster=True)
         audit = AuditService(settings)
         dispatcher = CommandDispatcher(
-            settings=settings, registry=registry, audit=audit,
+            settings=settings,
+            registry=registry,
+            audit=audit,
         )
         commands = CommandRepository(session)
         cmd = await commands.insert(
@@ -210,7 +215,9 @@ class TestHandleAck:
         registry = FakeRegistry(notified_cluster=True)
         audit = AuditService(settings)
         dispatcher = CommandDispatcher(
-            settings=settings, registry=registry, audit=audit,
+            settings=settings,
+            registry=registry,
+            audit=audit,
         )
         other_agent = Agent(
             project_id=project.id,
@@ -261,7 +268,9 @@ class TestHandleResult:
         registry = FakeRegistry(notified_cluster=True)
         audit = AuditService(settings)
         dispatcher = CommandDispatcher(
-            settings=settings, registry=registry, audit=audit,
+            settings=settings,
+            registry=registry,
+            audit=audit,
         )
         commands = CommandRepository(session)
         cmd = await commands.insert(
@@ -299,7 +308,9 @@ class TestHandleResult:
         registry = FakeRegistry(notified_cluster=True)
         audit = AuditService(settings)
         dispatcher = CommandDispatcher(
-            settings=settings, registry=registry, audit=audit,
+            settings=settings,
+            registry=registry,
+            audit=audit,
         )
         commands = CommandRepository(session)
         cmd = await commands.insert(
@@ -337,7 +348,9 @@ class TestHandleResult:
         registry = FakeRegistry(notified_cluster=True)
         audit = AuditService(settings)
         dispatcher = CommandDispatcher(
-            settings=settings, registry=registry, audit=audit,
+            settings=settings,
+            registry=registry,
+            audit=audit,
         )
         other_agent = Agent(
             project_id=project.id,
@@ -390,7 +403,9 @@ class TestHandleResult:
         registry = FakeRegistry(notified_cluster=True)
         audit = AuditService(settings)
         dispatcher = CommandDispatcher(
-            settings=settings, registry=registry, audit=audit,
+            settings=settings,
+            registry=registry,
+            audit=audit,
         )
         commands = CommandRepository(session)
         cmd = await commands.insert(

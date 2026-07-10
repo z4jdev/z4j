@@ -120,9 +120,7 @@ class ApiKeyRepository(BaseRepository[ApiKey]):
         if ip is not None:
             values["last_used_ip"] = ip
         await self.session.execute(
-            update(ApiKey)
-            .where(ApiKey.id == key_id)
-            .values(**values),
+            update(ApiKey).where(ApiKey.id == key_id).values(**values),
         )
 
 

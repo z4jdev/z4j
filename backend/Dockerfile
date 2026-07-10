@@ -18,7 +18,11 @@
 #
 # Build context: the monorepo root, NOT this directory:
 #
-#     docker build -f packages/z4j-brain/backend/Dockerfile -t z4j-brain .
+#     docker build --target runtime -f packages/z4j/backend/Dockerfile -t z4j .
+#
+# ALWAYS pass --target runtime for a production image: the LAST
+# stage in this file is dev-runtime (hot-reload uvicorn, no bundled
+# dashboard), and an untargeted build silently produces that.
 
 ARG PYTHON_VERSION=3.14
 ARG DEBIAN_RELEASE=trixie
@@ -95,7 +99,16 @@ RUN pip install --no-cache-dir "uv>=0.5.10"
 # wheels from each pyproject.toml and installs them into /opt/venv.
 WORKDIR /build
 COPY packages/z4j-core /build/packages/z4j-core
-COPY packages/z4j-brain /build/packages/z4j-brain
+# Post-1.4.0 the brain server ships in the ``z4j`` distribution
+# (packages/z4j, which packages backend/src/z4j_brain). The old
+# ``packages/z4j-brain`` directory is the metadata-only PyPI shim
+# whose sole dependency is ``z4j`` -- installing THAT here made uv
+# resolve the real brain FROM PYPI, so every image silently shipped
+# the previously-published release's backend instead of the source
+# tree it was built from (caught by the 1.7.0 boot smoke: a
+# 1.7.0-tree image reported ``z4j --version`` = 1.6.9). Install the
+# real package from the tree.
+COPY packages/z4j /build/packages/z4j
 # z4j-scheduler is a separate PyPI package but bundling it inside the
 # brain image enables the optional ``Z4J_EMBEDDED_SCHEDULER=true``
 # sidecar (docs/SCHEDULER.md §21.3) without requiring a second image.
@@ -108,7 +121,7 @@ RUN uv venv /opt/venv \
     && VIRTUAL_ENV=/opt/venv uv pip install \
         --no-cache \
         /build/packages/z4j-core \
-        "/build/packages/z4j-brain[postgres,scheduler-grpc]" \
+        "/build/packages/z4j[postgres,scheduler-grpc]" \
         /build/packages/z4j-scheduler
 
 # -----------------------------------------------------------------
@@ -275,8 +288,8 @@ RUN printf '%s\n' \
     'level = NOTSET' \
     'formatter = generic' \
     '[formatter_generic]' \
-    'format = %%(levelname)-5.5s [%%(name)s] %%(message)s' \
-    'datefmt = %%Y-%%m-%%d %%H:%%M:%%S' \
+    'format = %(levelname)-5.5s [%(name)s] %(message)s' \
+    'datefmt = %Y-%m-%d %H:%M:%S' \
     > /app/alembic.ini
 
 # 1.5: Z4J_HOME=/data routes every state file (DB, secrets, PKI,
@@ -386,8 +399,8 @@ RUN printf '%s\n' \
     'level = NOTSET' \
     'formatter = generic' \
     '[formatter_generic]' \
-    'format = %%(levelname)-5.5s [%%(name)s] %%(message)s' \
-    'datefmt = %%Y-%%m-%%d %%H:%%M:%%S' \
+    'format = %(levelname)-5.5s [%(name)s] %(message)s' \
+    'datefmt = %Y-%m-%d %H:%M:%S' \
     > /app/alembic.ini
 
 # Same entrypoint shim as production: run migrations to head, then

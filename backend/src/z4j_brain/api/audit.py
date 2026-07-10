@@ -125,7 +125,9 @@ _ALL_EXPORT_FIELDS: list[FieldDef] = [
     (
         "metadata",
         lambda r: __import__("json").dumps(
-            dict(r.audit_metadata or {}), default=str, ensure_ascii=False,
+            dict(r.audit_metadata or {}),
+            default=str,
+            ensure_ascii=False,
         ),
     ),
 ]
@@ -172,11 +174,11 @@ async def list_audit(
             "Unknown names are silently ignored."
         ),
     ),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> Any:
     """List audit log entries for one project.
 
@@ -202,7 +204,13 @@ async def list_audit(
 
     stmt = select(AuditLog).where(AuditLog.project_id == project.id)
     if action_prefix:
-        stmt = stmt.where(AuditLog.action.startswith(action_prefix))
+        # Escape LIKE metacharacters so a filter like "task.%" or
+        # "audit_" is matched LITERALLY, not as a wildcard. Bare
+        # startswith() left %/_ active (parity gap with activity.py's
+        # M16 fix); autoescape handles %, _ and the escape char.
+        stmt = stmt.where(
+            AuditLog.action.startswith(action_prefix, autoescape=True),
+        )
     if outcome:
         stmt = stmt.where(AuditLog.outcome == outcome)
     if user_id is not None:
@@ -213,7 +221,8 @@ async def list_audit(
     # Export path: no pagination, full result (capped).
     if format is not None:
         stmt = stmt.order_by(
-            AuditLog.occurred_at.desc(), AuditLog.id.desc(),
+            AuditLog.occurred_at.desc(),
+            AuditLog.id.desc(),
         ).limit(_EXPORT_ROW_CAP + 1)
         rows = list((await db_session.execute(stmt)).scalars().all())
         if len(rows) > _EXPORT_ROW_CAP:
@@ -222,11 +231,7 @@ async def list_audit(
                 "narrow the filter (action, outcome, since)",
                 details={"cap": _EXPORT_ROW_CAP},
             )
-        selected = (
-            [f.strip() for f in fields.split(",") if f.strip()]
-            if fields
-            else None
-        )
+        selected = [f.strip() for f in fields.split(",") if f.strip()] if fields else None
         field_defs = _resolve_fields(selected)
         base = f"z4j-audit-{slug}"
         if format == "csv":
@@ -255,7 +260,8 @@ async def list_audit(
             ),
         )
     stmt = stmt.order_by(
-        AuditLog.occurred_at.desc(), AuditLog.id.desc(),
+        AuditLog.occurred_at.desc(),
+        AuditLog.id.desc(),
     ).limit(page_size)
 
     rows = list((await db_session.execute(stmt)).scalars().all())

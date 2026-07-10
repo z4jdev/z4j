@@ -9,7 +9,6 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 from z4j_brain.api.user_notifications import (
     UserChannelImportFromProjectRequest,
     import_user_channel_from_project,

@@ -5,16 +5,17 @@ from __future__ import annotations
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
+from z4j_brain.api import activity as activity_mod
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.persistence.models import (
     AuditLog,
@@ -23,7 +24,6 @@ from z4j_brain.persistence.models import (
     Session,
     User,
 )
-from z4j_brain.api import activity as activity_mod
 from z4j_brain.settings import Settings
 
 
@@ -107,13 +107,17 @@ async def _seed_two_projects_one_user(
             user_agent_at_issue="test",
         ),
         Membership(
-            user_id=user_id, project_id=proj_a, role=ProjectRole.VIEWER,
+            user_id=user_id,
+            project_id=proj_a,
+            role=ProjectRole.VIEWER,
         ),
     ]
     if member_of_b:
         rows.append(
             Membership(
-                user_id=user_id, project_id=proj_b, role=ProjectRole.VIEWER,
+                user_id=user_id,
+                project_id=proj_b,
+                role=ProjectRole.VIEWER,
             ),
         )
 
@@ -131,7 +135,10 @@ async def _seed_two_projects_one_user(
 
 
 async def _seed_audit_row(
-    db, *, project_id: uuid.UUID | None, action: str = "task.failed",
+    db,
+    *,
+    project_id: uuid.UUID | None,
+    action: str = "task.failed",
 ) -> uuid.UUID:
     """Insert one audit row directly. The activity endpoint reads
     from the audit_log table; the row HMAC is not verified by the
@@ -163,7 +170,6 @@ async def _seed_audit_row(
 
 def _make_client(brain_app, settings: Settings, seed: dict):
     from httpx import ASGITransport, AsyncClient
-
     from z4j_brain.auth.csrf import csrf_cookie_name
 
     transport = ASGITransport(app=brain_app)
@@ -189,18 +195,26 @@ class TestActivityScopeEnforcement:
     """Non-admins see ONLY rows from projects they are a member of."""
 
     async def test_non_admin_excludes_other_projects(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app,
-            is_admin=False, member_of_b=False,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=False,
+            member_of_b=False,
         )
         db = brain_app.state.db
         a_id = await _seed_audit_row(
-            db, project_id=seed["proj_a"], action="task.failed",
+            db,
+            project_id=seed["proj_a"],
+            action="task.failed",
         )
         b_id = await _seed_audit_row(
-            db, project_id=seed["proj_b"], action="task.failed",
+            db,
+            project_id=seed["proj_b"],
+            action="task.failed",
         )
         async with _make_client(brain_app, settings, seed) as c:
             r = await c.get("/api/v1/activity")
@@ -211,19 +225,26 @@ class TestActivityScopeEnforcement:
         assert str(b_id) not in seen_ids
 
     async def test_non_admin_with_no_memberships_returns_empty(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app,
-            is_admin=False, member_of_b=False,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=False,
+            member_of_b=False,
         )
         # Drop the membership we created in the seed.
         db = brain_app.state.db
         from sqlalchemy import delete as _delete
+
         async with db.session() as s:
-            await s.execute(_delete(Membership).where(
-                Membership.user_id == seed["user_id"],
-            ))
+            await s.execute(
+                _delete(Membership).where(
+                    Membership.user_id == seed["user_id"],
+                )
+            )
             await s.commit()
         await _seed_audit_row(db, project_id=seed["proj_a"])
         async with _make_client(brain_app, settings, seed) as c:
@@ -235,11 +256,15 @@ class TestActivityScopeEnforcement:
         assert body["newest_cursor"] is None
 
     async def test_admin_sees_every_project(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app,
-            is_admin=True, member_of_b=False,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+            member_of_b=False,
         )
         db = brain_app.state.db
         a_id = await _seed_audit_row(db, project_id=seed["proj_a"])
@@ -252,12 +277,16 @@ class TestActivityScopeEnforcement:
         assert str(b_id) in ids
 
     async def test_admin_sees_rows_without_project(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Brain-wide rows (no project_id) are admin-only."""
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app,
-            is_admin=True, member_of_b=False,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+            member_of_b=False,
         )
         db = brain_app.state.db
         brain_id = await _seed_audit_row(db, project_id=None)
@@ -268,11 +297,15 @@ class TestActivityScopeEnforcement:
         assert str(brain_id) in ids
 
     async def test_non_admin_does_not_see_rows_without_project(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app,
-            is_admin=False, member_of_b=False,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=False,
+            member_of_b=False,
         )
         db = brain_app.state.db
         await _seed_audit_row(db, project_id=None)
@@ -289,17 +322,25 @@ class TestActivityScopeEnforcement:
 @pytest.mark.asyncio
 class TestActivityFilters:
     async def test_action_prefix_filter(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         db = brain_app.state.db
         await _seed_audit_row(
-            db, project_id=seed["proj_a"], action="user.password_changed",
+            db,
+            project_id=seed["proj_a"],
+            action="user.password_changed",
         )
         await _seed_audit_row(
-            db, project_id=seed["proj_a"], action="task.failed",
+            db,
+            project_id=seed["proj_a"],
+            action="task.failed",
         )
         async with _make_client(brain_app, settings, seed) as c:
             r = await c.get("/api/v1/activity?action_prefix=task.")
@@ -308,10 +349,14 @@ class TestActivityFilters:
         assert all(a.startswith("task.") for a in actions)
 
     async def test_project_slug_filter_constrains_results(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         db = brain_app.state.db
         await _seed_audit_row(db, project_id=seed["proj_a"])
@@ -325,10 +370,14 @@ class TestActivityFilters:
             assert it["project_slug"] == "alpha"
 
     async def test_unknown_project_slug_returns_empty(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as c:
             r = await c.get("/api/v1/activity?project_slug=nonexistent")
@@ -336,13 +385,17 @@ class TestActivityFilters:
         assert r.json()["items"] == []
 
     async def test_non_admin_project_slug_outside_memberships_empty(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """A non-admin asking for a project they don't belong to
         must get an empty result, not the rows."""
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app,
-            is_admin=False, member_of_b=False,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=False,
+            member_of_b=False,
         )
         db = brain_app.state.db
         await _seed_audit_row(db, project_id=seed["proj_b"])
@@ -355,10 +408,14 @@ class TestActivityFilters:
 @pytest.mark.asyncio
 class TestActivityPagination:
     async def test_limit_caps_result_count(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         db = brain_app.state.db
         for _ in range(5):
@@ -378,14 +435,19 @@ class TestActivityPagination:
         assert "|" in body["newest_cursor"]
 
     async def test_since_cursor_returns_only_newer_rows(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """v1.6 audit C8: cursor is (occurred_at, id) because the row
         id is uuid4 (random). Seed two batches with an explicit
         ``await asyncio.sleep(0.001)`` so occurred_at orders them."""
         import asyncio as _asyncio
+
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         db = brain_app.state.db
         for _ in range(3):
@@ -408,30 +470,42 @@ class TestActivityPagination:
         assert len(items) == 2
 
     async def test_malformed_cursor_returns_422(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as c:
             r = await c.get("/api/v1/activity?since_cursor=not-a-cursor")
         assert r.status_code == 422
 
     async def test_limit_below_one_rejected(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as c:
             r = await c.get("/api/v1/activity?limit=0")
         assert r.status_code == 422
 
     async def test_limit_above_cap_rejected(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as c:
             r = await c.get("/api/v1/activity?limit=999")
@@ -443,14 +517,18 @@ class TestActivityAuditFixes:
     """v1.6 audit follow-ups."""
 
     async def test_source_ip_hidden_from_non_admin(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """v1.6 audit M15: source_ip is privacy-sensitive. The cross-
         project feed widens the audience versus the per-project page;
         non-admins MUST NOT see source_ip in the feed."""
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app,
-            is_admin=False, member_of_b=False,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=False,
+            member_of_b=False,
         )
         db = brain_app.state.db
         async with db.session() as s:
@@ -480,16 +558,18 @@ class TestActivityAuditFixes:
         items = r.json()["items"]
         assert items, "expected at least one row"
         for item in items:
-            assert item["source_ip"] is None, (
-                "non-admin must not see source_ip"
-            )
+            assert item["source_ip"] is None, "non-admin must not see source_ip"
 
     async def test_source_ip_shown_to_admin(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Admins KEEP source_ip access. The redaction is non-admin-only."""
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         db = brain_app.state.db
         async with db.session() as s:
@@ -519,19 +599,27 @@ class TestActivityAuditFixes:
         assert items[0]["source_ip"] == "192.0.2.10"
 
     async def test_action_prefix_wildcard_does_not_match_anywhere(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """v1.6 audit M16: LIKE metachars in action_prefix must be
         escaped so ``%fail`` does not match ``task.failed``."""
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         db = brain_app.state.db
         await _seed_audit_row(
-            db, project_id=seed["proj_a"], action="task.failed",
+            db,
+            project_id=seed["proj_a"],
+            action="task.failed",
         )
         await _seed_audit_row(
-            db, project_id=seed["proj_a"], action="user.password_changed",
+            db,
+            project_id=seed["proj_a"],
+            action="user.password_changed",
         )
         async with _make_client(brain_app, settings, seed) as c:
             # Inject a leading ``%`` -- if unescaped, this would
@@ -542,14 +630,20 @@ class TestActivityAuditFixes:
         assert r.json()["items"] == []
 
     async def test_action_prefix_underscore_does_not_match_single_char(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         db = brain_app.state.db
         await _seed_audit_row(
-            db, project_id=seed["proj_a"], action="task.failed",
+            db,
+            project_id=seed["proj_a"],
+            action="task.failed",
         )
         async with _make_client(brain_app, settings, seed) as c:
             # ``_ask.`` would match ``task.`` if ``_`` were a wildcard.
@@ -558,12 +652,16 @@ class TestActivityAuditFixes:
         assert r.json()["items"] == []
 
     async def test_rate_limit_kicks_in_after_quota(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """v1.6 audit H13: per-user 60/min rate limit. We exhaust
         the bucket then assert the 61st request gets 429."""
         seed = await _seed_two_projects_one_user(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as c:
             for _ in range(60):
@@ -576,13 +674,16 @@ class TestActivityAuditFixes:
 
 @pytest.mark.asyncio
 async def test_unauthenticated_request_rejected(
-    settings: Settings, brain_app,
+    settings: Settings,
+    brain_app,
 ) -> None:
     """No session cookie -> 401. Activity feed is logged-in-only."""
     from httpx import ASGITransport, AsyncClient
+
     transport = ASGITransport(app=brain_app)
     async with AsyncClient(
-        transport=transport, base_url="http://testserver",
+        transport=transport,
+        base_url="http://testserver",
     ) as c:
         r = await c.get("/api/v1/activity")
     assert r.status_code in (401, 403)

@@ -80,7 +80,7 @@ class SetupService:
     a single source.
     """
 
-    __slots__ = ("_secret", "_settings", "_hasher", "_audit", "_db_manager")
+    __slots__ = ("_audit", "_db_manager", "_hasher", "_secret", "_settings")
 
     def __init__(
         self,
@@ -88,7 +88,7 @@ class SetupService:
         settings: Settings,
         hasher: PasswordHasher,
         audit: AuditService,
-        db_manager: "Any" = None,
+        db_manager: Any = None,
     ) -> None:
         self._secret: bytes = settings.secret.get_secret_value().encode("utf-8")
         self._settings = settings
@@ -203,7 +203,10 @@ class SetupService:
         # knows the brain is already initialised.
         if not await self.is_first_boot(users):
             await self._record_setup_failure(
-                audit_log, ip=ip, user_agent=user_agent, reason="already_initialised",
+                audit_log,
+                ip=ip,
+                user_agent=user_agent,
+                reason="already_initialised",
             )
             raise ConflictError(
                 "brain has already been initialised",
@@ -218,7 +221,10 @@ class SetupService:
         token_row = await tokens.get_active(lock=True)
         if token_row is None:
             await self._record_setup_failure(
-                audit_log, ip=ip, user_agent=user_agent, reason="no_active_token",
+                audit_log,
+                ip=ip,
+                user_agent=user_agent,
+                reason="no_active_token",
             )
             raise NotFoundError(
                 "No active setup token. Restart the brain to mint a "
@@ -231,7 +237,10 @@ class SetupService:
             # Token row has aged out. Delete defensively.
             await tokens.delete_by_id(token_row.id)
             await self._record_setup_failure(
-                audit_log, ip=ip, user_agent=user_agent, reason="expired",
+                audit_log,
+                ip=ip,
+                user_agent=user_agent,
+                reason="expired",
             )
             raise NotFoundError(
                 "Setup token has expired (15-minute lifetime). "
@@ -245,7 +254,10 @@ class SetupService:
             and hmac.compare_digest(supplied_hash, token_row.token_hash)
         ):
             await self._record_setup_failure(
-                audit_log, ip=ip, user_agent=user_agent, reason="invalid_token",
+                audit_log,
+                ip=ip,
+                user_agent=user_agent,
+                reason="invalid_token",
             )
             raise NotFoundError(
                 "This setup link is from a previous server run. The "
@@ -381,7 +393,7 @@ class SetupService:
         Known limitation (accepted trade-off): two concurrent
         pre-checks can both observe ``count < threshold`` and
         both proceed, so the budget can overshoot by at most
-        ``uvicorn_workers × concurrency - 1``. Making this truly
+        ``uvicorn_workers x concurrency - 1``. Making this truly
         atomic would require coupling the budget check into the
         audit INSERT via a Postgres CTE, which mixes concerns
         and complicates the audit chain. At the default threshold
@@ -456,7 +468,7 @@ class SetupService:
                     )
                     await audit_session.commit()
                 return
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S110  best-effort dedicated-session write, falls back to caller session
                 # Dedicated-session write failed (DB blip). Fall
                 # back to the caller's session - better to risk
                 # losing the audit on rollback than to silently

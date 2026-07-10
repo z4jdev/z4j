@@ -139,9 +139,7 @@ class PasswordHasher:
             has_lower = any(c.islower() for c in plaintext)
             has_upper = any(c.isupper() for c in plaintext)
             has_digit = any(c.isdigit() for c in plaintext)
-            has_symbol = any(
-                not c.isalnum() and not c.isspace() for c in plaintext
-            )
+            has_symbol = any(not c.isalnum() and not c.isspace() for c in plaintext)
             classes = sum([has_lower, has_upper, has_digit, has_symbol])
             if classes < 3:
                 raise PasswordError(

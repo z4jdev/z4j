@@ -20,8 +20,9 @@ exercised independently in tests:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import httpx
@@ -30,29 +31,31 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from z4j_brain import __version__
-from z4j_brain.api import (
-    auth,
-    auth_mfa,
-    health,
-    setup,
-)
 from z4j_brain.api import activity as activity_api
 from z4j_brain.api import agent_longpoll as agent_longpoll_api
 from z4j_brain.api import agent_workers as agent_workers_api
 from z4j_brain.api import agents as agents_api
 from z4j_brain.api import api_keys as api_keys_api
 from z4j_brain.api import audit as audit_api
+from z4j_brain.api import (
+    auth,
+    auth_mfa,
+    health,
+    setup,
+)
+from z4j_brain.api import automation_rules as automation_rules_api
 from z4j_brain.api import commands as commands_api
 from z4j_brain.api import events as events_api
 from z4j_brain.api import home as home_api
 from z4j_brain.api import invitations as invitations_api
+from z4j_brain.api import issues as issues_api
 from z4j_brain.api import memberships as memberships_api
 from z4j_brain.api import metrics as metrics_api
 from z4j_brain.api import notifications as notifications_api
 from z4j_brain.api import projects as projects_api
 from z4j_brain.api import queues as queues_api
-from z4j_brain.api import schedules as schedules_api
 from z4j_brain.api import schedulers_fleet as schedulers_fleet_api
+from z4j_brain.api import schedules as schedules_api
 from z4j_brain.api import stats as stats_api
 from z4j_brain.api import tasks as tasks_api
 from z4j_brain.api import trends as trends_api
@@ -74,6 +77,7 @@ from z4j_brain.domain.workers import (
     WorkerSupervisor,
 )
 from z4j_brain.domain.workers.agent_hygiene import AgentHygieneWorker
+from z4j_brain.domain.workers.misfire_detector import MisfireDetector
 from z4j_brain.domain.workers.partition_creator import PartitionCreatorWorker
 from z4j_brain.domain.workers.pending_fires import PendingFiresReplayWorker
 from z4j_brain.domain.workers.reconciliation import ReconciliationWorker
@@ -82,8 +86,6 @@ from z4j_brain.domain.workers.schedule_circuit_breaker import (
     ScheduleFiresPruneWorker,
 )
 from z4j_brain.logging_config import configure_logging
-from z4j_brain.observability.otel import init_otel
-from z4j_brain.observability.sentry import init_sentry
 from z4j_brain.middleware import (
     BodySizeLimitMiddleware,
     ErrorMiddleware,
@@ -92,6 +94,8 @@ from z4j_brain.middleware import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
+from z4j_brain.observability.otel import init_otel
+from z4j_brain.observability.sentry import init_sentry
 from z4j_brain.persistence.database import (
     DatabaseManager,
     create_engine_from_settings,
@@ -100,8 +104,8 @@ from z4j_brain.persistence.statement_timeout import install_statement_timeouts
 from z4j_brain.settings import Settings
 from z4j_brain.startup import run_first_boot_check
 from z4j_brain.startup_version import SchemaVersionError, check_and_update_schema_version
-from z4j_brain.websocket import gateway as ws_gateway
 from z4j_brain.websocket import dashboard_gateway as ws_dashboard_gateway
+from z4j_brain.websocket import gateway as ws_gateway
 from z4j_brain.websocket.dashboard_hub import (
     DashboardHub,
     LocalDashboardHub,
@@ -117,10 +121,37 @@ if TYPE_CHECKING:
 logger = structlog.get_logger("z4j.brain.main")
 
 
-def create_app(
+def _leader_gated_tick(db: DatabaseManager, worker_name: str, raw_tick: Any) -> Any:
+    """Wrap a periodic worker tick in the per-worker advisory lock.
+
+    ``z4j serve`` runs min(4, cpu) uvicorn workers and every process
+    starts the worker supervisor, so an ungated tick runs once PER
+    PROCESS per interval. For workers whose tick has cross-process
+    side effects (dispatching commands, DDL, audit rows) only the
+    replica that wins ``pg_try_advisory_xact_lock`` may run; the
+    others no-op until the next interval. SQLite deployments no-op
+    the lock (single-writer DB - see ``_leader_lock``).
+
+    Module-level (rather than a closure inside ``create_app``) so the
+    gating behavior is unit-testable without booting the app.
+    """
+
+    async def _wrapped() -> None:
+        from z4j_brain.domain.workers._leader_lock import (
+            acquire_per_worker_lock,
+        )
+
+        async with acquire_per_worker_lock(db, worker_name) as got:
+            if got:
+                await raw_tick()
+
+    return _wrapped
+
+
+def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     settings: Settings | None = None,
     *,
-    engine: "AsyncEngine | None" = None,
+    engine: AsyncEngine | None = None,
 ) -> FastAPI:
     """Build the FastAPI app."""
     settings = settings or Settings()  # type: ignore[call-arg]
@@ -169,15 +200,24 @@ def create_app(
         )
         audit_service.register_post_write_hook(audit_forwarder.enqueue)
     auth_service = AuthService(
-        settings=settings, hasher=hasher, audit=audit_service,
+        settings=settings,
+        hasher=hasher,
+        audit=audit_service,
     )
     setup_service = SetupService(
-        settings=settings, hasher=hasher, audit=audit_service,
+        settings=settings,
+        hasher=hasher,
+        audit=audit_service,
         db_manager=db,
     )
     redaction = RedactionEngine(
         RedactionConfig(
-            extra_key_patterns=tuple(settings.cors_origins[:0]),  # placeholder
+            # Operator-supplied brain-side extra patterns are not wired
+            # (there is no brain setting for them yet); the DEFAULT
+            # patterns plus agent-side redaction are the active scrub.
+            # Kept explicit-empty rather than the old cors_origins[:0]
+            # placeholder that looked wired but never was.
+            extra_key_patterns=(),
             extra_value_patterns=(),
             default_patterns_enabled=True,
             max_value_bytes=settings.max_payload_size_bytes,
@@ -223,7 +263,7 @@ def create_app(
                 settings=settings,
                 command=command,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j main: deliver_command_frame crashed AFTER claim - "
                 "command stuck in DISPATCHED state until "
@@ -286,10 +326,11 @@ def create_app(
     # embedded mode is fully self-contained.
     embedded_supervisor: Any = None
     if settings.embedded_scheduler:
-        from pathlib import Path as _PkiPath  # noqa: PLC0415
+        from pathlib import Path as _PkiPath
 
-        from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
-            SCHEDULER_CLIENT_CN, mint_loopback_pki,
+        from z4j_brain.embedded_scheduler import (
+            SCHEDULER_CLIENT_CN,
+            mint_loopback_pki,
         )
 
         # v1.1.0: default PKI directory is persistent at
@@ -303,6 +344,7 @@ def create_app(
             pki_dir = _PkiPath(settings.embedded_scheduler_pki_dir)
         else:
             from z4j_core.paths import z4j_home as _z4j_home
+
             pki_dir = _z4j_home() / "embedded-pki"
         embedded_pki = mint_loopback_pki(pki_dir)
         # Derive a settings copy with the auto-minted PKI + forced
@@ -335,7 +377,7 @@ def create_app(
     scheduler_grpc_server: Any = None  # type: ignore[assignment]
     if settings.scheduler_grpc_enabled:
         try:
-            from z4j_brain.scheduler_grpc.server import (  # noqa: PLC0415
+            from z4j_brain.scheduler_grpc.server import (
                 SchedulerGrpcServer,
             )
 
@@ -372,7 +414,16 @@ def create_app(
         ),
         PeriodicWorker(
             name="agent_health_worker",
-            tick=AgentHealthWorker(db=db, settings=settings).tick,
+            # audit + dispatcher wire the worker.offline emit path: a
+            # confirmed offline episode writes an audit row, fires
+            # worker.offline automation rules and fans out to
+            # agent.offline subscriptions (see AgentHealthWorker docs).
+            tick=AgentHealthWorker(
+                db=db,
+                settings=settings,
+                audit=audit_service,
+                dispatcher=command_dispatcher,
+            ).tick,
             interval_seconds=float(settings.agent_health_sweep_seconds),
         ),
         PeriodicWorker(
@@ -382,23 +433,93 @@ def create_app(
         ),
         PeriodicWorker(
             name="reconciliation_worker",
-            tick=ReconciliationWorker(
+            # Leader-locked (R3 M2(b)): pre-fix every brain process
+            # ran its own sweep, so ``z4j serve``'s min(4, cpu)
+            # workers each issued a duplicate ``reconcile_task``
+            # probe per stuck task per interval. Same advisory-lock
+            # gate the partition creator + outbox drain use.
+            tick=_leader_gated_tick(
                 db,
-                stale_threshold_seconds=(
-                    settings.reconciliation_stale_threshold_seconds
-                ),
-                dispatcher=command_dispatcher,
-            ).tick,
+                "reconciliation_worker",
+                ReconciliationWorker(
+                    db,
+                    stale_threshold_seconds=(settings.reconciliation_stale_threshold_seconds),
+                    # The sweep cadence doubles as the probe
+                    # idempotency-key window (R3 M2(c)).
+                    sweep_interval_seconds=(settings.reconciliation_sweep_seconds),
+                    dispatcher=command_dispatcher,
+                ).tick,
+            ),
             interval_seconds=float(
                 settings.reconciliation_sweep_seconds,
             ),
         ),
+    ]
+
+    # Events partition pre-creator (leader-only). ``z4j serve`` runs
+    # min(4, cpu) uvicorn workers since 1.5 and every process starts
+    # this supervisor, so an ungated tick raced the same
+    # ``CREATE TABLE .. PARTITION OF events`` DDL across processes at
+    # boot -- IF NOT EXISTS does not protect concurrent creators on
+    # Postgres, so the losers logged DuplicateTableError + an
+    # aborted-transaction ERROR storm (caught by the 1.7.0 container
+    # boot smoke). Same per-worker advisory-lock gate the
+    # schedule_fires partition worker has used since it shipped.
+    from z4j_brain.domain.workers._leader_lock import (
+        acquire_per_worker_lock as _acquire_partition_creator_lock,
+    )
+
+    _partition_creator = PartitionCreatorWorker(db=db, settings=settings)
+
+    async def _partition_creator_tick() -> None:
+        async with _acquire_partition_creator_lock(
+            db,
+            "partition_creator_worker",
+        ) as got:
+            if got:
+                await _partition_creator.tick()
+
+    _workers.append(
         PeriodicWorker(
             name="partition_creator_worker",
-            tick=PartitionCreatorWorker(db=db, settings=settings).tick,
+            tick=_partition_creator_tick,
             interval_seconds=3600.0,  # hourly
         ),
-    ]
+    )
+
+    # Automation firing-outbox drain (leader-only). Replays firings the
+    # frame router deferred to the durable outbox under backpressure, so a
+    # drop is recoverable rather than lost. Not scheduler-gated: it runs
+    # whenever the brain is up and is a cheap no-op when the outbox is
+    # empty. Wrapped in a per-worker advisory lock so only one replica
+    # drains at a time (SQLite no-ops the lock).
+    from z4j_brain.domain.workers._leader_lock import (
+        acquire_per_worker_lock as _acquire_outbox_lock,
+    )
+    from z4j_brain.domain.workers.automation_outbox import (
+        AutomationOutboxDrainWorker,
+    )
+
+    _automation_outbox_drain = AutomationOutboxDrainWorker(
+        db=db,
+        dispatcher=command_dispatcher,
+        audit=audit_service,
+        settings=settings,
+    )
+
+    async def _automation_outbox_drain_tick() -> None:
+        async with _acquire_outbox_lock(db, "automation_outbox_drain_worker") as got:
+            if got:
+                await _automation_outbox_drain.tick()
+
+    _workers.append(
+        PeriodicWorker(
+            name="automation_outbox_drain_worker",
+            tick=_automation_outbox_drain_tick,
+            interval_seconds=float(settings.automation_outbox_drain_interval_seconds),
+        ),
+    )
+
     if settings.scheduler_grpc_enabled:
         # Wrap each scheduler-grpc worker tick in a per-worker
         # Postgres advisory lock so multi-replica brain
@@ -419,68 +540,119 @@ def create_app(
                     if not got:
                         return
                     await raw_tick()
+
             return _wrapped
 
         _pending_fires_replay = PendingFiresReplayWorker(
-            db=db, dispatcher=command_dispatcher,
+            db=db,
+            dispatcher=command_dispatcher,
         )
         _circuit_breaker = ScheduleCircuitBreakerWorker(
-            db=db, settings=settings, audit=audit_service,
+            db=db,
+            settings=settings,
+            audit=audit_service,
         )
         _fires_prune = ScheduleFiresPruneWorker(
-            db=db, settings=settings,
+            db=db,
+            settings=settings,
+        )
+        _misfire_detector = MisfireDetector(
+            db=db,
+            settings=settings,
+            audit=audit_service,
+            dispatcher=command_dispatcher,
+        )
+        from z4j_brain.domain.workers.schedule_fires_partition import (
+            ScheduleFiresPartitionWorker,
         )
 
-        _workers.extend([
-            # z4j-scheduler buffered-fire replay. Sweeps expired
-            # buffers + replays fires whose project just got an
-            # online agent for the right engine.
-            PeriodicWorker(
-                name="pending_fires_replay_worker",
-                tick=_ha_tick(
-                    "pending_fires_replay_worker",
-                    _pending_fires_replay.tick,
+        _fires_partition = ScheduleFiresPartitionWorker(db=db, settings=settings)
+
+        _workers.extend(
+            [
+                # z4j-scheduler buffered-fire replay. Sweeps expired
+                # buffers + replays fires whose project just got an
+                # online agent for the right engine.
+                PeriodicWorker(
+                    name="pending_fires_replay_worker",
+                    tick=_ha_tick(
+                        "pending_fires_replay_worker",
+                        _pending_fires_replay.tick,
+                    ),
+                    interval_seconds=float(
+                        settings.pending_fires_replay_interval_seconds,
+                    ),
                 ),
-                interval_seconds=float(
-                    settings.pending_fires_replay_interval_seconds,
+                # z4j-scheduler circuit breaker. Auto-disables a
+                # schedule after N consecutive failed fires (configurable
+                # via ``schedule_circuit_breaker_threshold``, default 5)
+                # so a persistently-broken schedule doesn't flood the
+                # dashboard with noise. The trip flips ``is_enabled =
+                # False`` and writes an audit row with
+                # ``action="schedule.auto_disabled.circuit_breaker"``.
+                # Operators re-enable from the dashboard once the
+                # underlying bug is fixed.
+                PeriodicWorker(
+                    name="schedule_circuit_breaker_worker",
+                    tick=_ha_tick(
+                        "schedule_circuit_breaker_worker",
+                        _circuit_breaker.tick,
+                    ),
+                    interval_seconds=float(
+                        settings.schedule_circuit_breaker_interval_seconds,
+                    ),
                 ),
-            ),
-            # z4j-scheduler circuit breaker. Auto-disables a
-            # schedule after N consecutive failed fires (configurable
-            # via ``schedule_circuit_breaker_threshold``, default 5)
-            # so a persistently-broken schedule doesn't flood the
-            # dashboard with noise. The trip flips ``is_enabled =
-            # False`` and writes an audit row with
-            # ``action="schedule.auto_disabled.circuit_breaker"``.
-            # Operators re-enable from the dashboard once the
-            # underlying bug is fixed.
-            PeriodicWorker(
-                name="schedule_circuit_breaker_worker",
-                tick=_ha_tick(
-                    "schedule_circuit_breaker_worker",
-                    _circuit_breaker.tick,
+                # z4j-scheduler fire-history retention. Bounds the
+                # ``schedule_fires`` table at the operator-configured
+                # window. Hourly is fine - the table doesn't need
+                # tight retention.
+                PeriodicWorker(
+                    name="schedule_fires_prune_worker",
+                    tick=_ha_tick(
+                        "schedule_fires_prune_worker",
+                        _fires_prune.tick,
+                    ),
+                    interval_seconds=3600.0,
                 ),
-                interval_seconds=float(
-                    settings.schedule_circuit_breaker_interval_seconds,
+                # z4j-scheduler fire-history partition manager (Postgres
+                # only). Pre-creates daily scheduled_for partitions and
+                # drops expired ones (fast DROP-PARTITION retention). No-op
+                # on SQLite. Runs alongside the DELETE prune worker above,
+                # which stays as the fallback for DEFAULT-partition rows.
+                PeriodicWorker(
+                    name="schedule_fires_partition_worker",
+                    tick=_ha_tick(
+                        "schedule_fires_partition_worker",
+                        _fires_partition.tick,
+                    ),
+                    interval_seconds=3600.0,
                 ),
-            ),
-            # z4j-scheduler fire-history retention. Bounds the
-            # ``schedule_fires`` table at the operator-configured
-            # window. Hourly is fine - the table doesn't need
-            # tight retention.
-            PeriodicWorker(
-                name="schedule_fires_prune_worker",
-                tick=_ha_tick(
-                    "schedule_fires_prune_worker",
-                    _fires_prune.tick,
+            ]
+        )
+        # z4j-scheduler misfire detection (A4). Catches enabled
+        # interval/cron schedules the scheduler failed to fire on
+        # time -- crucially, this runs brain-side so a DOWN scheduler
+        # is caught (a scheduler-side check cannot report its own
+        # death). Emits ``scheduler.misfire_detected`` audit rows +
+        # fires ``schedule.misfired`` automation rules. Operator opts
+        # out with Z4J_SCHEDULER_MISFIRE_SWEEP_SECONDS=0.
+        if settings.scheduler_misfire_sweep_seconds > 0:
+            _workers.append(
+                PeriodicWorker(
+                    name="misfire_detector_worker",
+                    tick=_ha_tick(
+                        "misfire_detector_worker",
+                        _misfire_detector.tick,
+                    ),
+                    interval_seconds=float(
+                        settings.scheduler_misfire_sweep_seconds,
+                    ),
                 ),
-                interval_seconds=3600.0,
-            ),
-        ])
+            )
     supervisor = WorkerSupervisor(workers=_workers)
 
     @asynccontextmanager
-    async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def _lifespan(app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0912, PLR0915  startup/shutdown sequencing
         logger.info(
             "z4j starting",
             version=__version__,
@@ -488,9 +660,11 @@ def create_app(
         )
         try:
             await run_first_boot_check(
-                db=db, setup_service=setup_service, settings=settings,
+                db=db,
+                setup_service=setup_service,
+                settings=settings,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             # CRITICAL severity: a failure here usually means the
             # database is unreachable, which means the brain is
             # going to fail every request that hits the DB. We
@@ -498,8 +672,7 @@ def create_app(
             # liveness probe) but the operator MUST see this in
             # the logs without scrolling.
             logger.critical(
-                "z4j first-boot check failed; brain will be unhealthy "
-                "on any DB-touching request",
+                "z4j first-boot check failed; brain will be unhealthy on any DB-touching request",
                 exc_info=True,
             )
 
@@ -519,7 +692,7 @@ def create_app(
                 str(exc),
             )
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "z4j: schema version check failed (non-fatal)",
                 exc_info=True,
@@ -532,6 +705,8 @@ def create_app(
         # send.
         from z4j_brain.domain.notifications.channels import (
             set_allow_http_webhooks as _set_allow_http_webhooks,
+        )
+        from z4j_brain.domain.notifications.channels import (
             set_shared_client as _set_notification_http_client,
         )
 
@@ -604,12 +779,8 @@ def create_app(
                 # 1.5.0: agent_status_history retention counters.
                 # Same sweeper, separate stream + retention knob
                 # (event_retention_days, not audit_retention_days).
-                "agent_status_pruned_total": (
-                    audit_sweeper.total_agent_status_deleted
-                ),
-                "agent_status_last_deleted": (
-                    audit_sweeper.last_agent_status_deleted
-                ),
+                "agent_status_pruned_total": (audit_sweeper.total_agent_status_deleted),
+                "agent_status_last_deleted": (audit_sweeper.last_agent_status_deleted),
                 "wal_pages_last": wal_checkpoint.last_pages_checkpointed,
                 "wal_last_run_at": wal_checkpoint.last_run_at,
                 "wal_error": wal_checkpoint.last_error,
@@ -630,7 +801,7 @@ def create_app(
                 return {"agents": {}, "workers": {}}
             try:
                 return snap()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return {"agents": {}, "workers": {}}
 
         register_fleet_gauge_provider(_fleet_provider)
@@ -648,53 +819,56 @@ def create_app(
                     "audit_forwarder_queue",
                     audit_forwarder.queue_depth,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j main: register_inmemory_subsystem(audit_forwarder) "
                     "crashed; continuing without the gauge",
                 )
         try:
             from z4j_brain.api.activity import _user_bucket
+
             register_inmemory_subsystem(
                 "activity_rate_limit_users",
                 lambda: len(_user_bucket),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: S110  best-effort in-memory metric registration
             pass
         try:
             from z4j_brain.observability.otel import _DYNAMIC_SENSITIVE_HOSTS
+
             register_inmemory_subsystem(
                 "otel_dynamic_sensitive_hosts",
                 lambda: len(_DYNAMIC_SENSITIVE_HOSTS),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: S110  best-effort in-memory metric registration
             pass
         try:
             from z4j_brain.domain.event_ingestor import (
                 _metric_task_name_seen,
             )
+
             register_inmemory_subsystem(
                 "metric_task_name_projects",
                 lambda: len(_metric_task_name_seen),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: S110  best-effort in-memory metric registration
             pass
 
         try:
             await registry.start()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j registry.start crashed; continuing",
             )
         try:
             await dashboard_hub.start()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j dashboard_hub.start crashed; continuing",
             )
         try:
             await supervisor.start()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j worker supervisor start crashed; continuing",
             )
@@ -710,6 +884,7 @@ def create_app(
                 from z4j_brain.domain.audit_forwarder import (
                     validate_audit_webhook_url_at_startup,
                 )
+
                 _audit_err = await validate_audit_webhook_url_at_startup(
                     _audit_url,
                 )
@@ -720,7 +895,7 @@ def create_app(
                         "dispatch. Fix Z4J_AUDIT_WEBHOOK_URL and restart.",
                         _audit_err,
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j audit_forwarder start crashed; continuing",
                 )
@@ -728,7 +903,7 @@ def create_app(
         if scheduler_grpc_server is not None:
             try:
                 await scheduler_grpc_server.start()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 # In production we MUST refuse to start when
                 # scheduler_grpc cannot. Operator who
                 # fat-fingers ``Z4J_SCHEDULER_GRPC_INSECURE=true`` in
@@ -769,12 +944,13 @@ def create_app(
             and scheduler_grpc_server is not None
             and scheduler_grpc_server.bound_port > 0
         ):
-            from z4j_brain.domain.workers._leader_lock import (  # noqa: PLC0415
+            from z4j_brain.domain.workers._leader_lock import (
                 try_acquire_singleton_lock,
             )
 
             got_lock = await try_acquire_singleton_lock(
-                db, "embedded_scheduler_supervisor",
+                db,
+                "embedded_scheduler_supervisor",
             )
             if not got_lock:
                 logger.info(
@@ -785,7 +961,7 @@ def create_app(
                 # Fall through to the rest of the lifespan.
                 embedded_supervisor = None
             else:
-                from z4j_brain.embedded_scheduler import (  # noqa: PLC0415
+                from z4j_brain.embedded_scheduler import (
                     EmbeddedSchedulerSupervisor,
                 )
 
@@ -803,7 +979,7 @@ def create_app(
                 )
                 try:
                     await embedded_supervisor.start()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.critical(
                         "z4j embedded scheduler supervisor start "
                         "failed; brain will keep running but the embedded "
@@ -833,7 +1009,7 @@ def create_app(
             if embedded_supervisor is not None:
                 try:
                     await embedded_supervisor.stop()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "z4j embedded scheduler supervisor stop crashed",
                     )
@@ -841,19 +1017,21 @@ def create_app(
             # by the schedules trigger route). Failure here is non-
             # fatal - the channel is going away anyway.
             trig_client = getattr(
-                app.state, "scheduler_trigger_client", None,
+                app.state,
+                "scheduler_trigger_client",
+                None,
             )
             if trig_client is not None:
                 try:
                     await trig_client.close()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "z4j scheduler_trigger_client close crashed",
                     )
             if scheduler_grpc_server is not None:
                 try:
                     await scheduler_grpc_server.stop()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception("z4j scheduler_grpc stop crashed")
             # v1.1.0: PKI bundle now lives at
             # ``~/.z4j/embedded-pki/`` (or operator-pinned path) and
@@ -863,7 +1041,7 @@ def create_app(
             # forensics.
             try:
                 await supervisor.stop()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("z4j supervisor stop crashed")
             if audit_forwarder is not None:
                 # v1.6 audit H9: unregister the hook BEFORE stopping
@@ -875,21 +1053,21 @@ def create_app(
                     audit_service.unregister_post_write_hook(
                         audit_forwarder.enqueue,
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "z4j audit_forwarder hook unregister crashed",
                     )
                 try:
                     await audit_forwarder.stop()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception("z4j audit_forwarder stop crashed")
             try:
                 await dashboard_hub.stop()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("z4j dashboard_hub stop crashed")
             try:
                 await registry.stop()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("z4j registry stop crashed")
             # Drain the denial-audit
             # queue before tearing down the DB. Best-effort with a
@@ -897,22 +1075,22 @@ def create_app(
             # shutdown indefinitely.
             try:
                 await audit_queue.stop()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("z4j audit_queue stop crashed")
             try:
                 await audit_sweeper.stop()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("z4j audit_sweeper stop crashed")
             try:
                 await wal_checkpoint.stop()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("z4j wal_checkpoint stop crashed")
             # Tear down the shared notification HTTP client AFTER the
             # workers have stopped so any in-flight delivery can drain.
             try:
                 _set_notification_http_client(None)
                 await notification_http_client.aclose()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j notification_http_client close crashed",
                 )
@@ -1030,10 +1208,13 @@ def create_app(
     app.include_router(api_keys_api.router, prefix="/api/v1")
     app.include_router(tasks_api.router, prefix="/api/v1")
     app.include_router(events_api.router, prefix="/api/v1")
+    app.include_router(issues_api.router, prefix="/api/v1")
     app.include_router(workers_api.router, prefix="/api/v1")
     app.include_router(agent_workers_api.router, prefix="/api/v1")
     app.include_router(queues_api.router, prefix="/api/v1")
     app.include_router(commands_api.router, prefix="/api/v1")
+    app.include_router(automation_rules_api.router, prefix="/api/v1")
+    app.include_router(automation_rules_api.settings_router, prefix="/api/v1")
     app.include_router(schedules_api.router, prefix="/api/v1")
     app.include_router(schedulers_fleet_api.router, prefix="/api/v1")
     app.include_router(audit_api.router, prefix="/api/v1")
@@ -1046,11 +1227,11 @@ def create_app(
     app.include_router(notifications_api.router, prefix="/api/v1")
     app.include_router(user_notifications_api.router, prefix="/api/v1")
     # 1.3.4: admin-scoped /admin/system endpoints (Check for updates).
-    from z4j_brain.api import system as system_api  # noqa: PLC0415
+    from z4j_brain.api import system as system_api
 
     app.include_router(system_api.router, prefix="/api/v1")
     # 1.5.0: admin-scoped /admin/settings (read-only effective config).
-    from z4j_brain.api import admin_settings as admin_settings_api  # noqa: PLC0415
+    from z4j_brain.api import admin_settings as admin_settings_api
 
     app.include_router(admin_settings_api.router, prefix="/api/v1")
     app.include_router(agent_longpoll_api.router, prefix="/api/v1")
@@ -1148,11 +1329,11 @@ def create_app(
         return _PlainText(body, media_type="text/plain; charset=utf-8")
 
     @app.get("/.well-known/security.txt", include_in_schema=False)
-    async def security_txt_wellknown() -> _PlainText:  # noqa: D401
+    async def security_txt_wellknown() -> _PlainText:
         return _security_txt()
 
     @app.get("/security.txt", include_in_schema=False)
-    async def security_txt_legacy() -> _PlainText:  # noqa: D401
+    async def security_txt_legacy() -> _PlainText:
         return _security_txt()
 
     # ------------------------------------------------------------------
@@ -1215,7 +1396,7 @@ def create_app(
         # SPA fallback served ``index.html`` for any unmatched
         # path, which caused frontend code to choke on
         # ``Unexpected token '<'`` when an API URL was wrong.
-        _BACKEND_PREFIXES = (
+        _backend_prefixes = (
             "api/",
             "ws/",
             "metrics",
@@ -1240,7 +1421,7 @@ def create_app(
         # still shows old features" footgun. Hashed assets under
         # /assets/ keep the long-cache because their filename
         # changes on every build (Vite content-hashing).
-        _NO_CACHE_HEADERS = {
+        _no_cache_headers = {
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
@@ -1268,7 +1449,7 @@ def create_app(
             # Normalize: strip leading "/" if present (path:path
             # captures "api/v1/x" without the leading slash).
             normalized = full_path.lstrip("/")
-            for prefix in _BACKEND_PREFIXES:
+            for prefix in _backend_prefixes:
                 if normalized == prefix.rstrip("/") or normalized.startswith(prefix):
                     raise HTTPException(status_code=404)
             if full_path:
@@ -1279,9 +1460,10 @@ def create_app(
                     raise HTTPException(status_code=404) from None
                 if candidate.is_file():
                     return FileResponse(
-                        candidate, headers=_NO_CACHE_HEADERS,
+                        candidate,
+                        headers=_no_cache_headers,
                     )
-            return FileResponse(index_html, headers=_NO_CACHE_HEADERS)
+            return FileResponse(index_html, headers=_no_cache_headers)
 
     return app
 

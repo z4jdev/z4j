@@ -20,8 +20,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-
 from z4j_brain.audit_retention import AuditRetentionSweeper
 from z4j_brain.persistence import models  # noqa: F401  - register mappers
 from z4j_brain.persistence.base import Base
@@ -76,7 +74,9 @@ async def _insert_audit_row(
 @pytest.mark.asyncio
 class TestSweepOnce:
     async def test_disabled_when_retention_zero(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         # Force-enable the field via raw assignment - Pydantic gates >=1
         # but we exercise the runtime guard explicitly.
@@ -88,7 +88,9 @@ class TestSweepOnce:
         assert deleted == 0
 
     async def test_old_rows_pruned(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         now = datetime.now(UTC)
         # Insert 3 old + 2 fresh rows
@@ -100,7 +102,8 @@ class TestSweepOnce:
                 )
             for i in range(2):
                 await _insert_audit_row(
-                    session, occurred_at=now - timedelta(hours=i),
+                    session,
+                    occurred_at=now - timedelta(hours=i),
                 )
             await session.commit()
 
@@ -112,20 +115,21 @@ class TestSweepOnce:
 
         # Verify only fresh rows remain
         async with db_manager.session() as session:
-            remaining = (
-                await session.execute(select(AuditLog))
-            ).scalars().all()
+            remaining = (await session.execute(select(AuditLog))).scalars().all()
             assert len(remaining) == 2
 
     async def test_state_tracking_after_sweep(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         now = datetime.now(UTC)
         async with db_manager.session() as session:
             for _ in range(5):
                 await _insert_audit_row(
                     session,
-                    occurred_at=now - timedelta(
+                    occurred_at=now
+                    - timedelta(
                         days=settings.audit_retention_days + 5,
                     ),
                 )
@@ -146,7 +150,9 @@ class TestSweepOnce:
         assert sweeper.total_deleted == 5  # cumulative
 
     async def test_batched_delete_completes(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         # 250 old rows with batch_size=100 → expect 3 batches
         # (100 + 100 + 50) and total_deleted == 250.
@@ -156,7 +162,8 @@ class TestSweepOnce:
             for i in range(250):
                 await _insert_audit_row(
                     session,
-                    occurred_at=now - timedelta(
+                    occurred_at=now
+                    - timedelta(
                         days=settings.audit_retention_days + 5,
                         seconds=i,
                     ),
@@ -170,20 +177,22 @@ class TestSweepOnce:
         assert deleted == 250
 
         async with db_manager.session() as session:
-            remaining = (
-                await session.execute(select(AuditLog))
-            ).scalars().all()
+            remaining = (await session.execute(select(AuditLog))).scalars().all()
             assert remaining == []
 
     async def test_recent_rows_preserved(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         """Rows newer than cutoff must survive even an aggressive sweep."""
         now = datetime.now(UTC)
         async with db_manager.session() as session:
             # Just inside the retention window
             await _insert_audit_row(
-                session, occurred_at=now - timedelta(
+                session,
+                occurred_at=now
+                - timedelta(
                     days=settings.audit_retention_days - 1,
                 ),
             )
@@ -191,7 +200,8 @@ class TestSweepOnce:
             await _insert_audit_row(session, occurred_at=now)
             # And one ancient row that should die
             await _insert_audit_row(
-                session, occurred_at=now - timedelta(days=365),
+                session,
+                occurred_at=now - timedelta(days=365),
             )
             await session.commit()
 
@@ -202,21 +212,23 @@ class TestSweepOnce:
         assert deleted == 1
 
         async with db_manager.session() as session:
-            remaining = (
-                await session.execute(select(AuditLog))
-            ).scalars().all()
+            remaining = (await session.execute(select(AuditLog))).scalars().all()
             assert len(remaining) == 2
 
 
 @pytest.mark.asyncio
 class TestLifecycle:
     async def test_start_then_stop_clean(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         # Make sweep interval much shorter than the test so the loop
         # ticks at least once.
         object.__setattr__(
-            settings, "audit_retention_sweep_interval_seconds", 60,
+            settings,
+            "audit_retention_sweep_interval_seconds",
+            60,
         )
         sweeper = AuditRetentionSweeper()
         sweeper.start(db=db_manager, settings=settings)
@@ -225,7 +237,9 @@ class TestLifecycle:
         assert sweeper._task is None
 
     async def test_double_start_is_idempotent(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         sweeper = AuditRetentionSweeper()
         sweeper.start(db=db_manager, settings=settings)

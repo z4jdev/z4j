@@ -73,7 +73,9 @@ class Invitation(PKMixin, TimestampsMixin, Base):
     )
     email: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="viewer",
+        String(20),
+        nullable=False,
+        default="viewer",
     )
     invited_by: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
@@ -82,10 +84,12 @@ class Invitation(PKMixin, TimestampsMixin, Base):
     )
     token_hash: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
     accepted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     accepted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
@@ -93,7 +97,8 @@ class Invitation(PKMixin, TimestampsMixin, Base):
         nullable=True,
     )
     revoked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     __table_args__ = (

@@ -218,7 +218,7 @@ def is_session_live(
     idle_cutoff = now_utc.timestamp() - idle_timeout_seconds
     if _aware_utc(row.last_seen_at).timestamp() < idle_cutoff:
         return False
-    if (
+    return not (
         user_password_changed_at is not None
         # 1-second grace window. The session's ``issued_at`` comes
         # from the DB's ``func.now()`` which is SECOND-precision on
@@ -233,11 +233,8 @@ def is_session_live(
         # exploit a 1-second window here (a compromised session
         # needs a valid cookie signature, which requires the
         # current secret, which changes when the operator rotates).
-        and _aware_utc(row.issued_at)
-        < _aware_utc(user_password_changed_at) - timedelta(seconds=1)
-    ):
-        return False
-    return True
+        and _aware_utc(row.issued_at) < _aware_utc(user_password_changed_at) - timedelta(seconds=1)
+    )
 
 
 def aware_utc(value: datetime) -> datetime:

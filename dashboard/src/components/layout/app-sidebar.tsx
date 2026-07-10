@@ -37,6 +37,7 @@ import {
   Settings2,
   Shield,
   Terminal,
+  Zap,
 } from "lucide-react";
 import { useEffect } from "react";
 import { cn } from "@/lib/utils";
@@ -68,6 +69,7 @@ function buildNav(
     { label: "Workers", to: `/projects/${slug}/workers`, icon: Cpu },
     { label: "Queues", to: `/projects/${slug}/queues`, icon: Layers },
     { label: "Schedules", to: `/projects/${slug}/schedules`, icon: History },
+    { label: "Automation", to: `/projects/${slug}/automation`, icon: Zap },
     { label: "Commands", to: `/projects/${slug}/commands`, icon: Terminal },
   ];
   // Agents page is admin-territory (mint + revoke tokens). Hide the

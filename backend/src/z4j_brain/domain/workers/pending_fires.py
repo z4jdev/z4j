@@ -65,17 +65,18 @@ class PendingFiresReplayWorker:
         self._db = db
         self._dispatcher = dispatcher
 
-    async def tick(self) -> None:
-        from datetime import UTC, datetime  # noqa: PLC0415
+    async def tick(self) -> None:  # noqa: PLR0912, PLR0915  pending-fire dispatch sweep
+        from datetime import UTC, datetime
 
-        from sqlalchemy import select  # noqa: PLC0415
+        from sqlalchemy import select
 
-        from z4j_brain.persistence.models import PendingFire  # noqa: PLC0415
-        from z4j_brain.persistence.repositories import (  # noqa: PLC0415
+        from z4j_brain.persistence.models import PendingFire
+        from z4j_brain.persistence.repositories import (
             AgentRepository,
             AuditLogRepository,
             CommandRepository,
             PendingFiresRepository,
+            ScheduleFireRepository,
             ScheduleRepository,
         )
 
@@ -149,16 +150,29 @@ class PendingFiresReplayWorker:
                     )
                     if not fires:
                         continue
-                    fires = await self._apply_catch_up(
-                        fires=fires, schedules_repo=schedules_repo,
+                    fires, dropped_fire_ids = await self._apply_catch_up(
+                        fires=fires,
+                        schedules_repo=schedules_repo,
                     )
+
+                # Delete the buffer rows the catch_up policy discarded
+                # (skip: all; fire_one_missed: all but the latest; unknown
+                # policy: all) in their OWN committed transaction. Without
+                # this the dropped rows stay buffered and list_for_replay
+                # re-surfaces them every tick, so fire_one_missed would
+                # re-fire one missed occurrence per tick instead of exactly
+                # one -- duplicate dispatch of a non-idempotent scheduled
+                # job. A failure here just leaves them for the next tick.
+                if dropped_fire_ids:
+                    async with self._db.session() as drop_session:
+                        drop_repo = PendingFiresRepository(drop_session)
+                        for dropped_id in dropped_fire_ids:
+                            await drop_repo.delete_by_fire_id(dropped_id)
+                        await drop_session.commit()
 
                 for fire in fires:
                     target_agent = next(
-                        (
-                            a for a in agents
-                            if engine in (a.engine_adapters or ())
-                        ),
+                        (a for a in agents if engine in (a.engine_adapters or ())),
                         None,
                     )
                     if target_agent is None:
@@ -172,7 +186,7 @@ class PendingFiresReplayWorker:
                     # both are committed atomically.
                     async with self._db.session() as fire_session:
                         try:
-                            await self._dispatcher.issue(
+                            command = await self._dispatcher.issue(
                                 commands=CommandRepository(fire_session),
                                 audit_log=AuditLogRepository(fire_session),
                                 project_id=fire.project_id,
@@ -188,20 +202,35 @@ class PendingFiresReplayWorker:
                                     f"schedule:{fire.schedule_id}:fire:{fire.fire_id}"
                                 ),
                             )
+                            # A5: upgrade the buffered schedule_fires row to
+                            # delivered on replay so the fire-history view
+                            # reflects the dispatch immediately, instead of
+                            # sitting at "buffered" until the ack lands.
+                            # record() upserts on fire_id (buffered ->
+                            # delivered is a valid upgrade; a missing row is
+                            # inserted). Same fire_session so it commits
+                            # atomically with the issue + buffer delete.
+                            await ScheduleFireRepository(fire_session).record(
+                                fire_id=fire.fire_id,
+                                schedule_id=fire.schedule_id,
+                                project_id=fire.project_id,
+                                command_id=command.id,
+                                status="delivered",
+                                scheduled_for=fire.scheduled_for,
+                            )
                             await PendingFiresRepository(
                                 fire_session,
                             ).delete_by_fire_id(fire.fire_id)
                             await fire_session.commit()
                             replayed_total += 1
-                        except Exception:  # noqa: BLE001
+                        except Exception:
                             # The dispatcher already logged. Leave
                             # the buffer row; next tick retries
                             # (dedup is handled by
                             # commands.idempotency_key + ScheduleFire
                             # upgrade-on-conflict).
                             logger.exception(
-                                "z4j.brain.workers.pending_fires: replay "
-                                "failed for fire_id=%s",
+                                "z4j.brain.workers.pending_fires: replay failed for fire_id=%s",
                                 fire.fire_id,
                             )
                             await fire_session.rollback()
@@ -218,17 +247,20 @@ class PendingFiresReplayWorker:
         *,
         fires: list,
         schedules_repo,
-    ) -> list:
+    ) -> tuple[list, list]:
         """Filter the buffered fire list per each schedule's catch_up policy.
 
         - ``skip``: produce no fires for that schedule.
         - ``fire_one_missed``: produce only the most recent fire.
         - ``fire_all_missed``: produce all fires in order.
 
-        We delete the dropped buffer rows in the same pass so a
-        subsequent tick doesn't re-evaluate them. The deletion uses
-        the same session/transaction the caller will commit so the
-        worker stays atomic per tick.
+        Returns ``(kept, dropped_fire_ids)``. ``kept`` is the fires to
+        replay; ``dropped_fire_ids`` are the buffer rows the policy
+        discarded, which the caller deletes in a committed transaction so
+        a subsequent tick does not re-evaluate them (otherwise a dropped
+        occurrence is re-listed and re-fired every tick). Schedules that
+        no longer exist are left untouched -- the ``schedule_id`` CASCADE
+        or the retention sweep clears them.
 
         Performance: schedule lookups are batched into ONE query
         (``WHERE id IN (...)``) so a 100-schedule replay batch costs
@@ -236,9 +268,9 @@ class PendingFiresReplayWorker:
         a per-schedule ``.get()`` which was an O(N) round-trip
         storm at scale - audit-Phase2-1 caught it before Phase 3.
         """
-        from sqlalchemy import select  # noqa: PLC0415
+        from sqlalchemy import select
 
-        from z4j_brain.persistence.models import Schedule  # noqa: PLC0415
+        from z4j_brain.persistence.models import Schedule
 
         # Group by schedule.
         per_schedule: dict[UUID, list] = defaultdict(list)
@@ -246,7 +278,7 @@ class PendingFiresReplayWorker:
             per_schedule[fire.schedule_id].append(fire)
 
         if not per_schedule:
-            return []
+            return [], []
 
         # Single batched lookup for every distinct schedule_id in
         # the replay batch. SQLAlchemy turns the IN-list into one
@@ -257,6 +289,7 @@ class PendingFiresReplayWorker:
         schedules_by_id = {s.id: s for s in result.scalars().all()}
 
         kept: list = []
+        dropped_fire_ids: list = []
         for schedule_id, schedule_fires in per_schedule.items():
             schedule = schedules_by_id.get(schedule_id)
             if schedule is None:
@@ -264,12 +297,30 @@ class PendingFiresReplayWorker:
                 # The CASCADE on schedule_id should have already
                 # cleared them; if not, leave them for the sweep.
                 continue
+            if not getattr(schedule, "is_enabled", True):
+                # The operator DISABLED the schedule during the outage.
+                # is_enabled is otherwise only enforced at fire/buffer
+                # time, so without this a disable would not stop buffered
+                # fires from replaying once agents return -- defeating
+                # "stop this job now". Drop them regardless of catch_up.
+                logger.info(
+                    "z4j.brain.workers.pending_fires: schedule %s disabled "
+                    "during outage; dropping %d buffered fire(s)",
+                    schedule_id,
+                    len(schedule_fires),
+                )
+                dropped_fire_ids.extend(f.fire_id for f in schedule_fires)
+                continue
             policy = getattr(schedule, "catch_up", None) or "skip"
             if policy == "skip":
                 # Drop everything for this schedule.
+                dropped_fire_ids.extend(f.fire_id for f in schedule_fires)
                 continue
             if policy == "fire_one_missed":
                 kept.append(schedule_fires[-1])  # latest by scheduled_for
+                # Every earlier missed occurrence is discarded, not just
+                # skipped for this tick.
+                dropped_fire_ids.extend(f.fire_id for f in schedule_fires[:-1])
                 continue
             if policy == "fire_all_missed":
                 kept.extend(schedule_fires)
@@ -279,9 +330,11 @@ class PendingFiresReplayWorker:
             logger.warning(
                 "z4j.brain.workers.pending_fires: unknown catch_up "
                 "policy %r for schedule %s; dropping buffered fires",
-                policy, schedule_id,
+                policy,
+                schedule_id,
             )
-        return kept
+            dropped_fire_ids.extend(f.fire_id for f in schedule_fires)
+        return kept, dropped_fire_ids
 
 
 __all__ = ["PendingFiresReplayWorker"]

@@ -59,18 +59,29 @@ class Agent(PKMixin, TimestampsMixin, Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     token_hash: Mapped[str] = mapped_column(
-        String, nullable=False, unique=True,
+        String,
+        nullable=False,
+        unique=True,
     )
     protocol_version: Mapped[str] = mapped_column(String(20), nullable=False)
     framework_adapter: Mapped[str] = mapped_column(String(40), nullable=False)
     engine_adapters: Mapped[list[str]] = mapped_column(
-        text_array(), nullable=False, default=list, server_default="{}",
+        text_array(),
+        nullable=False,
+        default=list,
+        server_default="{}",
     )
     scheduler_adapters: Mapped[list[str]] = mapped_column(
-        text_array(), nullable=False, default=list, server_default="{}",
+        text_array(),
+        nullable=False,
+        default=list,
+        server_default="{}",
     )
     capabilities: Mapped[dict[str, Any]] = mapped_column(
-        jsonb(), nullable=False, default=dict, server_default="{}",
+        jsonb(),
+        nullable=False,
+        default=dict,
+        server_default="{}",
     )
     state: Mapped[AgentState] = mapped_column(
         Enum(
@@ -85,10 +96,12 @@ class Agent(PKMixin, TimestampsMixin, Base):
         server_default=AgentState.UNKNOWN.value,
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     last_connect_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     agent_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
@@ -106,7 +119,9 @@ class Agent(PKMixin, TimestampsMixin, Base):
         # name previously both succeeded silently; now one hits
         # an IntegrityError that the API handler converts to 409.
         UniqueConstraint(
-            "project_id", "name", name="uq_agents_project_name",
+            "project_id",
+            "name",
+            name="uq_agents_project_name",
         ),
     )
 

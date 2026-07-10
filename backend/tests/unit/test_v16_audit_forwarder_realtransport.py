@@ -21,14 +21,13 @@ regression in ANY of these classes would fail here:
 from __future__ import annotations
 
 import asyncio
-import hmac as _hmac
 import hashlib as _hashlib
+import hmac as _hmac
 import json
 from typing import Any
 
 import httpx
 import pytest
-
 from z4j_brain.domain import audit_forwarder as af_mod
 from z4j_brain.domain.audit_forwarder import (
     AUDIT_SIGNATURE_HEADER,
@@ -36,7 +35,6 @@ from z4j_brain.domain.audit_forwarder import (
     AuditForwarder,
 )
 from z4j_brain.domain.notifications.channels import set_shared_client
-
 
 WEBHOOK = "https://siem.example.test/ingest"
 SECRET = b"k" * 32
@@ -95,7 +93,8 @@ class TestSendOneAgainstRealTransport:
     """``_send_one`` -> real ``_post`` -> ``MockTransport``."""
 
     async def test_request_url_method_and_body(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(af_mod, "resolve_and_pin", _no_dns)
         seen: list[httpx.Request] = []
@@ -124,7 +123,8 @@ class TestSendOneAgainstRealTransport:
         assert fwd.failed_count == 0
 
     async def test_hmac_signature_covers_timestamp_plus_body(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If signing drifts (forgets timestamp, swaps order, picks
         wrong digest) this fails."""
@@ -151,15 +151,21 @@ class TestSendOneAgainstRealTransport:
         # Timestamp is unix-seconds (digit string), not ISO.
         assert ts.isdigit(), f"timestamp shape drift: {ts!r}"
         # Recompute and compare.
-        expected = "sha256=" + _hmac.new(
-            SECRET, ts.encode() + b"." + req.content, _hashlib.sha256,
-        ).hexdigest()
+        expected = (
+            "sha256="
+            + _hmac.new(
+                SECRET,
+                ts.encode() + b"." + req.content,
+                _hashlib.sha256,
+            ).hexdigest()
+        )
         assert sig == expected, "HMAC body+timestamp mismatch"
         assert req.headers["Content-Type"] == "application/json"
         assert req.headers["X-Z4J-Audit-Schema"] == "1"
 
     async def test_per_call_timeout_reaches_transport_extension(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """R2 ship-stopper regression guard. The forwarder's
         ``_timeout`` must arrive in the transport-side request
@@ -180,7 +186,8 @@ class TestSendOneAgainstRealTransport:
         set_shared_client(client)
         try:
             fwd = AuditForwarder(
-                webhook_url=WEBHOOK, hmac_secret=SECRET,
+                webhook_url=WEBHOOK,
+                hmac_secret=SECRET,
                 timeout_seconds=7.5,
             )
             await fwd._send_one(_payload())
@@ -208,7 +215,8 @@ class TestDrainLoopAgainstRealTransport:
     """``enqueue`` -> ``start`` -> drain loop -> transport."""
 
     async def test_three_enqueued_rows_all_reach_transport(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(af_mod, "resolve_and_pin", _no_dns)
         seen: list[httpx.Request] = []
@@ -248,7 +256,8 @@ class TestNon2xxAgainstRealTransport:
     AND the non_2xx accounting path."""
 
     async def test_500_increments_failed_and_does_not_blow_body_cap(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(af_mod, "resolve_and_pin", _no_dns)
         counts: dict[str, int] = {}
@@ -287,7 +296,8 @@ class TestCancelDuringInFlight:
     accounts for it in ``_shutdown_lost``."""
 
     async def test_in_flight_row_counted_in_shutdown_lost(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(af_mod, "resolve_and_pin", _no_dns)
         entered = asyncio.Event()

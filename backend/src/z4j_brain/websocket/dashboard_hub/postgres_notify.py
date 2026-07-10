@@ -25,10 +25,12 @@ chosen for the same Postgres-NOTIFY failure modes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets
 import time
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import asyncpg
@@ -122,14 +124,16 @@ class PostgresNotifyDashboardHub:
         self,
         *,
         project_id: UUID,
-        send: "SendCallable",
+        send: SendCallable,
         user_id: UUID | None = None,
-    ) -> "DashboardSubscription":
+    ) -> DashboardSubscription:
         return await self._local.add_subscriber(
-            project_id=project_id, send=send, user_id=user_id,
+            project_id=project_id,
+            send=send,
+            user_id=user_id,
         )
 
-    async def remove_subscriber(self, sub: "DashboardSubscription") -> None:
+    async def remove_subscriber(self, sub: DashboardSubscription) -> None:
         await self._local.remove_subscriber(sub)
 
     # ------------------------------------------------------------------
@@ -170,7 +174,7 @@ class PostgresNotifyDashboardHub:
                     {"channel": _DASHBOARD_CHANNEL, "payload": payload},
                 )
                 await session.commit()
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Publish failures must NEVER break the request that
             # triggered them. The local subscribers were already
             # served above; we just lose cross-worker fan-out for
@@ -199,10 +203,8 @@ class PostgresNotifyDashboardHub:
         self._stop_event.set()
         if self._listener_task is not None:
             self._listener_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._listener_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
             self._listener_task = None
         await self._local.stop()
 
@@ -218,16 +220,14 @@ class PostgresNotifyDashboardHub:
                 backoff_index = 0
             except asyncio.CancelledError:
                 return
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(
                     "z4j dashboard_hub listener: error, will reconnect",
                     error_class=type(exc).__name__,
                     backoff_index=backoff_index,
                     worker_id=self._worker_id,
                 )
-                backoff = _RECONNECT_BACKOFF[
-                    min(backoff_index, len(_RECONNECT_BACKOFF) - 1)
-                ]
+                backoff = _RECONNECT_BACKOFF[min(backoff_index, len(_RECONNECT_BACKOFF) - 1)]
                 backoff_index += 1
                 try:
                     await asyncio.wait_for(
@@ -249,9 +249,7 @@ class PostgresNotifyDashboardHub:
                     "tcp_keepalives_idle": "30",
                     "tcp_keepalives_interval": "10",
                     "tcp_keepalives_count": "3",
-                    "application_name": (
-                        f"z4j-brain-dashboard-hub-{self._worker_id}"
-                    ),
+                    "application_name": (f"z4j-brain-dashboard-hub-{self._worker_id}"),
                 },
             )
             await conn.add_listener(_DASHBOARD_CHANNEL, self._on_notify)
@@ -264,10 +262,8 @@ class PostgresNotifyDashboardHub:
             await self._heartbeat_loop_until_done(conn)
         finally:
             if conn is not None:
-                try:
+                with contextlib.suppress(Exception):
                     await conn.close(timeout=5.0)
-                except Exception:  # noqa: BLE001
-                    pass
 
     async def _heartbeat_loop_until_done(
         self,
@@ -286,9 +282,7 @@ class PostgresNotifyDashboardHub:
                 )
                 return
 
-            since_round_trip = (
-                time.monotonic() - self._last_heartbeat_round_trip
-            )
+            since_round_trip = time.monotonic() - self._last_heartbeat_round_trip
             if since_round_trip > timeout:
                 raise RuntimeError(
                     f"dashboard heartbeat round-trip exceeded {timeout}s "
@@ -316,9 +310,9 @@ class PostgresNotifyDashboardHub:
 
     def _on_notify(
         self,
-        connection: asyncpg.Connection,  # noqa: ARG002
-        pid: int,  # noqa: ARG002
-        channel: str,  # noqa: ARG002
+        connection: asyncpg.Connection,
+        pid: int,
+        channel: str,
         payload: str,
     ) -> None:
         """Handle a ``z4j_dashboard`` NOTIFY.
@@ -359,9 +353,9 @@ class PostgresNotifyDashboardHub:
 
     def _on_heartbeat(
         self,
-        connection: asyncpg.Connection,  # noqa: ARG002
-        pid: int,  # noqa: ARG002
-        channel: str,  # noqa: ARG002
+        connection: asyncpg.Connection,
+        pid: int,
+        channel: str,
         payload: str,
     ) -> None:
         if payload == self._worker_id:

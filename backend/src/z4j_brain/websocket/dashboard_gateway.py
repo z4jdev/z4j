@@ -34,6 +34,7 @@ refetches the relevant REST endpoint to get the new data.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -56,7 +57,7 @@ router = APIRouter(tags=["dashboard"])
 
 
 @router.websocket("/ws/dashboard")
-async def ws_dashboard(websocket: WebSocket) -> None:
+async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912  websocket lifecycle handler
     """The dashboard push endpoint. See module docstring."""
     settings = _settings_from(websocket)
     db = _db_from(websocket)
@@ -76,12 +77,23 @@ async def ws_dashboard(websocket: WebSocket) -> None:
         await _safe_close(websocket, code=4401)
         return
 
+    # MFA enrollment enforcement: a session past its enrollment grace
+    # deadline is restricted to the enrollment endpoints on the REST
+    # side (see ``enforce_mfa_enrollment`` in api/deps.py); the push
+    # channel is product surface too, so refuse it with the same
+    # "forbidden" close code the membership check uses.
+    from z4j_brain.domain.mfa.enforcement import evaluate_mfa_enforcement
+
+    if evaluate_mfa_enforcement(user=user, settings=settings).blocked:
+        await _safe_close(websocket, code=4403)
+        return
+
     # ------------------------------------------------------------------
     # 2) First frame: subscribe
     # ------------------------------------------------------------------
     try:
         first = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
-    except (asyncio.TimeoutError, WebSocketDisconnect):
+    except (TimeoutError, WebSocketDisconnect):
         await _safe_close(websocket, code=4400)
         return
 
@@ -105,7 +117,9 @@ async def ws_dashboard(websocket: WebSocket) -> None:
 
     try:
         sub = await hub.add_subscriber(
-            project_id=project_id, send=send, user_id=user.id,
+            project_id=project_id,
+            send=send,
+            user_id=user.id,
         )
     except RuntimeError:
         # Hub stopped between accept and register, OR per-user
@@ -143,7 +157,7 @@ async def ws_dashboard(websocket: WebSocket) -> None:
                     websocket.receive_text(),
                     timeout=idle_timeout,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.info(
                     "z4j dashboard_gateway: idle timeout, closing",
                     user_id=str(user.id),
@@ -155,7 +169,7 @@ async def ws_dashboard(websocket: WebSocket) -> None:
             except WebSocketDisconnect:
                 return
             await _handle_client_message(websocket, msg)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("z4j dashboard_gateway: receive loop crashed")
         await _safe_close(websocket, code=1011)
     finally:
@@ -170,9 +184,9 @@ async def ws_dashboard(websocket: WebSocket) -> None:
 async def _resolve_user(
     *,
     websocket: WebSocket,
-    settings: "Settings",
-    db: "DatabaseManager",
-) -> "User | None":
+    settings: Settings,
+    db: DatabaseManager,
+) -> User | None:
     """Resolve the session cookie → user, or return None.
 
     Mirrors the REST ``get_optional_session`` dependency. We can't
@@ -208,7 +222,9 @@ async def _resolve_user(
         users = UserRepository(session)
         sessions = SessionRepository(session)
         resolved = await auth_service.resolve_session(
-            users=users, sessions=sessions, session_id=sid,
+            users=users,
+            sessions=sessions,
+            session_id=sid,
         )
     return resolved[1] if resolved else None
 
@@ -232,7 +248,7 @@ def _parse_subscribe(raw: str) -> UUID | None:
         return None
 
 
-def _origin_allowed(origin: str | None, *, settings: "Settings") -> bool:
+def _origin_allowed(origin: str | None, *, settings: Settings) -> bool:
     """Return True when a browser WebSocket Origin is trusted.
 
     ``/ws/dashboard`` is cookie-authenticated, so Origin is the WS
@@ -248,7 +264,7 @@ def _origin_allowed(origin: str | None, *, settings: "Settings") -> bool:
     return normalized in _allowed_origins(settings)
 
 
-def _allowed_origins(settings: "Settings") -> set[str]:
+def _allowed_origins(settings: Settings) -> set[str]:
     allowed: set[str] = set()
     public_origin = _normalise_origin(settings.public_url)
     if public_origin is not None:
@@ -261,12 +277,14 @@ def _allowed_origins(settings: "Settings") -> set[str]:
             allowed.add(parsed)
     if settings.environment == "dev":
         port = settings.bind_port
-        allowed.update({
-            f"http://localhost:{port}",
-            f"http://127.0.0.1:{port}",
-            f"http://testserver:{port}",
-            "http://testserver",
-        })
+        allowed.update(
+            {
+                f"http://localhost:{port}",
+                f"http://127.0.0.1:{port}",
+                f"http://testserver:{port}",
+                "http://testserver",
+            }
+        )
     return allowed
 
 
@@ -279,12 +297,8 @@ def _normalise_origin(raw: str) -> str | None:
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return None
     host = parsed.hostname.lower()
-    default_port = (
-        parsed.scheme == "http"
-        and port == 80
-    ) or (
-        parsed.scheme == "https"
-        and port == 443
+    default_port = (parsed.scheme == "http" and port == 80) or (
+        parsed.scheme == "https" and port == 443
     )
     if port is not None and not default_port:
         host = f"{host}:{port}"
@@ -293,8 +307,8 @@ def _normalise_origin(raw: str) -> str | None:
 
 async def _user_can_see_project(
     *,
-    db: "DatabaseManager",
-    user: "User",
+    db: DatabaseManager,
+    user: User,
     project_id: UUID,
 ) -> bool:
     """Admins see every project; everyone else needs a membership row."""
@@ -331,21 +345,19 @@ async def _handle_client_message(
 
 
 async def _safe_close(websocket: WebSocket, *, code: int) -> None:
-    try:
+    with contextlib.suppress(Exception):
         await websocket.close(code=code)
-    except Exception:  # noqa: BLE001
-        pass
 
 
-def _settings_from(ws: WebSocket) -> "Settings":
+def _settings_from(ws: WebSocket) -> Settings:
     return ws.app.state.settings  # type: ignore[no-any-return]
 
 
-def _db_from(ws: WebSocket) -> "DatabaseManager":
+def _db_from(ws: WebSocket) -> DatabaseManager:
     return ws.app.state.db  # type: ignore[no-any-return]
 
 
-def _hub_from(ws: WebSocket) -> "DashboardHub":
+def _hub_from(ws: WebSocket) -> DashboardHub:
     return ws.app.state.dashboard_hub  # type: ignore[no-any-return]
 
 

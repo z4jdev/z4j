@@ -27,8 +27,6 @@ brain has no idea this is a test.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -37,7 +35,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
-
+from z4j_brain.auth.csrf import csrf_cookie_name
+from z4j_brain.auth.passwords import PasswordHasher
+from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
+from z4j_brain.main import create_app
+from z4j_brain.persistence.models import Project, Session, User
+from z4j_brain.settings import Settings
+from z4j_brain.websocket.auth import hash_agent_token
 from z4j_core.transport.frames import (
     EventBatchFrame,
     EventBatchPayload,
@@ -49,14 +53,6 @@ from z4j_core.transport.frames import (
 )
 from z4j_core.transport.framing import FrameSigner
 from z4j_core.transport.hmac import derive_project_secret
-
-from z4j_brain.auth.passwords import PasswordHasher
-from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
-from z4j_brain.auth.csrf import csrf_cookie_name
-from z4j_brain.main import create_app
-from z4j_brain.persistence.models import Project, Session, User
-from z4j_brain.settings import Settings
-from z4j_brain.websocket.auth import hash_agent_token
 
 pytestmark = pytest.mark.asyncio
 
@@ -72,7 +68,7 @@ async def _seed_full_environment(
     settings: Settings,
 ) -> dict:
     """Insert project + admin user + agent + dashboard session."""
-    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     project_id = uuid.uuid4()
     user_id = uuid.uuid4()
@@ -82,11 +78,14 @@ async def _seed_full_environment(
     agent_token_plaintext = secrets.token_urlsafe(32)
     secret = settings.secret.get_secret_value().encode("utf-8")
     agent_token_hash = hash_agent_token(
-        plaintext=agent_token_plaintext, secret=secret,
+        plaintext=agent_token_plaintext,
+        secret=secret,
     )
 
     factory = async_sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False,
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
     )
     hasher = PasswordHasher(settings)
     async with factory() as s:
@@ -155,7 +154,8 @@ class TestEndToEndLoop:
     ) -> None:
         """Connect a fake agent, push events, query via REST."""
         seeded = await _seed_full_environment(
-            migrated_engine, settings=integration_settings,
+            migrated_engine,
+            settings=integration_settings,
         )
 
         # Dispose the test-loop engine BEFORE TestClient takes over.
@@ -170,7 +170,7 @@ class TestEndToEndLoop:
         app = create_app(integration_settings, engine=None)
         # Wait for lifespan startup so the registry's listener task
         # is alive before we connect.
-        with TestClient(app) as client:
+        with TestClient(app) as client:  # noqa: SIM117  inner CM depends on outer client; nesting keeps scope clear
             # ------------------------------------------------------------
             # 1) Open the WebSocket and complete the hello handshake
             # ------------------------------------------------------------
@@ -218,7 +218,8 @@ class TestEndToEndLoop:
                     "utf-8",
                 )
                 project_secret = derive_project_secret(
-                    master, _UUID(ack.payload.project_id),
+                    master,
+                    _UUID(ack.payload.project_id),
                 )
                 # Audit fix S006-E (1.4.0): FrameSigner requires the
                 # ``session_id`` from the HelloAck so the per-frame
@@ -267,7 +268,7 @@ class TestEndToEndLoop:
                 # brain's event loop.
                 import time as _time
 
-                _time.sleep(0.5)
+                _time.sleep(0.5)  # noqa: ASYNC251  sync TestClient worker thread; deliberate, see comment above
 
                 # ------------------------------------------------------------
                 # 3) Query the REST API as the dashboard would

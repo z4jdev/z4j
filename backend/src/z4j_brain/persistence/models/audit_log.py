@@ -137,21 +137,25 @@ class AuditLog(PKMixin, Base):
     #: detects. Null for v2 rows (pre-chain upgrade) and for the
     #: very first row ever written (genesis).
     prev_row_hmac: Mapped[str | None] = mapped_column(
-        String(64), nullable=True,
+        String(64),
+        nullable=True,
     )
 
     __table_args__ = (
         Index(
             "ix_audit_log_project_occurred",
-            "project_id", "occurred_at",
+            "project_id",
+            "occurred_at",
         ),
         Index(
             "ix_audit_log_user_occurred",
-            "user_id", "occurred_at",
+            "user_id",
+            "occurred_at",
         ),
         Index(
             "ix_audit_log_action_occurred",
-            "action", "occurred_at",
+            "action",
+            "occurred_at",
         ),
         # Standalone index on occurred_at so the retention
         # sweeper's ``WHERE occurred_at < ? ORDER BY occurred_at``

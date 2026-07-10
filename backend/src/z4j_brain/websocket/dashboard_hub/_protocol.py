@@ -30,7 +30,8 @@ Worker / queue / schedule / audit topics land in a later phase.
 
 from __future__ import annotations
 
-from typing import Literal, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 #: Set of valid topic strings the hub will accept. Anything outside
@@ -80,7 +81,7 @@ class DashboardHub(Protocol):
         self,
         *,
         project_id: UUID,
-        send: "SendCallable",
+        send: SendCallable,
         user_id: UUID | None = None,
     ) -> DashboardSubscription:
         """Register a new dashboard connection.
@@ -121,8 +122,6 @@ class DashboardHub(Protocol):
 # ---------------------------------------------------------------------------
 # SendCallable
 # ---------------------------------------------------------------------------
-
-from typing import Any, Awaitable, Callable
 
 #: The hub-internal "push a JSON frame at this connection" callback.
 #:

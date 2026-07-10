@@ -64,7 +64,10 @@ class Worker(PKMixin, TimestampsMixin, Base):
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
     queues: Mapped[list[str]] = mapped_column(
-        text_array(), nullable=False, default=list, server_default="{}",
+        text_array(),
+        nullable=False,
+        default=list,
+        server_default="{}",
     )
     state: Mapped[WorkerState] = mapped_column(
         Enum(
@@ -79,7 +82,8 @@ class Worker(PKMixin, TimestampsMixin, Base):
         server_default=WorkerState.UNKNOWN.value,
     )
     last_heartbeat: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     load_average: Mapped[list[float] | None] = mapped_column(
         # Stored as JSON to keep cross-dialect simple. Postgres
@@ -90,7 +94,10 @@ class Worker(PKMixin, TimestampsMixin, Base):
     )
     memory_bytes: Mapped[int | None] = mapped_column(big_integer(), nullable=True)
     active_tasks: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default="0",
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
     )
     worker_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
@@ -102,7 +109,10 @@ class Worker(PKMixin, TimestampsMixin, Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "project_id", "engine", "name", name="uq_workers_project_engine_name",
+            "project_id",
+            "engine",
+            "name",
+            name="uq_workers_project_engine_name",
         ),
         Index("ix_workers_project_state", "project_id", "state"),
     )

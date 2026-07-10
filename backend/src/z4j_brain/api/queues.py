@@ -41,7 +41,7 @@ class QueuePublic(BaseModel):
     created_at: datetime
 
 
-def _queue_payload(queue: "Queue") -> QueuePublic:
+def _queue_payload(queue: Queue) -> QueuePublic:
     return QueuePublic(
         id=queue.id,
         project_id=queue.project_id,
@@ -57,10 +57,10 @@ def _queue_payload(queue: "Queue") -> QueuePublic:
 @router.get("", response_model=list[QueuePublic])
 async def list_queues(
     slug: str,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[QueuePublic]:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import QueueRepository

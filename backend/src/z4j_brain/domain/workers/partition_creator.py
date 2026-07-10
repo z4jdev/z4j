@@ -19,7 +19,7 @@ code path that deletes event data.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -46,8 +46,8 @@ class PartitionCreatorWorker:
     def __init__(
         self,
         *,
-        db: "DatabaseManager",
-        settings: "Settings",
+        db: DatabaseManager,
+        settings: Settings,
     ) -> None:
         self._db = db
         self._retention_days = settings.event_retention_days
@@ -104,16 +104,27 @@ class PartitionCreatorWorker:
                 range_end = (day + timedelta(days=1)).isoformat()
 
                 try:
-                    await session.execute(
-                        text(
-                            f"CREATE TABLE IF NOT EXISTS {partition_name} "
-                            f"PARTITION OF events "
-                            f"FOR VALUES FROM ('{range_start}') "
-                            f"TO ('{range_end}')"
-                        ),
-                    )
+                    # Savepoint per CREATE: on Postgres a failed
+                    # statement ABORTS the enclosing transaction, so
+                    # without the savepoint one lost create-race or
+                    # lock_timeout poisoned every later statement in
+                    # this tick (the pg_inherits retention query blew
+                    # up with InFailedSQLTransactionError). Rolling
+                    # back to the savepoint keeps the tick's
+                    # transaction healthy; the SET LOCAL lock_timeout
+                    # above survives because it predates the
+                    # savepoint.
+                    async with session.begin_nested():
+                        await session.execute(
+                            text(
+                                f"CREATE TABLE IF NOT EXISTS {partition_name} "
+                                f"PARTITION OF events "
+                                f"FOR VALUES FROM ('{range_start}') "
+                                f"TO ('{range_end}')"
+                            ),
+                        )
                     created += 1
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     # Log + skip a single partition rather than
                     # poison the whole tick. Most common cause is
                     # the lock_timeout above firing under ingest
@@ -142,7 +153,7 @@ class PartitionCreatorWorker:
                         "PARTITION for that range",
                         rows=int(default_count),
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Default partition may not exist on a brand-new
                 # install where the migration hasn't run. Best-effort.
                 logger.debug(
@@ -172,7 +183,9 @@ class PartitionCreatorWorker:
                     try:
                         parts = partition_name.replace("events_", "").split("_")
                         partition_date = date(
-                            int(parts[0]), int(parts[1]), int(parts[2]),
+                            int(parts[0]),
+                            int(parts[1]),
+                            int(parts[2]),
                         )
                     except (ValueError, IndexError):
                         continue
@@ -186,36 +199,31 @@ class PartitionCreatorWorker:
                     try:
                         max_occurred = (
                             await session.execute(
-                                text(
-                                    f"SELECT max(occurred_at) "
-                                    f"FROM {partition_name}"
-                                ),
+                                text(f"SELECT max(occurred_at) FROM {partition_name}"),  # noqa: S608  internal partition name, not user input
                             )
                         ).scalar()
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.warning(
-                            "z4j partition creator: probe failed; "
-                            "skipping drop",
+                            "z4j partition creator: probe failed; skipping drop",
                             partition=partition_name,
                             exc_info=True,
                         )
                         continue
-                    if max_occurred is not None:
-                        # Coerce both sides to date for the compare;
-                        # cutoff is a date and max_occurred is a
-                        # timestamptz. A row whose timestamp is on
-                        # cutoff-day or later must NOT be dropped.
-                        if max_occurred.date() >= cutoff:
-                            logger.warning(
-                                "z4j partition creator: refusing drop "
-                                "of %s, max(occurred_at)=%s exceeds "
-                                "cutoff %s; investigate name vs "
-                                "content drift",
-                                partition_name,
-                                max_occurred.isoformat(),
-                                cutoff.isoformat(),
-                            )
-                            continue
+                    # Coerce both sides to date for the compare;
+                    # cutoff is a date and max_occurred is a
+                    # timestamptz. A row whose timestamp is on
+                    # cutoff-day or later must NOT be dropped.
+                    if max_occurred is not None and max_occurred.date() >= cutoff:
+                        logger.warning(
+                            "z4j partition creator: refusing drop "
+                            "of %s, max(occurred_at)=%s exceeds "
+                            "cutoff %s; investigate name vs "
+                            "content drift",
+                            partition_name,
+                            max_occurred.isoformat(),
+                            cutoff.isoformat(),
+                        )
+                        continue
                     await session.execute(
                         text(f"DROP TABLE IF EXISTS {partition_name}"),
                     )

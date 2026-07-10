@@ -104,10 +104,10 @@ class StatsResponse(BaseModel):
 async def get_stats(
     slug: str,
     hours: int = 24,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> StatsResponse:
     """Return aggregated project statistics.
 
@@ -145,16 +145,13 @@ async def get_stats(
     for state, count in state_rows:
         # state is a TaskState enum value
         setattr(counts, state.value if hasattr(state, "value") else str(state), int(count))
-    tasks_total = sum(
-        getattr(counts, name) for name in TaskStateCounts.model_fields
-    )
+    tasks_total = sum(getattr(counts, name) for name in TaskStateCounts.model_fields)
 
     # 24h failure / success counts
     tasks_failed_24h = int(
         (
             await db_session.execute(
-                select(func.count(Task.id))
-                .where(
+                select(func.count(Task.id)).where(
                     Task.project_id == project.id,
                     Task.state == TaskState.FAILURE,
                     Task.finished_at >= cutoff_24h,
@@ -165,8 +162,7 @@ async def get_stats(
     tasks_succeeded_24h = int(
         (
             await db_session.execute(
-                select(func.count(Task.id))
-                .where(
+                select(func.count(Task.id)).where(
                     Task.project_id == project.id,
                     Task.state == TaskState.SUCCESS,
                     Task.finished_at >= cutoff_24h,
@@ -175,16 +171,13 @@ async def get_stats(
         ).scalar_one(),
     )
     total_24h = tasks_failed_24h + tasks_succeeded_24h
-    failure_rate_24h = (
-        tasks_failed_24h / total_24h if total_24h > 0 else 0.0
-    )
+    failure_rate_24h = tasks_failed_24h / total_24h if total_24h > 0 else 0.0
 
     # agents online/offline
     agents_online = int(
         (
             await db_session.execute(
-                select(func.count(Agent.id))
-                .where(
+                select(func.count(Agent.id)).where(
                     Agent.project_id == project.id,
                     Agent.state == AgentState.ONLINE,
                 ),
@@ -194,8 +187,7 @@ async def get_stats(
     agents_offline = int(
         (
             await db_session.execute(
-                select(func.count(Agent.id))
-                .where(
+                select(func.count(Agent.id)).where(
                     Agent.project_id == project.id,
                     Agent.state != AgentState.ONLINE,
                 ),
@@ -207,8 +199,7 @@ async def get_stats(
     workers_online = int(
         (
             await db_session.execute(
-                select(func.count(Worker.id))
-                .where(
+                select(func.count(Worker.id)).where(
                     Worker.project_id == project.id,
                     Worker.state == WorkerState.ONLINE,
                 ),
@@ -218,8 +209,7 @@ async def get_stats(
     workers_offline = int(
         (
             await db_session.execute(
-                select(func.count(Worker.id))
-                .where(
+                select(func.count(Worker.id)).where(
                     Worker.project_id == project.id,
                     Worker.state != WorkerState.ONLINE,
                 ),
@@ -231,8 +221,7 @@ async def get_stats(
     commands_pending = int(
         (
             await db_session.execute(
-                select(func.count(Command.id))
-                .where(
+                select(func.count(Command.id)).where(
                     Command.project_id == project.id,
                     Command.status.in_(
                         [CommandStatus.PENDING, CommandStatus.DISPATCHED],
@@ -244,8 +233,7 @@ async def get_stats(
     commands_completed_24h = int(
         (
             await db_session.execute(
-                select(func.count(Command.id))
-                .where(
+                select(func.count(Command.id)).where(
                     Command.project_id == project.id,
                     Command.status == CommandStatus.COMPLETED,
                     Command.completed_at >= cutoff_24h,
@@ -256,8 +244,7 @@ async def get_stats(
     commands_failed_24h = int(
         (
             await db_session.execute(
-                select(func.count(Command.id))
-                .where(
+                select(func.count(Command.id)).where(
                     Command.project_id == project.id,
                     Command.status == CommandStatus.FAILED,
                     Command.completed_at >= cutoff_24h,
@@ -268,8 +255,7 @@ async def get_stats(
     commands_timeout_24h = int(
         (
             await db_session.execute(
-                select(func.count(Command.id))
-                .where(
+                select(func.count(Command.id)).where(
                     Command.project_id == project.id,
                     Command.status == CommandStatus.TIMEOUT,
                     Command.completed_at >= cutoff_24h,
@@ -280,10 +266,14 @@ async def get_stats(
 
     # Queue depths
     queue_rows = (
-        await db_session.execute(
-            select(Queue).where(Queue.project_id == project.id),
+        (
+            await db_session.execute(
+                select(Queue).where(Queue.project_id == project.id),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     queue_depths = [
         QueueHealth(
             name=q.name,

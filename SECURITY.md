@@ -21,17 +21,5 @@ Only the latest minor release receives security fixes. See
 
 ## Security-critical surface
 
-<!--
-TODO: replace this block with the package-specific security-critical
-surface. Example (from z4j-core):
-
-- **Module X** (`z4j.x`) - describe why a bug here would
-  have cross-cutting impact.
-- **Module Y** - same.
-
-If this package has no security-critical surface beyond the generic
-ones covered by z4j-core, you can delete this section entirely.
--->
-
 This package has no package-specific security-critical surface beyond
 the generic ones owned by `z4j-core` (transport / redaction / policy).

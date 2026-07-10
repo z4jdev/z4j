@@ -12,7 +12,6 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-
 from z4j_brain.websocket.dashboard_hub import LocalDashboardHub
 from z4j_brain.websocket.dashboard_hub.local import (
     _MAX_SUBSCRIBERS_PER_USER,
@@ -45,7 +44,9 @@ class TestPerUserCap:
             for _ in range(5):
                 subs.append(
                     await hub.add_subscriber(
-                        project_id=uuid4(), send=_Sink(), user_id=user,
+                        project_id=uuid4(),
+                        send=_Sink(),
+                        user_id=user,
                     ),
                 )
             assert len(subs) == 5
@@ -61,12 +62,16 @@ class TestPerUserCap:
             # Fill up to the cap.
             for _ in range(_MAX_SUBSCRIBERS_PER_USER):
                 await hub.add_subscriber(
-                    project_id=uuid4(), send=_Sink(), user_id=user,
+                    project_id=uuid4(),
+                    send=_Sink(),
+                    user_id=user,
                 )
             # Next one must be refused.
             with pytest.raises(RuntimeError, match="cap"):
                 await hub.add_subscriber(
-                    project_id=uuid4(), send=_Sink(), user_id=user,
+                    project_id=uuid4(),
+                    send=_Sink(),
+                    user_id=user,
                 )
         finally:
             await hub.stop()
@@ -81,11 +86,15 @@ class TestPerUserCap:
             # Fill up noisy user.
             for _ in range(_MAX_SUBSCRIBERS_PER_USER):
                 await hub.add_subscriber(
-                    project_id=uuid4(), send=_Sink(), user_id=noisy,
+                    project_id=uuid4(),
+                    send=_Sink(),
+                    user_id=noisy,
                 )
             # quiet user is unaffected and can still subscribe.
             sub = await hub.add_subscriber(
-                project_id=uuid4(), send=_Sink(), user_id=quiet,
+                project_id=uuid4(),
+                send=_Sink(),
+                user_id=quiet,
             )
             assert sub is not None
         finally:
@@ -102,14 +111,18 @@ class TestPerUserCap:
             for _ in range(_MAX_SUBSCRIBERS_PER_USER):
                 subs.append(
                     await hub.add_subscriber(
-                        project_id=uuid4(), send=_Sink(), user_id=user,
+                        project_id=uuid4(),
+                        send=_Sink(),
+                        user_id=user,
                     ),
                 )
             # Remove one - count should drop.
             await hub.remove_subscriber(subs[0])
             # Re-subscribe succeeds.
             new_sub = await hub.add_subscriber(
-                project_id=uuid4(), send=_Sink(), user_id=user,
+                project_id=uuid4(),
+                send=_Sink(),
+                user_id=user,
             )
             assert new_sub is not None
         finally:

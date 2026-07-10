@@ -81,7 +81,7 @@ class TestExpiresAtTzCoercion:
         aware = datetime.now(UTC)
         with pytest.raises(TypeError):
             # This is the raw comparison the old code did.
-            _ = naive <= aware  # noqa: B015
+            _ = naive <= aware
 
 
 class TestAuthDepsActualImplementationCoerces:
@@ -94,9 +94,7 @@ class TestAuthDepsActualImplementationCoerces:
         from z4j_brain.api import deps
 
         src = inspect.getsource(deps._resolve_bearer_user)
-        assert "expires_at.replace(tzinfo=UTC)" in src or (
-            "expires_at.replace(tzinfo=" in src
-        ), (
+        assert "expires_at.replace(tzinfo=UTC)" in src or ("expires_at.replace(tzinfo=" in src), (
             "R6 M1 regression: _resolve_bearer_user must coerce a naive "
             "expires_at to UTC before comparing to datetime.now(UTC)"
         )

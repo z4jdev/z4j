@@ -48,6 +48,7 @@ collector. The SQLAlchemy instrumentation in particular needs
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
@@ -93,13 +94,15 @@ SENSITIVE_OUTBOUND_HOST_SUFFIXES: tuple[str, ...] = (
     ".discord.com",
     ".pagerduty.com",
 )
-SENSITIVE_OUTBOUND_HOSTS_EXACT: frozenset[str] = frozenset({
-    "outlook.office.com",
-    "hooks.slack.com",
-    "events.pagerduty.com",
-    "discordapp.com",
-    "discord.com",
-})
+SENSITIVE_OUTBOUND_HOSTS_EXACT: frozenset[str] = frozenset(
+    {
+        "outlook.office.com",
+        "hooks.slack.com",
+        "events.pagerduty.com",
+        "discordapp.com",
+        "discord.com",
+    }
+)
 
 #: Per-process set of operator-configured hostnames whose outbound
 #: spans must be redacted. Populated by :func:`init_otel` from
@@ -116,8 +119,9 @@ def _register_dynamic_sensitive_host(url: str | None) -> None:
         return
     try:
         from urllib.parse import urlparse
+
         host = (urlparse(url).hostname or "").lower().rstrip(".")
-    except Exception:  # noqa: BLE001
+    except Exception:
         return
     if host:
         _DYNAMIC_SENSITIVE_HOSTS.add(host)
@@ -139,9 +143,7 @@ def _is_sensitive_outbound_host(host: str) -> bool:
         return True
     if lower in _DYNAMIC_SENSITIVE_HOSTS:
         return True
-    return any(
-        lower.endswith(suffix) for suffix in SENSITIVE_OUTBOUND_HOST_SUFFIXES
-    )
+    return any(lower.endswith(suffix) for suffix in SENSITIVE_OUTBOUND_HOST_SUFFIXES)
 
 
 def _detect_service_version() -> str:
@@ -168,14 +170,8 @@ def build_resource_attributes(settings: Any) -> dict[str, str]:
     needing the SDK installed. The returned dict is the exact set
     of OTel ``Resource`` attributes :func:`init_otel` will install.
     """
-    service_name = (
-        getattr(settings, "otel_service_name", None)
-        or "z4j-brain"
-    )
-    namespace = (
-        getattr(settings, "otel_service_namespace", None)
-        or "z4j"
-    )
+    service_name = getattr(settings, "otel_service_name", None) or "z4j-brain"
+    namespace = getattr(settings, "otel_service_namespace", None) or "z4j"
     environment = (
         getattr(settings, "otel_environment", None)
         or getattr(settings, "environment", None)
@@ -202,9 +198,7 @@ def _excluded_urls_str(settings: Any) -> str:
     else:
         base = DEFAULT_EXCLUDED_URL_PATTERNS
     extra_raw = getattr(settings, "otel_excluded_url_patterns", None) or ""
-    extra = tuple(
-        s.strip() for s in extra_raw.split(",") if s.strip()
-    )
+    extra = tuple(s.strip() for s in extra_raw.split(",") if s.strip())
     combined = base + extra
     return ",".join(combined)
 
@@ -218,17 +212,13 @@ def _resolve_endpoint(settings: Any) -> str | None:
     raw = getattr(settings, "otel_exporter_otlp_endpoint", None)
     if raw is None:
         return None
-    value = (
-        raw.get_secret_value()
-        if hasattr(raw, "get_secret_value")
-        else str(raw)
-    )
+    value = raw.get_secret_value() if hasattr(raw, "get_secret_value") else str(raw)
     if not value or not value.strip():
         return None
     return value.strip()
 
 
-def init_otel(
+def init_otel(  # noqa: PLR0911, PLR0912, PLR0915  otel init dispatch
     settings: Any,
     *,
     app: Any | None = None,
@@ -248,7 +238,7 @@ def init_otel(
     attach. ``httpx`` instrumentation patches the library globally and
     does not need a reference.
     """
-    global _initialised, _init_succeeded
+    global _initialised, _init_succeeded  # noqa: PLW0603  module-level singleton lazy-init
 
     if _initialised:
         return _init_succeeded
@@ -280,9 +270,7 @@ def init_otel(
         _init_succeeded = False
         return False
 
-    protocol = (
-        getattr(settings, "otel_protocol", None) or "http/protobuf"
-    ).lower()
+    protocol = (getattr(settings, "otel_protocol", None) or "http/protobuf").lower()
     try:
         if protocol in ("http/protobuf", "http"):
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
@@ -356,7 +344,7 @@ def init_otel(
         provider = TracerProvider(resource=resource, sampler=sampler)
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(**exporter_kwargs)))
         trace.set_tracer_provider(provider)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning(
             "z4j observability.otel: TracerProvider setup raised; "
             "brain continues without OpenTelemetry.",
@@ -373,6 +361,7 @@ def init_otel(
             from opentelemetry.instrumentation.fastapi import (
                 FastAPIInstrumentor,
             )
+
             kwargs: dict[str, Any] = {}
             if excluded:
                 kwargs["excluded_urls"] = excluded
@@ -382,7 +371,7 @@ def init_otel(
                 "z4j observability.otel: FastAPI instrumentation not "
                 "installed; HTTP server spans disabled.",
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "z4j observability.otel: FastAPI instrumentation failed; "
                 "HTTP server spans disabled.",
@@ -394,6 +383,7 @@ def init_otel(
             from opentelemetry.instrumentation.sqlalchemy import (
                 SQLAlchemyInstrumentor,
             )
+
             # ``engine`` is the async engine; the instrumentation
             # accepts the underlying sync engine reference.
             sync_engine = getattr(engine, "sync_engine", engine)
@@ -406,10 +396,9 @@ def init_otel(
                 "z4j observability.otel: SQLAlchemy instrumentation "
                 "not installed; DB spans disabled.",
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
-                "z4j observability.otel: SQLAlchemy instrumentation "
-                "failed; DB spans disabled.",
+                "z4j observability.otel: SQLAlchemy instrumentation failed; DB spans disabled.",
                 exc_info=True,
             )
 
@@ -436,7 +425,8 @@ def init_otel(
             )
             span.set_attribute("http.target", "/[redacted by z4j]")
             span.set_attribute(
-                "url.full", f"{scheme}://{host}/[redacted by z4j]",
+                "url.full",
+                f"{scheme}://{host}/[redacted by z4j]",
             )
             span.set_attribute("url.path", "/[redacted by z4j]")
             span.set_attribute("url.query", "")
@@ -457,16 +447,13 @@ def init_otel(
                 if not isinstance(scheme, str):
                     scheme = str(scheme)
                 _set_redacted_attrs(span, host, scheme)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Fail-closed: a scrubber failure must NOT ship the
                 # auto-captured URL. Overwrite defensively + log.
-                try:
+                with contextlib.suppress(Exception):
                     _set_redacted_attrs(span, "[unknown]", "https")
-                except Exception:  # noqa: BLE001
-                    pass
                 logger.warning(
-                    "z4j observability.otel: httpx request_hook "
-                    "raised; URL redacted defensively",
+                    "z4j observability.otel: httpx request_hook raised; URL redacted defensively",
                     exc_info=True,
                 )
 
@@ -487,10 +474,9 @@ def init_otel(
             "z4j observability.otel: httpx instrumentation not "
             "installed; outbound HTTP spans disabled.",
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning(
-            "z4j observability.otel: httpx instrumentation failed; "
-            "outbound HTTP spans disabled.",
+            "z4j observability.otel: httpx instrumentation failed; outbound HTTP spans disabled.",
             exc_info=True,
         )
 
@@ -516,7 +502,7 @@ def _reset_for_tests() -> None:
     swaps brain instances (different audit_webhook_url across
     test runs) does not accumulate sensitive-host entries across
     runs. (Round 5 F5: test-pollution gap.)"""
-    global _initialised, _init_succeeded
+    global _initialised, _init_succeeded  # noqa: PLW0603  module-level singleton lazy-init
     _initialised = False
     _init_succeeded = False
     _reset_dynamic_sensitive_hosts_for_tests()
@@ -524,7 +510,7 @@ def _reset_for_tests() -> None:
 
 __all__ = [
     "DEFAULT_EXCLUDED_URL_PATTERNS",
+    "_reset_for_tests",
     "build_resource_attributes",
     "init_otel",
-    "_reset_for_tests",
 ]

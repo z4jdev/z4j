@@ -88,23 +88,29 @@ class AgentWorker(PKMixin, TimestampsMixin, Base):
         nullable=False,
     )
     worker_id: Mapped[str | None] = mapped_column(
-        String(128), nullable=True,
+        String(128),
+        nullable=True,
     )
     role: Mapped[str | None] = mapped_column(String(32), nullable=True)
     framework: Mapped[str | None] = mapped_column(String(40), nullable=True)
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     state: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="online",
+        String(20),
+        nullable=False,
+        default="online",
         server_default="online",
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     last_connect_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     __table_args__ = (
@@ -117,7 +123,9 @@ class AgentWorker(PKMixin, TimestampsMixin, Base):
         # enforces). Acceptable: the write here is idempotent
         # via ON CONFLICT DO UPDATE in the upsert path.
         UniqueConstraint(
-            "agent_id", "worker_id", name="uq_agent_workers_agent_worker",
+            "agent_id",
+            "worker_id",
+            name="uq_agent_workers_agent_worker",
         ),
         Index("ix_agent_workers_project_state", "project_id", "state"),
         Index("ix_agent_workers_agent_state", "agent_id", "state"),

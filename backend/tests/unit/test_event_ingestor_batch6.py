@@ -17,12 +17,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
-from z4j_core.redaction import RedactionConfig, RedactionEngine
-
 from z4j_brain.domain.event_ingestor import EventIngestor
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import AgentState, TaskState
 from z4j_brain.persistence.models import Agent, Project, Task
 from z4j_brain.persistence.repositories import (
@@ -31,6 +28,7 @@ from z4j_brain.persistence.repositories import (
     QueueRepository,
     TaskRepository,
 )
+from z4j_core.redaction import RedactionConfig, RedactionEngine
 
 
 @pytest.fixture
@@ -112,14 +110,18 @@ class TestCanvasAmbiguity:
 
         # Project-A has a parent task with this id.
         parent_a = Task(
-            project_id=proj_a.id, engine="celery",
-            task_id="shared-id", name="parent-in-a",
+            project_id=proj_a.id,
+            engine="celery",
+            task_id="shared-id",
+            name="parent-in-a",
         )
         # Project-B coincidentally has a row with the same
         # (engine, task_id) - legitimate same-id reuse.
         parent_b = Task(
-            project_id=proj_b.id, engine="celery",
-            task_id="shared-id", name="parent-in-b",
+            project_id=proj_b.id,
+            engine="celery",
+            task_id="shared-id",
+            name="parent-in-b",
         )
         session.add_all([parent_a, parent_b])
         await session.commit()
@@ -172,8 +174,10 @@ class TestCanvasAmbiguity:
 
         # Only project-B has this parent.
         parent_b = Task(
-            project_id=proj_b.id, engine="celery",
-            task_id="victim", name="parent-in-b-only",
+            project_id=proj_b.id,
+            engine="celery",
+            task_id="victim",
+            name="parent-in-b-only",
         )
         session.add(parent_b)
         await session.commit()
@@ -205,9 +209,7 @@ class TestCanvasAmbiguity:
                 ),
             )
         ).scalar_one()
-        assert child.parent_task_id is None, (
-            "cross-project-only reference must be dropped"
-        )
+        assert child.parent_task_id is None, "cross-project-only reference must be dropped"
 
 
 # ---------------------------------------------------------------------------
@@ -234,17 +236,20 @@ class TestStateMonotonicGuard:
         # 1) received → started → succeeded lifecycle (ordered).
         ordered = [
             _event(
-                kind="task.received", task_id="t1",
+                kind="task.received",
+                task_id="t1",
                 occurred_at=t_start,
                 data={"task_name": "app.x"},
             ),
             _event(
-                kind="task.started", task_id="t1",
+                kind="task.started",
+                task_id="t1",
                 occurred_at=t_start + timedelta(seconds=1),
                 data={"worker": "w1"},
             ),
             _event(
-                kind="task.succeeded", task_id="t1",
+                kind="task.succeeded",
+                task_id="t1",
                 occurred_at=t_end,
                 data={"runtime_ms": 59000},
             ),
@@ -271,7 +276,8 @@ class TestStateMonotonicGuard:
         # occurred_at is BEFORE the terminal event.
         stale = [
             _event(
-                kind="task.started", task_id="t1",
+                kind="task.started",
+                task_id="t1",
                 occurred_at=late_started,
                 data={"worker": "w1"},
             ),
@@ -306,14 +312,18 @@ class TestStateMonotonicGuard:
         agent = await _make_agent(session, proj)
         t = datetime.now(UTC)
         events = [
-            _event(kind="task.received", task_id="ok",
-                   occurred_at=t),
-            _event(kind="task.started", task_id="ok",
-                   occurred_at=t + timedelta(seconds=1),
-                   data={"worker": "w1"}),
+            _event(kind="task.received", task_id="ok", occurred_at=t),
+            _event(
+                kind="task.started",
+                task_id="ok",
+                occurred_at=t + timedelta(seconds=1),
+                data={"worker": "w1"},
+            ),
         ]
         await ingestor.ingest_batch(
-            events=events, project_id=proj.id, agent_id=agent.id,
+            events=events,
+            project_id=proj.id,
+            agent_id=agent.id,
             agents=AgentRepository(session),
             event_repo=EventRepository(session),
             task_repo=TaskRepository(session),
@@ -347,14 +357,18 @@ class TestStateMonotonicGuard:
         # stamps it to now, so existing_latest after ingest is
         # ~= now.
         attacker = [
-            _event(kind="task.received", task_id="x",
-                   occurred_at=t_now - timedelta(seconds=10)),
-            _event(kind="task.succeeded", task_id="x",
-                   occurred_at=t_now + timedelta(seconds=55),
-                   data={"runtime_ms": 10_000}),
+            _event(kind="task.received", task_id="x", occurred_at=t_now - timedelta(seconds=10)),
+            _event(
+                kind="task.succeeded",
+                task_id="x",
+                occurred_at=t_now + timedelta(seconds=55),
+                data={"runtime_ms": 10_000},
+            ),
         ]
         await ingestor.ingest_batch(
-            events=attacker, project_id=proj.id, agent_id=agent.id,
+            events=attacker,
+            project_id=proj.id,
+            agent_id=agent.id,
             agents=AgentRepository(session),
             event_repo=EventRepository(session),
             task_repo=TaskRepository(session),
@@ -368,12 +382,17 @@ class TestStateMonotonicGuard:
         # occurred_at is NOT < existing_latest, and the state
         # transition lands.
         legit = [
-            _event(kind="task.failed", task_id="x",
-                   occurred_at=t_now + timedelta(seconds=30),
-                   data={"exception": "oops"}),
+            _event(
+                kind="task.failed",
+                task_id="x",
+                occurred_at=t_now + timedelta(seconds=30),
+                data={"exception": "oops"},
+            ),
         ]
         await ingestor.ingest_batch(
-            events=legit, project_id=proj.id, agent_id=agent.id,
+            events=legit,
+            project_id=proj.id,
+            agent_id=agent.id,
             agents=AgentRepository(session),
             event_repo=EventRepository(session),
             task_repo=TaskRepository(session),
@@ -389,6 +408,5 @@ class TestStateMonotonicGuard:
         # SUCCESS (the R5 H1 fix - clamp tight + min(ts, now) on
         # the existing row's timestamps).
         assert task.state == TaskState.FAILURE, (
-            f"R5 H1 regression: hostile near-future stamp locked "
-            f"state at {task.state}"
+            f"R5 H1 regression: hostile near-future stamp locked state at {task.state}"
         )

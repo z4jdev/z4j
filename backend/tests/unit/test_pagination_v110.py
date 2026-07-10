@@ -26,12 +26,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ProjectRole, ScheduleKind
 from z4j_brain.persistence.models import (
     Membership,
@@ -42,7 +41,6 @@ from z4j_brain.persistence.models import (
 )
 from z4j_brain.persistence.models.notification import UserSubscription
 from z4j_brain.settings import Settings
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -132,7 +130,6 @@ async def _seed_user_in_project(
 
 def _make_client(brain_app, settings: Settings, seed: dict):
     from httpx import ASGITransport, AsyncClient
-
     from z4j_brain.auth.csrf import csrf_cookie_name
 
     transport = ASGITransport(app=brain_app)
@@ -163,10 +160,13 @@ class TestSchedulesPagination:
     """``GET /api/v1/projects/{slug}/schedules``, keyset on (name, id)."""
 
     async def test_envelope_shape_when_empty(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_user_in_project(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.get("/api/v1/projects/default/schedules")
@@ -175,11 +175,14 @@ class TestSchedulesPagination:
         assert body == {"items": [], "next_cursor": None}
 
     async def test_pagination_walks_all_pages(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Seed 7 schedules, page through with limit=3, assert full set."""
         seed = await _seed_user_in_project(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         async with brain_app.state.db.session() as s:
             for i in range(7):
@@ -206,7 +209,8 @@ class TestSchedulesPagination:
                 if cursor is not None:
                     params["cursor"] = cursor
                 r = await client.get(
-                    "/api/v1/projects/default/schedules", params=params,
+                    "/api/v1/projects/default/schedules",
+                    params=params,
                 )
                 assert r.status_code == 200, r.text
                 body = r.json()
@@ -220,11 +224,14 @@ class TestSchedulesPagination:
         assert seen == [f"sched-{i:02d}" for i in range(7)]
 
     async def test_cursor_does_not_skip_or_duplicate_at_boundary(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """The boundary row must appear exactly once across page edges."""
         seed = await _seed_user_in_project(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         async with brain_app.state.db.session() as s:
             for i in range(5):
@@ -243,7 +250,8 @@ class TestSchedulesPagination:
 
         async with _make_client(brain_app, settings, seed) as client:
             r1 = await client.get(
-                "/api/v1/projects/default/schedules", params={"limit": 2},
+                "/api/v1/projects/default/schedules",
+                params={"limit": 2},
             )
             assert r1.status_code == 200
             page1 = r1.json()
@@ -268,11 +276,14 @@ class TestSchedulesPagination:
             assert page3["next_cursor"] is None
 
     async def test_invalid_cursor_treated_as_no_cursor(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """A garbage cursor must not 500, return the first page instead."""
         seed = await _seed_user_in_project(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         async with brain_app.state.db.session() as s:
             s.add(
@@ -307,10 +318,13 @@ class TestUserSubscriptionsPagination:
     """``GET /api/v1/user/subscriptions``, keyset on (project_id, trigger, id)."""
 
     async def test_envelope_shape_when_empty(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_user_in_project(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.get("/api/v1/user/subscriptions")
@@ -319,10 +333,13 @@ class TestUserSubscriptionsPagination:
         assert body == {"items": [], "next_cursor": None}
 
     async def test_pagination_walks_all_pages(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_user_in_project(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         # Six distinct (project, trigger) subscriptions for the user.
         triggers = [
@@ -359,7 +376,8 @@ class TestUserSubscriptionsPagination:
                 if cursor is not None:
                     params["cursor"] = cursor
                 r = await client.get(
-                    "/api/v1/user/subscriptions", params=params,
+                    "/api/v1/user/subscriptions",
+                    params=params,
                 )
                 assert r.status_code == 200, r.text
                 body = r.json()
@@ -376,10 +394,13 @@ class TestUserSubscriptionsPagination:
         assert len(set(seen)) == len(seen)  # no duplicates across boundaries
 
     async def test_invalid_cursor_treated_as_no_cursor(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _seed_user_in_project(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         async with brain_app.state.db.session() as s:
             s.add(

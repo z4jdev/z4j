@@ -32,6 +32,7 @@ that already have a matching user subscription.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import logging
 from dataclasses import dataclass
@@ -130,7 +131,7 @@ def _format_body(
     if exception:
         # Trim long exceptions; the full traceback lives in the task detail.
         return exception[:500]
-    if state and state != trigger.split(".")[-1]:
+    if state and state != trigger.rsplit(".", maxsplit=1)[-1]:
         return f"State: {state}"
     return None
 
@@ -146,10 +147,10 @@ class NotificationService:
     Stateless - construct per request from the DB session.
     """
 
-    async def evaluate_and_dispatch(
+    async def evaluate_and_dispatch(  # noqa: PLR0912, PLR0915  subscription dispatch pipeline
         self,
         *,
-        session: "AsyncSession",
+        session: AsyncSession,
         project_id: UUID,
         trigger: str,
         task_id: str | None = None,
@@ -161,6 +162,7 @@ class NotificationService:
         exception: str | None = None,
         traceback: str | None = None,
         project_slug: str = "",
+        resource_type: str = "task",
     ) -> int:
         """Find matching user subscriptions and deliver notifications.
 
@@ -221,6 +223,13 @@ class NotificationService:
             "engine": engine,
             "queue": queue,
             "priority": priority,
+            # Round-4 LOW: schedule/agent alerts reuse the task-shaped
+            # contract (task_id carries the schedule/agent UUID), so
+            # the bell navigated every such alert to a nonexistent
+            # task page. resource_type tells the dashboard which
+            # detail route the id resolves to; "task" (and absent, for
+            # pre-existing rows) preserves the original behavior.
+            "resource_type": resource_type,
         }
 
         now = datetime.now(UTC)
@@ -244,16 +253,14 @@ class NotificationService:
                 for cid in sub.user_channel_ids:
                     user_channel_pairs.append((sub.user_id, cid))
 
-        project_channels_by_id: dict[UUID, "NotificationChannel"] = {}
+        project_channels_by_id: dict[UUID, NotificationChannel] = {}
         if all_proj_channel_ids:
             fetched = await project_channel_repo.get_many_for_project(
                 project_id=project_id,
                 ids=list(all_proj_channel_ids),
             )
             # Filter inactive upfront so the inner loop is pure.
-            project_channels_by_id = {
-                c.id: c for c in fetched if c.is_active
-            }
+            project_channels_by_id = {c.id: c for c in fetched if c.is_active}
 
         user_channels_by_id = await user_channel_repo.get_many_by_pairs(
             user_channel_pairs,
@@ -301,8 +308,7 @@ class NotificationService:
                         # At scale the audit-row-per-skip pattern floods
                         # the table with no operational value.
                         logger.debug(
-                            "z4j notification: cooldown-skipped "
-                            "sub_id=%s trigger=%s",
+                            "z4j notification: cooldown-skipped sub_id=%s trigger=%s",
                             sub.id,
                             trigger,
                         )
@@ -315,7 +321,7 @@ class NotificationService:
                                 project=str(project_id),
                                 trigger=trigger,
                             ).inc()
-                        except Exception:  # noqa: BLE001
+                        except Exception:  # noqa: S110  best-effort metrics increment, import + call
                             # Metrics module not importable in some
                             # test setups; safe to drop silently.
                             pass
@@ -340,7 +346,7 @@ class NotificationService:
 
                     # 6) Stage project channel deliveries (from the
                     #    pre-fetched dict, no DB round-trip here).
-                    for cid in (sub.project_channel_ids or []):
+                    for cid in sub.project_channel_ids or []:
                         channel = project_channels_by_id.get(cid)
                         if channel is None:
                             continue
@@ -361,7 +367,7 @@ class NotificationService:
 
                     # 7) Stage user channel deliveries (pre-fetched,
                     #    ownership already enforced by get_many_by_pairs).
-                    for cid in (sub.user_channel_ids or []):
+                    for cid in sub.user_channel_ids or []:
                         user_channel = user_channels_by_id.get(cid)
                         if user_channel is None or not user_channel.is_active:
                             continue
@@ -379,11 +385,10 @@ class NotificationService:
                                 task_name=task_name,
                             ),
                         )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Savepoint rolled back this sub's writes only.
                 logger.exception(
-                    "z4j notification: per-subscription staging failed "
-                    "(sub_id=%s)",
+                    "z4j notification: per-subscription staging failed (sub_id=%s)",
                     sub.id,
                 )
                 continue
@@ -419,13 +424,14 @@ class NotificationService:
                 from z4j_brain.domain.notifications.sanitize import (
                     sanitize_audit_text,
                 )
+
                 # Best-effort Prometheus counter. Imported inline so a
                 # broken metrics module never breaks dispatch.
                 try:
                     from z4j_brain.api.metrics import (
                         z4j_notifications_sent_total,
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     z4j_notifications_sent_total = None  # type: ignore[assignment]
 
                 for outcome in outcomes:
@@ -450,14 +456,12 @@ class NotificationService:
                                 )
                                 else "failed"
                             )
-                        try:
+                        with contextlib.suppress(Exception):
                             z4j_notifications_sent_total.labels(
                                 project=str(p.project_id) if p.project_id else "",
                                 channel_type=p.channel_type or "unknown",
                                 status=_status,
                             ).inc()
-                        except Exception:  # noqa: BLE001
-                            pass
                     # Sanitize error + response_body before persistence
                     # (audit H-1 / H-2 / H-3): the dispatcher's raw
                     # error / body text can carry the channel's
@@ -467,9 +471,7 @@ class NotificationService:
                     # internal IPs. p.channel_config is the original
                     # config dict the dispatcher received - lets the
                     # sanitizer mask URL-bearing substrings.
-                    raw_body = (
-                        outcome.response_body if not outcome.success else None
-                    )
+                    raw_body = outcome.response_body if not outcome.success else None
                     # R7-M1: pass the dispatcher's config dict directly
                     # via ``p.config``. The previous spelling
                     # ``getattr(p, "channel_config", None)`` silently
@@ -520,16 +522,14 @@ class NotificationService:
                     )
                     if outcome.success:
                         logger.info(
-                            "z4j notification sent (trigger=%s "
-                            "channel_type=%s task=%s)",
+                            "z4j notification sent (trigger=%s channel_type=%s task=%s)",
                             p.trigger,
                             p.channel_type,
                             p.task_name,
                         )
                     else:
                         logger.warning(
-                            "z4j notification failed (trigger=%s "
-                            "channel_type=%s error=%s)",
+                            "z4j notification failed (trigger=%s channel_type=%s error=%s)",
                             p.trigger,
                             p.channel_type,
                             outcome.error,
@@ -571,7 +571,7 @@ class NotificationService:
                     )
                 try:
                     result = await dispatcher(p.config, payload)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     return _DeliveryOutcome(
                         pending=p,
                         success=False,
@@ -594,7 +594,8 @@ class NotificationService:
         # _DeliveryOutcome; the only remaining unhandled raise is
         # CancelledError, which we coerce to a synthetic outcome.
         results = await asyncio.gather(
-            *(_run(p) for p in pending), return_exceptions=True,
+            *(_run(p) for p in pending),
+            return_exceptions=True,
         )
         coerced: list[_DeliveryOutcome] = []
         for idx, item in enumerate(results):
@@ -619,7 +620,7 @@ class NotificationService:
     async def materialize_defaults_for_member(
         self,
         *,
-        session: "AsyncSession",
+        session: AsyncSession,
         user_id: UUID,
         project_id: UUID,
     ) -> int:
@@ -673,7 +674,7 @@ class NotificationService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _matches_filters(
+    def _matches_filters(  # noqa: PLR0912  filter matching
         filters: dict[str, Any],
         *,
         priority: str | None,
@@ -781,7 +782,7 @@ class NotificationService:
 
     @staticmethod
     def _is_on_cooldown(
-        sub: "UserSubscription",
+        sub: UserSubscription,
         *,
         now: datetime,
     ) -> bool:
@@ -798,5 +799,6 @@ class NotificationService:
             return False
         cutoff = now - timedelta(seconds=sub.cooldown_seconds)
         return sub.last_fired_at >= cutoff
+
 
 __all__ = ["NotificationService"]

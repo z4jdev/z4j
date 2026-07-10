@@ -53,7 +53,7 @@ class EventListResponse(BaseModel):
     next_cursor: str | None
 
 
-def _event_payload(event: "Event") -> EventPublic:
+def _event_payload(event: Event) -> EventPublic:
     return EventPublic(
         id=event.id,
         project_id=event.project_id,
@@ -73,11 +73,11 @@ async def list_events_for_task(
     task_id: str = Query(..., min_length=1, max_length=200),
     cursor: str | None = Query(default=None),
     limit: int | None = Query(default=None, ge=1, le=5000),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> EventListResponse:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import EventRepository

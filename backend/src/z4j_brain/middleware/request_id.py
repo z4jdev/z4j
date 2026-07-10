@@ -39,7 +39,8 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: RequestResponseEndpoint,
     ) -> Response:
-        from z4j_core.observability import bind as _bind, clear as _clear
+        from z4j_core.observability import bind as _bind
+        from z4j_core.observability import clear as _clear
 
         incoming = request.headers.get(_HEADER)
         request_id = _normalize(incoming) or _generate()

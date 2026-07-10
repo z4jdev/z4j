@@ -10,7 +10,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-
 from z4j_brain.api.metrics import (
     _refresh_self_watch_gauges,
     register_self_watch_provider,

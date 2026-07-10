@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from z4j_brain.api.deps import (
     get_audit_log_repo,
@@ -89,7 +89,7 @@ def _validate_user_timezone(value: str | None) -> str | None:
     if value is None or value == "":
         return value
     try:
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: PLC0415
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
         ZoneInfo(value)
     except ZoneInfoNotFoundError as exc:
@@ -97,7 +97,7 @@ def _validate_user_timezone(value: str | None) -> str | None:
             f"timezone {value!r} is not a valid IANA timezone "
             "(e.g. 'UTC', 'America/New_York', 'Europe/London')",
         ) from exc
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise ValueError(
             f"timezone {value!r} could not be resolved: {exc}",
         ) from exc
@@ -179,16 +179,15 @@ def _payload(user: User) -> UserAdminPublic:
 
 @router.get("", response_model=list[UserAdminPublic])
 async def list_users(
-    admin: User = Depends(require_admin),  # noqa: ARG001
-    db_session: "AsyncSession" = Depends(get_session),
+    admin: User = Depends(require_admin),
+    db_session: AsyncSession = Depends(get_session),
     limit: int = 100,
     offset: int = 0,
 ) -> list[UserAdminPublic]:
     """List every dashboard user. Bounded by ``limit``."""
     if limit <= 0 or limit > 500:
         limit = 100
-    if offset < 0:
-        offset = 0
+    offset = max(offset, 0)
     result = await db_session.execute(
         select(User).order_by(User.created_at.desc()).limit(limit).offset(offset),
     )
@@ -204,11 +203,11 @@ async def list_users(
 async def create_user(
     body: CreateUserRequest,
     admin: User = Depends(require_admin),
-    users: "UserRepository" = Depends(get_user_repo),
-    hasher: "PasswordHasher" = Depends(get_password_hasher),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    users: UserRepository = Depends(get_user_repo),
+    hasher: PasswordHasher = Depends(get_password_hasher),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> UserAdminPublic:
     from z4j_brain.domain.auth_service import canonicalize_email
@@ -254,8 +253,8 @@ async def create_user(
 @router.get("/{user_id}", response_model=UserAdminPublic)
 async def get_user(
     user_id: uuid.UUID,
-    admin: User = Depends(require_admin),  # noqa: ARG001
-    users: "UserRepository" = Depends(get_user_repo),
+    admin: User = Depends(require_admin),
+    users: UserRepository = Depends(get_user_repo),
 ) -> UserAdminPublic:
     user = await users.get(user_id)
     if user is None:
@@ -271,15 +270,15 @@ async def get_user(
     response_model=UserAdminPublic,
     dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
 )
-async def update_user(
+async def update_user(  # noqa: PLR0912  user field update branches
     user_id: uuid.UUID,
     body: UpdateUserRequest,
     admin: User = Depends(require_admin),
-    users: "UserRepository" = Depends(get_user_repo),
-    sessions: "SessionRepository" = Depends(get_session_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    users: UserRepository = Depends(get_user_repo),
+    sessions: SessionRepository = Depends(get_session_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> UserAdminPublic:
     user = await users.get(user_id)
@@ -310,9 +309,7 @@ async def update_user(
     # remaining active admin - the instance would lose all admin
     # access and become unrecoverable from the UI.
     would_strip_admin = (
-        user.is_admin
-        and user.is_active
-        and (body.is_admin is False or body.is_active is False)
+        user.is_admin and user.is_active and (body.is_admin is False or body.is_active is False)
     )
     if would_strip_admin:
         # ``count_active_admins_for_update`` row-locks every active
@@ -322,8 +319,7 @@ async def update_user(
         active_admins = await users.count_active_admins_for_update()
         if active_admins <= 1:
             raise ConflictError(
-                "cannot remove the last admin - promote another "
-                "user to admin first",
+                "cannot remove the last admin - promote another user to admin first",
                 details={"reason": "last_admin"},
             )
 
@@ -346,7 +342,8 @@ async def update_user(
         if not body.is_active:
             # Deactivation revokes every active session for the user.
             await sessions.revoke_all_for_user(
-                user.id, reason="deactivated",
+                user.id,
+                reason="deactivated",
             )
     if body.timezone is not None:
         user.timezone = body.timezone
@@ -382,12 +379,12 @@ async def reset_password(
     user_id: uuid.UUID,
     body: PasswordResetRequest,
     admin: User = Depends(require_admin),
-    users: "UserRepository" = Depends(get_user_repo),
-    sessions: "SessionRepository" = Depends(get_session_repo),
-    hasher: "PasswordHasher" = Depends(get_password_hasher),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    users: UserRepository = Depends(get_user_repo),
+    sessions: SessionRepository = Depends(get_session_repo),
+    hasher: PasswordHasher = Depends(get_password_hasher),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> None:
     """Admin password reset.
@@ -407,7 +404,9 @@ async def reset_password(
     hasher.validate_policy(body.new_password)
     new_hash = hasher.hash(body.new_password)
     await users.update_password_hash(
-        user.id, new_hash, password_changed=True,
+        user.id,
+        new_hash,
+        password_changed=True,
     )
     await sessions.revoke_all_for_user(user.id, reason="password_changed")
 
@@ -432,10 +431,10 @@ async def reset_password(
 async def delete_user(
     user_id: uuid.UUID,
     admin: User = Depends(require_admin),
-    users: "UserRepository" = Depends(get_user_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    users: UserRepository = Depends(get_user_repo),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> None:
     """Permanently delete a user.
@@ -471,12 +470,25 @@ async def delete_user(
         active_admins = await users.count_active_admins_for_update()
         if active_admins <= 1:
             raise ConflictError(
-                "cannot delete the last admin - promote another "
-                "user to admin first",
+                "cannot delete the last admin - promote another user to admin first",
                 details={"reason": "last_admin"},
             )
 
     email_snapshot = user.email
+
+    # Disable the user's automation rules BEFORE the delete. The
+    # created_by FK is ON DELETE SET NULL, so without this the deleted
+    # user's rules become created_by IS NULL -- which the fire-time authz
+    # check treats as a system rule with standing authority -- leaving
+    # orphaned (possibly destructive) automation firing with no owner.
+    from z4j_brain.persistence.repositories import (
+        AutomationRuleRepository,
+    )
+
+    disabled_rules = await AutomationRuleRepository(
+        db_session,
+    ).disable_all_rules_created_by_user(user_id=user_id)
+
     await db_session.delete(user)
 
     await audit.record(
@@ -488,7 +500,7 @@ async def delete_user(
         outcome="allow",
         user_id=admin.id,
         source_ip=ip,
-        metadata={"email": email_snapshot},
+        metadata={"email": email_snapshot, "disabled_rules": disabled_rules},
     )
     await db_session.commit()
 

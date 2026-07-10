@@ -38,11 +38,7 @@ class FirstBootTokenRepository(BaseRepository[FirstBootToken]):
         fine for the unit suite - the race is a Postgres-shaped
         production concern.
         """
-        stmt = (
-            select(FirstBootToken)
-            .order_by(FirstBootToken.created_at.desc())
-            .limit(1)
-        )
+        stmt = select(FirstBootToken).order_by(FirstBootToken.created_at.desc()).limit(1)
         if lock:
             stmt = stmt.with_for_update()
         result = await self.session.execute(stmt)

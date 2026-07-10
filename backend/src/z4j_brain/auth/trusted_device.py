@@ -98,7 +98,8 @@ def set_trust_cookie(
         cookie_name(environment=environment),
         cookie_value,
         **cookie_kwargs(
-            environment=environment, max_age_seconds=max_age_seconds,
+            environment=environment,
+            max_age_seconds=max_age_seconds,
         ),
     )
 

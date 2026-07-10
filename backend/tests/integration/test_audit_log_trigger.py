@@ -54,7 +54,8 @@ class TestAppendOnly:
         assert "append-only" in str(exc_info.value).lower()
 
     async def test_insert_still_works(
-        self, migrated_engine: AsyncEngine,
+        self,
+        migrated_engine: AsyncEngine,
     ) -> None:
         # Append-only doesn't mean read-only - INSERT must still work.
         row_id = uuid.uuid4()

@@ -23,12 +23,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ProjectRole, ScheduleKind
 from z4j_brain.persistence.models import (
     Membership,
@@ -38,7 +37,6 @@ from z4j_brain.persistence.models import (
     User,
 )
 from z4j_brain.settings import Settings
-
 
 # =====================================================================
 # Fixtures (mirror test_schedules_import.py)
@@ -130,7 +128,6 @@ async def _make_seed(
 
 def _make_client(brain_app, settings: Settings, seed: dict):
     from httpx import ASGITransport, AsyncClient
-
     from z4j_brain.auth.csrf import csrf_cookie_name
 
     transport = ASGITransport(app=brain_app)
@@ -179,10 +176,14 @@ def _create_body(name: str = "every-hour", **overrides) -> dict:
 class TestCreateSchedule:
     @pytest.mark.asyncio
     async def test_create_returns_201_and_row(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -199,17 +200,23 @@ class TestCreateSchedule:
         # Row landed.
         async with brain_app.state.db.session() as s:
             rows = (
-                await s.execute(
-                    select(Schedule).where(
-                        Schedule.project_id == seed["project_id"],
-                    ),
+                (
+                    await s.execute(
+                        select(Schedule).where(
+                            Schedule.project_id == seed["project_id"],
+                        ),
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             assert len(rows) == 1
 
     @pytest.mark.asyncio
     async def test_create_rejects_operator_role(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # OPERATOR can trigger but not create. Mirrors the import-
         # endpoint convention.
@@ -228,14 +235,18 @@ class TestCreateSchedule:
 
     @pytest.mark.asyncio
     async def test_create_with_unknown_kind_returns_422(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Audit-Phase3-4 fix: bad enum is a semantic validation
         # failure, not a "resource missing" condition. Endpoint
         # returns 422 (Unprocessable Entity) so clients can
         # distinguish "you sent garbage" from "we don't have it".
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -261,10 +272,14 @@ class TestDefaultSchedulerOwnerFallback:
 
     @pytest.mark.asyncio
     async def test_create_without_scheduler_uses_project_default(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         # Flip the project default to "celery-beat" before creating
         # the schedule.
@@ -290,10 +305,14 @@ class TestDefaultSchedulerOwnerFallback:
 
     @pytest.mark.asyncio
     async def test_explicit_scheduler_overrides_project_default(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         # Project default = celery-beat, but body explicitly picks
         # z4j-scheduler. Body wins.
@@ -319,11 +338,15 @@ class TestDefaultSchedulerOwnerFallback:
 
     @pytest.mark.asyncio
     async def test_fresh_project_defaults_to_z4j_scheduler(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """Fresh project with no operator override: scheduler='z4j-scheduler'."""
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         body = _create_body("fresh")
         body.pop("scheduler", None)
@@ -345,10 +368,14 @@ class TestDefaultSchedulerOwnerFallback:
 class TestUpdateSchedule:
     @pytest.mark.asyncio
     async def test_partial_update_only_touches_sent_fields(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         # Seed a row directly via the DB so we know baseline values.
         schedule_id = uuid.uuid4()
@@ -385,10 +412,14 @@ class TestUpdateSchedule:
 
     @pytest.mark.asyncio
     async def test_update_unknown_id_returns_404(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.patch(
@@ -401,14 +432,18 @@ class TestUpdateSchedule:
 class TestUpdateIDOR:
     @pytest.mark.asyncio
     async def test_cross_project_update_returns_404_not_403(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # The schedule exists - but in a DIFFERENT project. The
         # request scopes to /projects/default/schedules/{id}. The
         # repo's get_for_project rejects, the route raises 404.
         # Returning 404 (not 403) deliberately hides existence.
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         other_project_id = uuid.uuid4()
         schedule_id = uuid.uuid4()
@@ -425,7 +460,8 @@ class TestUpdateIDOR:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )
@@ -449,10 +485,14 @@ class TestUpdateIDOR:
 class TestDeleteSchedule:
     @pytest.mark.asyncio
     async def test_delete_returns_204_and_removes_row(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         schedule_id = uuid.uuid4()
         async with brain_app.state.db.session() as s:
@@ -467,7 +507,8 @@ class TestDeleteSchedule:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )
@@ -485,10 +526,14 @@ class TestDeleteSchedule:
 
     @pytest.mark.asyncio
     async def test_delete_unknown_returns_404(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.delete(
@@ -498,7 +543,9 @@ class TestDeleteSchedule:
 
     @pytest.mark.asyncio
     async def test_delete_rejects_operator_role(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Even if the schedule exists, OPERATOR can't delete it.
         seed = await _make_seed(
@@ -520,7 +567,8 @@ class TestDeleteSchedule:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )
@@ -541,14 +589,18 @@ class TestDeleteSchedule:
 class TestImportReplaceForSource:
     @pytest.mark.asyncio
     async def test_replace_mode_deletes_absent_rows_with_same_source(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Seed three schedules with source="declarative_django":
         #   alpha, beta, gamma. Then import a batch with only
         #   alpha + delta. Expected: gamma+beta deleted, delta
         #   inserted, alpha unchanged (same hash).
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with brain_app.state.db.session() as s:
             for name, sh in (
@@ -566,7 +618,8 @@ class TestImportReplaceForSource:
                         kind=ScheduleKind.CRON,
                         expression="0 * * * *",
                         timezone="UTC",
-                        args=[], kwargs={},
+                        args=[],
+                        kwargs={},
                         is_enabled=True,
                         source="declarative_django",
                         source_hash=sh,
@@ -604,27 +657,35 @@ class TestImportReplaceForSource:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["unchanged"] == 1  # alpha
-        assert body["inserted"] == 1   # delta
-        assert body["deleted"] == 2    # beta + gamma
+        assert body["inserted"] == 1  # delta
+        assert body["deleted"] == 2  # beta + gamma
 
         async with brain_app.state.db.session() as s:
             rows = (
-                await s.execute(
-                    select(Schedule).where(
-                        Schedule.project_id == seed["project_id"],
-                    ),
+                (
+                    await s.execute(
+                        select(Schedule).where(
+                            Schedule.project_id == seed["project_id"],
+                        ),
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             assert {r.name for r in rows} == {"alpha", "delta"}
 
     @pytest.mark.asyncio
     async def test_replace_mode_does_not_delete_other_sources(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Two source labels coexist. Replace-mode for one source
         # must NOT touch rows from the other.
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with brain_app.state.db.session() as s:
             s.add(
@@ -637,7 +698,9 @@ class TestImportReplaceForSource:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={}, is_enabled=True,
+                    args=[],
+                    kwargs={},
+                    is_enabled=True,
                     source="imported_celerybeat",
                 ),
             )
@@ -651,7 +714,9 @@ class TestImportReplaceForSource:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={}, is_enabled=True,
+                    args=[],
+                    kwargs={},
+                    is_enabled=True,
                     source="declarative_django",
                 ),
             )
@@ -674,10 +739,14 @@ class TestImportReplaceForSource:
 
         async with brain_app.state.db.session() as s:
             rows = (
-                await s.execute(
-                    select(Schedule).where(
-                        Schedule.project_id == seed["project_id"],
-                    ),
+                (
+                    await s.execute(
+                        select(Schedule).where(
+                            Schedule.project_id == seed["project_id"],
+                        ),
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             assert {r.name for r in rows} == {"from-celerybeat"}

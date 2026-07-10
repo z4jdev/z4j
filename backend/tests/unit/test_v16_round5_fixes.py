@@ -10,15 +10,13 @@ naive-datetime cursor 500). Each test pins one of those fixes.
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import uuid
-from datetime import UTC, datetime
-from types import SimpleNamespace
+from datetime import UTC
 from typing import Any
 
 import httpx
 import pytest
-
 from z4j_brain.api import activity as activity_mod
 from z4j_brain.api.activity import (
     _decode_cursor,
@@ -28,7 +26,6 @@ from z4j_brain.api.activity import (
 )
 from z4j_brain.observability import otel as otel_mod
 from z4j_brain.observability.sentry import scrub_event
-
 
 # ---------------------------------------------------------------------------
 # Round 5 F1 (re) -- per-call timeout reaches the transport as a Timeout
@@ -62,14 +59,14 @@ class TestPostTimeoutReachesTransport:
         )
         set_shared_client(client)
         try:
-            try:
+            # MockTransport returns a non-streamable response; the
+            # request HAS reached the transport so captured is set.
+            with contextlib.suppress(httpx.StreamConsumed):
                 await _post(
-                    "https://example.com/x", content=b"{}", timeout=15.0,
+                    "https://example.com/x",
+                    content=b"{}",
+                    timeout=15.0,
                 )
-            except httpx.StreamConsumed:
-                # MockTransport returns a non-streamable response; the
-                # request HAS reached the transport so captured is set.
-                pass
         finally:
             set_shared_client(None)
             await client.aclose()
@@ -106,7 +103,8 @@ class TestRateLimitLRUDoesNotPinDeniedCallers:
         _reset_rate_limit_for_tests()
 
     def test_denied_calls_do_not_move_to_end(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Saturate 'a' first so its bucket is at the limit, then
         touch 'b' and 'c' so both are MRU AFTER 'a'. Now 'a' hammers
@@ -167,6 +165,7 @@ class TestDecodeCursorNaiveDatetime:
 
     def test_malformed_still_raises_422(self) -> None:
         from fastapi import HTTPException
+
         with pytest.raises(HTTPException) as excinfo:
             _decode_cursor("not-a-cursor")
         assert excinfo.value.status_code == 422
@@ -218,7 +217,8 @@ class TestAuditForwarderSwallowedCoverage:
 
     @pytest.mark.asyncio
     async def test_post_raised_bumps_swallowed(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from z4j_brain.domain import audit_forwarder as af_mod
         from z4j_brain.domain.audit_forwarder import AuditForwarder
@@ -248,12 +248,21 @@ class TestAuditForwarderSwallowedCoverage:
         # Use the JSON-serialisable dict shape directly.
         payload = {
             "id": "00000000-0000-0000-0000-00000000abcd",
-            "action": "t", "target_type": "t", "target_id": None,
-            "result": "success", "outcome": "allow", "event_id": None,
-            "user_id": None, "api_key_id": None, "project_id": None,
-            "source_ip": None, "user_agent": None, "metadata": {},
+            "action": "t",
+            "target_type": "t",
+            "target_id": None,
+            "result": "success",
+            "outcome": "allow",
+            "event_id": None,
+            "user_id": None,
+            "api_key_id": None,
+            "project_id": None,
+            "source_ip": None,
+            "user_agent": None,
+            "metadata": {},
             "occurred_at": "2026-05-12T12:00:00.000000+00:00",
-            "prev_row_hmac": None, "row_hmac": "0" * 64,
+            "prev_row_hmac": None,
+            "row_hmac": "0" * 64,
         }
         await fwd._send_one(payload)
         assert counts.get("audit_forwarder/post_raised", 0) == 1
@@ -277,10 +286,8 @@ class TestActivityFeedUserScopedRowVisibility:
         builder runs end-to-end in the existing
         test_activity_endpoint.py suite under SQLAlchemy."""
         from pathlib import Path
-        src = (
-            Path(__file__).resolve().parent.parent.parent
-            / "src/z4j_brain/api/activity.py"
-        )
+
+        src = Path(__file__).resolve().parent.parent.parent / "src/z4j_brain/api/activity.py"
         text = src.read_text(encoding="utf-8")
         # The clause must include the OR with user-scoped rows.
         assert "AuditLog.project_id.is_(None)" in text

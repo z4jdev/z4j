@@ -32,12 +32,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ScheduleKind
 from z4j_brain.persistence.models import (
     AuditLog,
@@ -47,7 +46,6 @@ from z4j_brain.persistence.models import (
     User,
 )
 from z4j_brain.settings import Settings
-
 
 # =====================================================================
 # Fixtures
@@ -86,7 +84,9 @@ async def brain_app(settings: Settings):
 
 
 async def _make_admin_seed(
-    *, settings: Settings, brain_app,
+    *,
+    settings: Settings,
+    brain_app,
 ) -> dict:
     db = brain_app.state.db
     hasher = PasswordHasher(settings)
@@ -128,7 +128,6 @@ async def _make_admin_seed(
 
 def _client(brain_app, settings: Settings, seed: dict):
     from httpx import ASGITransport, AsyncClient
-
     from z4j_brain.auth.csrf import csrf_cookie_name
 
     transport = ASGITransport(app=brain_app)
@@ -157,7 +156,9 @@ def _client(brain_app, settings: Settings, seed: dict):
 class TestAuditCapturesSourceFilter:
     @pytest.mark.asyncio
     async def test_replace_for_source_audit_records_source_filter(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         """The audit row MUST name the source label that was replaced.
 
@@ -166,7 +167,8 @@ class TestAuditCapturesSourceFilter:
         writes ``source_filter`` into the audit metadata.
         """
         seed = await _make_admin_seed(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         # Pre-seed two rows with source="declarative_django" so the
         # reconcile has something to delete.
@@ -182,7 +184,8 @@ class TestAuditCapturesSourceFilter:
                         kind=ScheduleKind.CRON,
                         expression="0 * * * *",
                         timezone="UTC",
-                        args=[], kwargs={},
+                        args=[],
+                        kwargs={},
                         is_enabled=True,
                         source="declarative_django",
                     ),
@@ -202,12 +205,16 @@ class TestAuditCapturesSourceFilter:
 
         async with brain_app.state.db.session() as s:
             audit_rows = (
-                await s.execute(
-                    select(AuditLog).where(
-                        AuditLog.action == "schedules.import",
-                    ),
+                (
+                    await s.execute(
+                        select(AuditLog).where(
+                            AuditLog.action == "schedules.import",
+                        ),
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
 
         assert len(audit_rows) == 1
         meta = audit_rows[0].audit_metadata
@@ -218,13 +225,16 @@ class TestAuditCapturesSourceFilter:
 
     @pytest.mark.asyncio
     async def test_upsert_mode_audit_omits_source_filter(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Plain ``upsert`` mode doesn't have a source_filter -
         # only replace_for_source does. The audit metadata stays
         # focused; we don't pollute it with None.
         seed = await _make_admin_seed(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         async with _client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -295,14 +305,17 @@ class TestConcurrentReconcileGuard:
 class TestValidationStatusCode:
     @pytest.mark.asyncio
     async def test_create_bad_enum_returns_422(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Pinned again here (also covered by the updated test in
         # test_schedules_crud.py) to make the audit fix visible
         # in the audit-fixes file - new contributors find it
         # together with the other Phase 3 regression tests.
         seed = await _make_admin_seed(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         async with _client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -322,10 +335,13 @@ class TestValidationStatusCode:
 
     @pytest.mark.asyncio
     async def test_update_bad_enum_returns_422(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_admin_seed(
-            settings=settings, brain_app=brain_app,
+            settings=settings,
+            brain_app=brain_app,
         )
         # Seed a schedule first.
         sid = uuid.uuid4()
@@ -341,7 +357,8 @@ class TestValidationStatusCode:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )

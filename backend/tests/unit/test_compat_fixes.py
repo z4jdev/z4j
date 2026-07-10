@@ -35,20 +35,18 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import Z4JMeta
 from z4j_brain.startup_version import (
     SchemaVersionError,
     check_and_update_schema_version,
 )
-
 
 # =====================================================================
 # C1, schema_version skew warns, doesn't raise
@@ -76,7 +74,9 @@ async def session():
 @pytest.mark.asyncio
 class TestC1SchemaVersionWarnNotRaise:
     async def test_db_newer_than_code_warns_continues(
-        self, session, caplog,
+        self,
+        session,
+        caplog,
     ) -> None:
         """The exact failure mode that bit operators on 1.0.18→1.0.17.
 
@@ -95,12 +95,13 @@ class TestC1SchemaVersionWarnNotRaise:
         # operator inspecting logs understands why some features
         # are missing.
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert any(
-            "9999.0.0" in r.getMessage() for r in warnings
-        ), f"expected version-skew warning, got: {[r.getMessage() for r in warnings]}"
+        assert any("9999.0.0" in r.getMessage() for r in warnings), (
+            f"expected version-skew warning, got: {[r.getMessage() for r in warnings]}"
+        )
 
     async def test_db_older_than_code_still_updates_record(
-        self, session,
+        self,
+        session,
     ) -> None:
         """Forward path unchanged: code newer than DB → update meta."""
         session.add(Z4JMeta(key="schema_version", value="0.0.1"))
@@ -155,7 +156,8 @@ class TestC2AutoMigrateUnknownRevision:
         assert "future_revision_xyz" in str(err)
 
     def test_detect_unknown_db_head_returns_none_without_db_url(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         """No Z4J_DATABASE_URL → can't introspect → returns None
         (best-effort) so the regular alembic upgrade path runs.
@@ -187,7 +189,6 @@ class TestH1SchedulerWorkersGated:
         list.
         """
         from sqlalchemy.ext.asyncio import create_async_engine
-
         from z4j_brain.main import create_app
         from z4j_brain.settings import Settings
 
@@ -229,10 +230,12 @@ class TestH2SubscriptionFiltersExtraIgnore:
         from z4j_brain.api.notifications import SubscriptionFilters
 
         # Must NOT raise
-        filters = SubscriptionFilters.model_validate({
-            "priority": ["high"],
-            "future_filter_key_unknown_to_this_version": "anything",
-        })
+        filters = SubscriptionFilters.model_validate(
+            {
+                "priority": ["high"],
+                "future_filter_key_unknown_to_this_version": "anything",
+            }
+        )
         # The known field stays; the unknown was ignored.
         assert filters.priority == ["high"]
         # Pydantic dump with exclude_none must NOT contain the
@@ -249,22 +252,26 @@ class TestH2SubscriptionFiltersExtraIgnore:
         """
         from z4j_brain.api.tasks import BulkDeleteRequest
 
-        with pytest.raises(Exception):  # pydantic ValidationError
-            BulkDeleteRequest.model_validate({
-                "task_ids": [str(uuid.uuid4())],
-                "project_id": str(uuid.uuid4()),  # smuggling attempt
-            })
+        with pytest.raises(ValidationError):
+            BulkDeleteRequest.model_validate(
+                {
+                    "task_ids": [str(uuid.uuid4())],
+                    "project_id": str(uuid.uuid4()),  # smuggling attempt
+                }
+            )
 
     def test_user_subscription_create_keeps_forbid(self):
         """R3 M11 audit defense still in place."""
         from z4j_brain.api.user_notifications import UserSubscriptionCreate
 
-        with pytest.raises(Exception):  # pydantic ValidationError
-            UserSubscriptionCreate.model_validate({
-                "project_id": str(uuid.uuid4()),
-                "trigger": "task.failed",
-                "user_id": str(uuid.uuid4()),  # smuggling attempt
-            })
+        with pytest.raises(ValidationError):
+            UserSubscriptionCreate.model_validate(
+                {
+                    "project_id": str(uuid.uuid4()),
+                    "trigger": "task.failed",
+                    "user_id": str(uuid.uuid4()),  # smuggling attempt
+                }
+            )
 
 
 # =====================================================================
@@ -292,7 +299,6 @@ class TestM2DashboardCacheControl:
 
         from httpx import ASGITransport, AsyncClient
         from sqlalchemy.ext.asyncio import create_async_engine
-
         from z4j_brain.main import create_app
         from z4j_brain.settings import Settings
 
@@ -310,14 +316,13 @@ class TestM2DashboardCacheControl:
             app = create_app(settings, engine=engine)
             transport = ASGITransport(app=app)
             async with AsyncClient(
-                transport=transport, base_url="http://testserver",
+                transport=transport,
+                base_url="http://testserver",
             ) as ac:
                 resp = await ac.get("/")
                 assert resp.status_code == 200
                 cc = resp.headers.get("cache-control", "")
-                assert "no-cache" in cc, (
-                    f"expected no-cache in Cache-Control, got: {cc!r}"
-                )
+                assert "no-cache" in cc, f"expected no-cache in Cache-Control, got: {cc!r}"
                 assert "no-store" in cc
                 assert "must-revalidate" in cc
         finally:

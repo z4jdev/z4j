@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 # =====================================================================
 # I-1: AcknowledgeFireResult correlation goes through schedule_fires
 # =====================================================================
@@ -35,12 +34,13 @@ class TestI1AckCorrelationByScheduleFires:
     async def test_ack_resolves_via_schedule_fires_join(self) -> None:
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy.pool import StaticPool
-
         from z4j_brain.persistence.base import Base
         from z4j_brain.persistence.database import DatabaseManager
         from z4j_brain.persistence.enums import ScheduleKind
         from z4j_brain.persistence.models import (
-            Project, Schedule, ScheduleFire,
+            Project,
+            Schedule,
+            ScheduleFire,
         )
         from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
         from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
@@ -59,7 +59,8 @@ class TestI1AckCorrelationByScheduleFires:
                 database_url="sqlite+aiosqlite:///:memory:",
                 secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
                 session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-                environment="dev", log_json=False,
+                environment="dev",
+                log_json=False,
             )
 
             project_id = uuid.uuid4()
@@ -74,48 +75,75 @@ class TestI1AckCorrelationByScheduleFires:
                 # (overwriting fire_id_a's pointer). Pre-fix, an ack
                 # for fire_id_a would silently no-op because
                 # last_fire_id no longer == fire_id_a.
-                s.add(Schedule(
-                    id=schedule_id_a, project_id=project_id,
-                    engine="celery", scheduler="z4j-scheduler",
-                    name="A", task_name="t.t",
-                    kind=ScheduleKind.CRON, expression="0 * * * *",
-                    timezone="UTC", args=[], kwargs={},
-                    is_enabled=True,
-                    last_fire_id=fire_id_b,  # B overwrote A
-                    total_runs=0,
-                ))
-                s.add(Schedule(
-                    id=schedule_id_b, project_id=project_id,
-                    engine="celery", scheduler="z4j-scheduler",
-                    name="B", task_name="t.t",
-                    kind=ScheduleKind.CRON, expression="0 * * * *",
-                    timezone="UTC", args=[], kwargs={},
-                    is_enabled=True,
-                    last_fire_id=fire_id_b,
-                    total_runs=0,
-                ))
+                s.add(
+                    Schedule(
+                        id=schedule_id_a,
+                        project_id=project_id,
+                        engine="celery",
+                        scheduler="z4j-scheduler",
+                        name="A",
+                        task_name="t.t",
+                        kind=ScheduleKind.CRON,
+                        expression="0 * * * *",
+                        timezone="UTC",
+                        args=[],
+                        kwargs={},
+                        is_enabled=True,
+                        last_fire_id=fire_id_b,  # B overwrote A
+                        total_runs=0,
+                    )
+                )
+                s.add(
+                    Schedule(
+                        id=schedule_id_b,
+                        project_id=project_id,
+                        engine="celery",
+                        scheduler="z4j-scheduler",
+                        name="B",
+                        task_name="t.t",
+                        kind=ScheduleKind.CRON,
+                        expression="0 * * * *",
+                        timezone="UTC",
+                        args=[],
+                        kwargs={},
+                        is_enabled=True,
+                        last_fire_id=fire_id_b,
+                        total_runs=0,
+                    )
+                )
                 # Both fires recorded in schedule_fires (the
                 # authoritative table). Post-fix the ack lookup
                 # joins on schedule_fires.fire_id so it correctly
                 # routes the ack to schedule A even though A's
                 # last_fire_id has been overwritten.
                 now = datetime.now(UTC)
-                s.add(ScheduleFire(
-                    fire_id=fire_id_a, schedule_id=schedule_id_a,
-                    project_id=project_id, command_id=None,
-                    status="delivered",
-                    scheduled_for=now, fired_at=now,
-                ))
-                s.add(ScheduleFire(
-                    fire_id=fire_id_b, schedule_id=schedule_id_b,
-                    project_id=project_id, command_id=None,
-                    status="delivered",
-                    scheduled_for=now, fired_at=now,
-                ))
+                s.add(
+                    ScheduleFire(
+                        fire_id=fire_id_a,
+                        schedule_id=schedule_id_a,
+                        project_id=project_id,
+                        command_id=None,
+                        status="delivered",
+                        scheduled_for=now,
+                        fired_at=now,
+                    )
+                )
+                s.add(
+                    ScheduleFire(
+                        fire_id=fire_id_b,
+                        schedule_id=schedule_id_b,
+                        project_id=project_id,
+                        command_id=None,
+                        status="delivered",
+                        scheduled_for=now,
+                        fired_at=now,
+                    )
+                )
                 await s.commit()
 
             servicer = SchedulerServiceImpl(
-                settings=settings, db=db,
+                settings=settings,
+                db=db,
                 command_dispatcher=None,  # type: ignore[arg-type]
                 audit_service=None,  # type: ignore[arg-type]
             )
@@ -137,6 +165,7 @@ class TestI1AckCorrelationByScheduleFires:
 
             # Verify Schedule A was updated, NOT Schedule B.
             from sqlalchemy import select
+
             async with db.session() as s:
                 result = await s.execute(
                     select(Schedule).where(Schedule.id == schedule_id_a),
@@ -184,7 +213,8 @@ class TestWatchSchedulesConcurrencyCap:
             database_url="sqlite+aiosqlite:///:memory:",
             secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
             session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-            environment="dev", log_json=False,
+            environment="dev",
+            log_json=False,
         )
         # Defaults bounded by realistic fleet ceiling.
         assert s.scheduler_grpc_watch_max_concurrent == 64
@@ -194,7 +224,6 @@ class TestWatchSchedulesConcurrencyCap:
         """``ge=1`` floor on per-cert cap so an operator can't
         configure '0 streams allowed' which would 100% deny."""
         from pydantic import ValidationError as _PydanticValidationError
-
         from z4j_brain.settings import Settings
 
         with pytest.raises(_PydanticValidationError):
@@ -202,7 +231,8 @@ class TestWatchSchedulesConcurrencyCap:
                 database_url="sqlite+aiosqlite:///:memory:",
                 secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
                 session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-                environment="dev", log_json=False,
+                environment="dev",
+                log_json=False,
                 scheduler_grpc_watch_max_per_cert=0,
             )
 
@@ -242,7 +272,10 @@ class TestWatchSchedulesCounterUnderLock:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "scheduler_grpc" / "handlers.py"
+            / "src"
+            / "z4j_brain"
+            / "scheduler_grpc"
+            / "handlers.py"
         ).read_text()
 
         # Strip comment lines (full-line `#` and trailing `# ...`).
@@ -268,7 +301,7 @@ class TestWatchSchedulesCounterUnderLock:
                 continue
             # Trailing inline comment.
             if " #" in raw:
-                raw = raw.split(" #", 1)[0]
+                raw = raw.split(" #", 1)[0]  # noqa: PLW2901  normalized in-loop
             code_lines.append(raw)
         code = "\n".join(code_lines)
 
@@ -285,7 +318,10 @@ class TestWatchSchedulesCounterUnderLock:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "scheduler_grpc" / "handlers.py"
+            / "src"
+            / "z4j_brain"
+            / "scheduler_grpc"
+            / "handlers.py"
         ).read_text()
         assert "_watch_global_count" in src
         assert "_watch_global_lock" in src
@@ -301,7 +337,10 @@ class TestWatchSchedulesCounterUnderLock:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "scheduler_grpc" / "handlers.py"
+            / "src"
+            / "z4j_brain"
+            / "scheduler_grpc"
+            / "handlers.py"
         ).read_text()
         # The shield wraps the release helper.
         assert "asyncio.shield(" in src
@@ -315,12 +354,15 @@ class TestWatchSchedulesCounterUnderLock:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "scheduler_grpc" / "handlers.py"
+            / "src"
+            / "z4j_brain"
+            / "scheduler_grpc"
+            / "handlers.py"
         ).read_text()
         # Locate the helper body and assert it touches both
         # counters.
         helper_start = src.index("async def _release_watch_slot(")
-        helper_body = src[helper_start:helper_start + 2000]
+        helper_body = src[helper_start : helper_start + 2000]
         assert "self._watch_global_count -= 1" in helper_body
         assert "self._watch_per_cert_count[cert_cn] -= 1" in helper_body
 
@@ -333,10 +375,13 @@ class TestWatchSchedulesCounterUnderLock:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "scheduler_grpc" / "handlers.py"
+            / "src"
+            / "z4j_brain"
+            / "scheduler_grpc"
+            / "handlers.py"
         ).read_text()
         helper_start = src.index("async def _release_watch_slot(")
-        helper_body = src[helper_start:helper_start + 2000]
+        helper_body = src[helper_start : helper_start + 2000]
         assert "self._watch_global_count < 0" in helper_body
         assert "logger.error" in helper_body
         # The reset itself.
@@ -350,7 +395,10 @@ class TestWatchSchedulesCounterUnderLock:
 
         src = (
             Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "scheduler_grpc" / "handlers.py"
+            / "src"
+            / "z4j_brain"
+            / "scheduler_grpc"
+            / "handlers.py"
         ).read_text()
         assert "self._watch_global_count: int = 0" in src
         assert "self._watch_global_cap = " in src
@@ -380,8 +428,7 @@ class TestN1BatchLookups:
         from pathlib import Path
 
         src = (
-            Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "api" / "schedules.py"
+            Path(__file__).resolve().parents[2] / "src" / "z4j_brain" / "api" / "schedules.py"
         ).read_text()
         # The fixed-up import handler builds existing_id_map from a
         # single tuple_(...).in_(batch_keys) lookup before the loop.
@@ -392,8 +439,7 @@ class TestN1BatchLookups:
         from pathlib import Path
 
         src = (
-            Path(__file__).resolve().parents[2]
-            / "src" / "z4j_brain" / "api" / "schedules.py"
+            Path(__file__).resolve().parents[2] / "src" / "z4j_brain" / "api" / "schedules.py"
         ).read_text()
         assert "diff_batch_keys" in src
         assert "existing_rows: dict[tuple[str, str], Schedule] = {}" in src
@@ -452,7 +498,6 @@ class TestAuditMiddlewareDenialRows:
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy.pool import StaticPool
         from starlette.requests import Request
-
         from z4j_brain.errors import AuthorizationError
         from z4j_brain.middleware.errors import _record_denial_if_relevant
         from z4j_brain.persistence.base import Base
@@ -473,7 +518,8 @@ class TestAuditMiddlewareDenialRows:
                 database_url="sqlite+aiosqlite:///:memory:",
                 secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
                 session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-                environment="dev", log_json=False,
+                environment="dev",
+                log_json=False,
             )
             async with db.session() as s:
                 s.add(Project(id=uuid.uuid4(), slug="acme", name="Acme"))
@@ -484,6 +530,7 @@ class TestAuditMiddlewareDenialRows:
             # now enqueues fire-and-forget; the drain task writes
             # the audit row.
             from z4j_brain.middleware._audit_queue import AuditQueue
+
             audit_queue = AuditQueue()
             audit_queue.start(db=db, settings=settings)
 
@@ -521,9 +568,7 @@ class TestAuditMiddlewareDenialRows:
                     ),
                 )
                 rows = list(result.scalars().all())
-            assert len(rows) == 1, (
-                "denial on a /schedules path must leave one audit row"
-            )
+            assert len(rows) == 1, "denial on a /schedules path must leave one audit row"
             assert rows[0].outcome == "deny"
             assert rows[0].source_ip == "127.0.0.1"
         finally:
@@ -545,8 +590,9 @@ class TestRound3TaskNameControlCharRejected:
     rejects control chars at the API boundary."""
 
     def test_create_rejects_newline_in_task_name(self) -> None:
-        from pydantic import ValidationError as _PVE
-
+        from pydantic import (
+            ValidationError as _PVE,  # noqa: N814  local alias for pydantic ValidationError
+        )
         from z4j_brain.api.schedules import ScheduleCreateIn
 
         with pytest.raises(_PVE):
@@ -559,8 +605,9 @@ class TestRound3TaskNameControlCharRejected:
             )
 
     def test_create_rejects_null_byte_in_task_name(self) -> None:
-        from pydantic import ValidationError as _PVE
-
+        from pydantic import (
+            ValidationError as _PVE,  # noqa: N814  local alias for pydantic ValidationError
+        )
         from z4j_brain.api.schedules import ScheduleCreateIn
 
         with pytest.raises(_PVE):
@@ -573,8 +620,9 @@ class TestRound3TaskNameControlCharRejected:
             )
 
     def test_create_rejects_control_char_in_expression(self) -> None:
-        from pydantic import ValidationError as _PVE
-
+        from pydantic import (
+            ValidationError as _PVE,  # noqa: N814  local alias for pydantic ValidationError
+        )
         from z4j_brain.api.schedules import ScheduleCreateIn
 
         with pytest.raises(_PVE):
@@ -587,16 +635,18 @@ class TestRound3TaskNameControlCharRejected:
             )
 
     def test_update_rejects_newline_in_task_name(self) -> None:
-        from pydantic import ValidationError as _PVE
-
+        from pydantic import (
+            ValidationError as _PVE,  # noqa: N814  local alias for pydantic ValidationError
+        )
         from z4j_brain.api.schedules import ScheduleUpdateIn
 
         with pytest.raises(_PVE):
             ScheduleUpdateIn(task_name="x\ny")
 
     def test_imported_rejects_newline_in_task_name(self) -> None:
-        from pydantic import ValidationError as _PVE
-
+        from pydantic import (
+            ValidationError as _PVE,  # noqa: N814  local alias for pydantic ValidationError
+        )
         from z4j_brain.api.schedules import ImportedScheduleIn
 
         with pytest.raises(_PVE):
@@ -644,7 +694,6 @@ class TestRound3FireScheduleSchedulerFilter:
     ) -> None:
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy.pool import StaticPool
-
         from z4j_brain.persistence.base import Base
         from z4j_brain.persistence.database import DatabaseManager
         from z4j_brain.persistence.enums import ScheduleKind
@@ -666,29 +715,35 @@ class TestRound3FireScheduleSchedulerFilter:
                 database_url="sqlite+aiosqlite:///:memory:",
                 secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
                 session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-                environment="dev", log_json=False,
+                environment="dev",
+                log_json=False,
             )
             project_id = uuid.uuid4()
             celery_beat_schedule_id = uuid.uuid4()
             async with db.session() as s:
                 s.add(Project(id=project_id, slug="acme", name="Acme"))
                 # Row owned by celery-beat (NOT z4j-scheduler).
-                s.add(Schedule(
-                    id=celery_beat_schedule_id,
-                    project_id=project_id,
-                    engine="celery",
-                    scheduler="celery-beat",  # different surface
-                    name="cb-row",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC", args=[], kwargs={},
-                    is_enabled=True,
-                ))
+                s.add(
+                    Schedule(
+                        id=celery_beat_schedule_id,
+                        project_id=project_id,
+                        engine="celery",
+                        scheduler="celery-beat",  # different surface
+                        name="cb-row",
+                        task_name="t.t",
+                        kind=ScheduleKind.CRON,
+                        expression="0 * * * *",
+                        timezone="UTC",
+                        args=[],
+                        kwargs={},
+                        is_enabled=True,
+                    )
+                )
                 await s.commit()
 
             servicer = SchedulerServiceImpl(
-                settings=settings, db=db,
+                settings=settings,
+                db=db,
                 command_dispatcher=None,  # type: ignore[arg-type]
                 audit_service=None,  # type: ignore[arg-type]
             )

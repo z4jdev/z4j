@@ -34,12 +34,13 @@ be able to read it top to bottom in 10 minutes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets
 import time
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
-from uuid import UUID, uuid4
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
+from uuid import UUID
 
 import asyncpg
 import structlog
@@ -51,7 +52,6 @@ from z4j_brain.websocket.registry._protocol import (
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
-    from sqlalchemy.ext.asyncio import AsyncSession
 
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.settings import Settings
@@ -78,6 +78,7 @@ def _log_task_exception(task: asyncio.Task[object]) -> None:
             error_class=type(exc).__name__,
             exc_info=exc,
         )
+
 
 _COMMANDS_CHANNEL: str = "z4j_commands"
 _HEARTBEAT_CHANNEL: str = "z4j_heartbeat"
@@ -138,7 +139,7 @@ class PostgresNotifyRegistry:
         # brain accepts as many concurrent connections as the
         # operator's gunicorn / Celery / etc. workers spawn.
         self._lock = asyncio.Lock()
-        self._connections: dict[UUID, dict[str | None, "WebSocket"]] = {}
+        self._connections: dict[UUID, dict[str | None, WebSocket]] = {}
         self._project_for_agent: dict[UUID, UUID] = {}
 
         # Watchdog state.
@@ -157,7 +158,7 @@ class PostgresNotifyRegistry:
         *,
         project_id: UUID,
         agent_id: UUID,
-        ws: "WebSocket",
+        ws: WebSocket,
         worker_id: str | None = None,
         cap: int = 0,
     ) -> None:
@@ -167,17 +168,17 @@ class PostgresNotifyRegistry:
             # Cap check (1.2.1+): NEW slot creations only.
             if cap > 0 and slot not in workers and len(workers) >= cap:
                 raise WorkerCapExceeded(
-                    agent_id=agent_id, current=len(workers), cap=cap,
+                    agent_id=agent_id,
+                    current=len(workers),
+                    cap=cap,
                 )
             existing = workers.get(slot)
             if existing is not None and existing is not ws:
                 # Same (agent_id, worker_id) reconnecting (a worker
                 # process restarting, or a legacy-mode duplicate).
                 # Kick the old; accept the new.
-                try:
+                with contextlib.suppress(Exception):
                     await existing.close(code=4002)
-                except Exception:  # noqa: BLE001
-                    pass
             workers[slot] = ws
             self._project_for_agent[agent_id] = project_id
         logger.info(
@@ -192,7 +193,7 @@ class PostgresNotifyRegistry:
         self,
         agent_id: UUID,
         *,
-        ws: "WebSocket | None" = None,
+        ws: WebSocket | None = None,
         worker_id: str | None = None,
     ) -> bool:
         """Drop one slot for ``agent_id``. Returns ``True`` if the
@@ -208,25 +209,24 @@ class PostgresNotifyRegistry:
             workers = self._connections.get(agent_id)
             if workers is None:
                 last = True
-            else:
-                if ws is not None:
-                    current = workers.get(slot)
-                    if current is not ws:
-                        last = False
-                    else:
-                        workers.pop(slot, None)
-                        if not workers:
-                            self._connections.pop(agent_id, None)
-                            self._project_for_agent.pop(agent_id, None)
-                            last = True
-                        else:
-                            last = False
+            elif ws is not None:
+                current = workers.get(slot)
+                if current is not ws:
+                    last = False
                 else:
                     workers.pop(slot, None)
                     if not workers:
                         self._connections.pop(agent_id, None)
                         self._project_for_agent.pop(agent_id, None)
                         last = True
+                    else:
+                        last = False
+            else:
+                workers.pop(slot, None)
+                if not workers:
+                    self._connections.pop(agent_id, None)
+                    self._project_for_agent.pop(agent_id, None)
+                    last = True
         logger.info(
             "z4j registry: agent unregistered",
             agent_id=str(agent_id),
@@ -291,7 +291,7 @@ class PostgresNotifyRegistry:
             try:
                 await ws.close(code=4003)
                 closed += 1
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S110  best-effort close of revoked agent connection
                 pass
         return closed
 
@@ -336,7 +336,7 @@ class PostgresNotifyRegistry:
         if ws is not None:
             try:
                 ok = await self._deliver_local(command_id, ws)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j registry: local deliver crashed",
                     command_id=str(command_id),
@@ -428,19 +428,15 @@ class PostgresNotifyRegistry:
             if task is None:
                 continue
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
         self._listener_task = None
         self._reconcile_task = None
         async with self._lock:
             for workers in list(self._connections.values()):
                 for ws in list(workers.values()):
-                    try:
+                    with contextlib.suppress(Exception):
                         await ws.close(code=1001)
-                    except Exception:  # noqa: BLE001
-                        pass
             self._connections.clear()
             self._project_for_agent.clear()
 
@@ -463,16 +459,14 @@ class PostgresNotifyRegistry:
                 backoff_index = 0
             except asyncio.CancelledError:
                 return
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(
                     "z4j registry listener: error, will reconnect",
                     error_class=type(exc).__name__,
                     backoff_index=backoff_index,
                     worker_id=self._worker_id,
                 )
-                backoff = _RECONNECT_BACKOFF[
-                    min(backoff_index, len(_RECONNECT_BACKOFF) - 1)
-                ]
+                backoff = _RECONNECT_BACKOFF[min(backoff_index, len(_RECONNECT_BACKOFF) - 1)]
                 backoff_index += 1
                 try:
                     await asyncio.wait_for(
@@ -501,9 +495,7 @@ class PostgresNotifyRegistry:
                     "tcp_keepalives_idle": "30",
                     "tcp_keepalives_interval": "10",
                     "tcp_keepalives_count": "3",
-                    "application_name": (
-                        f"z4j-brain-registry-{self._worker_id}"
-                    ),
+                    "application_name": (f"z4j-brain-registry-{self._worker_id}"),
                 },
             )
             await conn.add_listener(_COMMANDS_CHANNEL, self._on_notify)
@@ -523,10 +515,8 @@ class PostgresNotifyRegistry:
         finally:
             self._listener_alive.clear()
             if conn is not None:
-                try:
+                with contextlib.suppress(Exception):
                     await conn.close(timeout=self._settings.asyncpg_close_timeout)
-                except Exception:  # noqa: BLE001
-                    pass
 
     async def _heartbeat_loop_until_done(
         self,
@@ -562,20 +552,16 @@ class PostgresNotifyRegistry:
             since_round_trip = time.monotonic() - self._last_heartbeat_round_trip
             if since_round_trip > timeout:
                 raise RuntimeError(
-                    f"heartbeat round-trip exceeded {timeout}s "
-                    f"(last={since_round_trip:.1f}s)",
+                    f"heartbeat round-trip exceeded {timeout}s (last={since_round_trip:.1f}s)",
                 )
 
-            # Fire heartbeat.
-            try:
-                await conn.execute(
-                    "SELECT pg_notify($1, $2)",
-                    _HEARTBEAT_CHANNEL,
-                    self._worker_id,
-                )
-            except Exception:
-                # Connection is bad - let the outer loop reconnect.
-                raise
+            # Fire heartbeat. A failure means the connection is bad;
+            # let it propagate so the outer loop reconnects.
+            await conn.execute(
+                "SELECT pg_notify($1, $2)",
+                _HEARTBEAT_CHANNEL,
+                self._worker_id,
+            )
 
             # Sleep until next tick or stop.
             try:
@@ -593,9 +579,9 @@ class PostgresNotifyRegistry:
 
     def _on_notify(
         self,
-        connection: asyncpg.Connection,  # noqa: ARG002
-        pid: int,  # noqa: ARG002
-        channel: str,  # noqa: ARG002
+        connection: asyncpg.Connection,
+        pid: int,
+        channel: str,
         payload: str,
     ) -> None:
         """Handle a ``z4j_commands`` NOTIFY.
@@ -627,9 +613,9 @@ class PostgresNotifyRegistry:
 
     def _on_heartbeat(
         self,
-        connection: asyncpg.Connection,  # noqa: ARG002
-        pid: int,  # noqa: ARG002
-        channel: str,  # noqa: ARG002
+        connection: asyncpg.Connection,
+        pid: int,
+        channel: str,
         payload: str,
     ) -> None:
         """Handle a ``z4j_heartbeat`` NOTIFY.
@@ -644,9 +630,9 @@ class PostgresNotifyRegistry:
 
     def _on_agent_revoked(
         self,
-        connection: asyncpg.Connection,  # noqa: ARG002
-        pid: int,  # noqa: ARG002
-        channel: str,  # noqa: ARG002
+        connection: asyncpg.Connection,
+        pid: int,
+        channel: str,
         payload: str,
     ) -> None:
         """Handle a ``z4j_agent_revoked`` NOTIFY (1.6.5 F2).
@@ -692,7 +678,7 @@ class PostgresNotifyRegistry:
             return  # agent disconnected between notify and dispatch
         try:
             await self._deliver_local(command_id, ws)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j registry: notified deliver crashed",
                 command_id=str(command_id),
@@ -716,7 +702,7 @@ class PostgresNotifyRegistry:
                 pass
             try:
                 await self._reconcile_pending()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j registry: periodic reconcile crashed",
                     worker_id=self._worker_id,
@@ -759,7 +745,7 @@ class PostgresNotifyRegistry:
                 continue
             try:
                 await self._deliver_local(command_id, ws)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j registry: reconcile deliver crashed",
                     command_id=str(command_id),

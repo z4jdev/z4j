@@ -21,6 +21,9 @@ Public surface:
 from __future__ import annotations
 
 from z4j_brain.persistence.repositories._base import BaseRepository
+from z4j_brain.persistence.repositories.agent_offline_alert import (
+    AgentOfflineAlertRepository,
+)
 from z4j_brain.persistence.repositories.agent_status_history import (
     AgentStatusHistoryRepository,
 )
@@ -30,15 +33,26 @@ from z4j_brain.persistence.repositories.agent_workers import (
 from z4j_brain.persistence.repositories.agents import AgentRepository
 from z4j_brain.persistence.repositories.api_keys import ApiKeyRepository
 from z4j_brain.persistence.repositories.audit_log import AuditLogRepository
+from z4j_brain.persistence.repositories.automation_firing_outbox import (
+    AutomationFiringOutboxRepository,
+)
+from z4j_brain.persistence.repositories.automation_rule import (
+    AutomationRuleRepository,
+    CircuitDecision,
+)
 from z4j_brain.persistence.repositories.commands import CommandRepository
 from z4j_brain.persistence.repositories.events import EventRepository
 from z4j_brain.persistence.repositories.first_boot_tokens import (
     FirstBootTokenRepository,
 )
 from z4j_brain.persistence.repositories.invitations import InvitationRepository
+from z4j_brain.persistence.repositories.issues import IssuesRepository
 from z4j_brain.persistence.repositories.memberships import MembershipRepository
 from z4j_brain.persistence.repositories.mfa_recovery_codes import (
     MfaRecoveryCodeRepository,
+)
+from z4j_brain.persistence.repositories.misfire_alert import (
+    MisfireAlertRepository,
 )
 from z4j_brain.persistence.repositories.notifications import (
     NotificationChannelRepository,
@@ -69,18 +83,24 @@ from z4j_brain.persistence.repositories.users import UserRepository
 from z4j_brain.persistence.repositories.workers import WorkerRepository
 
 __all__ = [
+    "AgentOfflineAlertRepository",
     "AgentRepository",
     "AgentStatusHistoryRepository",
     "AgentWorkerRepository",
     "ApiKeyRepository",
     "AuditLogRepository",
+    "AutomationFiringOutboxRepository",
+    "AutomationRuleRepository",
     "BaseRepository",
+    "CircuitDecision",
     "CommandRepository",
     "EventRepository",
     "FirstBootTokenRepository",
     "InvitationRepository",
+    "IssuesRepository",
     "MembershipRepository",
     "MfaRecoveryCodeRepository",
+    "MisfireAlertRepository",
     "NotificationChannelRepository",
     "NotificationDeliveryRepository",
     "PendingFiresRepository",

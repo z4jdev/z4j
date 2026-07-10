@@ -13,6 +13,7 @@ write-then-chmod pattern.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -50,12 +51,10 @@ def write_bytes_secure(path: Path, data: bytes, *, mode: int = 0o600) -> None:
         os.write(fd, data)
     finally:
         os.close(fd)
-    try:
+    # Non-POSIX volumes may reject chmod; the directory mode is
+    # the access control we rely on in that case.
+    with contextlib.suppress(OSError):
         path.chmod(mode)
-    except OSError:
-        # Non-POSIX volumes may reject chmod; the directory mode is
-        # the access control we rely on in that case.
-        pass
 
 
 def ensure_dir_secure(path: Path, *, mode: int = 0o700) -> None:
@@ -75,10 +74,8 @@ def ensure_dir_secure(path: Path, *, mode: int = 0o700) -> None:
     there.
     """
     path.mkdir(parents=True, exist_ok=True, mode=mode)
-    try:
+    with contextlib.suppress(OSError):
         path.chmod(mode)
-    except OSError:
-        pass
 
 
-__all__ = ["write_bytes_secure", "ensure_dir_secure"]
+__all__ = ["ensure_dir_secure", "write_bytes_secure"]

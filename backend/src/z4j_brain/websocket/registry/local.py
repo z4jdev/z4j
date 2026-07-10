@@ -14,7 +14,9 @@ an :class:`asyncio.Lock`; the dict itself is single-task-owned.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Callable, Awaitable
+import contextlib
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
@@ -60,7 +62,7 @@ class LocalRegistry:
     def __init__(self, *, deliver_local: LocalDeliverCallback) -> None:
         self._lock = asyncio.Lock()
         # agent_id -> {worker_id (or None for legacy): WebSocket}
-        self._connections: dict[UUID, dict[str | None, "WebSocket"]] = {}
+        self._connections: dict[UUID, dict[str | None, WebSocket]] = {}
         self._project_for_agent: dict[UUID, UUID] = {}
         self._deliver_local = deliver_local
 
@@ -73,7 +75,7 @@ class LocalRegistry:
         *,
         project_id: UUID,
         agent_id: UUID,
-        ws: "WebSocket",
+        ws: WebSocket,
         worker_id: str | None = None,
         cap: int = 0,
     ) -> None:
@@ -86,16 +88,16 @@ class LocalRegistry:
             # existing slot in place.
             if cap > 0 and slot not in workers and len(workers) >= cap:
                 raise WorkerCapExceeded(
-                    agent_id=agent_id, current=len(workers), cap=cap,
+                    agent_id=agent_id,
+                    current=len(workers),
+                    cap=cap,
                 )
             existing = workers.get(slot)
             if existing is not None and existing is not ws:
                 # Same (agent_id, worker_id) reconnecting (or a
                 # legacy-mode duplicate). Kick the old.
-                try:
+                with contextlib.suppress(Exception):
                     await existing.close(code=4002)
-                except Exception:  # noqa: BLE001
-                    pass
             workers[slot] = ws
             self._project_for_agent[agent_id] = project_id
 
@@ -103,7 +105,7 @@ class LocalRegistry:
         self,
         agent_id: UUID,
         *,
-        ws: "WebSocket | None" = None,
+        ws: WebSocket | None = None,
         worker_id: str | None = None,
     ) -> bool:
         """Drop one slot for ``agent_id``. Returns ``True`` if the
@@ -160,7 +162,7 @@ class LocalRegistry:
         ws = next(iter(workers.values()))
         try:
             ok = await self._deliver_local(command_id, ws)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j local registry deliver crashed",
                 command_id=str(command_id),
@@ -195,7 +197,7 @@ class LocalRegistry:
             try:
                 await ws.close(code=4003)
                 closed += 1
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S110  best-effort close of revoked agent connection
                 # Connection may already be torn down; tolerate.
                 pass
         logger.info(
@@ -238,10 +240,8 @@ class LocalRegistry:
         async with self._lock:
             for workers in list(self._connections.values()):
                 for ws in list(workers.values()):
-                    try:
+                    with contextlib.suppress(Exception):
                         await ws.close(code=1001)
-                    except Exception:  # noqa: BLE001
-                        pass
             self._connections.clear()
             self._project_for_agent.clear()
 

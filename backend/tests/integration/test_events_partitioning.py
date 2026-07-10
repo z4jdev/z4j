@@ -11,7 +11,7 @@ Verifies that:
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import text
@@ -47,7 +47,8 @@ async def _insert_supporting_rows(
 
 class TestPartitioning:
     async def test_event_lands_in_today_partition(
-        self, migrated_engine: AsyncEngine,
+        self,
+        migrated_engine: AsyncEngine,
     ) -> None:
         project_id, agent_id = await _insert_supporting_rows(migrated_engine)
 
@@ -75,8 +76,7 @@ class TestPartitioning:
             partition_name = (
                 await conn.execute(
                     text(
-                        "SELECT tableoid::regclass::text FROM events "
-                        "WHERE id = :id",
+                        "SELECT tableoid::regclass::text FROM events WHERE id = :id",
                     ),
                     {"id": event_id},
                 )
@@ -86,16 +86,19 @@ class TestPartitioning:
         assert partition_name.startswith("events_20")
 
     async def test_idempotent_replay(
-        self, migrated_engine: AsyncEngine,
+        self,
+        migrated_engine: AsyncEngine,
     ) -> None:
         """Replaying the same (occurred_at, id) is a no-op via ON CONFLICT."""
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
         from z4j_brain.persistence.repositories import EventRepository
-        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
         project_id, agent_id = await _insert_supporting_rows(migrated_engine)
 
         factory = async_sessionmaker(
-            migrated_engine, class_=AsyncSession, expire_on_commit=False,
+            migrated_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
         )
         event_id = uuid.uuid4()
         now = datetime.now(UTC)

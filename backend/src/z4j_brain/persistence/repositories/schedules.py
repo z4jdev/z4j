@@ -160,7 +160,8 @@ class ScheduleRepository(BaseRepository[Schedule]):
         from z4j_brain.persistence.enums import ScheduleKind
 
         existing = await self.get_for_project(
-            project_id=project_id, schedule_id=schedule_id,
+            project_id=project_id,
+            schedule_id=schedule_id,
         )
         if existing is None:
             return None
@@ -189,7 +190,8 @@ class ScheduleRepository(BaseRepository[Schedule]):
         Returns True iff a row was removed.
         """
         existing = await self.get_for_project(
-            project_id=project_id, schedule_id=schedule_id,
+            project_id=project_id,
+            schedule_id=schedule_id,
         )
         if existing is None:
             return False
@@ -228,7 +230,6 @@ class ScheduleRepository(BaseRepository[Schedule]):
             stmt = stmt.where(Schedule.id.notin_(keep_ids))
         result = await self.session.execute(stmt)
         return result.rowcount or 0
-
 
     async def reconcile_snapshot(
         self,
@@ -284,7 +285,7 @@ class ScheduleRepository(BaseRepository[Schedule]):
             # ``scheduler`` field is the canonical source.
             enriched = dict(raw)
             enriched["scheduler"] = scheduler
-            enriched.setdefault("engine", scheduler.split("-")[0] or scheduler)
+            enriched.setdefault("engine", scheduler.split("-", maxsplit=1)[0] or scheduler)
 
             existed = await self.session.execute(
                 select(Schedule.id).where(
@@ -294,7 +295,8 @@ class ScheduleRepository(BaseRepository[Schedule]):
             )
             had_row = existed.scalar_one_or_none() is not None
             await self.upsert_from_event(
-                project_id=project_id, data=enriched,
+                project_id=project_id,
+                data=enriched,
             )
             if had_row:
                 summary["updated"] += 1

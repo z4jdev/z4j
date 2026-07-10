@@ -32,10 +32,10 @@ class TestWorkerConfAllowlistDrift:
         the specific drifting keys so the next maintainer knows
         exactly which side to update."""
         pytest.importorskip("z4j_celery.engine")
-        from z4j_celery.engine import _CONF_ALLOWLIST as ADAPTER_SET
         from z4j_brain.websocket.frame_router import (
             _WORKER_CONF_ALLOWLIST as BRAIN_SET,
         )
+        from z4j_celery.engine import _CONF_ALLOWLIST as ADAPTER_SET
 
         only_in_adapter = ADAPTER_SET - BRAIN_SET
         only_in_brain = BRAIN_SET - ADAPTER_SET

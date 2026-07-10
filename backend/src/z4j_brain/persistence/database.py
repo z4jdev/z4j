@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy.ext.asyncio import (
@@ -96,7 +96,7 @@ def _wire_deadlock_counter(engine: AsyncEngine) -> None:
     try:
         from sqlalchemy import event
 
-        from z4j_brain.api.metrics import (  # noqa: PLC0415
+        from z4j_brain.api.metrics import (
             record_swallowed,
             z4j_postgres_deadlocks_total,
         )
@@ -114,7 +114,7 @@ def _wire_deadlock_counter(engine: AsyncEngine) -> None:
             # path doesn't ship asyncpg).
             if exc.__class__.__name__ == "DeadlockDetectedError":
                 z4j_postgres_deadlocks_total.inc()
-        except Exception:  # noqa: BLE001
+        except Exception:
             record_swallowed("database", "deadlock_counter")
 
 
@@ -126,7 +126,7 @@ def _register_pool_gauge_provider(engine: AsyncEngine) -> None:
     no DB query.
     """
     try:
-        from z4j_brain.api.metrics import (  # noqa: PLC0415
+        from z4j_brain.api.metrics import (
             register_pool_gauge_provider,
         )
     except ImportError:
@@ -141,11 +141,11 @@ def _register_pool_gauge_provider(engine: AsyncEngine) -> None:
         sync_pool = engine.sync_engine.pool
         try:
             size = sync_pool.size()  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
+        except Exception:
             size = 0
         try:
             checked_out = sync_pool.checkedout()  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
+        except Exception:
             checked_out = 0
         return (int(size), int(checked_out))
 
@@ -205,7 +205,7 @@ class DatabaseManager:
         logger.info("z4j database engine disposed")
 
 
-async def get_session(request: "Any") -> AsyncIterator[AsyncSession]:  # type: ignore[name-defined]
+async def get_session(request: Any) -> AsyncIterator[AsyncSession]:  # type: ignore[name-defined]
     """FastAPI dependency yielding a per-request ``AsyncSession``.
 
     The session is tied to request scope: it is opened on enter and

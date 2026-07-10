@@ -28,7 +28,6 @@ import uuid
 from typing import Any
 
 import pytest
-
 from z4j_brain.api import commands as commands_mod
 from z4j_brain.api.commands import BulkRetryRequest, issue_bulk_retry
 
@@ -39,7 +38,7 @@ class _FakeAuditService:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
 
-    async def record(self, repo, **kwargs) -> object:  # noqa: ANN001, ANN003
+    async def record(self, repo, **kwargs) -> object:
         self.records.append(kwargs)
         return object()
 
@@ -55,10 +54,10 @@ class _FakePolicy:
     def __init__(self, project: _FakeProject) -> None:
         self._project = project
 
-    async def get_project_or_404(self, projects, slug):  # noqa: ANN001
+    async def get_project_or_404(self, projects, slug):
         return self._project
 
-    async def require_member(self, memberships, *, user, project, min_role):  # noqa: ANN001
+    async def require_member(self, memberships, *, user, project, min_role):
         return None
 
 
@@ -70,13 +69,13 @@ class _FakeTaskRepo:
     def __init__(self, names: dict[str, str]) -> None:
         self._names = names
 
-    def __call__(self, session):  # noqa: ANN001  - constructed as TaskRepository(db_session)
+    def __call__(self, session):
         return self
 
-    async def get_priorities_for_ids(self, *, project_id, engine, task_ids):  # noqa: ANN001
+    async def get_priorities_for_ids(self, *, project_id, engine, task_ids):
         return {}
 
-    async def get_names_for_ids(self, *, project_id, engine, task_ids):  # noqa: ANN001
+    async def get_names_for_ids(self, *, project_id, engine, task_ids):
         return dict(self._names)
 
 
@@ -93,7 +92,7 @@ class _FakeUser:
         self.id = uuid.uuid4()
 
 
-def _patch_common(monkeypatch, project, names):  # noqa: ANN001
+def _patch_common(monkeypatch, project, names):
     monkeypatch.setattr(
         "z4j_brain.domain.policy_engine.PolicyEngine",
         lambda: _FakePolicy(project),
@@ -107,7 +106,8 @@ def _patch_common(monkeypatch, project, names):  # noqa: ANN001
 @pytest.mark.asyncio
 class TestR10L1AuditCompleteness:
     async def test_partial_rq_resolution_400_writes_denial_audit_row(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ) -> None:
         """The 400 fast-path must record a 'refused' audit row + commit
         BEFORE raising, so the refusal is durable (not rolled back)."""
@@ -141,10 +141,7 @@ class TestR10L1AuditCompleteness:
 
         assert exc_info.value.status_code == 400
         # A denial audit row was recorded...
-        refusals = [
-            r for r in audit.records
-            if r["action"] == "command.bulk_retry.refused"
-        ]
+        refusals = [r for r in audit.records if r["action"] == "command.bulk_retry.refused"]
         assert len(refusals) == 1, (
             "R10-L1 regression: the RQ partial-resolution 400 path "
             "must record a 'command.bulk_retry.refused' audit row. "
@@ -163,7 +160,8 @@ class TestR10L1AuditCompleteness:
         )
 
     async def test_smuggled_server_owned_key_writes_sanitized_audit_row(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ) -> None:
         """An authenticated client supplying a server-owned filter key
         (the R9-H1 confused-deputy attempt) must leave a tamper-evident
@@ -178,12 +176,14 @@ class TestR10L1AuditCompleteness:
         audit = _FakeAuditService()
         session = _FakeSession()
 
-        async def _fake_issue_generic(**kwargs):  # noqa: ANN003
+        async def _fake_issue_generic(**kwargs):
             # Stand in for _issue_generic_command; return a sentinel.
             return "ISSUED"
 
         monkeypatch.setattr(
-            commands_mod, "_issue_generic_command", _fake_issue_generic,
+            commands_mod,
+            "_issue_generic_command",
+            _fake_issue_generic,
         )
 
         body = BulkRetryRequest(
@@ -209,8 +209,7 @@ class TestR10L1AuditCompleteness:
 
         assert result == "ISSUED"
         sanitized = [
-            r for r in audit.records
-            if r["action"] == "command.bulk_retry.filter_keys_rejected"
+            r for r in audit.records if r["action"] == "command.bulk_retry.filter_keys_rejected"
         ]
         assert len(sanitized) == 1, (
             "R10-L1 regression: a smuggled server-owned filter key must "
@@ -223,7 +222,8 @@ class TestR10L1AuditCompleteness:
         assert session.commits >= 1
 
     async def test_clean_filter_writes_no_extra_audit_row(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ) -> None:
         """A clean filter (no server-owned keys, no partial resolution)
         must NOT write a denial/sanitized row - only the normal command
@@ -233,11 +233,13 @@ class TestR10L1AuditCompleteness:
         audit = _FakeAuditService()
         session = _FakeSession()
 
-        async def _fake_issue_generic(**kwargs):  # noqa: ANN003
+        async def _fake_issue_generic(**kwargs):
             return "ISSUED"
 
         monkeypatch.setattr(
-            commands_mod, "_issue_generic_command", _fake_issue_generic,
+            commands_mod,
+            "_issue_generic_command",
+            _fake_issue_generic,
         )
 
         body = BulkRetryRequest(

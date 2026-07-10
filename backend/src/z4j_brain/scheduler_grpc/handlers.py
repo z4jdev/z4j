@@ -33,10 +33,12 @@ Phase 1 implementation notes:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import grpc
@@ -74,7 +76,9 @@ _ERROR_MESSAGE_MAX_CHARS = 500
 _ERROR_CODE_MAX_CHARS = 64
 
 
-def _sanitize_error_message(raw: str | None, *, max_chars: int = _ERROR_MESSAGE_MAX_CHARS) -> str | None:
+def _sanitize_error_message(
+    raw: str | None, *, max_chars: int = _ERROR_MESSAGE_MAX_CHARS
+) -> str | None:
     """Bound + sanitize a scheduler-reported error string.
 
     Strips control characters (newlines, ANSI escapes) so a single
@@ -91,15 +95,15 @@ def _sanitize_error_message(raw: str | None, *, max_chars: int = _ERROR_MESSAGE_
     # other control chars. Tab + space stay because real error
     # text uses them.
     cleaned = "".join(
-        c for c in raw
-        if c == "\t" or c == " " or (32 <= ord(c) < 127) or 160 <= ord(c) <= 255
+        c for c in raw if c in {"\t", " "} or (32 <= ord(c) < 127) or 160 <= ord(c) <= 255
     )
     cleaned = cleaned.strip()
     if not cleaned:
         return None
     if len(cleaned) > max_chars:
-        cleaned = cleaned[:max_chars - 3] + "..."
+        cleaned = cleaned[: max_chars - 3] + "..."
     return cleaned
+
 
 # Default page size when the scheduler does not specify one.
 _DEFAULT_LIST_PAGE_SIZE = 100
@@ -144,7 +148,7 @@ def _get_fire_schedule_semaphore() -> asyncio.Semaphore:
     test fixtures; ``asyncio.Semaphore`` binds to the loop at
     construction.
     """
-    global _fire_schedule_sem
+    global _fire_schedule_sem  # noqa: PLW0603  module-level singleton lazy-init
     if _fire_schedule_sem is None:
         _fire_schedule_sem = asyncio.Semaphore(_FIRE_SCHEDULE_BOUND)
     return _fire_schedule_sem
@@ -173,9 +177,9 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         command_dispatcher: CommandDispatcher,
         audit_service: AuditService,
     ) -> None:
-        from collections import defaultdict  # noqa: PLC0415
+        from collections import defaultdict
 
-        from z4j_brain.domain.scheduler_rate_limiter import (  # noqa: PLC0415
+        from z4j_brain.domain.scheduler_rate_limiter import (
             SchedulerRateLimiter,
         )
 
@@ -237,7 +241,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         from sqlalchemy import select
 
         from z4j_brain.persistence.models import Schedule
-        from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.binding import (
             enforce_cn_project_binding,
             filter_project_ids_by_binding,
         )
@@ -283,7 +287,9 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 # CN, narrow the query to its allowed projects so a
                 # bound scheduler never sees rows it doesn't own.
                 bound_projects = await filter_project_ids_by_binding(
-                    context=context, bindings=bindings, db=self._db,
+                    context=context,
+                    bindings=bindings,
+                    db=self._db,
                 )
                 if bound_projects is not None:
                     if not bound_projects:
@@ -310,7 +316,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
     # WatchSchedules - server streaming
     # ------------------------------------------------------------------
 
-    async def WatchSchedules(  # noqa: N802
+    async def WatchSchedules(  # noqa: N802, PLR0912  gRPC method name; branch-heavy stream handler
         self,
         request: pb.WatchSchedulesRequest,
         context: grpc.aio.ServicerContext,
@@ -348,7 +354,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         # Per-cert project binding. For an
         # explicit project_id, enforce binding. For "all projects"
         # mode (project_id=None), narrow to the peer's bound set.
-        from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.binding import (
             enforce_cn_project_binding,
             filter_project_ids_by_binding,
         )
@@ -364,7 +370,9 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             )
         else:
             bound_project_ids = await filter_project_ids_by_binding(
-                context=context, bindings=bindings, db=self._db,
+                context=context,
+                bindings=bindings,
+                db=self._db,
             )
             if bound_project_ids is not None and not bound_project_ids:
                 # Bound CN with no resolvable projects - close stream.
@@ -385,7 +393,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         # counter; release both on stream end. RESOURCE_EXHAUSTED on
         # cap so the scheduler client retries with backoff (its
         # ``_backoff_or_stop`` already handles this).
-        from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.binding import (
             extract_peer_cns as _peer_cns,
         )
 
@@ -400,7 +408,8 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 logger.warning(
                     "z4j.brain.scheduler_grpc: WatchSchedules per-cert "
                     "cap reached for cert_cn=%r (cap=%d); rejecting",
-                    cert_cn, per_cert_cap,
+                    cert_cn,
+                    per_cert_cap,
                 )
                 await context.abort(
                     grpc.StatusCode.RESOURCE_EXHAUSTED,
@@ -543,7 +552,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         network drop).
         """
         try:
-            import asyncpg  # noqa: PLC0415
+            import asyncpg
         except ImportError:  # pragma: no cover
             # asyncpg is a hard dep of brain on Postgres - this branch
             # only fires if the operator stripped it out for some
@@ -608,19 +617,18 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         def _on_notify(_conn, _pid, _channel, payload: str) -> None:
             # Called by asyncpg in the connection's task. Just
             # enqueue - the consumer below does the actual work.
-            try:
+            with contextlib.suppress(asyncio.QueueFull):
                 notification_queue.put_nowait(payload)
-            except asyncio.QueueFull:  # pragma: no cover - unbounded queue
-                pass
 
         await conn.add_listener("z4j_schedules_changed", _on_notify)
         try:
             while not context.cancelled():
                 try:
                     payload = await asyncio.wait_for(
-                        notification_queue.get(), timeout=30.0,
+                        notification_queue.get(),
+                        timeout=30.0,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Liveness ping - keeps the gRPC stream alive
                     # under no-traffic conditions and lets us notice
                     # context cancellation without blocking forever.
@@ -629,21 +637,19 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                     return
 
                 event = await self._notification_to_event(
-                    payload=payload, project_filter=project_filter,
+                    payload=payload,
+                    project_filter=project_filter,
                 )
                 if event is not None:
                     yield event
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 await conn.remove_listener(
-                    "z4j_schedules_changed", _on_notify,
+                    "z4j_schedules_changed",
+                    _on_notify,
                 )
-            except Exception:  # noqa: BLE001
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 await conn.close()
-            except Exception:  # noqa: BLE001
-                pass
 
     async def _watch_via_polling(
         self,
@@ -682,7 +688,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                     snapshot=snapshot,
                     first_cycle=first_cycle,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j.brain.scheduler_grpc: watch poll crashed",
                 )
@@ -692,12 +698,10 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             for event in events:
                 yield event
                 if event.resume_token:
-                    try:
+                    with contextlib.suppress(ValueError):
                         last_seen_at = datetime.fromisoformat(
                             event.resume_token,
                         )
-                    except ValueError:
-                        pass
 
             first_cycle = False
             try:
@@ -705,7 +709,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             except asyncio.CancelledError:
                 return
 
-    async def _notification_to_event(
+    async def _notification_to_event(  # noqa: PLR0911  notification decode dispatch
         self,
         *,
         payload: str,
@@ -723,7 +727,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         - the row turns out to belong to a different scheduler
           (we only emit for ``scheduler='z4j-scheduler'``)
         """
-        import json as _json  # noqa: PLC0415
+        import json as _json
 
         try:
             data = _json.loads(payload)
@@ -769,9 +773,9 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         # The trigger fires on every INSERT/UPDATE regardless of
         # scheduler value; filter here so we don't leak rows owned
         # by celery-beat etc. into the z4j-scheduler stream.
-        from sqlalchemy import select  # noqa: PLC0415
+        from sqlalchemy import select
 
-        from z4j_brain.persistence.models import Schedule  # noqa: PLC0415
+        from z4j_brain.persistence.models import Schedule
 
         async with self._db.session() as session:
             result = await session.execute(
@@ -787,9 +791,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             return None
 
         kind = (
-            pb.ScheduleEvent.Kind.CREATED
-            if op_kind == "insert"
-            else pb.ScheduleEvent.Kind.UPDATED
+            pb.ScheduleEvent.Kind.CREATED if op_kind == "insert" else pb.ScheduleEvent.Kind.UPDATED
         )
         return pb.ScheduleEvent(
             kind=kind,
@@ -872,7 +874,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
     # FireSchedule
     # ------------------------------------------------------------------
 
-    async def FireSchedule(  # noqa: N802
+    async def FireSchedule(  # noqa: N802, PLR0911, PLR0912, PLR0915  gRPC method name; fire dispatch
         self,
         request: pb.FireScheduleRequest,
         context: grpc.aio.ServicerContext,
@@ -886,12 +888,22 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 error_message=str(exc),
             )
 
+        # A5: the operator who triggered this fire (empty for
+        # scheduler-driven cadence fires). Malformed -> unattributed
+        # rather than a hard reject; attribution is best-effort metadata.
+        triggered_by_user_id: UUID | None = None
+        if request.triggered_by_user_id:
+            try:
+                triggered_by_user_id = UUID(request.triggered_by_user_id)
+            except ValueError:
+                triggered_by_user_id = None
+
         # Per-cert FireSchedule rate
         # limit. Bucket is keyed by the peer's primary CN; an empty
         # bucket -> RESOURCE_EXHAUSTED (gRPC standard for rate
         # limiting). The limiter is a no-op when
         # scheduler_grpc_fire_rate_limit_enabled is False.
-        from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+        from z4j_brain.scheduler_grpc.binding import (
             extract_peer_cns,
         )
 
@@ -905,7 +917,8 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             logger.warning(
                 "z4j.brain.scheduler_grpc: FireSchedule rate-limited "
                 "for cert_cn=%r (schedule_id=%s)",
-                cert_cn, schedule_id,
+                cert_cn,
+                schedule_id,
             )
             await context.abort(
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
@@ -917,7 +930,6 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             AuditLogRepository,
             CommandRepository,
             ScheduleFireRepository,
-            ScheduleRepository,
         )
 
         # Phase 4: parse the scheduler-supplied scheduled_for so the
@@ -925,8 +937,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         # whatever wall-clock the brain runs at.
         scheduled_for_dt = (
             datetime.fromtimestamp(
-                request.scheduled_for.seconds
-                + request.scheduled_for.nanos / 1e9,
+                request.scheduled_for.seconds + request.scheduled_for.nanos / 1e9,
                 tz=UTC,
             )
             if request.scheduled_for.seconds
@@ -956,11 +967,10 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             # writer) so dev/test paths are unaffected; Postgres
             # holds the row exclusively for the duration of this
             # transaction.
-            from sqlalchemy import select  # noqa: PLC0415
+            from sqlalchemy import select
 
-            from z4j_brain.persistence.models import Schedule  # noqa: PLC0415
+            from z4j_brain.persistence.models import Schedule
 
-            schedules = ScheduleRepository(session)
             # Mirror the ``scheduler == _SCHEDULER_NAME`` filter
             # that List/Watch already apply. Otherwise a
             # z4j-scheduler peer could call FireSchedule against
@@ -994,9 +1004,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                     await self._rate_limiter.refund(cert_cn=cert_cn)
                 return pb.FireScheduleResponse(
                     error_code="schedule_not_found",
-                    error_message=(
-                        f"schedule {schedule_id} not in brain"
-                    ),
+                    error_message=(f"schedule {schedule_id} not in brain"),
                 )
             # Per-cert project binding.
             # Bound CNs cannot fire schedules for projects outside
@@ -1006,7 +1014,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             # error-code split (schedule_not_found vs
             # schedule_disabled vs PERMISSION_DENIED) gets the same
             # answer regardless of the row's enabled state.
-            from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+            from z4j_brain.scheduler_grpc.binding import (
                 enforce_cn_project_binding,
             )
 
@@ -1016,6 +1024,34 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 bindings=self._settings.scheduler_grpc_cn_project_bindings,
                 db=self._db,
             )
+            # A5: only attribute this fire to the operator if they are
+            # actually a member of THIS schedule's project. Drops a forged
+            # cross-project id (a compromised/buggy scheduler could
+            # otherwise fabricate attribution) AND a stale/nonexistent id
+            # that would fail the users FK on the "delivered" record()
+            # write below -- which happens AFTER the command is already
+            # dispatched, so an unguarded FK error would drop the
+            # fire-history row and no-op the later ack. Unattributed is the
+            # safe fallback.
+            if triggered_by_user_id is not None:
+                from z4j_brain.persistence.repositories import (
+                    MembershipRepository,
+                )
+
+                _member = await MembershipRepository(session).get_for_user_project(
+                    user_id=triggered_by_user_id,
+                    project_id=schedule.project_id,
+                )
+                if _member is None:
+                    logger.warning(
+                        "z4j.brain.scheduler_grpc: FireSchedule "
+                        "triggered_by_user_id %s is not a member of the "
+                        "schedule's project %s; recording the fire as "
+                        "unattributed",
+                        triggered_by_user_id,
+                        schedule.project_id,
+                    )
+                    triggered_by_user_id = None
             if not schedule.is_enabled:
                 # Scheduler should have skipped this on its side, but
                 # defend against a race between disable + tick.
@@ -1049,9 +1085,9 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 # wants zero buffering can disable buffering by
                 # setting Z4J_PENDING_FIRES_BUFFER_SKIP_POLICY=false
                 # (Phase 3 op knob; default True today).
-                from datetime import timedelta  # noqa: PLC0415
+                from datetime import timedelta
 
-                from z4j_brain.persistence.repositories import (  # noqa: PLC0415
+                from z4j_brain.persistence.repositories import (
                     PendingFiresRepository,
                 )
 
@@ -1090,6 +1126,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                     command_id=None,
                     status="buffered",
                     scheduled_for=scheduled_for_dt,
+                    triggered_by_user_id=triggered_by_user_id,
                 )
                 await session.commit()
                 return pb.FireScheduleResponse(buffered=True)
@@ -1122,7 +1159,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                     user_agent=None,
                     idempotency_key=f"schedule:{schedule.id}:fire:{fire_id}",
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.exception(
                     "z4j.brain.scheduler_grpc: FireSchedule failed",
                     extra={
@@ -1148,9 +1185,10 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                         scheduled_for=scheduled_for_dt,
                         error_code="brain_error",
                         error_message=safe_error,
+                        triggered_by_user_id=triggered_by_user_id,
                     )
                     await session.commit()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     # Audit-write failure is non-fatal: don't mask the
                     # original error from the scheduler.
                     logger.exception(
@@ -1169,7 +1207,10 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             schedule.last_fire_id = fire_id  # type: ignore[attr-defined]
             # Phase 4: write the fire-history row with the
             # brain-assigned command_id. AcknowledgeFireResult will
-            # update it later with the agent's outcome.
+            # update it later with the agent's outcome -- and it
+            # CORRELATES the schedule by joining schedule_fires on
+            # fire_id, so this row must always exist or the ack no-ops
+            # (last_run_at / total_runs / notifications all skipped).
             await ScheduleFireRepository(session).record(
                 fire_id=fire_id,
                 schedule_id=schedule.id,
@@ -1177,6 +1218,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 command_id=command.id,
                 status="delivered",
                 scheduled_for=scheduled_for_dt,
+                triggered_by_user_id=triggered_by_user_id,
             )
             await session.commit()
 
@@ -1188,7 +1230,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
     # AcknowledgeFireResult
     # ------------------------------------------------------------------
 
-    async def AcknowledgeFireResult(  # noqa: N802
+    async def AcknowledgeFireResult(  # noqa: N802, PLR0915  gRPC method name; ack dispatch
         self,
         request: pb.AcknowledgeFireResultRequest,
         context: grpc.aio.ServicerContext,
@@ -1256,7 +1298,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             # ``last_run_at`` + ``total_runs`` AND triggers
             # notifications, so a rogue bound cert could otherwise
             # forge "fire failed" alerts on cross-project schedules.
-            from z4j_brain.scheduler_grpc.binding import (  # noqa: PLC0415
+            from z4j_brain.scheduler_grpc.binding import (
                 enforce_cn_project_binding,
             )
 
@@ -1280,46 +1322,15 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             # ``Schedule.total_runs + 1`` makes the increment
             # atomic in Postgres without needing FOR UPDATE on
             # the schedule row.
-            updates: dict[str, Any] = {
-                "last_run_at": now,
-                "updated_at": now,
-            }
-            if request.status == "success":
-                updates["total_runs"] = Schedule.total_runs + 1
-
-            # Conditionally clear
-            # ``last_fire_id`` only if it still points at THIS
-            # fire. Concurrently-in-flight fires would otherwise
-            # have their pointer wiped by a late ack of an earlier
-            # fire. Use the WHERE clause to make the clear atomic
-            # without a separate read.
-            await session.execute(
-                update(Schedule)
-                .where(Schedule.id == schedule.id)
-                .values(**updates),
-            )
-            await session.execute(
-                update(Schedule)
-                .where(
-                    Schedule.id == schedule.id,
-                    Schedule.last_fire_id == fire_id,
-                )
-                .values(last_fire_id=None),
-            )
-
-            # Phase 4: also update the schedule_fires row with the
-            # ack outcome + computed latency. The history view shows
-            # the per-fire detail; the circuit breaker reads this to
-            # detect consecutive failures.
-            from z4j_brain.persistence.repositories import (  # noqa: PLC0415
+            # Update the per-fire schedule_fires row FIRST so we learn
+            # whether this is the first ack of this fire_id. The
+            # schedule's lifetime counters must advance only once per
+            # fire, so they have to be gated on that result.
+            from z4j_brain.persistence.repositories import (
                 ScheduleFireRepository,
             )
 
-            ack_status = (
-                "acked_success"
-                if request.status == "success"
-                else "acked_failed"
-            )
+            ack_status = "acked_success" if request.status == "success" else "acked_failed"
             # Sanitize scheduler-supplied
             # error text before persisting + dispatching downstream.
             # The scheduler is a trusted peer but its error string
@@ -1329,14 +1340,15 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             # notification template + dashboard rendering.
             safe_error = _sanitize_error_message(request.error)
             safe_error_code = _sanitize_error_message(
-                request.error, max_chars=_ERROR_CODE_MAX_CHARS,
+                request.error,
+                max_chars=_ERROR_CODE_MAX_CHARS,
             )
             # Capture
-            # ``was_first_ack`` so we only fan out notifications
-            # for the FIRST ack of a given fire_id. Duplicate acks
-            # (HA scheduler retry, network duplicate) skip the
-            # notification dispatch to avoid two pages for one
-            # failure.
+            # ``was_first_ack`` so we only fan out notifications AND only
+            # advance the lifetime counters for the FIRST ack of a given
+            # fire_id. Duplicate acks (HA scheduler retry, network
+            # duplicate) skip both to avoid two pages -- and a
+            # double-counted total_runs -- for one fire.
             _row, was_first_ack = await ScheduleFireRepository(
                 session,
             ).acknowledge(
@@ -1346,6 +1358,37 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 error_message=safe_error,
             )
 
+            # Advance the schedule's lifetime counters on the FIRST ack
+            # only. The atomic ``Schedule.total_runs + 1`` SQL increment
+            # prevents a lost-update race between acks of DISTINCT fires,
+            # but does NOTHING against a re-delivered ack of the SAME fire
+            # -- which would otherwise double-count total_runs and drift
+            # the lifetime counter high over days of HA retries. Gate it
+            # on was_first_ack.
+            if was_first_ack:
+                updates: dict[str, Any] = {
+                    "last_run_at": now,
+                    "updated_at": now,
+                }
+                if request.status == "success":
+                    updates["total_runs"] = Schedule.total_runs + 1
+                await session.execute(
+                    update(Schedule).where(Schedule.id == schedule.id).values(**updates),
+                )
+            # Conditionally clear ``last_fire_id`` only if it still points
+            # at THIS fire. Idempotent (the WHERE no-ops once cleared) so
+            # it is safe to run on a duplicate ack too; concurrently
+            # in-flight fires would otherwise have their pointer wiped by
+            # a late ack of an earlier fire.
+            await session.execute(
+                update(Schedule)
+                .where(
+                    Schedule.id == schedule.id,
+                    Schedule.last_fire_id == fire_id,
+                )
+                .values(last_fire_id=None),
+            )
+
             # Write an audit row for every ack. Without this,
             # the AcknowledgeFireResult handler would mutate
             # ``schedules.last_run_at`` + ``total_runs`` and
@@ -1353,11 +1396,11 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             # breadcrumb. Any alert-injection attempt (a rogue
             # scheduler ACKing as ``failed`` to trigger pages)
             # would be forensically invisible.
-            from z4j_brain.persistence.repositories import (  # noqa: PLC0415
-                AuditLogRepository,
-            )
-            from z4j_brain.domain.audit_service import (  # noqa: PLC0415
+            from z4j_brain.domain.audit_service import (
                 AuditService as _AuditService,
+            )
+            from z4j_brain.persistence.repositories import (
+                AuditLogRepository,
             )
 
             try:
@@ -1388,13 +1431,14 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                         "error": safe_error,
                     },
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Audit failure must not block the ack from
                 # committing; the schedule row update + notification
                 # dispatch are the load-bearing operations.
                 logger.exception(
                     "z4j.brain.scheduler_grpc: failed to record ack "
-                    "audit row for fire_id=%s (non-fatal)", fire_id,
+                    "audit row for fire_id=%s (non-fatal)",
+                    fire_id,
                 )
 
             await session.commit()
@@ -1433,7 +1477,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             return pb.AcknowledgeFireResultResponse()
 
         try:
-            from z4j_brain.domain.notifications.service import (  # noqa: PLC0415
+            from z4j_brain.domain.notifications.service import (
                 NotificationService,
             )
 
@@ -1464,7 +1508,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                         exception=safe_error,
                     )
                 await notify_session.commit()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j.brain.scheduler_grpc: schedule notification "
                 "dispatch failed for fire_id=%s (non-fatal)",
@@ -1545,7 +1589,8 @@ def _ts_iso(ts: Timestamp) -> str:
     if ts.seconds == 0 and ts.nanos == 0:
         return ""
     return datetime.fromtimestamp(
-        ts.seconds + ts.nanos / 1_000_000_000, tz=UTC,
+        ts.seconds + ts.nanos / 1_000_000_000,
+        tz=UTC,
     ).isoformat()
 
 

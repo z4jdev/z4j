@@ -15,7 +15,6 @@ from typing import Any
 import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
-
 from z4j_brain.domain import audit_forwarder as af_mod
 from z4j_brain.domain.audit_forwarder import (
     AUDIT_SIGNATURE_HEADER,
@@ -26,7 +25,6 @@ from z4j_brain.domain.audit_forwarder import (
     sign_payload,
 )
 from z4j_brain.settings import ConfigError, Settings
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -105,21 +103,25 @@ class TestAuditWebhookSettings:
         assert "embedded" not in str(s.audit_webhook_url)
 
     def test_url_without_hmac_secret_rejected(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv(
-            "Z4J_AUDIT_WEBHOOK_URL", "https://siem.internal/ingest",
+            "Z4J_AUDIT_WEBHOOK_URL",
+            "https://siem.internal/ingest",
         )
         with pytest.raises(ConfigError):
             Settings()  # type: ignore[call-arg]
 
     def test_short_hmac_secret_rejected(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv(
-            "Z4J_AUDIT_WEBHOOK_URL", "https://siem.internal/ingest",
+            "Z4J_AUDIT_WEBHOOK_URL",
+            "https://siem.internal/ingest",
         )
         monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_HMAC_SECRET", "too-short")
         with pytest.raises(ConfigError):
@@ -127,7 +129,9 @@ class TestAuditWebhookSettings:
 
     @pytest.mark.parametrize("bad", ["0", "0.5", "121", "0.05"])
     def test_timeout_out_of_range_rejected(
-        self, monkeypatch: pytest.MonkeyPatch, bad: str,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bad: str,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_TIMEOUT_SECONDS", bad)
@@ -136,7 +140,9 @@ class TestAuditWebhookSettings:
 
     @pytest.mark.parametrize("ok", ["1.0", "5", "10.0", "120.0"])
     def test_timeout_in_range_accepted(
-        self, monkeypatch: pytest.MonkeyPatch, ok: str,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ok: str,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_TIMEOUT_SECONDS", ok)
@@ -155,10 +161,22 @@ class TestRowToPayload:
         payload = _row_to_payload(row)
         # Every field a downstream parser expects.
         for key in (
-            "id", "action", "target_type", "target_id", "result",
-            "outcome", "event_id", "user_id", "api_key_id",
-            "project_id", "source_ip", "user_agent", "metadata",
-            "occurred_at", "prev_row_hmac", "row_hmac",
+            "id",
+            "action",
+            "target_type",
+            "target_id",
+            "result",
+            "outcome",
+            "event_id",
+            "user_id",
+            "api_key_id",
+            "project_id",
+            "source_ip",
+            "user_agent",
+            "metadata",
+            "occurred_at",
+            "prev_row_hmac",
+            "row_hmac",
         ):
             assert key in payload, f"missing {key}"
 
@@ -197,10 +215,7 @@ class TestSignPayload:
     def test_signature_matches_manual_hmac(self) -> None:
         body = b'{"id":"x"}'
         secret = b"the-shared-key"
-        expected = (
-            "sha256="
-            + hmac.new(secret, body, hashlib.sha256).hexdigest()
-        )
+        expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
         assert sign_payload(secret, body) == expected
 
     def test_signature_is_deterministic(self) -> None:
@@ -303,7 +318,8 @@ class TestAuditForwarderQueue:
 class TestAuditForwarderSendOne:
     @pytest.mark.asyncio
     async def test_happy_path_posts_signed_body(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         recorder = _RecordingPost(status_code=200)
         monkeypatch.setattr(af_mod, "_post", recorder)
@@ -347,7 +363,8 @@ class TestAuditForwarderSendOne:
 
     @pytest.mark.asyncio
     async def test_ssrf_rejection_increments_failed_count(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         recorder = _RecordingPost()
         monkeypatch.setattr(af_mod, "_post", recorder)
@@ -367,7 +384,8 @@ class TestAuditForwarderSendOne:
 
     @pytest.mark.asyncio
     async def test_5xx_response_marked_failed(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         recorder = _RecordingPost(status_code=503)
         monkeypatch.setattr(af_mod, "_post", recorder)
@@ -383,7 +401,8 @@ class TestAuditForwarderSendOne:
 
     @pytest.mark.asyncio
     async def test_post_raises_failed_count(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         async def _raising_post(_url: str, **_: Any) -> httpx.Response:
             raise RuntimeError("connection refused")
@@ -448,7 +467,8 @@ class TestShutdownDrainAccounting:
 
     @pytest.mark.asyncio
     async def test_residual_after_cancel_counted(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Use a never-resolving send so rows queued during stop()
         # cannot drain.
@@ -497,7 +517,7 @@ class TestUnregisterHook:
 
         # Construct a minimal AuditService via a stub settings.
         class _Stub:
-            class secret:
+            class secret:  # noqa: N801  mirrors Settings.secret attribute name
                 @staticmethod
                 def get_secret_value() -> str:
                     return "x" * 48
@@ -523,7 +543,8 @@ class TestUnregisterHook:
 class TestAuditForwarderRunForever:
     @pytest.mark.asyncio
     async def test_start_drains_queue_through_send(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         recorder = _RecordingPost(status_code=202)
         monkeypatch.setattr(af_mod, "_post", recorder)

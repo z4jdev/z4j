@@ -65,7 +65,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, text
 
-from z4j_brain.persistence.models import AgentStatusHistory, AuditLog
+from z4j_brain.persistence.models import AuditLog
 
 if TYPE_CHECKING:
     from z4j_brain.persistence.database import DatabaseManager
@@ -183,13 +183,13 @@ class AuditRetentionSweeper:
             # propagates.
             self._task.cancel()
             raise
-        except (TimeoutError, Exception):  # noqa: BLE001
+        except (TimeoutError, Exception):
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S110  best-effort inner task cleanup
                 pass
         self._task = None
 
@@ -214,21 +214,20 @@ class AuditRetentionSweeper:
             await self._do_sweep_agent_status()
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception(
                 "z4j.brain.audit_retention: agent_status sweep failed; "
                 "audit_log sweep already ran successfully",
             )
-            self._last_error = (
-                f"agent_status: {type(exc).__name__}: {exc}"
-            )
+            self._last_error = f"agent_status: {type(exc).__name__}: {exc}"
         return deleted
 
     async def _loop(self) -> None:
         assert self._settings is not None
         while not self._stop_event.is_set():
             interval = max(
-                60, self._settings.audit_retention_sweep_interval_seconds,
+                60,
+                self._settings.audit_retention_sweep_interval_seconds,
             )
             try:
                 await self._do_sweep()
@@ -237,11 +236,11 @@ class AuditRetentionSweeper:
                 # exits cleanly when stop() / outer cancel fires
                 # mid-sweep.
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 logger.exception(
-                    "z4j.brain.audit_retention: sweep pass failed; "
-                    "next attempt in %ds", interval,
+                    "z4j.brain.audit_retention: sweep pass failed; next attempt in %ds",
+                    interval,
                 )
             # 1.5.0: agent_status_history sweep. Runs every tick
             # alongside the audit sweep so operators have one cadence
@@ -251,17 +250,17 @@ class AuditRetentionSweeper:
                 await self._do_sweep_agent_status()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001
-                self._last_error = (
-                    f"agent_status: {type(exc).__name__}: {exc}"
-                )
+            except Exception as exc:
+                self._last_error = f"agent_status: {type(exc).__name__}: {exc}"
                 logger.exception(
                     "z4j.brain.audit_retention: agent_status sweep "
-                    "pass failed; next attempt in %ds", interval,
+                    "pass failed; next attempt in %ds",
+                    interval,
                 )
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=interval,
+                    self._stop_event.wait(),
+                    timeout=interval,
                 )
                 return
             except asyncio.CancelledError:
@@ -294,13 +293,15 @@ class AuditRetentionSweeper:
         if retention_days < 1:
             logger.warning(
                 "z4j.brain.audit_retention: refusing to sweep with "
-                "retention_days=%d (must be >= 1)", retention_days,
+                "retention_days=%d (must be >= 1)",
+                retention_days,
             )
             return 0
 
         cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         batch_size = max(
-            100, self._settings.audit_retention_sweep_batch_size,
+            100,
+            self._settings.audit_retention_sweep_batch_size,
         )
         max_per_pass = max(
             batch_size,
@@ -333,49 +334,43 @@ class AuditRetentionSweeper:
         # batch-level errors so a single bad row doesn't abort
         # the whole pass.
         if is_postgres:
-            async with self._db.session() as session:
-                async with session.begin():
-                    lock_row = await session.execute(
-                        text("SELECT pg_try_advisory_xact_lock(:k)"),
-                        {"k": _SWEEP_ADVISORY_LOCK_KEY},
+            async with self._db.session() as session, session.begin():
+                lock_row = await session.execute(
+                    text("SELECT pg_try_advisory_xact_lock(:k)"),
+                    {"k": _SWEEP_ADVISORY_LOCK_KEY},
+                )
+                got_lock = bool(lock_row.scalar())
+                if not got_lock:
+                    logger.debug(
+                        "z4j.brain.audit_retention: another "
+                        "worker holds the sweep lock; "
+                        "skipping pass",
                     )
-                    got_lock = bool(lock_row.scalar())
-                    if not got_lock:
-                        logger.debug(
-                            "z4j.brain.audit_retention: another "
-                            "worker holds the sweep lock; "
-                            "skipping pass",
-                        )
-                        # Update last_run_at even on the lock-skip path
-                        # so /metrics doesn't report a stale
-                        # timestamp making operators think the
-                        # sweeper has stalled.
-                        self._last_run_at = datetime.now(UTC)
-                        return 0
-                    while (
-                        not self._stop_event.is_set()
-                        and total < max_per_pass
-                    ):
-                        rows = await self._sweep_one_batch_postgres(
-                            session,
-                            cutoff=cutoff,
-                            batch_size=batch_size,
-                        )
-                        total += rows
-                        if rows < batch_size:
-                            break
+                    # Update last_run_at even on the lock-skip path
+                    # so /metrics doesn't report a stale
+                    # timestamp making operators think the
+                    # sweeper has stalled.
+                    self._last_run_at = datetime.now(UTC)
+                    return 0
+                while not self._stop_event.is_set() and total < max_per_pass:
+                    rows = await self._sweep_one_batch_postgres(
+                        session,
+                        cutoff=cutoff,
+                        batch_size=batch_size,
+                    )
+                    total += rows
+                    if rows < batch_size:
+                        break
                     # The xact-scoped lock auto-releases at the
                     # implicit COMMIT when ``begin()`` exits.
         else:
             # SQLite: per-batch session so each commit returns the
             # connection to the pool and the WAL doesn't grow
             # unbounded across the pass.
-            while (
-                not self._stop_event.is_set()
-                and total < max_per_pass
-            ):
+            while not self._stop_event.is_set() and total < max_per_pass:
                 rows = await self._sweep_one_batch_sqlite(
-                    cutoff=cutoff, batch_size=batch_size,
+                    cutoff=cutoff,
+                    batch_size=batch_size,
                 )
                 total += rows
                 if rows < batch_size:
@@ -391,9 +386,10 @@ class AuditRetentionSweeper:
         self._last_error = None
         if total:
             logger.info(
-                "z4j.brain.audit_retention: pruned %d rows older than %s "
-                "(retention_days=%d)",
-                total, cutoff.isoformat(), retention_days,
+                "z4j.brain.audit_retention: pruned %d rows older than %s (retention_days=%d)",
+                total,
+                cutoff.isoformat(),
+                retention_days,
             )
         return total
 
@@ -459,7 +455,8 @@ class AuditRetentionSweeper:
                             "WHERE occurred_at < :cutoff "
                             "ORDER BY occurred_at LIMIT :limit",
                         ).bindparams(
-                            cutoff=cutoff, limit=batch_size,
+                            cutoff=cutoff,
+                            limit=batch_size,
                         ),
                     ),
                 ),
@@ -497,7 +494,8 @@ class AuditRetentionSweeper:
 
         cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         batch_size = max(
-            100, self._settings.audit_retention_sweep_batch_size,
+            100,
+            self._settings.audit_retention_sweep_batch_size,
         )
         max_per_pass = max(
             batch_size,
@@ -517,7 +515,8 @@ class AuditRetentionSweeper:
             async with self._db.session() as session:
                 repo = AgentStatusHistoryRepository(session)
                 rows = await repo.delete_older_than(
-                    cutoff=cutoff, batch_size=batch_size,
+                    cutoff=cutoff,
+                    batch_size=batch_size,
                 )
                 await session.commit()
             total += rows
@@ -530,7 +529,9 @@ class AuditRetentionSweeper:
             logger.info(
                 "z4j.brain.audit_retention: pruned %d agent_status_history "
                 "rows older than %s (event_retention_days=%d)",
-                total, cutoff.isoformat(), retention_days,
+                total,
+                cutoff.isoformat(),
+                retention_days,
             )
         return total
 

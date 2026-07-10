@@ -23,7 +23,6 @@ import uuid
 from typing import Any
 
 import pytest
-
 from z4j_brain.websocket.registry.local import LocalRegistry
 
 
@@ -40,7 +39,7 @@ class FakeWebSocket:
 
 @pytest.fixture
 def registry() -> LocalRegistry:
-    async def deliver(command_id: uuid.UUID, ws: Any) -> bool:  # noqa: ARG001
+    async def deliver(command_id: uuid.UUID, ws: Any) -> bool:
         return True
 
     return LocalRegistry(deliver_local=deliver)
@@ -49,7 +48,8 @@ def registry() -> LocalRegistry:
 @pytest.mark.asyncio
 class TestWorkerFirstProtocol:
     async def test_legacy_agents_keep_kick_semantics(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """Two 1.1.x connections (no worker_id) - second kicks first."""
         ws1 = FakeWebSocket("legacy-1")
@@ -57,11 +57,15 @@ class TestWorkerFirstProtocol:
         agent_id = uuid.uuid4()
 
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws1,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws1,
             worker_id=None,
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws2,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws2,
             worker_id=None,
         )
 
@@ -70,7 +74,8 @@ class TestWorkerFirstProtocol:
         assert registry.is_online(agent_id)
 
     async def test_distinct_workers_coexist_no_kick(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """Two 1.2.0 connections with different worker_ids - both register."""
         ws_web1 = FakeWebSocket("gunicorn-1")
@@ -78,11 +83,15 @@ class TestWorkerFirstProtocol:
         agent_id = uuid.uuid4()
 
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_web1,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_web1,
             worker_id="django-12345-1700000000000",
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_web2,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_web2,
             worker_id="django-12346-1700000000001",
         )
 
@@ -93,7 +102,8 @@ class TestWorkerFirstProtocol:
         assert registry.is_online(agent_id)
 
     async def test_same_worker_reconnect_kicks_old(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """1.2.0 worker process restart - same worker_id reconnects, old kicked."""
         ws_old = FakeWebSocket("old-pid")
@@ -102,11 +112,15 @@ class TestWorkerFirstProtocol:
         wid = "django-12345-1700000000000"
 
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_old,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_old,
             worker_id=wid,
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_new,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_new,
             worker_id=wid,
         )
 
@@ -114,7 +128,8 @@ class TestWorkerFirstProtocol:
         assert not ws_new.closed
 
     async def test_mixed_legacy_and_workerfirst_coexist(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """A legacy 1.1.x slot + 1.2.0 worker slots all coexist."""
         ws_legacy = FakeWebSocket("legacy")
@@ -123,15 +138,21 @@ class TestWorkerFirstProtocol:
         agent_id = uuid.uuid4()
 
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_legacy,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_legacy,
             worker_id=None,  # legacy slot
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_worker_a,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_worker_a,
             worker_id="celery-100-ts1",
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_worker_b,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_worker_b,
             worker_id="celery-101-ts1",
         )
 
@@ -142,7 +163,8 @@ class TestWorkerFirstProtocol:
         assert registry.is_online(agent_id)
 
     async def test_unregister_only_drops_specified_worker(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """Disconnecting one worker keeps the others online.
 
@@ -155,11 +177,15 @@ class TestWorkerFirstProtocol:
         agent_id = uuid.uuid4()
 
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_a,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_a,
             worker_id="wid-a",
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_b,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_b,
             worker_id="wid-b",
         )
 
@@ -176,7 +202,8 @@ class TestWorkerFirstProtocol:
         assert not registry.is_online(agent_id)
 
     async def test_unregister_legacy_slot_doesnt_drop_workers(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """Disconnecting the legacy slot doesn't drop coexisting workers."""
         ws_legacy = FakeWebSocket("legacy")
@@ -184,11 +211,15 @@ class TestWorkerFirstProtocol:
         agent_id = uuid.uuid4()
 
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_legacy,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_legacy,
             worker_id=None,
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_worker,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_worker,
             worker_id="wid-1",
         )
 
@@ -198,7 +229,8 @@ class TestWorkerFirstProtocol:
         assert registry.is_online(agent_id)
 
     async def test_deliver_routes_to_first_available_worker(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """Commands flow to any registered worker."""
         ws_a = FakeWebSocket("a")
@@ -206,22 +238,28 @@ class TestWorkerFirstProtocol:
         agent_id = uuid.uuid4()
 
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_a,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_a,
             worker_id="wid-a",
         )
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_b,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_b,
             worker_id="wid-b",
         )
 
         result = await registry.deliver(
-            command_id=uuid.uuid4(), agent_id=agent_id,
+            command_id=uuid.uuid4(),
+            agent_id=agent_id,
         )
         assert result.delivered_locally is True
         assert result.agent_was_known is True
 
     async def test_old_unregister_signature_still_works(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """Backwards: callers that don't pass worker_id (1.1.x code paths)
         still drop the legacy slot only."""
@@ -229,7 +267,9 @@ class TestWorkerFirstProtocol:
         agent_id = uuid.uuid4()
 
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws,
         )  # worker_id defaults to None
         await registry.unregister(agent_id, ws=ws)  # also defaults to None
 
@@ -249,7 +289,8 @@ class TestF1LegacySlotCollision:
     """
 
     async def test_string_named_legacy_does_not_collide(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         ws_legacy = FakeWebSocket("legacy-1.1.x")
         ws_named = FakeWebSocket("attacker-named-legacy")
@@ -257,13 +298,17 @@ class TestF1LegacySlotCollision:
 
         # Legacy 1.1.x agent connects (worker_id=None)
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_legacy,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_legacy,
             worker_id=None,
         )
 
         # 1.2.0+ agent (potentially malicious) sends worker_id="__legacy__"
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id, ws=ws_named,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=ws_named,
             worker_id="__legacy__",
         )
 
@@ -290,19 +335,24 @@ class TestF2WorkerCap:
     """
 
     async def test_cap_zero_is_unbounded(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         agent_id = uuid.uuid4()
         # 100 distinct workers, no cap -> all accepted
         for i in range(100):
             await registry.register(
-                project_id=uuid.uuid4(), agent_id=agent_id,
-                ws=FakeWebSocket(f"w{i}"), worker_id=f"wid-{i}", cap=0,
+                project_id=uuid.uuid4(),
+                agent_id=agent_id,
+                ws=FakeWebSocket(f"w{i}"),
+                worker_id=f"wid-{i}",
+                cap=0,
             )
         assert registry.is_online(agent_id)
 
     async def test_cap_rejects_new_slot_past_cap(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         from z4j_brain.websocket.registry._protocol import WorkerCapExceeded
 
@@ -310,41 +360,55 @@ class TestF2WorkerCap:
         # Fill the cap (3)
         for i in range(3):
             await registry.register(
-                project_id=uuid.uuid4(), agent_id=agent_id,
-                ws=FakeWebSocket(f"w{i}"), worker_id=f"wid-{i}", cap=3,
+                project_id=uuid.uuid4(),
+                agent_id=agent_id,
+                ws=FakeWebSocket(f"w{i}"),
+                worker_id=f"wid-{i}",
+                cap=3,
             )
 
         # 4th distinct worker_id rejected
         with pytest.raises(WorkerCapExceeded) as exc_info:
             await registry.register(
-                project_id=uuid.uuid4(), agent_id=agent_id,
-                ws=FakeWebSocket("over"), worker_id="wid-3", cap=3,
+                project_id=uuid.uuid4(),
+                agent_id=agent_id,
+                ws=FakeWebSocket("over"),
+                worker_id="wid-3",
+                cap=3,
             )
         assert exc_info.value.cap == 3
         assert exc_info.value.current == 3
 
     async def test_cap_allows_reconnect_of_existing_slot(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """Reconnecting under an existing worker_id (process restart
         in place) doesn't count against the cap."""
         agent_id = uuid.uuid4()
         for i in range(3):
             await registry.register(
-                project_id=uuid.uuid4(), agent_id=agent_id,
-                ws=FakeWebSocket(f"w{i}"), worker_id=f"wid-{i}", cap=3,
+                project_id=uuid.uuid4(),
+                agent_id=agent_id,
+                ws=FakeWebSocket(f"w{i}"),
+                worker_id=f"wid-{i}",
+                cap=3,
             )
 
         # Same worker_id reconnects (process restart with same id) -
         # should succeed even though we are AT the cap.
         await registry.register(
-            project_id=uuid.uuid4(), agent_id=agent_id,
-            ws=FakeWebSocket("w0-reconnect"), worker_id="wid-0", cap=3,
+            project_id=uuid.uuid4(),
+            agent_id=agent_id,
+            ws=FakeWebSocket("w0-reconnect"),
+            worker_id="wid-0",
+            cap=3,
         )
         assert registry.is_online(agent_id)
 
     async def test_cap_independent_per_agent(
-        self, registry: LocalRegistry,
+        self,
+        registry: LocalRegistry,
     ) -> None:
         """Cap is per-agent. Two agents can each fill the cap."""
         from z4j_brain.websocket.registry._protocol import WorkerCapExceeded
@@ -354,22 +418,34 @@ class TestF2WorkerCap:
 
         for i in range(2):
             await registry.register(
-                project_id=uuid.uuid4(), agent_id=agent_a,
-                ws=FakeWebSocket(f"a{i}"), worker_id=f"a-wid-{i}", cap=2,
+                project_id=uuid.uuid4(),
+                agent_id=agent_a,
+                ws=FakeWebSocket(f"a{i}"),
+                worker_id=f"a-wid-{i}",
+                cap=2,
             )
             await registry.register(
-                project_id=uuid.uuid4(), agent_id=agent_b,
-                ws=FakeWebSocket(f"b{i}"), worker_id=f"b-wid-{i}", cap=2,
+                project_id=uuid.uuid4(),
+                agent_id=agent_b,
+                ws=FakeWebSocket(f"b{i}"),
+                worker_id=f"b-wid-{i}",
+                cap=2,
             )
 
         # Both at cap; 3rd in either bucket rejected
         with pytest.raises(WorkerCapExceeded):
             await registry.register(
-                project_id=uuid.uuid4(), agent_id=agent_a,
-                ws=FakeWebSocket("a3"), worker_id="a-wid-2", cap=2,
+                project_id=uuid.uuid4(),
+                agent_id=agent_a,
+                ws=FakeWebSocket("a3"),
+                worker_id="a-wid-2",
+                cap=2,
             )
         with pytest.raises(WorkerCapExceeded):
             await registry.register(
-                project_id=uuid.uuid4(), agent_id=agent_b,
-                ws=FakeWebSocket("b3"), worker_id="b-wid-2", cap=2,
+                project_id=uuid.uuid4(),
+                agent_id=agent_b,
+                ws=FakeWebSocket("b3"),
+                worker_id="b-wid-2",
+                cap=2,
             )

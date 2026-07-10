@@ -28,16 +28,15 @@ Close codes:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError as PydanticValidationError
-
-from z4j_core import __version__ as CORE_VERSION
 from z4j_core.errors import SignatureError
 from z4j_core.transport.frames import (
     CommandFrame,
@@ -53,7 +52,9 @@ from z4j_core.transport.framing import FrameSigner, FrameVerifier
 from z4j_core.transport.hmac import derive_project_secret
 from z4j_core.transport.versioning import SUPPORTED_PROTOCOLS
 
-from z4j_brain import __version__ as BRAIN_VERSION
+from z4j_brain import (
+    __version__ as BRAIN_VERSION,  # noqa: N812  conventional version-constant alias
+)
 from z4j_brain.websocket.auth import resolve_agent_by_bearer
 from z4j_brain.websocket.frame_router import FrameRouter
 
@@ -65,14 +66,13 @@ if TYPE_CHECKING:
     from z4j_brain.websocket.registry import BrainRegistry
 from z4j_brain.websocket.registry._protocol import WorkerCapExceeded
 
-
 logger = structlog.get_logger("z4j.brain.gateway")
 
 router = APIRouter(tags=["gateway"])
 
 
 @router.websocket("/ws/agent")
-async def ws_agent(websocket: WebSocket) -> None:
+async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR0915  connection state machine
     """The agent gateway endpoint.
 
     See module docstring for the per-connection state machine.
@@ -85,7 +85,7 @@ async def ws_agent(websocket: WebSocket) -> None:
     # "second connection wins" policy only kicks the OTHER
     # active session per agent, it doesn't prevent connect
     # floods.
-    from z4j_brain.domain.ip_rate_limit import _agent_connect_bucket  # noqa: PLC0415
+    from z4j_brain.domain.ip_rate_limit import _agent_connect_bucket
 
     client_host = websocket.client.host if websocket.client else None
     if client_host is not None:
@@ -139,7 +139,7 @@ async def ws_agent(websocket: WebSocket) -> None:
                     source_ip=client_host,
                 )
                 await audit_session.commit()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("z4j gateway: failed to audit bearer rejection")
         finally:
             logger.info("z4j gateway: bearer rejected", source_ip=client_host)
@@ -154,9 +154,10 @@ async def ws_agent(websocket: WebSocket) -> None:
     # ------------------------------------------------------------------
     try:
         first_frame = await _recv_frame(
-            websocket, max_bytes=settings.ws_max_frame_bytes,
+            websocket,
+            max_bytes=settings.ws_max_frame_bytes,
         )
-    except (WebSocketDisconnect, ConnectionError, _BadFrame):
+    except (WebSocketDisconnect, ConnectionError, _BadFrameError):
         await _safe_close(websocket, code=4400)
         return
 
@@ -213,9 +214,7 @@ async def ws_agent(websocket: WebSocket) -> None:
             framework_adapter=first_frame.payload.framework,
             engine_adapters=list(first_frame.payload.engines),
             scheduler_adapters=list(first_frame.payload.schedulers),
-            capabilities={
-                k: list(v) for k, v in first_frame.payload.capabilities.items()
-            },
+            capabilities={k: list(v) for k, v in first_frame.payload.capabilities.items()},
             # Carries the agent's optional `host.name` label and any other
             # host-level metadata. The agent (z4j-bare 1.0.3+) populates
             # this from the operator's `Z4J_AGENT_NAME` env / settings.Z4J
@@ -226,9 +225,7 @@ async def ws_agent(websocket: WebSocket) -> None:
             # per-agent VERSION column + *update available* badge.
             # Agents older than 1.0.3 may report empty / 0.0.0; the
             # dashboard renders ``unknown`` in that case.
-            agent_version=(
-                agent_ver if agent_ver and agent_ver != "0.0.0" else None
-            ),
+            agent_version=(agent_ver if agent_ver and agent_ver != "0.0.0" else None),
         )
         await db_session.commit()
 
@@ -237,7 +234,7 @@ async def ws_agent(websocket: WebSocket) -> None:
     if dashboard_hub is not None:
         try:
             await dashboard_hub.publish_agent_change(project_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j gateway: dashboard agent online publish failed",
                 agent_id=str(agent_id),
@@ -308,6 +305,7 @@ async def ws_agent(websocket: WebSocket) -> None:
     registry = _registry_from(websocket)
     ingestor: EventIngestor = websocket.app.state.event_ingestor
     dispatcher: CommandDispatcher = websocket.app.state.command_dispatcher
+
     # Callback the FrameRouter uses to emit
     # outbound frames (event_batch_ack today; reserved for any
     # future brain->agent control frame). The FrameSigner is
@@ -315,7 +313,7 @@ async def ws_agent(websocket: WebSocket) -> None:
     # both. ``websocket.send_bytes`` is async; the closure preserves
     # exception propagation so the FrameRouter's ack-emit branch
     # can log on failure without losing the trace.
-    async def _send_frame(out: "Frame") -> None:
+    async def _send_frame(out: Frame) -> None:
         await websocket.send_bytes(signer.sign_and_serialize(out))
 
     frame_router = FrameRouter(
@@ -327,6 +325,8 @@ async def ws_agent(websocket: WebSocket) -> None:
         dashboard_hub=getattr(websocket.app.state, "dashboard_hub", None),
         worker_id=first_frame.payload.worker_id,
         send_frame=_send_frame,
+        automation_notify_coalesce_seconds=settings.automation_notify_coalesce_seconds,
+        automation_outbox_max_rows_per_project=settings.automation_outbox_max_rows_per_project,
     )
 
     # Worker-first protocol (1.2.0+): pull the optional worker_id
@@ -375,7 +375,7 @@ async def ws_agent(websocket: WebSocket) -> None:
                 started_at=first_frame.payload.worker_started_at,
             )
             await db_session.commit()
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Best-effort: persistence is for the dashboard, not the
         # control flow. If the DB write fails (unlikely with
         # SQLite/Postgres in a healthy brain), the in-memory
@@ -463,7 +463,7 @@ async def ws_agent(websocket: WebSocket) -> None:
                 finally:
                     ingest_queue.task_done()
 
-        def _log_ingest_task_failure(t: "asyncio.Task[None]") -> None:
+        def _log_ingest_task_failure(t: asyncio.Task[None]) -> None:
             # Without this, a silent crash inside _ingest_worker leaves
             # the recv loop happily filling the queue while no one
             # drains it, wedging the connection until idle timeout
@@ -501,7 +501,7 @@ async def ws_agent(websocket: WebSocket) -> None:
                         ),
                         timeout=idle_timeout,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.info(
                         "z4j gateway: idle timeout, closing",
                         agent_id=str(agent_id),
@@ -511,7 +511,7 @@ async def ws_agent(websocket: WebSocket) -> None:
                     break
                 except WebSocketDisconnect:
                     break
-                except _BadFrame:
+                except _BadFrameError:
                     # Bad frame is connection-fatal - kill the WS to
                     # avoid de-syncing the wire protocol.
                     await _safe_close(websocket, code=4400)
@@ -522,14 +522,14 @@ async def ws_agent(websocket: WebSocket) -> None:
                     # the session; close with a distinct code so
                     # operators can distinguish a crypto failure from a
                     # plain malformed frame.
-                    logger.error(
+                    logger.exception(
                         "z4j gateway: frame verification failed, closing",
                         agent_id=str(agent_id),
                         reason=str(exc),
                     )
                     await _safe_close(websocket, code=4403)
                     break
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception("z4j gateway: unexpected recv error")
                     await _safe_close(websocket, code=1011)
                     break
@@ -554,10 +554,8 @@ async def ws_agent(websocket: WebSocket) -> None:
             for t in ingest_tasks:
                 t.cancel()
             for t in ingest_tasks:
-                try:
+                with contextlib.suppress(asyncio.CancelledError, BaseException):
                     await t
-                except (asyncio.CancelledError, BaseException):  # noqa: BLE001
-                    pass
 
             # Drain the ingest queue so any frames held by cancelled
             # ``put`` futures are released. Without this, an
@@ -590,7 +588,7 @@ async def ws_agent(websocket: WebSocket) -> None:
             try:
                 websocket._z4j_signer = None  # type: ignore[attr-defined]
                 websocket._z4j_verifier = None  # type: ignore[attr-defined]
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S110  best-effort reference drop for GC
                 pass
 
             # Tear down the FrameRouter's per-connection background
@@ -598,10 +596,8 @@ async def ws_agent(websocket: WebSocket) -> None:
             # closure capturing ``websocket`` + ``signer``; clearing
             # ``_send_frame`` breaks that cycle so the router itself
             # can be collected without waiting on cycle-GC.
-            try:
+            with contextlib.suppress(Exception):
                 frame_router.aclose()
-            except Exception:  # noqa: BLE001
-                pass
     finally:
         # Pass our own
         # ``websocket`` so the registry only evicts the entry IF it
@@ -617,7 +613,9 @@ async def ws_agent(websocket: WebSocket) -> None:
         # the LAST worker was just removed, decided under the
         # registry lock.
         last_worker_gone = await registry.unregister(
-            agent_id, ws=websocket, worker_id=agent_worker_id,
+            agent_id,
+            ws=websocket,
+            worker_id=agent_worker_id,
         )
         # Worker-first persistence (1.2.1+): flip THIS worker's row
         # to offline regardless of whether others remain. The agent-
@@ -626,7 +624,8 @@ async def ws_agent(websocket: WebSocket) -> None:
         try:
             async with db.session() as db_session:
                 await AgentWorkerRepository(db_session).mark_offline(
-                    agent_id=agent_id, worker_id=agent_worker_id,
+                    agent_id=agent_id,
+                    worker_id=agent_worker_id,
                 )
                 if last_worker_gone:
                     # Pass connect_at so the conditional
@@ -636,10 +635,11 @@ async def ws_agent(websocket: WebSocket) -> None:
                     # the agent to state=offline indefinitely while the
                     # new ws + heartbeats stream uninterrupted.
                     await AgentRepository(db_session).mark_offline(
-                        agent_id, captured_at=connect_at,
+                        agent_id,
+                        captured_at=connect_at,
                     )
                 await db_session.commit()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j gateway: agent_worker offline flip failed",
                 agent_id=str(agent_id),
@@ -648,7 +648,7 @@ async def ws_agent(websocket: WebSocket) -> None:
         if dashboard_hub is not None:
             try:
                 await dashboard_hub.publish_agent_change(project_id)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "z4j gateway: dashboard agent offline publish failed",
                     agent_id=str(agent_id),
@@ -661,7 +661,7 @@ async def ws_agent(websocket: WebSocket) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _BadFrame(Exception):
+class _BadFrameError(Exception):
     """Raised when a frame is unparseable / oversized / wrong type."""
 
 
@@ -676,19 +676,16 @@ async def _recv_frame(
     When ``verifier`` is provided (every frame after the handshake),
     the parse + envelope-HMAC + replay-guard checks all run here so
     the receive loop can handle :class:`SignatureError` distinctly
-    from :class:`_BadFrame`. The handshake itself passes
+    from :class:`_BadFrameError`. The handshake itself passes
     ``verifier=None`` because the session's agent/project bindings
     are still being negotiated at that point.
     """
-    try:
-        message = await websocket.receive()
-    except WebSocketDisconnect:
-        raise
+    message = await websocket.receive()
 
     if message.get("type") != "websocket.receive":
         if message.get("type") == "websocket.disconnect":
             raise WebSocketDisconnect()
-        raise _BadFrame(f"unexpected message type: {message.get('type')}")
+        raise _BadFrameError(f"unexpected message type: {message.get('type')}")
 
     raw: bytes
     if "bytes" in message and message["bytes"] is not None:
@@ -696,46 +693,44 @@ async def _recv_frame(
     elif "text" in message and message["text"] is not None:
         raw = message["text"].encode("utf-8")
     else:
-        raise _BadFrame("empty frame")
+        raise _BadFrameError("empty frame")
 
     if len(raw) > max_bytes:
-        raise _BadFrame(f"frame too large: {len(raw)} > {max_bytes}")
+        raise _BadFrameError(f"frame too large: {len(raw)} > {max_bytes}")
 
     if verifier is not None:
         # parse_and_verify raises SignatureError on any security
         # failure; we let it bubble to the recv loop. Parse errors
-        # still translate to _BadFrame so close codes stay
+        # still translate to _BadFrameError so close codes stay
         # meaningful.
         try:
             return verifier.parse_and_verify(raw)
         except SignatureError:
             raise
         except (json.JSONDecodeError, PydanticValidationError) as exc:
-            raise _BadFrame(f"frame parse failed: {type(exc).__name__}") from exc
+            raise _BadFrameError(f"frame parse failed: {type(exc).__name__}") from exc
 
     try:
         return parse_frame(raw)
     except (json.JSONDecodeError, PydanticValidationError) as exc:
-        raise _BadFrame(f"frame parse failed: {type(exc).__name__}") from exc
+        raise _BadFrameError(f"frame parse failed: {type(exc).__name__}") from exc
 
 
 async def _safe_close(websocket: WebSocket, *, code: int) -> None:
     """Close the WebSocket without raising on already-closed."""
-    try:
+    with contextlib.suppress(Exception):
         await websocket.close(code=code)
-    except Exception:  # noqa: BLE001
-        pass
 
 
-def _settings_from(ws: WebSocket) -> "Settings":
+def _settings_from(ws: WebSocket) -> Settings:
     return ws.app.state.settings  # type: ignore[no-any-return]
 
 
-def _db_from(ws: WebSocket) -> "DatabaseManager":
+def _db_from(ws: WebSocket) -> DatabaseManager:
     return ws.app.state.db  # type: ignore[no-any-return]
 
 
-def _registry_from(ws: WebSocket) -> "BrainRegistry":
+def _registry_from(ws: WebSocket) -> BrainRegistry:
     return ws.app.state.brain_registry  # type: ignore[no-any-return]
 
 
@@ -746,8 +741,8 @@ def _registry_from(ws: WebSocket) -> "BrainRegistry":
 
 async def _drain_pending_for_agent(
     *,
-    db: "DatabaseManager",
-    settings: "Settings",
+    db: DatabaseManager,
+    settings: Settings,
     agent_id: uuid.UUID,
     websocket: WebSocket,
 ) -> None:
@@ -757,9 +752,10 @@ async def _drain_pending_for_agent(
     was offline at the moment a command was issued - the row was
     persisted with ``status='pending'`` and is now waiting for us.
     """
+    from sqlalchemy import select
+
     from z4j_brain.persistence.enums import CommandStatus
     from z4j_brain.persistence.models import Command
-    from sqlalchemy import select
 
     async with db.session() as session:
         result = await session.execute(
@@ -799,7 +795,7 @@ async def _drain_pending_for_agent(
                 settings=settings,
                 command=cmd,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j gateway: drain push failed AFTER claim - command "
                 "is stuck in DISPATCHED state until CommandTimeoutWorker "
@@ -819,8 +815,8 @@ async def _drain_pending_for_agent(
 async def deliver_command_frame(
     *,
     websocket: WebSocket,
-    settings: "Settings",
-    command: "Command",
+    settings: Settings,
+    command: Command,
 ) -> None:
     """Sign + serialize + send a single command to the agent.
 

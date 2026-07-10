@@ -13,7 +13,6 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.api.trends import _bucket_expr
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base

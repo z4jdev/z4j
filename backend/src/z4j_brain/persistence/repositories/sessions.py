@@ -49,9 +49,7 @@ class SessionRepository(BaseRepository[Session]):
             csrf_token=csrf_token,
             expires_at=expires_at,
             ip_at_issue=ip_at_issue,
-            user_agent_at_issue=(
-                user_agent_at_issue[:256] if user_agent_at_issue else None
-            ),
+            user_agent_at_issue=(user_agent_at_issue[:256] if user_agent_at_issue else None),
         )
         self.session.add(row)
         await self.session.flush()
@@ -64,9 +62,7 @@ class SessionRepository(BaseRepository[Session]):
         authenticated request after the session has been validated.
         """
         await self.session.execute(
-            update(Session)
-            .where(Session.id == session_id)
-            .values(last_seen_at=datetime.now(UTC)),
+            update(Session).where(Session.id == session_id).values(last_seen_at=datetime.now(UTC)),
         )
 
     async def revoke(

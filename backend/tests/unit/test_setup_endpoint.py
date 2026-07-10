@@ -7,10 +7,9 @@ import secrets
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.settings import Settings
 
 
@@ -57,7 +56,7 @@ async def client(brain_app):
 
 
 @pytest.fixture
-async def fresh_token(brain_app, settings):  # noqa: ARG001
+async def fresh_token(brain_app, settings):
     """Mint a setup token via the SetupService directly.
 
     The lifespan startup hook would normally do this, but the
@@ -99,7 +98,11 @@ class TestStatus:
         assert r.json()["first_boot"] is True
 
     async def test_status_anon_401_after_first_boot(
-        self, client, brain_app, settings, fresh_token,
+        self,
+        client,
+        brain_app,
+        settings,
+        fresh_token,
     ) -> None:
         """1.6.4 security tightening: once the brain has been
         provisioned (at least one user exists), anonymous callers
@@ -135,7 +138,9 @@ class TestStatus:
 @pytest.mark.asyncio
 class TestForm:
     async def test_form_served_in_first_boot(
-        self, client, fresh_token,  # noqa: ARG002 - just need the row minted
+        self,
+        client,
+        fresh_token,
     ) -> None:
         # Round-9 audit fix R8-Bootstrap-MED test update (Apr 2026):
         # the form is now also gated on an active token row
@@ -193,7 +198,7 @@ class TestComplete:
         s = await client.get("/api/v1/setup/status")
         assert s.json() == {"first_boot": False}
 
-    async def test_invalid_token_410(self, client, fresh_token) -> None:  # noqa: ARG002
+    async def test_invalid_token_410(self, client, fresh_token) -> None:
         r = await client.post(
             "/api/v1/setup/complete",
             json={
@@ -206,7 +211,9 @@ class TestComplete:
         assert r.status_code == 404
 
     async def test_double_consumption_blocked(
-        self, client, fresh_token,
+        self,
+        client,
+        fresh_token,
     ) -> None:
         first = await client.post(
             "/api/v1/setup/complete",
@@ -229,7 +236,9 @@ class TestComplete:
         assert second.status_code == 409
 
     async def test_weak_password_rejected(
-        self, client, fresh_token,
+        self,
+        client,
+        fresh_token,
     ) -> None:
         r = await client.post(
             "/api/v1/setup/complete",

@@ -19,30 +19,24 @@ These tests pin the fix so a future regression fails loudly.
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
-from z4j_brain.persistence.enums import AgentState, ScheduleKind
+from z4j_brain.persistence.enums import ScheduleKind
 from z4j_brain.persistence.models import (
-    Agent,
     PendingFire,
     Project,
     Schedule,
 )
 from z4j_brain.persistence.repositories import (
-    PendingFiresRepository,
     ScheduleRepository,
 )
-from z4j_brain.settings import Settings
-
 
 # =====================================================================
 # HIGH-1: removeprefix vs lstrip
@@ -64,7 +58,7 @@ class TestInterceptorRemovePrefix:
     is covered by ``packages/z4j-scheduler/tests/unit/test_audit_phase2_fixes.py``.
     """
 
-    def test_cn_starting_with_S_not_mangled(self) -> None:
+    def test_cn_starting_with_S_not_mangled(self) -> None:  # noqa: N802  capital S is the mangled-letter symptom under test
         # The literal symptom: S gets stripped, "Scheduler-1"
         # becomes "cheduler-1", allow-list match fails.
         assert "Scheduler-1".removeprefix("DNS:") == "Scheduler-1"
@@ -85,8 +79,6 @@ class TestInterceptorRemovePrefix:
         # Inline the same expression the interceptor uses to ensure
         # both sides stay consistent. If a future refactor switches
         # back to lstrip this assertion catches it.
-        from z4j_brain.scheduler_grpc import auth as brain_auth
-
         # Pull the source of the interceptor module and confirm
         # ``lstrip("DNS:")`` no longer appears.
         # Round-9 audit fix R9-Sched-MED (Apr 2026): the helper now
@@ -96,15 +88,15 @@ class TestInterceptorRemovePrefix:
         # and that ``lstrip`` is absent.
         import inspect
 
+        from z4j_brain.scheduler_grpc import auth as brain_auth
+
         source = inspect.getsource(brain_auth)
-        assert "lstrip(\"DNS:\")" not in source
+        assert 'lstrip("DNS:")' not in source
         assert "lstrip('DNS:')" not in source
         assert "removeprefix" in source
         # And every general-name prefix is in the strip set.
         for prefix in ("DNS:", "IP:", "URI:", "email:"):
-            assert prefix in source, (
-                f"_normalise_cn must strip {prefix} (R9-Sched-MED)"
-            )
+            assert prefix in source, f"_normalise_cn must strip {prefix} (R9-Sched-MED)"
 
 
 # =====================================================================
@@ -147,7 +139,8 @@ async def db():
 class TestApplyCatchUpBatchedLookup:
     @pytest.mark.asyncio
     async def test_one_select_per_replay_batch_not_per_schedule(
-        self, db,
+        self,
+        db,
     ) -> None:
         """Five distinct schedules + one execute call, not five.
 
@@ -175,7 +168,8 @@ class TestApplyCatchUpBatchedLookup:
                         kind=ScheduleKind.CRON,
                         expression="0 * * * *",
                         timezone="UTC",
-                        args=[], kwargs={},
+                        args=[],
+                        kwargs={},
                         is_enabled=True,
                         catch_up="fire_all_missed",
                     ),
@@ -205,15 +199,17 @@ class TestApplyCatchUpBatchedLookup:
         async with db.session() as s:
             counting = _CountingSession(s)
             schedules_repo = ScheduleRepository(counting)  # type: ignore[arg-type]
-            kept = await PendingFiresReplayWorker._apply_catch_up(
-                fires=fires, schedules_repo=schedules_repo,
+            kept, dropped = await PendingFiresReplayWorker._apply_catch_up(
+                fires=fires,
+                schedules_repo=schedules_repo,
             )
             # Exactly ONE execute - the batched IN-list lookup.
             # The previous N+1 implementation called .execute 5 times
             # (one .get per schedule via the BaseRepository).
             assert counting.execute_calls == 1
-            # Sanity: catch_up=fire_all_missed kept everything.
+            # Sanity: catch_up=fire_all_missed kept everything and dropped none.
             assert len(kept) == 5
+            assert dropped == []
 
 
 # =====================================================================

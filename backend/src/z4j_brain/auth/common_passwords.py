@@ -124,11 +124,33 @@ def _generate_patterns() -> frozenset[str]:
     out: set[str] = set()
     seasons = ("spring", "summer", "autumn", "fall", "winter")
     bases = (
-        "welcome", "password", "pass", "admin", "letmein", "qwerty",
-        "monkey", "dragon", "master", "hello", "login",
-        "z4j", "celery", "rq", "dramatiq", "django", "flask",
-        "fastapi", "postgres", "postgresql", "redis", "rabbitmq",
-        "worker", "brain", "agent", "company", "corp",
+        "welcome",
+        "password",
+        "pass",
+        "admin",
+        "letmein",
+        "qwerty",
+        "monkey",
+        "dragon",
+        "master",
+        "hello",
+        "login",
+        "z4j",
+        "celery",
+        "rq",
+        "dramatiq",
+        "django",
+        "flask",
+        "fastapi",
+        "postgres",
+        "postgresql",
+        "redis",
+        "rabbitmq",
+        "worker",
+        "brain",
+        "agent",
+        "company",
+        "corp",
     )
     years = tuple(str(y) for y in range(2015, 2030))
     symbols = ("", "!", "!!", "#", "$", "*", "@")

@@ -22,12 +22,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.persistence.models import (
     AuditLog,
@@ -132,7 +131,6 @@ async def _make_seed(
 
 def _make_client(brain_app, settings: Settings, seed: dict):
     from httpx import ASGITransport, AsyncClient
-
     from z4j_brain.auth.csrf import csrf_cookie_name
 
     transport = ASGITransport(app=brain_app)
@@ -186,10 +184,14 @@ def _sample_schedule(name: str = "every-hour", **overrides) -> dict:
 class TestImportSchedulesHappyPath:
     @pytest.mark.asyncio
     async def test_fresh_import_returns_inserted_count(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -198,7 +200,8 @@ class TestImportSchedulesHappyPath:
                     "schedules": [
                         _sample_schedule("a"),
                         _sample_schedule(
-                            "b", source_hash="cafebabe" * 8,
+                            "b",
+                            source_hash="cafebabe" * 8,
                         ),
                     ],
                 },
@@ -214,21 +217,29 @@ class TestImportSchedulesHappyPath:
         # Schedules landed in the DB with scheduler="z4j-scheduler".
         async with brain_app.state.db.session() as s:
             rows = (
-                await s.execute(
-                    select(Schedule).where(
-                        Schedule.project_id == seed["project_id"],
-                    ),
+                (
+                    await s.execute(
+                        select(Schedule).where(
+                            Schedule.project_id == seed["project_id"],
+                        ),
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             assert {r.name for r in rows} == {"a", "b"}
             assert {r.scheduler for r in rows} == {"z4j-scheduler"}
 
     @pytest.mark.asyncio
     async def test_reimport_same_hash_is_noop(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         payload = {"schedules": [_sample_schedule("noop")]}
         async with _make_client(brain_app, settings, seed) as client:
@@ -251,10 +262,14 @@ class TestImportSchedulesHappyPath:
 
     @pytest.mark.asyncio
     async def test_reimport_changed_hash_updates(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as client:
             await client.post(
@@ -299,7 +314,9 @@ class TestImportSchedulesHappyPath:
 class TestImportPerRowErrors:
     @pytest.mark.asyncio
     async def test_bad_kind_rejects_whole_batch_at_schema(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Audit fix REST H-2 (Apr 2026): the API now validates
         # ``kind`` at the Pydantic schema layer instead of letting
@@ -311,7 +328,9 @@ class TestImportPerRowErrors:
         # batch rejection on schema errors is the more defensive
         # default for the API surface.
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -341,7 +360,9 @@ class TestImportPerRowErrors:
 class TestImportRequiresAdmin:
     @pytest.mark.asyncio
     async def test_operator_role_rejected(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         # Operator-role member - cannot import.
         seed = await _make_seed(
@@ -366,19 +387,21 @@ class TestImportRequiresAdmin:
 class TestImportAudit:
     @pytest.mark.asyncio
     async def test_one_audit_row_per_batch(
-        self, settings: Settings, brain_app,
+        self,
+        settings: Settings,
+        brain_app,
     ) -> None:
         seed = await _make_seed(
-            settings=settings, brain_app=brain_app, is_admin=True,
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
         )
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.post(
                 "/api/v1/projects/default/schedules:import",
                 json={
                     "schedules": [
-                        _sample_schedule(f"sched-{i}",
-                                          source_hash=f"{i:064d}")
-                        for i in range(5)
+                        _sample_schedule(f"sched-{i}", source_hash=f"{i:064d}") for i in range(5)
                     ],
                 },
             )
@@ -386,12 +409,16 @@ class TestImportAudit:
 
         async with brain_app.state.db.session() as s:
             rows = (
-                await s.execute(
-                    select(AuditLog).where(
-                        AuditLog.action == "schedules.import",
-                    ),
+                (
+                    await s.execute(
+                        select(AuditLog).where(
+                            AuditLog.action == "schedules.import",
+                        ),
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             # Exactly one audit row, not five.
             assert len(rows) == 1
             audit_row = rows[0]

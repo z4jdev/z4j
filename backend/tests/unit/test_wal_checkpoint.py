@@ -15,7 +15,6 @@ import secrets
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
-
 from z4j_brain.persistence import models  # noqa: F401  - register mappers
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
@@ -47,7 +46,9 @@ async def db_manager() -> DatabaseManager:
 @pytest.mark.asyncio
 class TestSqliteCheckpoint:
     async def test_checkpoint_once_returns_int(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         task = WalCheckpointTask()
         task._db = db_manager
@@ -65,7 +66,8 @@ class TestSqliteCheckpoint:
 @pytest.mark.asyncio
 class TestPostgresShortCircuit:
     async def test_start_does_not_spawn_on_postgres(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         # Build a "Postgres-shaped" engine without actually connecting.
         # SQLAlchemy will accept the URL and report ``dialect.name='postgresql'``
@@ -85,7 +87,9 @@ class TestPostgresShortCircuit:
 @pytest.mark.asyncio
 class TestLifecycle:
     async def test_start_then_stop(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         task = WalCheckpointTask()
         task.start(db=db_manager, settings=settings)
@@ -94,7 +98,9 @@ class TestLifecycle:
         assert task._task is None
 
     async def test_double_start_is_idempotent(
-        self, db_manager: DatabaseManager, settings: Settings,
+        self,
+        db_manager: DatabaseManager,
+        settings: Settings,
     ) -> None:
         task = WalCheckpointTask()
         task.start(db=db_manager, settings=settings)

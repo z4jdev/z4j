@@ -101,27 +101,52 @@ class Task(PKMixin, TimestampsMixin, Base):
     result: Mapped[Any | None] = mapped_column(jsonb(), nullable=True)
     exception: Mapped[str | None] = mapped_column(Text, nullable=True)
     traceback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Stable failure fingerprint (R4): set when the task transitions to
+    #: FAILURE from the exception + traceback, kept across a later recovery
+    #: (so the Issues view can show recovered issues). Groups the same
+    #: logical failure across runs + engines. NULL for tasks that never
+    #: failed. See ``z4j_brain.domain.fingerprint``.
+    fingerprint: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: When the task last transitioned to FAILURE. Set alongside
+    #: ``fingerprint`` on TASK_FAILED and, like it, NOT cleared on a later
+    #: recovery -- ``finished_at`` is overwritten by TASK_SUCCEEDED, so the
+    #: Issues view must use this (not finished_at) for the failure "seen"
+    #: window, or a long-ago failure that recovered recently looks recent.
+    last_failed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     retry_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default="0",
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
     )
     eta: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     received_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     runtime_ms: Mapped[int | None] = mapped_column(big_integer(), nullable=True)
     worker_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     parent_task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     root_task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     tags: Mapped[list[str]] = mapped_column(
-        text_array(), nullable=False, default=list, server_default="{}",
+        text_array(),
+        nullable=False,
+        default=list,
+        server_default="{}",
     )
     task_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
@@ -131,21 +156,28 @@ class Task(PKMixin, TimestampsMixin, Base):
         server_default="{}",
     )
     search_vector: Mapped[str | None] = mapped_column(
-        tsvector(), nullable=True,
+        tsvector(),
+        nullable=True,
     )
 
     __table_args__ = (
         UniqueConstraint(
-            "project_id", "engine", "task_id",
+            "project_id",
+            "engine",
+            "task_id",
             name="uq_tasks_project_engine_task_id",
         ),
         Index(
             "ix_tasks_project_state_started",
-            "project_id", "state", "started_at",
+            "project_id",
+            "state",
+            "started_at",
         ),
         Index("ix_tasks_project_name", "project_id", "name"),
         Index("ix_tasks_project_queue", "project_id", "queue"),
         Index("ix_tasks_project_finished", "project_id", "finished_at"),
+        # R4 Issues: aggregate failures by fingerprint per project.
+        Index("ix_tasks_project_fingerprint", "project_id", "fingerprint"),
         # Postgres-only indexes (GIN on jsonb_path_ops, GIN on tsvector,
         # partial idx on parent/root) are added in the migration as
         # raw SQL with a dialect check - SQLite cannot represent them.

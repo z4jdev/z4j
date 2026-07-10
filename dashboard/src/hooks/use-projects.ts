@@ -25,7 +25,6 @@ export function useCreateProject() {
       name: string;
       description?: string | null;
       environment?: string;
-      retention_days?: number;
     }) => api.post<ProjectPublic>("/projects", body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
   });
@@ -43,7 +42,6 @@ export function useUpdateProject() {
       description?: string | null;
       environment?: string;
       timezone?: string;
-      retention_days?: number;
       new_slug?: string;
     }) => {
       const { new_slug, ...rest } = body;

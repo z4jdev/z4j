@@ -8,6 +8,17 @@ debug "did the 3am cron actually fire?"
 One row per fire_id. The scheduler's idempotency-keyed retries
 collapse here via the unique constraint on fire_id.
 
+POSTGRES PARTITIONING (migration ``v1_7_schedule_fires_partition``): on
+Postgres this table is RANGE-partitioned by ``scheduled_for``, so its real
+PK is ``(id, scheduled_for)`` and its real unique is
+``(fire_id, scheduled_for)`` -- Postgres requires the partition key in both.
+This model keeps the plain ``(id)`` PK / ``(fire_id)`` unique it declares
+here (that IS the SQLite shape, and SQLite is not partitioned); the extra
+partition-key column in the Postgres constraints is intentional and
+invisible at runtime, because ``scheduled_for`` is stable per ``fire_id``
+(the id is ``uuid5(schedule_id + scheduled_for)``) so the dedup collapses
+exactly the same rows, and nothing reads this table by a bare id.
+
 Per ``docs/SCHEDULER.md §11`` Phase 4.
 """
 
@@ -28,7 +39,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
 from z4j_brain.persistence.base import Base
-
 
 #: Possible ``status`` values. The scheduler progresses one row
 #: through these states. Stored as TEXT so future statuses don't
@@ -89,11 +99,14 @@ class ScheduleFire(Base):
         UniqueConstraint("fire_id", name="uq_schedule_fires_fire_id"),
         Index(
             "ix_schedule_fires_schedule_recent",
-            "schedule_id", "fired_at",
+            "schedule_id",
+            "fired_at",
         ),
         Index(
             "ix_schedule_fires_circuit_breaker",
-            "schedule_id", "status", "fired_at",
+            "schedule_id",
+            "status",
+            "fired_at",
         ),
     )
 
@@ -103,7 +116,8 @@ class ScheduleFire(Base):
         default=uuid.uuid4,
     )
     fire_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False,
+        Uuid(as_uuid=True),
+        nullable=False,
     )
     schedule_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -120,20 +134,34 @@ class ScheduleFire(Base):
         ForeignKey("commands.id", ondelete="SET NULL"),
         nullable=True,
     )
+    #: The user who manually triggered this fire (``TriggerSchedule`` /
+    #: "fire now"); ``NULL`` for scheduler-driven cadence fires.
+    #: ``ON DELETE SET NULL`` so removing a user preserves the history.
+    #: Required by H1 (personal-activity attribution) + RC3 (recovery
+    #: lineage).
+    triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
     fired_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
     acked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(
-        String(2000), nullable=True,
+        String(2000),
+        nullable=True,
     )
 
 

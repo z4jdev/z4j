@@ -29,6 +29,7 @@ glob patterns. The host validation middleware does exact-match comparison
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 from z4j_core.paths import z4j_home
@@ -99,10 +100,8 @@ def write_persisted(hosts: list[str]) -> None:
         if path.exists():
             path.unlink()
         tmp.replace(path)
-    try:
+    with contextlib.suppress(OSError):
         path.chmod(0o644)
-    except OSError:
-        pass
 
 
 def add(hosts_to_add: list[str]) -> tuple[list[str], list[str]]:

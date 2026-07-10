@@ -62,7 +62,7 @@ class WalCheckpointTask:
         # -1 sentinel matches the
         # documented "no useful number" semantics. 0 used to mean
         # "ran once and checkpointed nothing" AND "never run yet"
-        #, distinct states that operators graphing the gauge need
+        # , distinct states that operators graphing the gauge need
         # to distinguish.
         self._last_pages_checkpointed: int = -1
         self._last_error: str | None = None
@@ -102,8 +102,8 @@ class WalCheckpointTask:
             return
         if db.engine.dialect.name != "sqlite":
             logger.info(
-                "z4j.brain.wal_checkpoint: dialect=%s; checkpoint task "
-                "not needed", db.engine.dialect.name,
+                "z4j.brain.wal_checkpoint: dialect=%s; checkpoint task not needed",
+                db.engine.dialect.name,
             )
             return
         self._db = db
@@ -128,13 +128,13 @@ class WalCheckpointTask:
         except asyncio.CancelledError:
             self._task.cancel()
             raise
-        except (TimeoutError, Exception):  # noqa: BLE001
+        except (TimeoutError, Exception):
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S110  best-effort inner task cleanup
                 pass
         self._task = None
 
@@ -166,11 +166,13 @@ class WalCheckpointTask:
         # opportunistically before our first deliberate pass.
         while not self._stop_event.is_set():
             interval = max(
-                60, self._settings.wal_checkpoint_interval_seconds,
+                60,
+                self._settings.wal_checkpoint_interval_seconds,
             )
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=interval,
+                    self._stop_event.wait(),
+                    timeout=interval,
                 )
                 return
             except asyncio.CancelledError:
@@ -181,11 +183,11 @@ class WalCheckpointTask:
                 await self._do_checkpoint()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 logger.exception(
-                    "z4j.brain.wal_checkpoint: pass failed; "
-                    "next attempt in %ds", interval,
+                    "z4j.brain.wal_checkpoint: pass failed; next attempt in %ds",
+                    interval,
                 )
 
     async def _do_checkpoint(self) -> int:
@@ -224,7 +226,8 @@ class WalCheckpointTask:
         self._last_error = None
         if pages > 0:
             logger.debug(
-                "z4j.brain.wal_checkpoint: checkpointed %d pages", pages,
+                "z4j.brain.wal_checkpoint: checkpointed %d pages",
+                pages,
             )
         return pages
 

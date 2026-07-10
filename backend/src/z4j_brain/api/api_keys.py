@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 
 #: Token prefix that helps users identify z4j API keys in configs.
-_TOKEN_PREFIX = "z4k_"
+_TOKEN_PREFIX = "z4k_"  # noqa: S105  public token prefix, not a secret
 
 #: Salt for API key HMAC - distinct from agent token salt so the
 #: same secret cannot collide between the two surfaces.
@@ -100,12 +100,13 @@ class CreateApiKeyRequest(BaseModel):
     def _cap_scope_strings(cls, v: list[str]) -> list[str]:
         for entry in v:
             if not isinstance(entry, str):
-                raise ValueError("scope entries must be strings")
+                raise ValueError("scope entries must be strings")  # noqa: TRY004  pydantic validator must raise ValueError
             if len(entry) > 64:
                 raise ValueError(
                     "scope entries are bounded to 64 characters",
                 )
         return v
+
     project_id: uuid.UUID | None = Field(
         default=None,
         description=(
@@ -185,7 +186,7 @@ def _key_payload(
 
 @router.get("/scopes", response_model=ScopeCatalogue)
 async def list_scopes(
-    _user: "User" = Depends(get_current_user),
+    _user: User = Depends(get_current_user),
 ) -> ScopeCatalogue:
     """Catalogue of scopes the UI can offer at mint time.
 
@@ -207,8 +208,8 @@ async def list_scopes(
 
 @router.get("", response_model=list[ApiKeyPublic])
 async def list_api_keys(
-    user: "User" = Depends(get_current_user),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[ApiKeyPublic]:
     """List all active (non-revoked) API keys for the current user.
 
@@ -235,10 +236,7 @@ async def list_api_keys(
             )
         ).all()
         slug_by_id = {r.id: r.slug for r in rows}
-    return [
-        _key_payload(k, project_slug=slug_by_id.get(k.project_id))
-        for k in keys
-    ]
+    return [_key_payload(k, project_slug=slug_by_id.get(k.project_id)) for k in keys]
 
 
 @router.post(
@@ -249,11 +247,11 @@ async def list_api_keys(
 )
 async def create_api_key(
     body: CreateApiKeyRequest,
-    user: "User" = Depends(get_current_user),
-    settings: "Settings" = Depends(get_settings),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> ApiKeyCreated:
     """Create a new personal API key.
@@ -278,7 +276,8 @@ async def create_api_key(
     # instead of silently dropping the scope.
     # ------------------------------------------------------------
     accepted, rejected = validate_requested_scopes(
-        requested=body.scopes, user_is_admin=bool(user.is_admin),
+        requested=body.scopes,
+        user_is_admin=bool(user.is_admin),
     )
     if rejected:
         raise ConflictError(
@@ -303,7 +302,8 @@ async def create_api_key(
         if not user.is_admin:
             memberships = MembershipRepository(db_session)
             member = await memberships.get_for_user_project(
-                user_id=user.id, project_id=project.id,
+                user_id=user.id,
+                project_id=project.id,
             )
             if member is None:
                 raise ConflictError(
@@ -379,10 +379,10 @@ async def create_api_key(
 )
 async def revoke_api_key(
     key_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    audit: "AuditService" = Depends(get_audit_service),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> None:
     """Revoke (soft-delete) a personal API key.

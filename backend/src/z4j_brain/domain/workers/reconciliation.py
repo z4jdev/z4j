@@ -8,7 +8,12 @@ backend for the authoritative state.
 
 When the agent reports ``engine_state != brain_state``, the brain
 updates its own snapshot to match + writes an audit row noting
-"state changed by reconciliation." This closes the
+"state changed by reconciliation" + (when the engine's answer is a
+TERMINAL state, i.e. the task really did start-but-never-finish in
+the brain's view) fires any ``task.orphaned`` automation rules. The
+emit site lives where the probe result lands --
+``CommandDispatcher._apply_reconciliation_result`` -- not in this
+worker, because the probe is asynchronous. This closes the
 "task-stuck-in-started-forever" gap that happens when:
 
 - The agent restarted mid-task and lost its event buffer.
@@ -23,10 +28,20 @@ Safety properties:
 - Fails open - if no online agent for the project, we skip this
   tick and retry next cycle.
 - Writes are single-statement UPDATEs inside one transaction.
+- Leader-locked (R3 M2(b)) - ``main.py`` wraps the tick in the
+  per-worker advisory lock (same pattern as the partition creator),
+  so with ``z4j serve``'s min(4, cpu) uvicorn workers only ONE
+  process sweeps per interval instead of four issuing duplicate
+  probe commands.
+- Deduplicated (R3 M2(c)) - each probe command carries a
+  deterministic per-task / per-sweep-window idempotency key, so any
+  duplicate sweep that slips past the lock collapses onto the same
+  ``commands`` row.
 """
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -44,22 +59,59 @@ logger = structlog.get_logger("z4j.brain.workers.reconciliation")
 # user-initiated retries/cancels.
 _MAX_TASKS_PER_SWEEP = 100
 
+# ``commands.idempotency_key`` is ``String(200)``; keys longer than
+# this would fail the INSERT outright.
+_IDEMPOTENCY_KEY_MAX_LEN = 200
+
+
+def _probe_idempotency_key(engine: str, task_id: str, window: int) -> str:
+    """Deterministic per-task / per-sweep-window probe dedupe key.
+
+    R3 M2(c): probe commands used to carry no idempotency key, so
+    duplicate sweeps (multiple brain replicas, a retried tick) issued
+    duplicate ``reconcile_task`` commands that nothing downstream
+    deduplicated. The key is deterministic over ``(engine, task_id,
+    window)`` where ``window`` is the sweep-interval bucket: a
+    duplicate sweep inside the same window collapses onto the same
+    ``commands`` row (unique on ``(project_id, idempotency_key)``),
+    while a later window mints a new key so a still-stuck task can be
+    re-probed.
+
+    ``task_id`` can be up to 200 chars, which would overflow the
+    200-char column with the prefix attached - in that case the
+    ``engine:task_id`` pair is folded into a SHA-256 digest. Still
+    deterministic, just not human-readable.
+    """
+    key = f"reconcile:{engine}:{task_id}:{window}"
+    if len(key) <= _IDEMPOTENCY_KEY_MAX_LEN:
+        return key
+    digest = hashlib.sha256(f"{engine}:{task_id}".encode()).hexdigest()[:32]
+    return f"reconcile:sha256:{digest}:{window}"
+
 
 class ReconciliationWorker:
     """Periodic stuck-task reconciliation sweeper."""
 
     def __init__(
         self,
-        db: "DatabaseManager",
+        db: DatabaseManager,
         *,
         stale_threshold_seconds: int = 900,
+        sweep_interval_seconds: int = 300,
         dispatcher: object | None = None,
     ) -> None:
         """
         Args:
             db: Shared DatabaseManager.
-            stale_threshold_seconds: Tasks ``started_at`` older than
-                this and still non-terminal are probed.
+            stale_threshold_seconds: Tasks whose age anchor
+                (``started_at``, falling back to ``received_at`` then
+                ``created_at``) is older than this and still
+                non-terminal are probed.
+            sweep_interval_seconds: The tick cadence, used as the
+                idempotency-key window: duplicate sweeps within one
+                window dedupe onto the same probe command, the next
+                window can re-probe. Wire the same value the
+                PeriodicWorker ticks with.
             dispatcher: Optional CommandDispatcher; in production the
                 supervisor wires the live one. Tests pass a stub or
                 ``None`` (worker will just count stuck tasks without
@@ -67,6 +119,7 @@ class ReconciliationWorker:
         """
         self._db = db
         self._stale_threshold = timedelta(seconds=stale_threshold_seconds)
+        self._sweep_interval = max(1, int(sweep_interval_seconds))
         self._dispatcher = dispatcher
 
     async def tick(self) -> None:
@@ -79,13 +132,18 @@ class ReconciliationWorker:
             TaskRepository,
         )
 
-        cutoff = datetime.now(UTC) - self._stale_threshold
+        now = datetime.now(UTC)
+        cutoff = now - self._stale_threshold
+        # Idempotency window for this sweep (R3 M2(c)) - see
+        # ``_probe_idempotency_key``.
+        window = int(now.timestamp() // self._sweep_interval)
 
         async with self._db.session() as session:
             task_repo = TaskRepository(session)
             agent_repo = AgentRepository(session)
             stuck = await task_repo.list_stuck_for_reconciliation(
-                stuck_before=cutoff, limit=_MAX_TASKS_PER_SWEEP,
+                stuck_before=cutoff,
+                limit=_MAX_TASKS_PER_SWEEP,
             )
             if not stuck:
                 return
@@ -124,7 +182,7 @@ class ReconciliationWorker:
                 # security audit (H2).
                 agents_by_engine: dict[str, object] = {}
                 for a in online_agents:
-                    for eng in (a.engine_adapters or []):
+                    for eng in a.engine_adapters or []:
                         agents_by_engine.setdefault(eng, a)
 
                 for t in tasks:
@@ -163,9 +221,17 @@ class ReconciliationWorker:
                             issued_by=None,
                             ip=None,
                             user_agent="z4j-reconciliation-worker",
+                            # Dedupe duplicate sweeps within one
+                            # window onto a single probe command
+                            # (R3 M2(c)).
+                            idempotency_key=_probe_idempotency_key(
+                                t.engine,
+                                t.task_id,
+                                window,
+                            ),
                         )
                         dispatched += 1
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         # Per-task failures (agent went offline mid-sweep,
                         # registry hiccup) shouldn't kill the whole tick.
                         # Log and move on so the next tick gets another shot.

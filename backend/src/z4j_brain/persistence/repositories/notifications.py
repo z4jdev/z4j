@@ -44,7 +44,6 @@ from z4j_brain.persistence.models.notification import (
 )
 from z4j_brain.persistence.repositories._base import BaseRepository
 
-
 # ---------------------------------------------------------------------------
 # Project channels (existing).
 # ---------------------------------------------------------------------------
@@ -178,7 +177,8 @@ class UserChannelRepository(BaseRepository[UserChannel]):
         return list(result.scalars().all())
 
     async def get_many_by_pairs(
-        self, pairs: list[tuple[UUID, UUID]],
+        self,
+        pairs: list[tuple[UUID, UUID]],
     ) -> dict[UUID, UserChannel]:
         """Bulk-fetch user channels by (user_id, channel_id) pairs.
 
@@ -195,11 +195,7 @@ class UserChannelRepository(BaseRepository[UserChannel]):
         stmt = select(UserChannel).where(UserChannel.id.in_(ids))
         rows = (await self.session.execute(stmt)).scalars().all()
         supplied = set(pairs)
-        return {
-            r.id: r
-            for r in rows
-            if (r.user_id, r.id) in supplied
-        }
+        return {r.id: r for r in rows if (r.user_id, r.id) in supplied}
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +231,7 @@ class UserSubscriptionRepository(BaseRepository[UserSubscription]):
         dispatcher code (``list_active_for_dispatch`` is separate;
         only the settings UI page is paginated) is unaffected.
         """
-        from sqlalchemy import and_, or_
+        from sqlalchemy import or_
 
         stmt = (
             select(UserSubscription)
@@ -248,11 +244,7 @@ class UserSubscriptionRepository(BaseRepository[UserSubscription]):
         )
         if project_id is not None:
             stmt = stmt.where(UserSubscription.project_id == project_id)
-        if (
-            cursor_project_id is not None
-            and cursor_trigger is not None
-            and cursor_id is not None
-        ):
+        if cursor_project_id is not None and cursor_trigger is not None and cursor_id is not None:
             stmt = stmt.where(
                 or_(
                     UserSubscription.project_id > cursor_project_id,
@@ -395,7 +387,8 @@ class UserSubscriptionRepository(BaseRepository[UserSubscription]):
                 "AND :cid = ANY(project_channel_ids)",
             )
             result = await self.session.execute(
-                stmt, {"cid": channel_id, "pid": project_id},
+                stmt,
+                {"cid": channel_id, "pid": project_id},
             )
             return int(result.rowcount or 0)
         # SQLite fallback: scan the small project-scoped set and rewrite.
@@ -438,7 +431,8 @@ class UserSubscriptionRepository(BaseRepository[UserSubscription]):
                 "AND :cid = ANY(user_channel_ids)",
             )
             result = await self.session.execute(
-                stmt, {"cid": channel_id, "uid": user_id},
+                stmt,
+                {"cid": channel_id, "uid": user_id},
             )
             return int(result.rowcount or 0)
         # SQLite fallback: scan the user-scoped set and rewrite.
@@ -485,9 +479,7 @@ class UserSubscriptionRepository(BaseRepository[UserSubscription]):
 # ---------------------------------------------------------------------------
 
 
-class ProjectDefaultSubscriptionRepository(
-    BaseRepository[ProjectDefaultSubscription]
-):
+class ProjectDefaultSubscriptionRepository(BaseRepository[ProjectDefaultSubscription]):
     """Admin-managed templates that materialize on user join."""
 
     def __init__(self, session: AsyncSession) -> None:
@@ -569,7 +561,8 @@ class ProjectDefaultSubscriptionRepository(
                 "AND :cid = ANY(project_channel_ids)",
             )
             result = await self.session.execute(
-                stmt, {"cid": channel_id, "pid": project_id},
+                stmt,
+                {"cid": channel_id, "pid": project_id},
             )
             return int(result.rowcount or 0)
         # SQLite fallback: scan and rewrite.
@@ -709,7 +702,7 @@ class NotificationDeliveryRepository(BaseRepository[NotificationDelivery]):
         # cursor without a separate COUNT query).
         if limit <= 0 or limit > 501:
             raise ValueError("limit must be between 1 and 501")
-        from sqlalchemy import and_, or_
+        from sqlalchemy import or_
 
         where_conds: list[Any] = [
             NotificationDelivery.project_id == project_id,
@@ -769,7 +762,7 @@ class NotificationDeliveryRepository(BaseRepository[NotificationDelivery]):
         """
         if limit <= 0 or limit > 501:
             raise ValueError("limit must be between 1 and 501")
-        from sqlalchemy import and_, or_
+        from sqlalchemy import or_
 
         from z4j_brain.persistence.models import UserSubscription
 
@@ -780,9 +773,7 @@ class NotificationDeliveryRepository(BaseRepository[NotificationDelivery]):
         # remember owning. For the v1.0.18 minimum, we just match
         # by user-owned subscription_id at query time.
         owned_subs = (
-            select(UserSubscription.id)
-            .where(UserSubscription.user_id == user_id)
-            .scalar_subquery()
+            select(UserSubscription.id).where(UserSubscription.user_id == user_id).scalar_subquery()
         )
 
         # v1.1.0: a row "belongs to" the user if EITHER it fired

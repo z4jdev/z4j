@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import secrets
-import uuid
 from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
-from z4j_core.redaction import RedactionConfig, RedactionEngine
-
 from z4j_brain.domain.event_ingestor import EventIngestor
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import AgentState, TaskState
 from z4j_brain.persistence.models import Agent, Event, Project, Task
 from z4j_brain.persistence.repositories import (
@@ -24,6 +20,7 @@ from z4j_brain.persistence.repositories import (
     QueueRepository,
     TaskRepository,
 )
+from z4j_core.redaction import RedactionConfig, RedactionEngine
 
 
 @pytest.fixture
@@ -294,3 +291,130 @@ class TestHeartbeat:
         await session.commit()
         await session.refresh(agent)
         assert agent.last_seen_at is not None
+
+
+@pytest.mark.asyncio
+async def test_ingest_batch_returns_only_new_events(
+    session: AsyncSession,
+    project: Project,
+    agent: Agent,
+    ingestor: EventIngestor,
+) -> None:
+    """A re-delivered event (same content -> same content-derived
+    event_id) is deduped at insert and is NOT returned, so the caller's
+    automation hook fires ONCE per logical event, not once per delivery.
+    This is the fix for the flaky-WS reconnect firing amplification.
+    """
+    ev = _make_event(
+        kind="task.failed",
+        data={"task_name": "myapp.t", "exception": "boom"},
+    )
+
+    def _kw():
+        return {
+            "project_id": project.id,
+            "agent_id": agent.id,
+            "agents": AgentRepository(session),
+            "event_repo": EventRepository(session),
+            "task_repo": TaskRepository(session),
+            "queue_repo": QueueRepository(session),
+        }
+
+    first = await ingestor.ingest_batch(events=[ev], **_kw())
+    await session.commit()
+    assert len(first) == 1  # genuinely new -> returned (rule would fire)
+
+    # Re-deliver the exact same event (agent reconnect buffer re-flush).
+    second = await ingestor.ingest_batch(events=[ev], **_kw())
+    await session.commit()
+    assert second == []  # duplicate -> NOT returned -> rule does NOT re-fire
+
+    # Exactly one events row exists (dedup held).
+    rows = (await session.execute(select(Event))).scalars().all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_subsecond_divergent_redelivery_dedupes(
+    session: AsyncSession,
+    project: Project,
+    agent: Agent,
+    ingestor: EventIngestor,
+) -> None:
+    """Two deliveries of ONE logical task event that differ only in the
+    sub-second of occurred_at (the celery-events fan-out, or two brain
+    replicas) must collapse to a single events row and fire automation
+    once. The content-derived event_id is second-grained, so occurred_at
+    is stored at second granularity too; otherwise the (project_id,
+    occurred_at, id) conflict key would miss and both would insert.
+    """
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    ev1 = _make_event(
+        kind="task.failed",
+        data={"task_name": "myapp.t", "exception": "boom"},
+        occurred_at=base.replace(microsecond=100_000),
+    )
+    ev2 = _make_event(
+        kind="task.failed",
+        data={"task_name": "myapp.t", "exception": "boom"},
+        occurred_at=base.replace(microsecond=400_000),
+    )
+
+    def _kw():
+        return {
+            "project_id": project.id,
+            "agent_id": agent.id,
+            "agents": AgentRepository(session),
+            "event_repo": EventRepository(session),
+            "task_repo": TaskRepository(session),
+            "queue_repo": QueueRepository(session),
+        }
+
+    first = await ingestor.ingest_batch(events=[ev1], **_kw())
+    await session.commit()
+    assert len(first) == 1
+
+    second = await ingestor.ingest_batch(events=[ev2], **_kw())
+    await session.commit()
+    # Same logical event within one second -> deduped, no second firing.
+    assert second == []
+    rows = (await session.execute(select(Event))).scalars().all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_touch_failure_does_not_lose_events(
+    session: AsyncSession,
+    project: Project,
+    agent: Agent,
+    ingestor: EventIngestor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deadlock/failure on the best-effort heartbeat touch (now wrapped
+    in its own savepoint) must NOT abort the batch: the ingested events
+    still commit and are returned. Live-test finding: an unprotected
+    deadlock there lost the whole batch and automation never fired.
+    """
+    ev = _make_event(kind="task.received", data={"task_name": "x"})
+    agents_repo = AgentRepository(session)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("simulated heartbeat deadlock")
+
+    monkeypatch.setattr(agents_repo, "touch_heartbeat_at", _boom)
+
+    new = await ingestor.ingest_batch(
+        events=[ev],
+        project_id=project.id,
+        agent_id=agent.id,
+        agents=agents_repo,
+        event_repo=EventRepository(session),
+        task_repo=TaskRepository(session),
+        queue_repo=QueueRepository(session),
+    )
+    await session.commit()
+
+    # Heartbeat failed, but the event survived (savepoint isolation).
+    assert len(new) == 1
+    task = (await session.execute(select(Task))).scalar_one()
+    assert task.name == "x"

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.domain.command_dispatcher import CommandDispatcher
-    from z4j_brain.persistence.models import Agent, Schedule, User
+    from z4j_brain.persistence.models import Agent, Project, Schedule, User
     from z4j_brain.persistence.repositories import (
         AuditLogRepository,
         MembershipRepository,
@@ -91,7 +91,7 @@ class SchedulePublic(BaseModel):
     source_hash: str | None = None
 
 
-def _payload(schedule: "Schedule") -> SchedulePublic:
+def _payload(schedule: Schedule) -> SchedulePublic:
     return SchedulePublic(
         id=schedule.id,
         project_id=schedule.project_id,
@@ -103,7 +103,9 @@ def _payload(schedule: "Schedule") -> SchedulePublic:
         expression=schedule.expression,
         timezone=schedule.timezone,
         queue=schedule.queue,
-        priority=schedule.priority.value if hasattr(schedule.priority, "value") else str(schedule.priority or "normal"),
+        priority=schedule.priority.value
+        if hasattr(schedule.priority, "value")
+        else str(schedule.priority or "normal"),
         args=schedule.args,
         kwargs=schedule.kwargs,
         is_enabled=schedule.is_enabled,
@@ -168,10 +170,10 @@ async def list_schedules(
     slug: str,
     limit: int = Query(default=50, ge=1, le=500),
     cursor: str | None = Query(default=None),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> SchedulesListPublic:
     """List schedules in a project, paginated.
 
@@ -226,6 +228,9 @@ class ScheduleFirePublic(BaseModel):
     latency_ms: int | None
     error_code: str | None
     error_message: str | None
+    #: The operator who manually triggered this fire, or None for
+    #: scheduler-driven cadence fires.
+    triggered_by_user_id: uuid.UUID | None = None
 
 
 def _fire_payload(row: Any) -> ScheduleFirePublic:
@@ -241,6 +246,47 @@ def _fire_payload(row: Any) -> ScheduleFirePublic:
         latency_ms=row.latency_ms,
         error_code=row.error_code,
         error_message=row.error_message,
+        triggered_by_user_id=row.triggered_by_user_id,
+    )
+
+
+class ScheduleMisfirePublic(BaseModel):
+    """One detected misfire of a schedule (A4 misfire history).
+
+    The brain's misfire detector writes a ``scheduler.misfire_detected``
+    audit row each time an enabled schedule's expected fire is late past
+    the grace window; this is the operator-facing projection of those
+    rows for one schedule.
+    """
+
+    schedule_id: uuid.UUID
+    detected_at: datetime
+    expected_fire_at: datetime | None
+    lateness_seconds: float | None
+    grace_seconds: int | None
+    name: str | None
+    engine: str | None
+    kind: str | None
+
+
+def _misfire_payload(row: Any, schedule_id: uuid.UUID) -> ScheduleMisfirePublic:
+    meta = row.audit_metadata or {}
+    expected_raw = meta.get("expected_fire_at")
+    expected: datetime | None = None
+    if isinstance(expected_raw, str):
+        try:
+            expected = datetime.fromisoformat(expected_raw)
+        except ValueError:
+            expected = None
+    return ScheduleMisfirePublic(
+        schedule_id=schedule_id,
+        detected_at=row.occurred_at,
+        expected_fire_at=expected,
+        lateness_seconds=meta.get("lateness_seconds"),
+        grace_seconds=meta.get("grace_seconds"),
+        name=meta.get("name"),
+        engine=meta.get("engine"),
+        kind=meta.get("kind"),
     )
 
 
@@ -252,10 +298,10 @@ async def list_schedule_fires(
     slug: str,
     schedule_id: uuid.UUID,
     limit: int = 100,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[ScheduleFirePublic]:
     """Return the schedule's fire history, newest first.
 
@@ -289,7 +335,8 @@ async def list_schedule_fires(
 
     # Verify the schedule belongs to this project (IDOR-safe).
     schedule = await ScheduleRepository(db_session).get_for_project(
-        project_id=project.id, schedule_id=schedule_id,
+        project_id=project.id,
+        schedule_id=schedule_id,
     )
     if schedule is None:
         raise NotFoundError(
@@ -305,14 +352,74 @@ async def list_schedule_fires(
     return [_fire_payload(r) for r in rows]
 
 
+@router.get(
+    "/{schedule_id}/misfires",
+    response_model=list[ScheduleMisfirePublic],
+)
+async def list_schedule_misfires(
+    slug: str,
+    schedule_id: uuid.UUID,
+    limit: int = 50,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+) -> list[ScheduleMisfirePublic]:
+    """Return the schedule's detected misfires, newest first.
+
+    Authorization: VIEWER. A misfire is a system-detected "this enabled
+    schedule missed its slot" event (no who-did-what), so unlike the
+    general audit log (ADMIN) it is safe for any project member to see --
+    it is operational data about a schedule they can already read. The
+    most recent row is the schedule detail page's "last misfire".
+
+    Limit capped at 1000; the dashboard defaults to a short window.
+    """
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.repositories import (
+        AuditLogRepository,
+        ScheduleRepository,
+    )
+
+    if limit < 1 or limit > 1000:
+        limit = max(1, min(1000, limit))
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.VIEWER,
+    )
+
+    # Verify the schedule belongs to this project (IDOR-safe).
+    schedule = await ScheduleRepository(db_session).get_for_project(
+        project_id=project.id,
+        schedule_id=schedule_id,
+    )
+    if schedule is None:
+        raise NotFoundError(
+            "schedule not found",
+            details={"schedule_id": str(schedule_id)},
+        )
+
+    rows = await AuditLogRepository(db_session).list_misfires_for_schedule(
+        project_id=project.id,
+        schedule_id=schedule.id,
+        limit=limit,
+    )
+    return [_misfire_payload(r, schedule.id) for r in rows]
+
+
 @router.get("/{schedule_id}", response_model=SchedulePublic)
 async def get_schedule(
     slug: str,
     schedule_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> SchedulePublic:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import ScheduleRepository
@@ -326,7 +433,8 @@ async def get_schedule(
         min_role=ProjectRole.VIEWER,
     )
     schedule = await ScheduleRepository(db_session).get_for_project(
-        project_id=project.id, schedule_id=schedule_id,
+        project_id=project.id,
+        schedule_id=schedule_id,
     )
     if schedule is None:
         raise NotFoundError(
@@ -387,7 +495,7 @@ def _validate_iana_timezone(value: str) -> str:
     if stripped == "":
         return "UTC"
     try:
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: PLC0415
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
         ZoneInfo(stripped)
     except ZoneInfoNotFoundError as exc:
@@ -395,7 +503,7 @@ def _validate_iana_timezone(value: str) -> str:
             f"timezone {stripped!r} is not a valid IANA timezone "
             "(e.g. 'UTC', 'America/New_York', 'Europe/London')",
         ) from exc
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # Any other parser failure (malformed bytes, encoding issues)
         # is also a rejection; better an explicit 422 than silent
         # downstream tick failure.
@@ -403,6 +511,7 @@ def _validate_iana_timezone(value: str) -> str:
             f"timezone {stripped!r} could not be resolved: {exc}",
         ) from exc
     return stripped
+
 
 # JSON-serialised byte cap per args/kwargs payload. 64KB is the
 # operator-friendly ceiling: covers every realistic schedule
@@ -415,10 +524,10 @@ _ARGS_KWARGS_MAX_SERIALIZED_BYTES = 64 * 1024
 # log-line cost.
 _NAME_MAX = 200
 _EXPRESSION_MAX = 1024  # six-field cron with comma-lists is still short
-_TASK_NAME_MAX = 500    # python.dotted.module.name with package depth
-_TIMEZONE_MAX = 64      # IANA tz names are < 50 chars in practice
-_QUEUE_MAX = 200        # broker queue name; RabbitMQ caps at 255
-_SOURCE_MAX = 64        # source label vocab is short by convention
+_TASK_NAME_MAX = 500  # python.dotted.module.name with package depth
+_TIMEZONE_MAX = 64  # IANA tz names are < 50 chars in practice
+_QUEUE_MAX = 200  # broker queue name; RabbitMQ caps at 255
+_SOURCE_MAX = 64  # source label vocab is short by convention
 _SOURCE_HASH_MAX = 128  # SHA-256 hex = 64 chars; SHA-512 = 128
 
 # Pattern that rejects ASCII control chars (NUL through US, plus
@@ -436,7 +545,7 @@ def _validate_args_kwargs_size(value: Any, field_name: str) -> Any:
     abuse case (multi-MB payload) the serialise itself is the
     rate-limit.
     """
-    import json as _json  # noqa: PLC0415
+    import json as _json
 
     if value is None:
         return value
@@ -458,12 +567,17 @@ class ScheduleCreateIn(BaseModel):
     """Body for ``POST /schedules`` - operator-defined schedule."""
 
     name: str = Field(
-        ..., min_length=1, max_length=_NAME_MAX, pattern=_NO_CONTROL_CHARS,
+        ...,
+        min_length=1,
+        max_length=_NAME_MAX,
+        pattern=_NO_CONTROL_CHARS,
     )
     engine: str = Field(..., min_length=1, max_length=40)
     kind: str = Field(..., min_length=1, max_length=20)
     expression: str = Field(
-        ..., min_length=1, max_length=_EXPRESSION_MAX,
+        ...,
+        min_length=1,
+        max_length=_EXPRESSION_MAX,
         pattern=_NO_CONTROL_CHARS,
     )
     # Reject control characters in ``task_name``. Without this,
@@ -473,7 +587,9 @@ class ScheduleCreateIn(BaseModel):
     # future renderer / exporter that forgets to sanitize is
     # still safe.
     task_name: str = Field(
-        ..., min_length=1, max_length=_TASK_NAME_MAX,
+        ...,
+        min_length=1,
+        max_length=_TASK_NAME_MAX,
         pattern=_NO_CONTROL_CHARS,
     )
     timezone: str = Field(default="UTC", max_length=_TIMEZONE_MAX)
@@ -492,7 +608,9 @@ class ScheduleCreateIn(BaseModel):
     # because callers that explicitly pass ``"z4j-scheduler"``
     # still get z4j-scheduler-owned schedules.
     scheduler: str | None = Field(
-        default=None, min_length=1, max_length=40,
+        default=None,
+        min_length=1,
+        max_length=40,
     )
     source: str = Field(default="dashboard", min_length=1, max_length=_SOURCE_MAX)
     source_hash: str | None = Field(default=None, max_length=_SOURCE_HASH_MAX)
@@ -552,12 +670,16 @@ class ScheduleUpdateIn(BaseModel):
     engine: str | None = Field(default=None, min_length=1, max_length=40)
     kind: str | None = Field(default=None, min_length=1, max_length=20)
     expression: str | None = Field(
-        default=None, min_length=1, max_length=_EXPRESSION_MAX,
+        default=None,
+        min_length=1,
+        max_length=_EXPRESSION_MAX,
         pattern=_NO_CONTROL_CHARS,
     )
     # See ScheduleCreateIn.task_name.
     task_name: str | None = Field(
-        default=None, min_length=1, max_length=_TASK_NAME_MAX,
+        default=None,
+        min_length=1,
+        max_length=_TASK_NAME_MAX,
         pattern=_NO_CONTROL_CHARS,
     )
     timezone: str | None = Field(default=None, max_length=_TIMEZONE_MAX)
@@ -605,7 +727,8 @@ class ScheduleUpdateIn(BaseModel):
     @field_validator("kwargs")
     @classmethod
     def _cap_kwargs(
-        cls, v: dict[str, Any] | None,
+        cls,
+        v: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         return _validate_args_kwargs_size(v, "kwargs")
 
@@ -620,12 +743,12 @@ async def create_schedule(
     slug: str,
     body: ScheduleCreateIn,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> SchedulePublic:
     """Create a new schedule under the project.
@@ -652,7 +775,9 @@ async def create_schedule(
     create_data = body.model_dump()
     if create_data.get("scheduler") is None:
         create_data["scheduler"] = getattr(
-            project, "default_scheduler_owner", "z4j-scheduler",
+            project,
+            "default_scheduler_owner",
+            "z4j-scheduler",
         )
     # Enforce per-project allow-list when
     # set. ``None`` means unrestricted (the default).
@@ -661,7 +786,8 @@ async def create_schedule(
     repo = ScheduleRepository(db_session)
     try:
         row = await repo.create_for_project(
-            project_id=project.id, data=create_data,
+            project_id=project.id,
+            data=create_data,
         )
     except ValueError as exc:
         # 422 Unprocessable Entity - the request was syntactically
@@ -700,12 +826,12 @@ async def update_schedule(
     schedule_id: uuid.UUID,
     body: ScheduleUpdateIn,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> SchedulePublic:
     """Partial update. Only fields present in the body are touched.
@@ -773,12 +899,12 @@ async def delete_schedule(
     slug: str,
     schedule_id: uuid.UUID,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> None:
     """Hard-delete the schedule. IDOR-safe (project-scoped lookup).
@@ -799,7 +925,8 @@ async def delete_schedule(
 
     repo = ScheduleRepository(db_session)
     deleted = await repo.delete_for_project(
-        project_id=project.id, schedule_id=schedule_id,
+        project_id=project.id,
+        schedule_id=schedule_id,
     )
     if not deleted:
         raise NotFoundError(
@@ -821,7 +948,6 @@ async def delete_schedule(
         metadata={},
     )
     await db_session.commit()
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -831,11 +957,11 @@ async def delete_schedule(
 
 async def _pick_scheduler_agent(
     *,
-    db_session: "AsyncSession",
+    db_session: AsyncSession,
     project_id: uuid.UUID,
     scheduler_name: str,
     schedule_id: uuid.UUID,
-) -> "Agent":
+) -> Agent:
     """Pick the best online agent to receive a schedule command.
 
     Filters the project's agents down to those that are:
@@ -871,8 +997,7 @@ async def _pick_scheduler_agent(
     # without this scheduler adapter?
     if not agents:
         raise NotFoundError(
-            "no online agent for this project; start the agent "
-            "and retry",
+            "no online agent for this project; start the agent and retry",
             details={
                 "schedule_id": str(schedule_id),
                 "scheduler": scheduler_name,
@@ -896,12 +1021,12 @@ async def _enable_or_disable(
     slug: str,
     schedule_id: uuid.UUID,
     enabled: bool,
-    user: "User",
-    memberships: "MembershipRepository",
-    projects: "ProjectRepository",
-    audit_log: "AuditLogRepository",
-    dispatcher: "CommandDispatcher",
-    db_session: "AsyncSession",
+    user: User,
+    memberships: MembershipRepository,
+    projects: ProjectRepository,
+    audit_log: AuditLogRepository,
+    dispatcher: CommandDispatcher,
+    db_session: AsyncSession,
     ip: str,
 ) -> SchedulePublic:
     from z4j_brain.domain.policy_engine import PolicyEngine
@@ -921,7 +1046,8 @@ async def _enable_or_disable(
 
     schedules_repo = ScheduleRepository(db_session)
     schedule = await schedules_repo.get_for_project(
-        project_id=project.id, schedule_id=schedule_id,
+        project_id=project.id,
+        schedule_id=schedule_id,
     )
     if schedule is None:
         raise NotFoundError(
@@ -958,14 +1084,16 @@ async def _enable_or_disable(
     # Optimistically reflect the operator's intent in the brain row.
     # The agent will sync back the authoritative state on success.
     await schedules_repo.set_enabled(
-        schedule_id=schedule_id, enabled=enabled,
+        schedule_id=schedule_id,
+        enabled=enabled,
     )
     await db_session.commit()
 
     await dispatcher.notify_dashboard_command_change(project.id)
 
     refreshed = await schedules_repo.get_for_project(
-        project_id=project.id, schedule_id=schedule_id,
+        project_id=project.id,
+        schedule_id=schedule_id,
     )
     assert refreshed is not None
     return _payload(refreshed)
@@ -979,12 +1107,12 @@ async def _enable_or_disable(
 async def enable_schedule(
     slug: str,
     schedule_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> SchedulePublic:
     return await _enable_or_disable(
@@ -1009,12 +1137,12 @@ async def enable_schedule(
 async def disable_schedule(
     slug: str,
     schedule_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> SchedulePublic:
     return await _enable_or_disable(
@@ -1042,15 +1170,15 @@ async def disable_schedule(
 async def trigger_schedule_now(
     slug: str,
     schedule_id: uuid.UUID,
-    request: "Request",
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    settings: "Settings" = Depends(get_settings),
-    db_session: "AsyncSession" = Depends(get_session),
+    request: Request,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> SchedulePublic:
     """Issue a one-shot ``schedule.trigger_now`` command.
@@ -1075,7 +1203,8 @@ async def trigger_schedule_now(
 
     schedules_repo = ScheduleRepository(db_session)
     schedule = await schedules_repo.get_for_project(
-        project_id=project.id, schedule_id=schedule_id,
+        project_id=project.id,
+        schedule_id=schedule_id,
     )
     if schedule is None:
         raise NotFoundError(
@@ -1093,9 +1222,8 @@ async def trigger_schedule_now(
     # operator has wired the trigger client, route through the
     # scheduler so its local cache last_fire_at gets the update
     # (preventing the next tick from double-firing).
-    use_scheduler_grpc = (
-        schedule.scheduler == "z4j-scheduler"
-        and bool(settings.scheduler_trigger_url)
+    use_scheduler_grpc = schedule.scheduler == "z4j-scheduler" and bool(
+        settings.scheduler_trigger_url
     )
     if use_scheduler_grpc:
         client = await _get_or_build_trigger_client(request, settings)
@@ -1130,11 +1258,11 @@ async def trigger_schedule_now(
                     },
                 )
                 await db_session.commit()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Audit failure should not mask the original
                 # scheduler error from the operator. Log + continue
                 # to the raise.
-                import logging  # noqa: PLC0415
+                import logging
 
                 logging.getLogger("z4j.brain.schedules").exception(
                     "trigger audit (failure) write crashed",
@@ -1167,7 +1295,8 @@ async def trigger_schedule_now(
         )
         await db_session.commit()
         refreshed = await schedules_repo.get_for_project(
-            project_id=project.id, schedule_id=schedule_id,
+            project_id=project.id,
+            schedule_id=schedule_id,
         )
         assert refreshed is not None
         return _payload(refreshed)
@@ -1205,7 +1334,8 @@ async def trigger_schedule_now(
     await dispatcher.notify_dashboard_command_change(project.id)
 
     refreshed = await schedules_repo.get_for_project(
-        project_id=project.id, schedule_id=schedule_id,
+        project_id=project.id,
+        schedule_id=schedule_id,
     )
     assert refreshed is not None
     return _payload(refreshed)
@@ -1217,8 +1347,8 @@ async def trigger_schedule_now(
 
 
 async def _get_or_build_trigger_client(
-    request: "Request",
-    settings: "Settings",
+    request: Request,
+    settings: Settings,
 ):
     """Return a process-wide :class:`TriggerScheduleClient` singleton.
 
@@ -1235,7 +1365,7 @@ async def _get_or_build_trigger_client(
     cached = getattr(request.app.state, "scheduler_trigger_client", None)
     if cached is not None:
         return cached
-    from z4j_brain.scheduler_grpc.trigger_client import (  # noqa: PLC0415
+    from z4j_brain.scheduler_grpc.trigger_client import (
         TriggerScheduleClient,
     )
 
@@ -1267,17 +1397,24 @@ class ImportedScheduleIn(BaseModel):
     """
 
     name: str = Field(
-        ..., min_length=1, max_length=_NAME_MAX, pattern=_NO_CONTROL_CHARS,
+        ...,
+        min_length=1,
+        max_length=_NAME_MAX,
+        pattern=_NO_CONTROL_CHARS,
     )
     engine: str = Field(..., min_length=1, max_length=40)
     kind: str = Field(..., min_length=1, max_length=20)
     expression: str = Field(
-        ..., min_length=1, max_length=_EXPRESSION_MAX,
+        ...,
+        min_length=1,
+        max_length=_EXPRESSION_MAX,
         pattern=_NO_CONTROL_CHARS,
     )
     # See ScheduleCreateIn.task_name.
     task_name: str = Field(
-        ..., min_length=1, max_length=_TASK_NAME_MAX,
+        ...,
+        min_length=1,
+        max_length=_TASK_NAME_MAX,
         pattern=_NO_CONTROL_CHARS,
     )
     timezone: str = Field(default="UTC", max_length=_TIMEZONE_MAX)
@@ -1293,10 +1430,14 @@ class ImportedScheduleIn(BaseModel):
     # would see imported rows silently land under
     # ``z4j-scheduler`` ownership.
     scheduler: str | None = Field(
-        default=None, min_length=1, max_length=40,
+        default=None,
+        min_length=1,
+        max_length=40,
     )
     source: str = Field(
-        default="imported", min_length=1, max_length=_SOURCE_MAX,
+        default="imported",
+        min_length=1,
+        max_length=_SOURCE_MAX,
     )
     source_hash: str | None = Field(default=None, max_length=_SOURCE_HASH_MAX)
 
@@ -1346,35 +1487,38 @@ class ImportedScheduleIn(BaseModel):
 # request. We pin the legitimate replace-mode source values to the
 # declarative + importer vocabulary; "dashboard" is operator-edited
 # state and must NEVER be a replace target.
-_REPLACE_FOR_SOURCE_ALLOWLIST: frozenset[str] = frozenset({
-    # Declarative reconcilers - the legitimate use case for replace
-    # mode. Each framework adapter tags rows with this prefix.
-    # Both ``:`` and ``_`` separators are accepted because both
-    # forms appear in the wild (the recent docs use ``:``, the
-    # earlier integration tests + some adapter releases use ``_``).
-    "declarative:django",
-    "declarative:flask",
-    "declarative:fastapi",
-    "declarative_django",
-    "declarative_flask",
-    "declarative_fastapi",
-    "declarative",  # bare prefix used by some adapters
-    # Migration importers - operators occasionally re-run a
-    # celery-beat → z4j import to apply upstream changes; the
-    # replace mode is the right tool for that flow.
-    "imported_celerybeat",
-    "imported_celery",
-    "imported_django_celery_beat",
-    "imported_rq",
-    "imported_rqscheduler",
-    "imported_apscheduler",
-    "imported_cron",
-    "imported",  # generic importer label
-})
+_REPLACE_FOR_SOURCE_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # Declarative reconcilers - the legitimate use case for replace
+        # mode. Each framework adapter tags rows with this prefix.
+        # Both ``:`` and ``_`` separators are accepted because both
+        # forms appear in the wild (the recent docs use ``:``, the
+        # earlier integration tests + some adapter releases use ``_``).
+        "declarative:django",
+        "declarative:flask",
+        "declarative:fastapi",
+        "declarative_django",
+        "declarative_flask",
+        "declarative_fastapi",
+        "declarative",  # bare prefix used by some adapters
+        # Migration importers - operators occasionally re-run a
+        # celery-beat → z4j import to apply upstream changes; the
+        # replace mode is the right tool for that flow.
+        "imported_celerybeat",
+        "imported_celery",
+        "imported_django_celery_beat",
+        "imported_rq",
+        "imported_rqscheduler",
+        "imported_apscheduler",
+        "imported_cron",
+        "imported",  # generic importer label
+    }
+)
 
 
 def _validate_scheduler_in_allowlist(
-    project: "Project", scheduler_name: str,
+    project: Project,
+    scheduler_name: str,
 ) -> None:
     """Reject schedulers outside the project's allow-list (1.2.2+).
 
@@ -1394,7 +1538,9 @@ def _validate_scheduler_in_allowlist(
     if allowed is None:
         return  # unrestricted
     default_owner = getattr(
-        project, "default_scheduler_owner", "z4j-scheduler",
+        project,
+        "default_scheduler_owner",
+        "z4j-scheduler",
     )
     if scheduler_name == default_owner or scheduler_name in allowed:
         return
@@ -1490,16 +1636,16 @@ class ImportSchedulesResponse(BaseModel):
     status_code=200,
     dependencies=[Depends(require_csrf)],
 )
-async def import_schedules(
+async def import_schedules(  # noqa: PLR0912, PLR0915  import diff + apply branches
     slug: str,
     body: ImportSchedulesRequest,
     request: Request,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> ImportSchedulesResponse:
     """Bulk-import schedules from a migration tool.
@@ -1591,19 +1737,13 @@ async def import_schedules(
     # reconcile-vs-reconcile serialization, only meaningful for
     # ``replace_for_source``).
     if body.mode == "replace_for_source" and (
-        db_session.bind.dialect.name == "postgresql"
-        if db_session.bind is not None
-        else False
+        db_session.bind.dialect.name == "postgresql" if db_session.bind is not None else False
     ):
-        from hashlib import sha256  # noqa: PLC0415
+        from hashlib import sha256
 
-        from sqlalchemy import text  # noqa: PLC0415
+        from sqlalchemy import text
 
-        scope_key = (
-            (body.source_filter
-             or (body.schedules[0].source if body.schedules else "")
-             or "")
-        )
+        scope_key = body.source_filter or (body.schedules[0].source if body.schedules else "") or ""
         # Two-int form so we can fit both project_id and source-label
         # hash in the 64-bit advisory-lock key space without collision.
         # Source-specific lock for replace_for_source serializes
@@ -1611,7 +1751,9 @@ async def import_schedules(
         # fix M-3, predates 1.2.2.)
         proj_int = int.from_bytes(project.id.bytes[:4], "big", signed=True)
         source_int = int.from_bytes(
-            sha256(scope_key.encode()).digest()[:4], "big", signed=True,
+            sha256(scope_key.encode()).digest()[:4],
+            "big",
+            signed=True,
         )
         await db_session.execute(
             text("SELECT pg_advisory_xact_lock(:p, :s)"),
@@ -1619,7 +1761,12 @@ async def import_schedules(
         )
 
     summary = ImportSchedulesResponse(
-        inserted=0, updated=0, unchanged=0, failed=0, deleted=0, errors={},
+        inserted=0,
+        updated=0,
+        unchanged=0,
+        failed=0,
+        deleted=0,
+        errors={},
     )
     # For replace_for_source mode, pre-load the entire
     # (scheduler, name) -> id map for the batch in a SINGLE
@@ -1635,7 +1782,9 @@ async def import_schedules(
     # ``"z4j-scheduler"`` which silently overrides the project's
     # chosen default for every row that didn't specify.
     project_default_scheduler = getattr(
-        project, "default_scheduler_owner", "z4j-scheduler",
+        project,
+        "default_scheduler_owner",
+        "z4j-scheduler",
     )
 
     def _resolve_scheduler(row_scheduler: str | None) -> str:
@@ -1643,9 +1792,9 @@ async def import_schedules(
 
     existing_id_map: dict[tuple[str, str], uuid.UUID] = {}
     if body.mode == "replace_for_source" and body.schedules:
-        from sqlalchemy import select, tuple_  # noqa: PLC0415
+        from sqlalchemy import select, tuple_
 
-        from z4j_brain.persistence.models import Schedule  # noqa: PLC0415
+        from z4j_brain.persistence.models import Schedule
 
         # The pre-flight existing-row lookup is keyed by the
         # resolved (scheduler, name) tuple, the same key the
@@ -1658,10 +1807,7 @@ async def import_schedules(
         # That migration runs at upgrade time so the lookup here
         # finds them under the new key without runtime dual-key
         # logic (which has a double-firing failure mode).
-        batch_keys = [
-            (_resolve_scheduler(row.scheduler), row.name)
-            for row in body.schedules
-        ]
+        batch_keys = [(_resolve_scheduler(row.scheduler), row.name) for row in body.schedules]
         existing_lookup = await db_session.execute(
             select(
                 Schedule.scheduler,
@@ -1773,9 +1919,8 @@ async def import_schedules(
         # The label that scoped the delete pass. Use the resolved
         # value (which may have come from the first row's source if
         # the operator didn't set source_filter explicitly).
-        audit_metadata["source_filter"] = (
-            body.source_filter
-            or (body.schedules[0].source if body.schedules else None)
+        audit_metadata["source_filter"] = body.source_filter or (
+            body.schedules[0].source if body.schedules else None
         )
     # Also record the API key that fired this action (if the
     # request came in via bearer auth).
@@ -1845,13 +1990,13 @@ class DiffSchedulesResponse(BaseModel):
     status_code=200,
     dependencies=[Depends(require_csrf)],
 )
-async def diff_schedules(
+async def diff_schedules(  # noqa: PLR0912  import diff branches
     slug: str,
     body: ImportSchedulesRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> DiffSchedulesResponse:
     """Preview what ``:import`` would do without applying it.
 
@@ -1925,18 +2070,17 @@ async def diff_schedules(
     # queries; one batched SELECT per request is the supported
     # path. ``tuple_(...).in_(...)`` is portable across Postgres
     # + SQLite.
-    from sqlalchemy import tuple_  # noqa: PLC0415
+    from sqlalchemy import tuple_
 
     # Same project-default
     # resolution as the :import path, so :diff previews the same
     # row identity that :import will write.
     diff_project_default = getattr(
-        project, "default_scheduler_owner", "z4j-scheduler",
+        project,
+        "default_scheduler_owner",
+        "z4j-scheduler",
     )
-    diff_batch_keys = [
-        (row.scheduler or diff_project_default, row.name)
-        for row in body.schedules
-    ]
+    diff_batch_keys = [(row.scheduler or diff_project_default, row.name) for row in body.schedules]
     existing_rows: dict[tuple[str, str], Schedule] = {}
     if diff_batch_keys:
         result = await db_session.execute(
@@ -1971,10 +2115,14 @@ async def diff_schedules(
             "source_hash": row.source_hash,
         }
         if existing is None:
-            inserted.append(DiffEntry(
-                name=row.name, scheduler=scheduler,
-                proposed=proposed, current={},
-            ))
+            inserted.append(
+                DiffEntry(
+                    name=row.name,
+                    scheduler=scheduler,
+                    proposed=proposed,
+                    current={},
+                )
+            )
             continue
         current = {
             "name": existing.name,
@@ -1996,20 +2144,24 @@ async def diff_schedules(
         # AND brain's row to carry the same hash. Without a hash we
         # treat the row as an UPDATE - same semantics the real
         # import takes (it always rewrites when it can't compare).
-        if (
-            row.source_hash
-            and current["source_hash"]
-            and row.source_hash == current["source_hash"]
-        ):
-            unchanged.append(DiffEntry(
-                name=row.name, scheduler=scheduler,
-                proposed=proposed, current=current,
-            ))
+        if row.source_hash and current["source_hash"] and row.source_hash == current["source_hash"]:
+            unchanged.append(
+                DiffEntry(
+                    name=row.name,
+                    scheduler=scheduler,
+                    proposed=proposed,
+                    current=current,
+                )
+            )
         else:
-            updated.append(DiffEntry(
-                name=row.name, scheduler=scheduler,
-                proposed=proposed, current=current,
-            ))
+            updated.append(
+                DiffEntry(
+                    name=row.name,
+                    scheduler=scheduler,
+                    proposed=proposed,
+                    current=current,
+                )
+            )
 
     deleted: list[DiffEntry] = []
     if body.mode == "replace_for_source":
@@ -2029,29 +2181,31 @@ async def diff_schedules(
             for existing in result.scalars():
                 if (existing.scheduler, existing.name) in batch_keys:
                     continue
-                deleted.append(DiffEntry(
-                    name=existing.name,
-                    scheduler=existing.scheduler,
-                    proposed={},
-                    current={
-                        "name": existing.name,
-                        "scheduler": existing.scheduler,
-                        "engine": existing.engine,
-                        "kind": (
-                            existing.kind.value
-                            if hasattr(existing.kind, "value")
-                            else str(existing.kind)
-                        ),
-                        "expression": existing.expression,
-                        "task_name": existing.task_name,
-                        "source": (
-                            getattr(existing, "source", "") or ""
-                        ),
-                        "source_hash": getattr(
-                            existing, "source_hash", None,
-                        ),
-                    },
-                ))
+                deleted.append(
+                    DiffEntry(
+                        name=existing.name,
+                        scheduler=existing.scheduler,
+                        proposed={},
+                        current={
+                            "name": existing.name,
+                            "scheduler": existing.scheduler,
+                            "engine": existing.engine,
+                            "kind": (
+                                existing.kind.value
+                                if hasattr(existing.kind, "value")
+                                else str(existing.kind)
+                            ),
+                            "expression": existing.expression,
+                            "task_name": existing.task_name,
+                            "source": (getattr(existing, "source", "") or ""),
+                            "source_hash": getattr(
+                                existing,
+                                "source_hash",
+                                None,
+                            ),
+                        },
+                    )
+                )
 
     return DiffSchedulesResponse(
         inserted=inserted,
@@ -2101,14 +2255,14 @@ class ResyncSchedulesResponse(BaseModel):
 )
 async def resync_schedules(
     slug: str,
-    request: "Request",
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit: "AuditService" = Depends(get_audit_service),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    request: Request,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> ResyncSchedulesResponse:
     """Force every online agent in the project to re-emit a full
@@ -2167,10 +2321,7 @@ async def resync_schedules(
     online_agents = await AgentRepository(
         db_session,
     ).list_online_for_project(project.id)
-    eligible = [
-        agent for agent in online_agents
-        if agent.scheduler_adapters
-    ]
+    eligible = [agent for agent in online_agents if agent.scheduler_adapters]
 
     if not eligible:
         # Audit the failed attempt so an operator clicking the
@@ -2188,9 +2339,7 @@ async def resync_schedules(
             source_ip=ip,
             metadata={
                 "reason": (
-                    "no_online_agent_with_scheduler"
-                    if online_agents
-                    else "no_online_agent"
+                    "no_online_agent_with_scheduler" if online_agents else "no_online_agent"
                 ),
                 "online_agent_count": len(online_agents),
             },
@@ -2206,9 +2355,7 @@ async def resync_schedules(
             details={
                 "online_agent_count": len(online_agents),
                 "reason": (
-                    "no_online_agent_with_scheduler"
-                    if online_agents
-                    else "no_online_agent"
+                    "no_online_agent_with_scheduler" if online_agents else "no_online_agent"
                 ),
             },
         )

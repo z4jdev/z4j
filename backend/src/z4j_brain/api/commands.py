@@ -14,42 +14,6 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
-# Engines the brain knows how to dispatch commands to. This is the
-# whitelist that gates ``RetryTaskRequest.engine`` /
-# ``CancelTaskRequest.engine``. Adding a new engine = one line here.
-# Keeping this centralized (vs a plain Enum on each request) so the
-# error message at 422 time is clear + one code edit covers every
-# endpoint that accepts an engine name.
-#
-# The brain already accepts ``Event.engine`` as a free-form string
-# for *ingest* (so we don't break when an agent on a newer brain
-# version reports a newly-added engine) - this list applies only
-# to *dispatch*, where we have to actually have an adapter.
-KNOWN_ENGINES: frozenset[str] = frozenset({"celery", "rq", "dramatiq"})
-
-# R9 H-1 (HIGH): every key in this frozenset is populated by the
-# brain server-side from the Task table; an API client must NOT be
-# able to seed any of them through ``BulkRetryRequest.filter``.
-#
-# Surface impact: ``filter["task_names"]`` is consumed by the RQ
-# adapter's ``bulk_retry_action`` and passed straight to
-# ``queue.enqueue_call(func=...)``; a client-spoofable map would
-# let an authenticated operator retry a known RQ job as an
-# arbitrary importable callable. ``filter["overrides"]`` and
-# ``filter["task_priorities"]`` have analogous server-owned shapes
-# and round through the same dispatcher pathway.
-#
-# The ``issue_bulk_retry`` endpoint strips these keys from the
-# inbound filter before enrichment; the rejected key list is
-# surfaced in the outgoing command payload as
-# ``rejected_client_supplied_filter_keys`` so the audit trail
-# records the attempt rather than silently dropping it.
-SERVER_OWNED_FILTER_KEYS: frozenset[str] = frozenset({
-    "task_names",
-    "task_priorities",
-    "overrides",
-})
-
 from z4j_brain.api._pagination import (
     clamp_limit,
     decode_cursor,
@@ -83,6 +47,45 @@ if TYPE_CHECKING:
         ProjectRepository,
     )
     from z4j_brain.settings import Settings
+
+
+# Engines the brain knows how to dispatch commands to. This is the
+# whitelist that gates ``RetryTaskRequest.engine`` /
+# ``CancelTaskRequest.engine``. Adding a new engine = one line here.
+# Keeping this centralized (vs a plain Enum on each request) so the
+# error message at 422 time is clear + one code edit covers every
+# endpoint that accepts an engine name.
+#
+# The brain already accepts ``Event.engine`` as a free-form string
+# for *ingest* (so we don't break when an agent on a newer brain
+# version reports a newly-added engine) - this list applies only
+# to *dispatch*, where we have to actually have an adapter.
+KNOWN_ENGINES: frozenset[str] = frozenset({"celery", "rq", "dramatiq"})
+
+# R9 H-1 (HIGH): every key in this frozenset is populated by the
+# brain server-side from the Task table; an API client must NOT be
+# able to seed any of them through ``BulkRetryRequest.filter``.
+#
+# Surface impact: ``filter["task_names"]`` is consumed by the RQ
+# adapter's ``bulk_retry_action`` and passed straight to
+# ``queue.enqueue_call(func=...)``; a client-spoofable map would
+# let an authenticated operator retry a known RQ job as an
+# arbitrary importable callable. ``filter["overrides"]`` and
+# ``filter["task_priorities"]`` have analogous server-owned shapes
+# and round through the same dispatcher pathway.
+#
+# The ``issue_bulk_retry`` endpoint strips these keys from the
+# inbound filter before enrichment; the rejected key list is
+# surfaced in the outgoing command payload as
+# ``rejected_client_supplied_filter_keys`` so the audit trail
+# records the attempt rather than silently dropping it.
+SERVER_OWNED_FILTER_KEYS: frozenset[str] = frozenset(
+    {
+        "task_names",
+        "task_priorities",
+        "overrides",
+    }
+)
 
 
 router = APIRouter(prefix="/projects/{slug}/commands", tags=["commands"])
@@ -161,11 +164,11 @@ class RetryTaskRequest(BaseModel):
         """
         if v is None:
             return v
-        import json as _json  # noqa: PLC0415
+        import json as _json
 
         try:
             size = len(_json.dumps(v).encode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ValueError(
                 f"override value is not JSON-serialisable: {exc}",
             ) from exc
@@ -206,15 +209,20 @@ class PurgeQueueRequest(BaseModel):
     """Purge-queue request body.
 
     The agent's per-engine ``purge_queue_action`` refuses to act
-    unless one of the two confirmation fields is supplied:
+    unless one of these confirmation inputs is supplied:
 
-    * ``confirm_token`` - HMAC of ``(queue_name, observed_depth)``.
-      The caller (dashboard / API client) fetches the current depth
-      first (from the agent's measurement, surfaced in the brain's
-      queue-depth telemetry), computes the token with
-      :func:`z4j_celery.actions.purge.expected_confirm_token`, and
-      sends it here. The agent re-measures and re-computes; a
-      mismatch means the depth moved (likely a replayed command).
+    * ``observed_depth`` - the queue depth the operator confirmed
+      against (from the brain's queue-depth telemetry shown in the
+      dashboard). The brain computes the keyed
+      ``HMAC(project_secret, "purge|queue|depth")`` confirm token
+      server-side (M-7) -- the operator never handles the token, and
+      because it is keyed a party who can only see the depth cannot
+      forge it. The agent re-measures and re-computes against its own
+      per-project secret; a mismatch means the depth moved (likely a
+      replayed command) and it refuses.
+    * ``confirm_token`` - a pre-computed token, for non-dashboard API
+      clients. Passed through as-is (a keyed token from a secret-holder,
+      or a legacy unkeyed token during the grace window).
     * ``force`` - bypass the token check and the depth threshold.
       Logged at CRITICAL by the agent; reserved for scripted
       emergency use.
@@ -227,8 +235,13 @@ class PurgeQueueRequest(BaseModel):
     agent_id: uuid.UUID
     queue: str = Field(min_length=1, max_length=200)
     confirm_token: str | None = Field(
-        default=None, min_length=1, max_length=128,
+        default=None,
+        min_length=1,
+        max_length=128,
     )
+    #: Operator-observed queue depth. When supplied (and no explicit
+    #: confirm_token), the brain computes the keyed token server-side.
+    observed_depth: int | None = Field(default=None, ge=0)
     force: bool = False
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
@@ -280,24 +293,51 @@ class RateLimitRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
-def _command_payload(cmd: "Command") -> CommandPublic:
+#: Payload keys that are SECRETS and must never appear in a read response,
+#: for ANY role: the purge confirm token authorizes a destructive
+#: mass-delete, so returning it to a depth observer is a forgery handoff.
+_SECRET_PAYLOAD_KEYS = frozenset({"confirm_token"})
+
+
+def _redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {k: ("<redacted>" if k in _SECRET_PAYLOAD_KEYS else v) for k, v in payload.items()}
+
+
+def _command_payload(cmd: Command, *, include_actor: bool = True) -> CommandPublic:
+    """Build the public view of a command.
+
+    ``include_actor`` gates who-did-what (``issued_by``) plus the raw
+    ``payload`` and ``result`` behind OPERATOR: a VIEWER sees a command's
+    action / target / status / timestamps but NOT the issuing operator, the
+    payload (which can carry ``override_kwargs`` / arguments), or the
+    result. The confirm-token secret is redacted for EVERY role.
+    """
+    payload = _redact_payload(dict(cmd.payload or {})) if include_actor else {}
     return CommandPublic(
         id=cmd.id,
         project_id=cmd.project_id,
         agent_id=cmd.agent_id,
-        issued_by=cmd.issued_by,
+        issued_by=cmd.issued_by if include_actor else None,
         action=cmd.action,
         target_type=cmd.target_type,
         target_id=cmd.target_id,
-        payload=dict(cmd.payload or {}),
+        payload=payload,
         status=cmd.status.value,
-        result=cmd.result,
+        result=cmd.result if include_actor else None,
         error=cmd.error,
         issued_at=cmd.issued_at,
         dispatched_at=cmd.dispatched_at,
         completed_at=cmd.completed_at,
         timeout_at=cmd.timeout_at,
     )
+
+
+def _include_actor(membership: Any) -> bool:
+    """Whether the caller may see who-did-what + the raw command payload
+    (OPERATOR+). A VIEWER gets the operational shape only."""
+    from z4j_brain.domain.policy_engine import role_rank
+
+    return role_rank(membership.role) >= role_rank(ProjectRole.OPERATOR)
 
 
 # ---------------------------------------------------------------------------
@@ -311,23 +351,24 @@ async def list_commands(
     status: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
     limit: int | None = Query(default=None, ge=1, le=5000),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
-    settings: "Settings" = Depends(get_settings),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> CommandListResponse:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import CommandRepository
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
-    await policy.require_member(
+    membership = await policy.require_member(
         memberships,
         user=user,
         project=project,
         min_role=ProjectRole.VIEWER,
     )
+    include_actor = _include_actor(membership)
 
     status_enum: CommandStatus | None = None
     if status:
@@ -355,7 +396,7 @@ async def list_commands(
         next_cursor = encode_cursor(last.issued_at, last.id)
 
     return CommandListResponse(
-        items=[_command_payload(c) for c in rows],
+        items=[_command_payload(c, include_actor=include_actor) for c in rows],
         next_cursor=next_cursor,
     )
 
@@ -364,17 +405,17 @@ async def list_commands(
 async def get_command(
     slug: str,
     command_id: uuid.UUID,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> CommandPublic:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import CommandRepository
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
-    await policy.require_member(
+    membership = await policy.require_member(
         memberships,
         user=user,
         project=project,
@@ -386,7 +427,7 @@ async def get_command(
             "command not found",
             details={"command_id": str(command_id)},
         )
-    return _command_payload(cmd)
+    return _command_payload(cmd, include_actor=_include_actor(membership))
 
 
 # ---------------------------------------------------------------------------
@@ -403,12 +444,12 @@ async def get_command(
 async def issue_retry_task(
     slug: str,
     body: RetryTaskRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CommandPublic:
     # Look up the original task's priority so the agent can
@@ -460,16 +501,8 @@ async def issue_retry_task(
             "engine": body.engine,
             "task_id": body.task_id,
             "task_name": original.name if original else None,
-            "args": (
-                original.args
-                if (original and body.override_args is None)
-                else None
-            ),
-            "kwargs": (
-                original.kwargs
-                if (original and body.override_kwargs is None)
-                else None
-            ),
+            "args": (original.args if (original and body.override_args is None) else None),
+            "kwargs": (original.kwargs if (original and body.override_kwargs is None) else None),
             "override_args": body.override_args,
             "override_kwargs": body.override_kwargs,
             "eta_seconds": body.eta_seconds,
@@ -495,12 +528,12 @@ async def issue_retry_task(
 async def issue_cancel_task(
     slug: str,
     body: CancelTaskRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CommandPublic:
     return await _issue_task_command(
@@ -535,13 +568,13 @@ async def issue_cancel_task(
 async def issue_bulk_retry(
     slug: str,
     body: BulkRetryRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    audit_service: "AuditService" = Depends(get_audit_service),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit_service: AuditService = Depends(get_audit_service),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CommandPublic:
     # Look up per-task priorities so the bulk re-enqueue
@@ -572,13 +605,8 @@ async def issue_bulk_retry(
     # filter BEFORE enrichment. See SERVER_OWNED_FILTER_KEYS docstring
     # at module top for the full rationale.
     raw_filter = body.filter or {}
-    rejected_client_keys = sorted(
-        k for k in SERVER_OWNED_FILTER_KEYS if k in raw_filter
-    )
-    enriched_filter = {
-        k: v for k, v in raw_filter.items()
-        if k not in SERVER_OWNED_FILTER_KEYS
-    }
+    rejected_client_keys = sorted(k for k in SERVER_OWNED_FILTER_KEYS if k in raw_filter)
+    enriched_filter = {k: v for k, v in raw_filter.items() if k not in SERVER_OWNED_FILTER_KEYS}
 
     # R10-L1: the act of an authenticated operator supplying
     # server-owned filter keys (the R9-H1 confused-deputy attempt) is
@@ -652,13 +680,8 @@ async def issue_bulk_retry(
             )
             if task_names:
                 enriched_filter["task_names"] = task_names
-            if (
-                filter_engine == "rq"
-                and len(task_names) != len(capped_ids)
-            ):
-                missing = sorted(
-                    set(capped_ids) - set(task_names.keys())
-                )
+            if filter_engine == "rq" and len(task_names) != len(capped_ids):
+                missing = sorted(set(capped_ids) - set(task_names.keys()))
                 # R10-L1: record the refusal as a tamper-evident audit
                 # row + commit BEFORE raising, so the 400 fast-path is
                 # no longer an audit blind spot. Without this commit
@@ -679,9 +702,7 @@ async def issue_bulk_retry(
                         "engine": str(filter_engine),
                         "missing_task_names": missing,
                         "requested_ids": len(capped_ids),
-                        "rejected_client_supplied_filter_keys": (
-                            rejected_client_keys
-                        ),
+                        "rejected_client_supplied_filter_keys": (rejected_client_keys),
                     },
                 )
                 await db_session.commit()
@@ -727,6 +748,43 @@ async def issue_bulk_retry(
     )
 
 
+async def _resolve_purge_confirm_token(
+    *,
+    body: PurgeQueueRequest,
+    slug: str,
+    projects: ProjectRepository,
+    settings: Settings,
+) -> str | None:
+    """Return the confirm token to attach to a purge command.
+
+    An explicit ``body.confirm_token`` (non-dashboard API client) is
+    passed through unchanged. Otherwise, when ``observed_depth`` is
+    supplied and the command is not ``force``, compute the keyed
+    ``HMAC(project_secret, "purge|queue|depth")`` token server-side (M-7)
+    using the same per-project secret the agent holds -- so the operator
+    never handles a token and a depth-observer cannot forge one. Returns
+    None (agent will refuse unless force) when neither input is present
+    or the project cannot be resolved.
+    """
+    if body.confirm_token is not None:
+        return body.confirm_token
+    if body.force or body.observed_depth is None:
+        return None
+    from z4j_core.purge_token import compute_purge_confirm_token
+    from z4j_core.transport.hmac import derive_project_secret
+
+    project = await projects.get_by_slug(slug)
+    if project is None:
+        return None
+    master = settings.secret.get_secret_value().encode("utf-8")
+    secret = derive_project_secret(master, project.id)
+    return compute_purge_confirm_token(
+        secret=secret,
+        queue_name=body.queue,
+        queue_depth=body.observed_depth,
+    )
+
+
 @router.post(
     "/purge-queue",
     response_model=CommandPublic,
@@ -739,13 +797,14 @@ async def issue_bulk_retry(
 async def issue_purge_queue(
     slug: str,
     body: PurgeQueueRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
+    settings: Settings = Depends(get_settings),
 ) -> CommandPublic:
     """DESTRUCTIVE - requires admin role.
 
@@ -753,10 +812,17 @@ async def issue_purge_queue(
     purge action refuses the destructive ``queue_delete``
     fallback, so this is bounded to ``queue_purge`` semantics.
 
-    The caller must pass either ``confirm_token`` (HMAC of
-    ``queue_name + observed_depth``) or ``force=True``. Without
-    one of these the agent refuses to act.
+    The caller passes ``observed_depth`` (the depth they confirmed
+    against) and the brain computes the keyed confirm token
+    server-side (M-7), or a pre-computed ``confirm_token``, or
+    ``force=True``. Without one of these the agent refuses to act.
     """
+    confirm_token = await _resolve_purge_confirm_token(
+        body=body,
+        slug=slug,
+        projects=projects,
+        settings=settings,
+    )
     return await _issue_generic_command(
         slug=slug,
         action="purge_queue",
@@ -764,7 +830,7 @@ async def issue_purge_queue(
         target_id=body.queue,
         payload={
             "queue": body.queue,
-            "confirm_token": body.confirm_token,
+            "confirm_token": confirm_token,
             "force": body.force,
         },
         idempotency_key=body.idempotency_key,
@@ -789,12 +855,12 @@ async def issue_purge_queue(
 async def issue_restart_worker(
     slug: str,
     body: RestartWorkerRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CommandPublic:
     return await _issue_generic_command(
@@ -824,12 +890,12 @@ async def issue_restart_worker(
 async def issue_pool_resize(
     slug: str,
     body: PoolResizeRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CommandPublic:
     """Grow or shrink the worker pool by ``delta`` processes."""
@@ -864,12 +930,12 @@ async def issue_pool_resize(
 async def issue_add_consumer(
     slug: str,
     body: ConsumerRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CommandPublic:
     """Start consuming from an additional queue on a worker."""
@@ -903,12 +969,12 @@ async def issue_add_consumer(
 async def issue_cancel_consumer(
     slug: str,
     body: ConsumerRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CommandPublic:
     """Stop consuming from a queue on a worker."""
@@ -942,12 +1008,12 @@ async def issue_cancel_consumer(
 async def issue_rate_limit(
     slug: str,
     body: RateLimitRequest,
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    audit_log: "AuditLogRepository" = Depends(get_audit_log_repo),
-    dispatcher: "CommandDispatcher" = Depends(get_command_dispatcher),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CommandPublic:
     """Set or clear a per-task rate limit on one (or every) worker.
@@ -988,12 +1054,12 @@ async def _issue_task_command(
     target_id: str,
     payload: dict[str, Any],
     idempotency_key: str | None,
-    user: "User",
-    memberships: "MembershipRepository",
-    projects: "ProjectRepository",
-    audit_log: "AuditLogRepository",
-    dispatcher: "CommandDispatcher",
-    db_session: "AsyncSession",
+    user: User,
+    memberships: MembershipRepository,
+    projects: ProjectRepository,
+    audit_log: AuditLogRepository,
+    dispatcher: CommandDispatcher,
+    db_session: AsyncSession,
     ip: str,
 ) -> CommandPublic:
     """Shared body for the two task-targeting command endpoints."""
@@ -1024,12 +1090,12 @@ async def _issue_generic_command(
     payload: dict[str, Any],
     idempotency_key: str | None,
     agent_id: uuid.UUID,
-    user: "User",
-    memberships: "MembershipRepository",
-    projects: "ProjectRepository",
-    audit_log: "AuditLogRepository",
-    dispatcher: "CommandDispatcher",
-    db_session: "AsyncSession",
+    user: User,
+    memberships: MembershipRepository,
+    projects: ProjectRepository,
+    audit_log: AuditLogRepository,
+    dispatcher: CommandDispatcher,
+    db_session: AsyncSession,
     ip: str,
     require_role: ProjectRole = ProjectRole.OPERATOR,
 ) -> CommandPublic:

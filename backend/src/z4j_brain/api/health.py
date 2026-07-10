@@ -13,6 +13,7 @@ Two endpoints:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy import text
@@ -73,7 +74,7 @@ async def health_ready(
                 session.execute(text("SELECT 1")),
                 timeout=_READINESS_DB_TIMEOUT_S,
             )
-    except (TimeoutError, Exception):  # noqa: BLE001
+    except (TimeoutError, Exception):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "unready", "reason": "database"}
 
@@ -128,12 +129,14 @@ async def health_system(
                     info["database_size_mb"] = round(int(db_size) / 1_048_576, 1)
 
                 result = await session.execute(
-                    text("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"),
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                    ),
                 )
                 info["database_connections"] = result.scalar_one_or_none()
             elif dialect == "sqlite":
                 info["database_version"] = "SQLite"
-    except Exception:  # noqa: BLE001
+    except Exception:
         info["database_type"] = "unknown"
         info["database_error"] = "failed to query database info"
 
@@ -143,12 +146,10 @@ async def health_system(
 
         packages = {}
         for pkg in ["fastapi", "uvicorn", "sqlalchemy", "pydantic", "celery"]:
-            try:
+            with contextlib.suppress(im.PackageNotFoundError):
                 packages[pkg] = im.version(pkg)
-            except im.PackageNotFoundError:
-                pass
         info["packages"] = packages
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: S110  best-effort package version probe
         pass
 
     return info

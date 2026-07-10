@@ -56,24 +56,25 @@ def _fire_pending_audit_forwards(session: _SyncSession) -> None:
         for hook in hooks:
             try:
                 hook(payload)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # v1.6 Round 5 I: route the failure through the
                 # swallowed-exceptions counter so the Grafana alert
                 # picks it up alongside the other audit-fwd sites.
                 try:
                     from z4j_brain.api.metrics import record_swallowed
+
                     record_swallowed("audit_service", "post_commit_hook")
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: S110  best-effort metrics increment, import + call
                     pass
                 logger.warning(
-                    "z4j audit_service: post-commit hook raised; "
-                    "audit row written, mirror dropped",
+                    "z4j audit_service: post-commit hook raised; audit row written, mirror dropped",
                     exc_info=True,
                 )
 
 
 def _drop_pending_audit_forwards(
-    session: _SyncSession, *_unused: Any,
+    session: _SyncSession,
+    *_unused: Any,
 ) -> None:
     """Clear the pending-forward list on rollback so phantom rows
     are never forwarded. (v1.6 audit C6.)
@@ -93,7 +94,7 @@ _AUDIT_EVENT_LISTENERS_REGISTERED: bool = False
 
 
 def _ensure_session_listeners_registered() -> None:
-    global _AUDIT_EVENT_LISTENERS_REGISTERED
+    global _AUDIT_EVENT_LISTENERS_REGISTERED  # noqa: PLW0603  module-level singleton lazy-init
     if _AUDIT_EVENT_LISTENERS_REGISTERED:
         return
     _sa_event.listen(_SyncSession, "after_commit", _fire_pending_audit_forwards)
@@ -101,7 +102,9 @@ def _ensure_session_listeners_registered() -> None:
     # Some async test setups create + close sessions in the same
     # tick; ``after_soft_rollback`` covers nested-savepoint paths.
     _sa_event.listen(
-        _SyncSession, "after_soft_rollback", _drop_pending_audit_forwards,
+        _SyncSession,
+        "after_soft_rollback",
+        _drop_pending_audit_forwards,
     )
     _AUDIT_EVENT_LISTENERS_REGISTERED = True
 
@@ -118,6 +121,7 @@ def _build_forward_payload(row: Any) -> dict[str, Any]:
     # Import locally to avoid a domain<->infrastructure import cycle
     # (audit_forwarder imports notifications.channels for _post).
     from z4j_brain.domain.audit_forwarder import row_to_payload
+
     return row_to_payload(row)
 
 
@@ -204,7 +208,7 @@ class AuditService:
     for both compliance and debugging.
     """
 
-    __slots__ = ("_secret", "_verify_secrets", "_post_write_hooks")
+    __slots__ = ("_post_write_hooks", "_secret", "_verify_secrets")
 
     def __init__(self, settings: Settings) -> None:
         self._secret: bytes = settings.secret.get_secret_value().encode("utf-8")
@@ -349,7 +353,7 @@ class AuditService:
                 if sync_session is not None:
                     pending = sync_session.info.setdefault(_PENDING_KEY, [])
                     pending.append((payload, list(self._post_write_hooks)))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning(
                     "z4j audit_service: failed to stage post-commit "
                     "hook payload; audit row written, mirror dropped",
@@ -387,13 +391,15 @@ class AuditService:
         for secret in self._verify_secrets:
             recomputed = self._compute_hmac(entry, secret=secret)
             if len(recomputed) == len(stored) and hmac.compare_digest(
-                recomputed, stored,
+                recomputed,
+                stored,
             ):
                 return True
         return False
 
     def verify_chain(
-        self, rows: "list[AuditLog]",
+        self,
+        rows: list[AuditLog],
     ) -> tuple[bool, list[str]]:
         """Walk a sequence of rows and verify the HMAC chain.
 
@@ -425,8 +431,7 @@ class AuditService:
         for row in rows:
             if not self.verify_row(row):
                 reasons.append(
-                    f"row {row.id}: bad row_hmac (tampered field "
-                    f"or missing hmac)",
+                    f"row {row.id}: bad row_hmac (tampered field or missing hmac)",
                 )
                 continue
             # The genesis row (first row ever written) has
@@ -461,12 +466,11 @@ class AuditService:
         ``verify_row`` passes each rotation-window secret in turn.
         """
         canonical = self._canonicalize(entry)
-        digest = hmac.new(
+        return hmac.new(
             secret if secret is not None else self._secret,
             canonical.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        return digest
 
     @staticmethod
     def _canonicalize(entry: AuditEntry) -> str:
@@ -489,17 +493,25 @@ class AuditService:
             "outcome": entry.outcome,
             "event_id": str(entry.event_id) if entry.event_id else None,
             "user_id": str(entry.user_id) if entry.user_id else None,
-            "api_key_id": (
-                str(entry.api_key_id) if entry.api_key_id else None
-            ),
+            "api_key_id": (str(entry.api_key_id) if entry.api_key_id else None),
             "project_id": str(entry.project_id) if entry.project_id else None,
             "source_ip": entry.source_ip,
             "user_agent": entry.user_agent,
             "metadata": entry.metadata,
+            # A NAIVE occurred_at must be interpreted as UTC, never
+            # local time. The service always signs an aware-UTC value,
+            # but SQLite's DateTime(timezone=True) drops the offset in
+            # storage, so verification re-reads a naive datetime.
+            # ``astimezone(UTC)`` on a naive value assumes LOCAL time,
+            # which on any non-UTC host shifted the canonical string
+            # and false-positived the ENTIRE log as tampered. Aware
+            # values (record time, Postgres reads) are unaffected.
             "occurred_at": (
-                entry.occurred_at.astimezone(UTC).isoformat(
-                    timespec="microseconds",
-                )
+                (
+                    entry.occurred_at.replace(tzinfo=UTC)
+                    if entry.occurred_at.tzinfo is None
+                    else entry.occurred_at.astimezone(UTC)
+                ).isoformat(timespec="microseconds")
             ),
             "prev_row_hmac": entry.prev_row_hmac,
         }

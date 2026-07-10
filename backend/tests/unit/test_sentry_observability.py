@@ -25,7 +25,6 @@ from typing import Any
 
 import pytest
 from pydantic import SecretStr, ValidationError
-
 from z4j_brain.observability import sentry as sentry_mod
 from z4j_brain.observability.sentry import (
     _REDACTED,
@@ -36,7 +35,6 @@ from z4j_brain.observability.sentry import (
     scrub_event,
 )
 from z4j_brain.settings import Settings
-
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -87,7 +85,9 @@ class TestSentrySettings:
 
     @pytest.mark.parametrize("rate", ["-0.1", "1.01", "2.0", "999"])
     def test_traces_sample_rate_out_of_range_rejected(
-        self, monkeypatch: pytest.MonkeyPatch, rate: str,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        rate: str,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv("Z4J_SENTRY_TRACES_SAMPLE_RATE", rate)
@@ -96,7 +96,9 @@ class TestSentrySettings:
 
     @pytest.mark.parametrize("rate", ["0.0", "0.05", "0.5", "1.0"])
     def test_traces_sample_rate_in_range_accepted(
-        self, monkeypatch: pytest.MonkeyPatch, rate: str,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        rate: str,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv("Z4J_SENTRY_TRACES_SAMPLE_RATE", rate)
@@ -105,7 +107,9 @@ class TestSentrySettings:
 
     @pytest.mark.parametrize("rate", ["-0.001", "1.5"])
     def test_profiles_sample_rate_out_of_range_rejected(
-        self, monkeypatch: pytest.MonkeyPatch, rate: str,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        rate: str,
     ) -> None:
         _base_env(monkeypatch)
         monkeypatch.setenv("Z4J_SENTRY_PROFILES_SAMPLE_RATE", rate)
@@ -139,7 +143,8 @@ def _reset_sentry_module() -> Any:
 
 class TestInitSentry:
     def test_no_dsn_returns_false(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _base_env(monkeypatch)
         s = Settings()  # type: ignore[call-arg]
@@ -158,7 +163,8 @@ class TestInitSentry:
         assert init_sentry(s) is False
 
     def test_with_dsn_calls_sdk_init_with_scrubber(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         fake = _FakeSentrySDK()
         monkeypatch.setitem(sys.modules, "sentry_sdk", fake)  # type: ignore[arg-type]
@@ -183,7 +189,8 @@ class TestInitSentry:
         assert kwargs["before_send"] is scrub_event
 
     def test_environment_falls_back_to_settings_environment(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         fake = _FakeSentrySDK()
         monkeypatch.setitem(sys.modules, "sentry_sdk", fake)  # type: ignore[arg-type]
@@ -199,7 +206,8 @@ class TestInitSentry:
         assert fake.init_calls[0]["environment"] == "production"
 
     def test_init_is_idempotent(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         fake = _FakeSentrySDK()
         monkeypatch.setitem(sys.modules, "sentry_sdk", fake)  # type: ignore[arg-type]
@@ -219,7 +227,8 @@ class TestInitSentry:
         assert len(fake.init_calls) == 1
 
     def test_sdk_init_failure_is_swallowed(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A broken DSN / a misversioned SDK must NOT crash boot."""
 
@@ -239,7 +248,8 @@ class TestInitSentry:
         assert init_sentry(s) is False
 
     def test_missing_sdk_returns_false(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Operator set the DSN but did not `pip install z4j[sentry]`.
         Init logs a warning and returns False; the brain keeps running."""

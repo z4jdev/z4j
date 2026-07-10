@@ -18,7 +18,7 @@ introduced in Round 5 plus one UX bug:
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -29,7 +29,6 @@ from typing import Any
 import httpx
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Round 6 SHIP-STOPPER 1 -- queue_depth is a real class method
 # ---------------------------------------------------------------------------
@@ -38,6 +37,7 @@ import pytest
 class TestAuditForwarderQueueDepth:
     def test_method_is_on_the_class(self) -> None:
         from z4j_brain.domain.audit_forwarder import AuditForwarder
+
         fwd = AuditForwarder(
             webhook_url="https://x.example/i",
             hmac_secret=b"x" * 32,
@@ -51,20 +51,33 @@ class TestAuditForwarderQueueDepth:
 
     def test_queue_depth_reflects_enqueue(self) -> None:
         from z4j_brain.domain.audit_forwarder import AuditForwarder
+
         fwd = AuditForwarder(
             webhook_url="https://x.example/i",
             hmac_secret=b"x" * 32,
             buffer_size=10,
         )
         for _ in range(3):
-            fwd.enqueue({"id": str(uuid.uuid4()), "action": "t",
-                         "target_type": "t", "target_id": None,
-                         "result": "success", "outcome": "allow",
-                         "event_id": None, "user_id": None,
-                         "api_key_id": None, "project_id": None,
-                         "source_ip": None, "user_agent": None,
-                         "metadata": {}, "occurred_at": None,
-                         "prev_row_hmac": None, "row_hmac": "0" * 64})
+            fwd.enqueue(
+                {
+                    "id": str(uuid.uuid4()),
+                    "action": "t",
+                    "target_type": "t",
+                    "target_id": None,
+                    "result": "success",
+                    "outcome": "allow",
+                    "event_id": None,
+                    "user_id": None,
+                    "api_key_id": None,
+                    "project_id": None,
+                    "source_ip": None,
+                    "user_agent": None,
+                    "metadata": {},
+                    "occurred_at": None,
+                    "prev_row_hmac": None,
+                    "row_hmac": "0" * 64,
+                }
+            )
         assert fwd.queue_depth() == 3
 
 
@@ -82,10 +95,8 @@ class TestInmemorySubsystemRegistrationGuards:
         self,
     ) -> None:
         from pathlib import Path
-        src = (
-            Path(__file__).resolve().parent.parent.parent
-            / "src/z4j_brain/main.py"
-        )
+
+        src = Path(__file__).resolve().parent.parent.parent / "src/z4j_brain/main.py"
         text = src.read_text(encoding="utf-8")
         # The audit_forwarder block must contain the same try/except
         # shape as the other three surfaces.
@@ -93,7 +104,7 @@ class TestInmemorySubsystemRegistrationGuards:
         idx = text.find(anchor)
         assert idx > 0, "audit_forwarder_queue registration missing"
         # Walk backward to find the surrounding try.
-        window = text[max(0, idx - 300):idx + 200]
+        window = text[max(0, idx - 300) : idx + 200]
         assert "try:" in window, (
             "audit_forwarder registration MUST be wrapped in try/except "
             "to match the other three v1.6 surfaces (R6 SHIP-STOPPER 2)"
@@ -116,6 +127,7 @@ class TestActivityFeedPersonalBadge:
         self,
     ) -> None:
         from pathlib import Path
+
         # Find the dashboard route file (project layout permitting).
         candidates = [
             Path(__file__).resolve().parent.parent.parent
@@ -166,8 +178,10 @@ class TestAuditForwarderRealTransport:
 
     @pytest.mark.asyncio
     async def test_send_one_through_real_httpx(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from z4j_brain.domain import audit_forwarder as af_mod
         from z4j_brain.domain.audit_forwarder import (
             AUDIT_SIGNATURE_HEADER,
             AUDIT_TIMESTAMP_HEADER,
@@ -176,7 +190,6 @@ class TestAuditForwarderRealTransport:
         from z4j_brain.domain.notifications.channels import (
             set_shared_client,
         )
-        from z4j_brain.domain import audit_forwarder as af_mod
 
         async def _noop_resolve_and_pin(
             _u: str,
@@ -212,13 +225,11 @@ class TestAuditForwarderRealTransport:
                 timeout_seconds=7.5,
             )
             payload = self._make_payload()
-            try:
+            # MockTransport's pre-buffered response trips our
+            # streaming read; the request was successfully
+            # sent so the captured fields are populated.
+            with contextlib.suppress(httpx.StreamConsumed):
                 await fwd._send_one(payload)
-            except httpx.StreamConsumed:
-                # MockTransport's pre-buffered response trips our
-                # streaming read; the request was successfully
-                # sent so the captured fields are populated.
-                pass
         finally:
             set_shared_client(None)
             await client.aclose()
@@ -250,8 +261,7 @@ class TestAuditForwarderRealTransport:
         )
         actual = captured["headers"][AUDIT_SIGNATURE_HEADER.lower()]
         assert hmac.compare_digest(expected, actual), (
-            "HMAC mismatch -- the brain's signing diverged from the doc'd "
-            "<timestamp>.<body> shape"
+            "HMAC mismatch -- the brain's signing diverged from the doc'd <timestamp>.<body> shape"
         )
 
         # 5) Per-call timeout reached the transport (R2 ship-stopper

@@ -19,7 +19,8 @@ class TestRequestId:
         assert response.headers["x-request-id"] == "client-supplied-id-1234"
 
     async def test_caller_supplied_id_with_spaces_is_replaced(
-        self, client,
+        self,
+        client,
     ) -> None:
         response = await client.get(
             "/api/v1/health",

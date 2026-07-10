@@ -49,7 +49,8 @@ if TYPE_CHECKING:
 
 
 router = APIRouter(
-    prefix="/projects/{slug}/agent-workers", tags=["agent-workers"],
+    prefix="/projects/{slug}/agent-workers",
+    tags=["agent-workers"],
 )
 
 
@@ -77,7 +78,7 @@ class AgentWorkerPublic(BaseModel):
     updated_at: datetime
 
 
-def _agent_worker_payload(row: "AgentWorker") -> AgentWorkerPublic:
+def _agent_worker_payload(row: AgentWorker) -> AgentWorkerPublic:
     return AgentWorkerPublic(
         id=row.id,
         agent_id=row.agent_id,
@@ -100,13 +101,14 @@ async def list_agent_workers(
     slug: str,
     state: str | None = Query(default=None, pattern="^(online|offline)$"),
     role: str | None = Query(
-        default=None, pattern=r"^(web|task|scheduler|beat|other)$",
+        default=None,
+        pattern=r"^(web|task|scheduler|beat|other)$",
     ),
     limit: int = Query(default=200, ge=1, le=500),
-    user: "User" = Depends(get_current_user),
-    memberships: "MembershipRepository" = Depends(get_membership_repo),
-    projects: "ProjectRepository" = Depends(get_project_repo),
-    db_session: "AsyncSession" = Depends(get_session),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
 ) -> list[AgentWorkerPublic]:
     """List agent worker processes for a project.
 
@@ -129,7 +131,10 @@ async def list_agent_workers(
 
     repo = AgentWorkerRepository(db_session)
     rows = await repo.list_for_project(
-        project.id, state=state, role=role, limit=limit,
+        project.id,
+        state=state,
+        role=role,
+        limit=limit,
     )
     return [_agent_worker_payload(r) for r in rows]
 

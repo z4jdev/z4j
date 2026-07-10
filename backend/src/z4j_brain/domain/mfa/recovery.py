@@ -40,9 +40,7 @@ _GROUP_COUNT: Final[int] = 3
 #: code. Exposed so the API endpoint can pre-validate the format
 #: cheaply before hitting the DB.
 RECOVERY_CODE_PATTERN: Final[str] = (
-    f"^[{_ALPHABET}]{{{_GROUP_LEN}}}-"
-    f"[{_ALPHABET}]{{{_GROUP_LEN}}}-"
-    f"[{_ALPHABET}]{{{_GROUP_LEN}}}$"
+    f"^[{_ALPHABET}]{{{_GROUP_LEN}}}-[{_ALPHABET}]{{{_GROUP_LEN}}}-[{_ALPHABET}]{{{_GROUP_LEN}}}$"
 )
 _RECOVERY_CODE_RX = re.compile(RECOVERY_CODE_PATTERN)
 
@@ -74,10 +72,7 @@ def normalize_recovery_code(raw: str) -> str:
     stripped = stripped.replace("-", "").upper()
     if len(stripped) != _GROUP_LEN * _GROUP_COUNT:
         return stripped  # let the regex reject it
-    return "-".join(
-        stripped[i : i + _GROUP_LEN]
-        for i in range(0, len(stripped), _GROUP_LEN)
-    )
+    return "-".join(stripped[i : i + _GROUP_LEN] for i in range(0, len(stripped), _GROUP_LEN))
 
 
 def generate_recovery_codes(count: int) -> list[str]:

@@ -12,7 +12,6 @@ import asyncio
 from uuid import uuid4
 
 import pytest
-
 from z4j_brain.websocket.dashboard_hub import LocalDashboardHub
 
 pytestmark = pytest.mark.asyncio

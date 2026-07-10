@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
-
 from z4j_brain.auth.sessions import (
     SESSION_COOKIE_NAME_DEV,
     SESSION_COOKIE_NAME_PROD,

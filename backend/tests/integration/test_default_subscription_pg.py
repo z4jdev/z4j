@@ -20,11 +20,9 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.models import (
     NotificationChannel,
     Project,
@@ -128,7 +126,6 @@ async def _seed(brain_app, settings: Settings) -> dict:
 
 def _client(brain_app, settings: Settings, seed: dict):
     from httpx import ASGITransport, AsyncClient
-
     from z4j_brain.auth.csrf import csrf_cookie_name
 
     transport = ASGITransport(app=brain_app)
@@ -152,7 +149,9 @@ def _client(brain_app, settings: Settings, seed: dict):
 class TestProductionRepro:
     @pytest.mark.asyncio
     async def test_create_default_with_three_channels_pg(
-        self, integration_settings: Settings, brain_app,
+        self,
+        integration_settings: Settings,
+        brain_app,
     ) -> None:
         """Same shape as the operator's screenshot. Against real Postgres."""
         seed = await _seed(brain_app, integration_settings)
@@ -171,5 +170,5 @@ class TestProductionRepro:
                 },
             )
         if r.status_code != 201:
-            print(f"\n!!! status={r.status_code}\nbody={r.text}")
+            print(f"\n!!! status={r.status_code}\nbody={r.text}")  # noqa: T201  diagnostic on assertion failure
         assert r.status_code == 201, r.text

@@ -16,6 +16,7 @@ local hub first, then optionally repeat against the
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -62,7 +63,7 @@ class _Subscriber:
     id: UUID = field(default_factory=uuid4)
     project_id: UUID = field(default=None)  # type: ignore[assignment]
     user_id: UUID | None = None
-    send: "SendCallable" = field(default=None)  # type: ignore[assignment]
+    send: SendCallable = field(default=None)  # type: ignore[assignment]
     queue: asyncio.Queue[dict] = field(default=None)  # type: ignore[assignment]
     writer: asyncio.Task[None] | None = None
     closed: bool = False
@@ -104,9 +105,9 @@ class LocalDashboardHub:
         self,
         *,
         project_id: UUID,
-        send: "SendCallable",
+        send: SendCallable,
         user_id: UUID | None = None,
-    ) -> "DashboardSubscription":
+    ) -> DashboardSubscription:
         sub = _Subscriber(
             project_id=project_id,
             user_id=user_id,
@@ -145,7 +146,7 @@ class LocalDashboardHub:
         )
         return sub
 
-    async def remove_subscriber(self, sub: "DashboardSubscription") -> None:
+    async def remove_subscriber(self, sub: DashboardSubscription) -> None:
         if not isinstance(sub, _Subscriber):
             return  # not ours - ignore
         async with self._lock:
@@ -215,7 +216,7 @@ class LocalDashboardHub:
                 frame = await sub.queue.get()
                 try:
                     await sub.send(frame)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.info(
                         "z4j dashboard_hub: send failed, dropping subscriber",
                         sub_id=str(sub.id),
@@ -228,10 +229,8 @@ class LocalDashboardHub:
         sub.closed = True
         if sub.writer is not None and not sub.writer.done():
             sub.writer.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await sub.writer
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
 
     # ------------------------------------------------------------------
     # Test helpers
