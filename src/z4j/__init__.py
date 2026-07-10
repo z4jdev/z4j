@@ -13,15 +13,15 @@ for your stack:
 
 Quick start:
 
-    z4j-brain serve --port 7700 --admin-email you@dev.local --admin-password changeme
+    z4j serve --port 7700 --admin-email you@dev.local --admin-password changeme
 
 Then open http://localhost:7700.
 
-Licensed under AGPL-3.0-or-later because this package installs the
-brain server (z4j-brain) by default. The individual agent packages
-(z4j-core, z4j-bare, z4j-django, z4j-celery, etc.) are Apache 2.0 and
-can be installed standalone with no AGPL obligation - see the repository
-LICENSE files for details.
+Licensed under AGPL-3.0-or-later because this package ships the
+brain server. The individual agent packages (z4j-core, z4j-bare,
+z4j-django, z4j-celery, etc.) are Apache 2.0 and can be installed
+standalone with no AGPL obligation - see the repository LICENSE
+files for details.
 """
 
 from __future__ import annotations

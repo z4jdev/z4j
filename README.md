@@ -98,13 +98,16 @@ pip install z4j                          # brain only
 pip install 'z4j[django,celery]'         # Django + Celery + celery-beat
 pip install 'z4j[fastapi,arq]'           # FastAPI + arq + arq-cron
 pip install 'z4j[flask,rq]'              # Flask + RQ + rq-scheduler
-pip install 'z4j[django,celery,scheduler]'   # add z4j-scheduler too
 ```
 
 Each extra pulls the matching engine adapter and its schedule
 companion (e.g. `[celery]` pulls `z4j-celery` + `z4j-celerybeat`).
-The `[scheduler]` extra adds `z4j-scheduler` for operators who want
-the engine-agnostic dynamic scheduler.
+The engine-agnostic dynamic scheduler is its own service and its
+own package, install it alongside the brain when you want it:
+
+```bash
+pip install z4j-scheduler
+```
 
 Then start z4j:
 
