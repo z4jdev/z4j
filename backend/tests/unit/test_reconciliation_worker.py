@@ -481,3 +481,23 @@ class TestReconciliationLeaderGating:
         assert (
             '"reconciliation_worker"' in registration[registration.index("_leader_gated_tick(") :]
         )
+
+    def test_main_wires_partition_creator_through_worker_lock(self) -> None:
+        # Wiring tripwire: the partition creator's tick must stay
+        # behind the per-worker advisory lock - f198e02 fixed the
+        # multi-worker boot ERROR storm (concurrent CREATE ..
+        # PARTITION OF is not protected by IF NOT EXISTS on
+        # Postgres) but shipped without a test pinning the gate.
+        import inspect
+
+        import z4j_brain.main as main_mod
+
+        source = inspect.getsource(main_mod.create_app)
+        idx = source.index("async def _partition_creator_tick")
+        closure = source[idx : idx + 400]
+        assert "_acquire_partition_creator_lock(" in closure
+        assert '"partition_creator_worker"' in closure
+        assert "if got:" in closure
+        reg = source.index('name="partition_creator_worker"')
+        registration = source[reg : reg + 300]
+        assert "tick=_partition_creator_tick" in registration

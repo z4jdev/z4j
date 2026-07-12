@@ -428,6 +428,10 @@ class TestCircuitBreaker:
         assert len(notes) == 1
         assert notes[0].trigger == "schedule.circuit_breaker.tripped"
         assert notes[0].data["task_id"] == str(schedule_id)
+        # The bell routes on resource_type; without the stamp a
+        # breaker alert deep-links to a nonexistent task page
+        # (round-4 LOW).
+        assert notes[0].data["resource_type"] == "schedule"
 
     @pytest.mark.asyncio
     async def test_does_not_disable_with_recent_success(

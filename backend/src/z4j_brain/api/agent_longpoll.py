@@ -345,6 +345,12 @@ async def agent_events(
     if agent is None:
         raise HTTPException(status_code=401, detail="invalid agent token")
 
+    # Same identity advertisement as GET /commands (the connect
+    # probe), so either route teaches the transport its canonical
+    # signing identity.
+    response.headers["X-Z4J-Agent-Id"] = str(agent.id)
+    response.headers["X-Z4J-Project-Id"] = str(agent.project_id)
+
     master_bytes = settings.secret.get_secret_value().encode("utf-8")
     _, verifier = await _get_or_create_session(
         agent=agent,
@@ -457,6 +463,16 @@ async def agent_commands(  # noqa: PLR0915  long-poll command handler
         )
     if agent is None:
         raise HTTPException(status_code=401, detail="invalid agent token")
+
+    # Advertise the canonical agent/project UUIDs, the long-poll
+    # analogue of the WebSocket hello_ack. The agent's config holds
+    # the project SLUG, but the frame HMAC envelope binds the
+    # project UUID on the brain side, so without these headers the
+    # transport has no way to learn the UUIDs it must sign with
+    # (pre-1.7 it minted a random uuid4 and every frame failed
+    # verification in both directions).
+    response.headers["X-Z4J-Agent-Id"] = str(agent.id)
+    response.headers["X-Z4J-Project-Id"] = str(agent.project_id)
 
     master_bytes = settings.secret.get_secret_value().encode("utf-8")
     signer, _ = await _get_or_create_session(

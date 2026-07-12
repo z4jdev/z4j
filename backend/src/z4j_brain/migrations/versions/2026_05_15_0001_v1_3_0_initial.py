@@ -53,24 +53,22 @@ WHAT'S NOT INCLUDED:
   harmless headroom.
 
 COMPATIBILITY METADATA: this migration declares its compat
-window via the ``compat`` dict. The brain reads it at startup
-and refuses to apply migrations whose ``min_z4j_version`` is
-above the running brain version. Future 1.3.x migrations carry
-the same metadata, so an operator on z4j-brain 1.3.0 cannot
-accidentally apply a migration that requires 1.5.0+.
+window via the ``compat`` dict. The metadata is documentation
+for operators and tooling; no runtime gate reads it today (a
+startup refusal for migrations whose ``min_z4j_version``
+exceeds the running brain version is tracked as follow-up
+work). Later migrations carry the same metadata so the window
+stays visible next to each schema change.
 """
 
 from __future__ import annotations
 
-import socket
 from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
 from alembic.util import CommandError
-
 from z4j_brain.persistence.base import Base
-
 
 # ---------------------------------------------------------------------------
 # Alembic revision identifiers
@@ -86,11 +84,12 @@ depends_on: str | Sequence[str] | None = None
 # Compatibility metadata (1.3.x convention)
 # ---------------------------------------------------------------------------
 #
-# Read by ``z4j_brain.main.create_app`` at startup AND by the
-# ``z4j migrate check`` CLI. The brain refuses to start if
-# its own version is below ``min_z4j_version`` for ANY migration
-# in the chain, operators can never accidentally apply a
-# migration their brain doesn't understand.
+# Documentation for operators and tooling: no runtime consumer
+# reads this dict today. A startup gate that refuses to apply
+# migrations whose ``min_z4j_version`` exceeds the running brain
+# version is tracked as follow-up work; until it lands, the
+# window is advisory and lives here so it stays visible next to
+# the schema change it describes.
 #
 # - ``min_z4j_version``, earliest brain that can apply this migration
 # - ``max_z4j_version``, latest brain that can apply this migration
@@ -285,7 +284,7 @@ def _install_extensions() -> None:
 
 
 def _install_postgres_only_features(
-    bind: sa.engine.Connection,  # noqa: ARG001
+    bind: sa.engine.Connection,
 ) -> None:
     """``projects.slug`` regex CHECK + ``gen_random_uuid()`` server defaults.
 

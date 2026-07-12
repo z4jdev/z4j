@@ -717,6 +717,10 @@ class TestOfflineSubscription:
         assert notes[0].reason == "subscribed"
         assert notes[0].trigger == "agent.offline"
         assert notes[0].data["task_id"] == str(agent_id)
+        # The bell routes on resource_type; without the stamp an
+        # offline alert deep-links to a nonexistent task page
+        # (round-4 LOW).
+        assert notes[0].data["resource_type"] == "agent"
 
 
 # =====================================================================
