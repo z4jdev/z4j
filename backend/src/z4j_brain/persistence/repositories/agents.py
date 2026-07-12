@@ -276,14 +276,20 @@ class AgentRepository(BaseRepository[Agent]):
         await self.session.execute(stmt)
 
     async def promote_online_if_offline(self, agent_id: UUID) -> None:
-        """Re-assert state=online if currently offline. Heartbeat path.
+        """Re-assert state=online from any non-online state. Heartbeat path.
 
-        Heartbeats arriving from a live WS connection flip the
-        state column back to ``online`` if it wrongly drifted to
-        ``offline`` (e.g. a late mark_offline from a previous
-        close that lost the race against the new connection's
-        mark_online). Idempotent: a no-op when the agent is
-        already online.
+        Heartbeats arriving from a live connection flip the state
+        column to ``online`` if it wrongly drifted to ``offline``
+        (a late mark_offline that lost the race against a new
+        connection's mark_online) OR is still ``unknown``.
+
+        The ``unknown`` case matters for LONG-POLL agents: long-poll
+        has no ``hello`` handshake, so nothing calls ``mark_online``
+        (that is WS-gateway-only). Verified long-poll heartbeats and
+        event batches reach this method, so widening the guard from
+        ``== OFFLINE`` to ``!= ONLINE`` is what lets a long-poll-only
+        agent ever show online at all (pre-fix it was pinned at
+        ``unknown`` forever). Idempotent: a no-op when already online.
 
         The operation is a single indexed UPDATE with a WHERE
         guard so the row is touched only when needed; cheap to call
@@ -292,7 +298,7 @@ class AgentRepository(BaseRepository[Agent]):
         await self.session.execute(
             update(Agent)
             .where(Agent.id == agent_id)
-            .where(Agent.state == AgentState.OFFLINE)
+            .where(Agent.state != AgentState.ONLINE)
             .values(state=AgentState.ONLINE),
         )
 

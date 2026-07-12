@@ -81,6 +81,7 @@ from z4j_brain.websocket.auth import resolve_agent_by_bearer
 from z4j_brain.websocket.frame_router import FrameRouter
 
 if TYPE_CHECKING:
+    from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.persistence.models import Agent, Command
 
 
@@ -246,6 +247,30 @@ async def _get_or_create_session(
                 if _sessions_per_agent[evicted_agent] <= 0:
                     _sessions_per_agent.pop(evicted_agent, None)
         return signer, verifier
+
+
+async def _record_longpoll_liveness(
+    db: DatabaseManager,
+    agent_id: uuid.UUID,
+    *,
+    ingested: bool,
+) -> None:
+    """Reflect a long-poll cycle as agent liveness on ``/agents``.
+
+    Always bumps ``last_seen_at`` (the heartbeat-equivalent). When the
+    batch actually ingested, also promotes the agent to online: long-poll
+    has no hello handshake, so nothing else calls ``mark_online``, and an
+    agent with heartbeats disabled would otherwise stay pinned at
+    ``unknown`` forever even while it is verifiably delivering events.
+    """
+    from z4j_brain.persistence.repositories import AgentRepository
+
+    async with db.session() as session:
+        agents_repo = AgentRepository(session)
+        await agents_repo.touch_heartbeat(agent_id)
+        if ingested:
+            await agents_repo.promote_online_if_offline(agent_id)
+        await session.commit()
 
 
 async def _drop_session(agent_id: uuid.UUID, session_nonce: str | None) -> None:
@@ -419,14 +444,7 @@ async def agent_events(
                 agent_id=str(agent.id),
             )
 
-    # Touch agent.last_seen_at so /agents reflects the long-poll
-    # cycle as liveness, the same way a heartbeat frame would over
-    # a WebSocket.
-    async with db.session() as session:
-        from z4j_brain.persistence.repositories import AgentRepository
-
-        await AgentRepository(session).touch_heartbeat(agent.id)
-        await session.commit()
+    await _record_longpoll_liveness(db, agent.id, ingested=accepted > 0)
 
     if session_invalidated:
         await _drop_session(agent.id, session_nonce)
