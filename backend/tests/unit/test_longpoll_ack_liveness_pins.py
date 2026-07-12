@@ -175,16 +175,46 @@ class _FakeIngestor:
         return []
 
 
-def _router(send_frame=None) -> FrameRouter:
+class _RaisingIngestor:
+    """Fails during ingest, before any commit -- the R5-M1 scenario."""
+
+    async def ingest_batch(self, **_kwargs):
+        raise RuntimeError("simulated ingest failure before commit")
+
+
+def _router(send_frame=None, ingestor=None) -> FrameRouter:
     return FrameRouter(
         db=_FakeDB(),
-        ingestor=_FakeIngestor(),
+        ingestor=ingestor or _FakeIngestor(),
         dispatcher=object(),
         project_id=uuid.uuid4(),
         agent_id=uuid.uuid4(),
         dashboard_hub=None,
         send_frame=send_frame,
     )
+
+
+async def test_dispatch_returns_true_on_durable_success() -> None:
+    """dispatch() reports durability to the long-poll caller."""
+    router = _router()
+    frame = EventBatchFrame(id="evb_ok", payload=EventBatchPayload(events=[]))
+    assert await router.dispatch(frame) is True
+
+
+async def test_dispatch_returns_false_on_ingest_failure() -> None:
+    """R5-M1: a swallowed ingest/commit failure returns False so the
+    long-poll events POST counts it as REJECTED, not accepted.
+
+    Pre-fix dispatch() returned None unconditionally, so agent_events
+    always did accepted += 1 even when nothing persisted, and the
+    agent's confirm_on_send then deleted an undelivered buffer entry.
+    """
+    router = _router(ingestor=_RaisingIngestor())
+    frame = EventBatchFrame(
+        id="evb_fail",
+        payload=EventBatchPayload(events=[{"engine": "celery", "kind": "task.succeeded"}]),
+    )
+    assert await router.dispatch(frame) is False
 
 
 async def test_longpoll_router_has_no_ack_channel() -> None:
@@ -270,6 +300,41 @@ async def test_longpoll_verified_events_promote_online(
 
     state = await _agent_state(brain_app, agent_ids["agent_id"])
     assert state == AgentState.ONLINE
+
+
+async def _agent_last_seen(brain_app, agent_id: uuid.UUID):
+    async with brain_app.state.db.session() as s:
+        agent = await s.get(Agent, agent_id)
+        return agent.last_seen_at
+
+
+async def test_rejected_upload_does_not_refresh_liveness(
+    client,
+    brain_app,
+    agent_ids,
+) -> None:
+    """R5-L1: a fully-rejected upload (no verified, durably-handled
+    frame) must NOT bump last_seen_at.
+
+    Otherwise a bearer holder who cannot produce a valid frame HMAC
+    could keep a dead agent pinned ONLINE by POSTing garbage, defeating
+    the offline sweep (which keys off a stale last_seen_at) and its
+    alerts. The frame here is an unsigned/garbage string that fails to
+    parse, so accepted == 0.
+    """
+    before = await _agent_last_seen(brain_app, agent_ids["agent_id"])
+    r = await client.post(
+        "/api/v1/agent/events",
+        json={"frames": ["not-a-signed-frame"]},
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": "lp-pins-nonce-reject",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["accepted"] == 0
+    after = await _agent_last_seen(brain_app, agent_ids["agent_id"])
+    assert after == before  # liveness untouched by unverified traffic
 
 
 async def test_promote_online_repo_semantics(brain_app, agent_ids) -> None:

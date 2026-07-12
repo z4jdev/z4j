@@ -382,8 +382,22 @@ class FrameRouter:
                     frame_type=getattr(out, "type", None),
                 )
 
-    async def dispatch(self, frame: Frame) -> None:
-        """Route ``frame`` to the right service. Never raises."""
+    async def dispatch(self, frame: Frame) -> bool:
+        """Route ``frame`` to the right service. Never raises.
+
+        Returns ``True`` when the frame was handled without a swallowed
+        exception, ``False`` when a handler raised (the exception is
+        logged and absorbed so the connection survives). For an
+        ``event_batch`` a ``True`` return means the batch DURABLY
+        committed (the handler only returns cleanly after
+        ``session.commit()``), which is exactly the signal the
+        long-poll ``POST /events`` needs: over long-poll the HTTP 200
+        accepted-count IS the acknowledgement, so a swallowed ingest or
+        commit failure must NOT be counted as accepted, or the agent's
+        ``confirm_on_send`` would delete a buffer entry that never
+        persisted (R5-M1). The WebSocket gateway ignores the return and
+        relies on the ack frame instead, so its contract is unchanged.
+        """
         try:
             if isinstance(frame, EventBatchFrame):
                 await self._handle_event_batch(frame)
@@ -414,6 +428,8 @@ class FrameRouter:
                 project_id=str(self._project_id),
                 error_class=type(exc).__name__,
             )
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # event_batch

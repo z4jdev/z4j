@@ -257,19 +257,29 @@ async def _record_longpoll_liveness(
 ) -> None:
     """Reflect a long-poll cycle as agent liveness on ``/agents``.
 
-    Always bumps ``last_seen_at`` (the heartbeat-equivalent). When the
-    batch actually ingested, also promotes the agent to online: long-poll
-    has no hello handshake, so nothing else calls ``mark_online``, and an
-    agent with heartbeats disabled would otherwise stay pinned at
-    ``unknown`` forever even while it is verifiably delivering events.
+    Liveness (both the ``last_seen_at`` bump AND the promote) is gated
+    on ``ingested`` -- at least one frame in the upload was verified
+    (its HMAC passed) AND durably handled. A fully-rejected upload does
+    NOT refresh liveness, otherwise a bearer holder who cannot produce a
+    valid frame HMAC could keep a dead agent pinned ONLINE by POSTing
+    garbage, suppressing the offline sweep and its alerts (R5-L1). The
+    offline sweep keys off a stale ``last_seen_at``, so refreshing it on
+    unverified traffic would defeat it.
+
+    When there IS verified traffic, promote the agent to online:
+    long-poll has no hello handshake, so nothing else calls
+    ``mark_online``, and an agent with heartbeats disabled would
+    otherwise stay pinned at ``unknown`` even while verifiably
+    delivering events.
     """
+    if not ingested:
+        return
     from z4j_brain.persistence.repositories import AgentRepository
 
     async with db.session() as session:
         agents_repo = AgentRepository(session)
         await agents_repo.touch_heartbeat(agent_id)
-        if ingested:
-            await agents_repo.promote_online_if_offline(agent_id)
+        await agents_repo.promote_online_if_offline(agent_id)
         await session.commit()
 
 
@@ -433,16 +443,29 @@ async def agent_events(
             errors.append(f"parse failed: {type(exc).__name__}")
             continue
 
+        # dispatch() returns True only when the frame was durably
+        # handled (for an event_batch: committed). Over long-poll the
+        # HTTP 200 accepted-count IS the ack the agent confirms against,
+        # so a swallowed ingest/commit failure must count as REJECTED,
+        # never accepted, or the agent's confirm_on_send would delete a
+        # buffer entry that never persisted (R5-M1). Replaying the whole
+        # upload on the retry is safe: the brain dedups by
+        # content-derived event_id.
         try:
-            await frame_router.dispatch(frame)
-            accepted += 1
-        except Exception as exc:
+            handled = await frame_router.dispatch(frame)
+        except Exception as exc:  # defensive: dispatch is contracted not to raise
             rejected += 1
             errors.append(f"dispatch failed: {type(exc).__name__}")
             logger.exception(
                 "z4j longpoll: dispatch crashed",
                 agent_id=str(agent.id),
             )
+            continue
+        if handled:
+            accepted += 1
+        else:
+            rejected += 1
+            errors.append("dispatch not durably committed")
 
     await _record_longpoll_liveness(db, agent.id, ingested=accepted > 0)
 
