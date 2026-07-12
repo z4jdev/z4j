@@ -250,7 +250,7 @@ class TestSavepointBatchIsolation:
         good_c = _received(str(uuid.uuid4()), task_id="task-C")
 
         # Ingest a 4-event batch with a duplicate in the middle.
-        new_events = await ingestor.ingest_batch(
+        result = await ingestor.ingest_batch(
             events=[good_a, dup_1, dup_2, good_c],
             project_id=proj.id,
             agent_id=agent.id,
@@ -265,7 +265,8 @@ class TestSavepointBatchIsolation:
         event_count = (await session.execute(select(func.count()).select_from(Event))).scalar_one()
         assert event_count == 3
         # ingest_batch now returns the NEW events (dup_2 deduped -> 3).
-        assert len(new_events) == 3
+        assert len(result.new_events) == 3
+        assert result.fully_durable  # no transient skips
 
         # Tasks for A, B, C all projected (dup did NOT poison the batch).
         task_ids = sorted(t.task_id for t in (await session.execute(select(Task))).scalars().all())

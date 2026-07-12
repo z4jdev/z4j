@@ -182,6 +182,33 @@ _STATE_FOR_KIND: dict[EventKind, TaskState | None] = {
 }
 
 
+class BatchIngestResult:
+    """Outcome of :meth:`EventIngestor.ingest_batch`.
+
+    ``new_events`` are the NEW (non-duplicate) events actually inserted
+    (used for once-per-logical-event hooks). ``transient_skips`` counts
+    events that were dropped from THIS commit because of a TRANSIENT
+    infrastructure error (a deadlock/serialization/operational failure
+    that survived the per-event retry), not because their content was
+    bad. A batch with any transient skip is NOT fully durable: the caller
+    must withhold the delivery acknowledgement so the agent re-sends the
+    batch (the committed events dedup on replay; the transiently-failed
+    one gets another chance). Without this the skipped event would be
+    silently dropped while the agent, seeing a durable ack, evicts its
+    only copy (permanent data loss).
+    """
+
+    __slots__ = ("new_events", "transient_skips")
+
+    def __init__(self, new_events: list[dict[str, Any]], transient_skips: int) -> None:
+        self.new_events = new_events
+        self.transient_skips = transient_skips
+
+    @property
+    def fully_durable(self) -> bool:
+        return self.transient_skips == 0
+
+
 class EventIngestor:
     """Project agent-side events onto the brain's persistent state."""
 
@@ -201,11 +228,14 @@ class EventIngestor:
         task_repo: TaskRepository,
         queue_repo: QueueRepository,
         worker_repo: WorkerRepository | None = None,
-    ) -> list[dict[str, Any]]:
-        """Ingest a batch of events. Returns the NEW (non-duplicate)
-        events -- the ones actually inserted, with re-delivered
-        duplicates excluded (an agent reconnect re-flushes its buffered
-        events with the SAME event_id; those dedup at insert time).
+    ) -> BatchIngestResult:
+        """Ingest a batch of events. Returns a :class:`BatchIngestResult`
+        carrying the NEW (non-duplicate) events -- the ones actually
+        inserted, with re-delivered duplicates excluded (an agent
+        reconnect re-flushes its buffered events with the SAME event_id;
+        those dedup at insert time) -- and a count of events dropped from
+        this commit for a TRANSIENT reason (so the caller can withhold
+        the delivery ack and let the agent re-send).
 
         Returning the new events (not just a count) lets the caller run
         per-event hooks -- notably automation rule firing -- ONCE per
@@ -230,6 +260,11 @@ class EventIngestor:
         # and is NOT appended, so the caller's automation hook fires once
         # per logical event, not once per delivery.
         new_events: list[dict[str, Any]] = []
+        # Events dropped from THIS commit because of a transient infra
+        # error (deadlock/operational after the per-event retry). A
+        # non-zero count means the batch is not fully durable and the
+        # caller must NOT ack it, so the agent re-sends (R6-panel-HIGH).
+        transient_skips = 0
         # Accumulator for worker upserts. Key is (engine, name);
         # value is the latest occurred_at observed for that worker
         # in this batch. We pick max so a stale event late in the
@@ -290,26 +325,38 @@ class EventIngestor:
                             agent_id=str(agent_id),
                         )
                         continue
-                    # Non-deadlock SQL error after retry: the
-                    # savepoint already rolled back the failing
-                    # event's writes; we log + skip it. The rest of
-                    # the batch can still commit cleanly. Re-raising
-                    # would force the agent to re-send the entire
-                    # batch on reconnect, which under sustained
-                    # contention amplifies latency by an order of
-                    # magnitude (round-13 perf observed 8s+ p99
-                    # under that retry-pressure path). Skipping a
-                    # truly-broken event (poison message that
-                    # repeatably fails) is the correct trade.
-                    logger.exception(
-                        "z4j event_ingestor: per-event SQL error; skipping",
+                    # A DB-layer (OperationalError/DBAPIError) failure
+                    # that survived the per-event retry: a deadlock that
+                    # did not clear, pool exhaustion, a serialization
+                    # failure, etc. These are TRANSIENT infrastructure
+                    # errors -- the SAME event will very likely commit on
+                    # a fresh attempt. The savepoint already rolled back
+                    # this event's writes, so the rest of the batch still
+                    # commits (we do NOT re-raise and force a full-batch
+                    # rollback, which under sustained contention amplifies
+                    # latency by an order of magnitude, round-13 perf).
+                    # But we COUNT the skip so the caller withholds the
+                    # delivery ack: the agent then re-sends the batch and
+                    # this event gets another chance, instead of being
+                    # silently dropped while the agent evicts its only
+                    # copy on a durable-looking ack (R6-panel-HIGH).
+                    transient_skips += 1
+                    logger.warning(
+                        "z4j event_ingestor: per-event DB error survived "
+                        "retry; withholding ack so the agent re-sends",
                         project_id=str(project_id),
                         agent_id=str(agent_id),
                     )
                     break
                 except Exception:
+                    # A non-DB per-event error (bad envelope, redaction
+                    # failure, a genuinely malformed event). Re-sending
+                    # cannot help -- the same bytes fail the same way --
+                    # so this is a permanent drop, NOT counted toward
+                    # transient_skips. The agent's own bounded quarantine
+                    # is the backstop if such an event kept being sent.
                     logger.exception(
-                        "z4j event_ingestor: per-event ingest failed; skipping",
+                        "z4j event_ingestor: per-event ingest failed (permanent); skipping",
                         project_id=str(project_id),
                         agent_id=str(agent_id),
                     )
@@ -363,7 +410,7 @@ class EventIngestor:
             write="agent.heartbeat",
             agent_id=str(agent_id),
         )
-        return new_events
+        return BatchIngestResult(new_events=new_events, transient_skips=transient_skips)
 
     async def _best_effort_side_write(
         self,
@@ -579,23 +626,6 @@ class EventIngestor:
         # events keep full precision on their agent-id key.
         stored_occurred_at = occurred_at.replace(microsecond=0) if task_id else occurred_at
 
-        # 0) Prometheus counter. Best-effort: a metric-registry
-        # hiccup must not break event ingestion. The bump below to
-        # ``z4j_swallowed_exceptions_total`` keeps this visible in
-        # Grafana even though we don't log per event.
-        try:
-            from z4j_brain.api.metrics import z4j_events_ingested_total
-
-            z4j_events_ingested_total.labels(
-                project=str(project_id),
-                engine=engine,
-                kind=kind_value,
-            ).inc()
-        except Exception:
-            from z4j_brain.api.metrics import record_swallowed
-
-            record_swallowed("event_ingestor", "counter_inc")
-
         # 1) Append to the partitioned events table.
         inserted = await event_repo.insert(
             event_id=event_id,
@@ -607,6 +637,26 @@ class EventIngestor:
             occurred_at=stored_occurred_at,
             payload=data if isinstance(data, dict) else {},
         )
+
+        # 0-now-after-1) Prometheus counter, gated on a NEW row. Counting
+        # before the insert (the pre-fix position) double-counted every
+        # re-delivered event on a reconnect re-flush, so the ingest rate
+        # graph over-reported under WS churn (R6-F3). Best-effort: a
+        # metric-registry hiccup must not break ingestion, and the bump
+        # to ``z4j_swallowed_exceptions_total`` keeps it visible.
+        if inserted:
+            try:
+                from z4j_brain.api.metrics import z4j_events_ingested_total
+
+                z4j_events_ingested_total.labels(
+                    project=str(project_id),
+                    engine=engine,
+                    kind=kind_value,
+                ).inc()
+            except Exception:
+                from z4j_brain.api.metrics import record_swallowed
+
+                record_swallowed("event_ingestor", "counter_inc")
 
         # 2) Touch the queue if mentioned.
         # Defer the touch when a batch-level dedup set was supplied; the

@@ -322,12 +322,12 @@ async def test_ingest_batch_returns_only_new_events(
 
     first = await ingestor.ingest_batch(events=[ev], **_kw())
     await session.commit()
-    assert len(first) == 1  # genuinely new -> returned (rule would fire)
+    assert len(first.new_events) == 1  # genuinely new -> returned (rule would fire)
 
     # Re-deliver the exact same event (agent reconnect buffer re-flush).
     second = await ingestor.ingest_batch(events=[ev], **_kw())
     await session.commit()
-    assert second == []  # duplicate -> NOT returned -> rule does NOT re-fire
+    assert second.new_events == []  # duplicate -> NOT returned -> rule does NOT re-fire
 
     # Exactly one events row exists (dedup held).
     rows = (await session.execute(select(Event))).scalars().all()
@@ -372,12 +372,12 @@ async def test_subsecond_divergent_redelivery_dedupes(
 
     first = await ingestor.ingest_batch(events=[ev1], **_kw())
     await session.commit()
-    assert len(first) == 1
+    assert len(first.new_events) == 1
 
     second = await ingestor.ingest_batch(events=[ev2], **_kw())
     await session.commit()
     # Same logical event within one second -> deduped, no second firing.
-    assert second == []
+    assert second.new_events == []
     rows = (await session.execute(select(Event))).scalars().all()
     assert len(rows) == 1
 
@@ -415,6 +415,6 @@ async def test_heartbeat_touch_failure_does_not_lose_events(
     await session.commit()
 
     # Heartbeat failed, but the event survived (savepoint isolation).
-    assert len(new) == 1
+    assert len(new.new_events) == 1
     task = (await session.execute(select(Task))).scalar_one()
     assert task.name == "x"

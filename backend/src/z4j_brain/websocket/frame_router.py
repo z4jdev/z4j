@@ -400,8 +400,11 @@ class FrameRouter:
         """
         try:
             if isinstance(frame, EventBatchFrame):
-                await self._handle_event_batch(frame)
-            elif isinstance(frame, HeartbeatFrame):
+                # The event_batch handler returns its own durability bool
+                # (False when an event was transiently skipped), which IS
+                # the durability signal for this frame.
+                return await self._handle_event_batch(frame)
+            if isinstance(frame, HeartbeatFrame):
                 await self._handle_heartbeat(frame)
             elif isinstance(frame, CommandAckFrame):
                 await self._handle_command_ack(frame)
@@ -435,7 +438,16 @@ class FrameRouter:
     # event_batch
     # ------------------------------------------------------------------
 
-    async def _handle_event_batch(self, frame: EventBatchFrame) -> None:
+    async def _handle_event_batch(self, frame: EventBatchFrame) -> bool:
+        """Ingest an event batch. Returns True only when the batch is
+        FULLY durable (committed with no transiently-skipped event).
+
+        A False return (commit failed, OR the commit succeeded but an
+        event was dropped for a transient DB error) means the agent must
+        re-send: the ack is withheld (WS) and dispatch returns False
+        (long-poll), so no un-stored event is ever evicted on the agent
+        (R6-panel-HIGH). The committed events dedup on the replay.
+        """
         # The agent's frame.payload.events list is exactly what
         # EventIngestor expects - a list of dicts with engine /
         # kind / task_id / occurred_at / data fields.
@@ -472,10 +484,10 @@ class FrameRouter:
         # Automation fires only on these so an agent-reconnect buffer
         # re-flush (same event_ids) cannot re-fire a rule N times.
         new_events: list[dict[str, Any]] = []
-        commit_ok = False
+        fully_durable = False
         try:
             async with self._db.session() as session:
-                new_events = await self._ingestor.ingest_batch(
+                result = await self._ingestor.ingest_batch(
                     events=events,
                     project_id=self._project_id,
                     agent_id=self._agent_id,
@@ -485,14 +497,29 @@ class FrameRouter:
                     queue_repo=QueueRepository(session),
                     worker_repo=WorkerRepository(session),
                 )
+                new_events = result.new_events
                 accepted_count = len(new_events)
                 await session.commit()
-                commit_ok = True
+                # FULLY durable only when nothing was transiently skipped.
+                # If an event was dropped for a transient DB error, the
+                # committed events are real (they dedup on replay) but the
+                # batch must NOT be acked, so the agent re-sends and the
+                # skipped event gets another chance (R6-panel-HIGH).
+                fully_durable = result.fully_durable
+                if not fully_durable:
+                    logger.warning(
+                        "z4j frame_router: event_batch had transient "
+                        "skips; withholding ack so the agent re-sends",
+                        project_id=str(self._project_id),
+                        agent_id=str(self._agent_id),
+                        transient_skips=result.transient_skips,
+                    )
         finally:
             # Emit an ``event_batch_ack`` so the agent can confirm-
-            # and-evict the matching buffer entries. Sending only on
-            # commit success means a deadlock storm in ingest does
-            # NOT silently consume buffer entries on the agent.
+            # and-evict the matching buffer entries. Sending ONLY on
+            # FULL durability (committed with no transient skip) means a
+            # deadlock storm in ingest does NOT silently consume buffer
+            # entries on the agent.
             #
             # Fire-and-forget the send so the next event_batch can
             # start ingesting immediately. Awaiting the ack send
@@ -502,7 +529,7 @@ class FrameRouter:
             # trip the agent's ack watchdog. Spawning a task lets
             # the websocket send write happen concurrently with the
             # next ingest.
-            if commit_ok and self._send_frame is not None:
+            if fully_durable and self._send_frame is not None:
                 ack = EventBatchAckFrame(
                     id=f"eba_{frame.id}"[:64],
                     ts=datetime.now(UTC),
@@ -522,28 +549,47 @@ class FrameRouter:
                 self._pending_ack_tasks.add(ack_task)
                 ack_task.add_done_callback(self._pending_ack_tasks.discard)
 
-        # One publish per batch (not per event) - the dashboard
-        # refetches the list and gets every change in one round
-        # trip. The publish runs after the commit so subscribers
-        # never see a topic referencing data still in flight.
-        await self._publish_task_change()
+        # Post-commit side effects. These run AFTER the events are
+        # durably committed, and each is best-effort: an exception here
+        # must NOT propagate to ``dispatch``, because ``dispatch``'s
+        # return value is the long-poll durability signal and the data
+        # is already persisted. If a post-commit hook could flip the
+        # return to False, the agent would treat a stored batch as
+        # undelivered and re-send it (harmless for row/automation dedup,
+        # but it would re-run these very hooks) (R6-F2). Each hook is
+        # isolated so one failing does not skip the others.
+        await self._run_post_commit_hook("publish", self._publish_task_change())
+        # Notifications + automation fire on the NEW events only
+        # (``new_events``, not the full delivered batch): a re-delivered
+        # event was already notified/fired on its first delivery, so a
+        # reconnect re-flush or a long-poll retry after a partial-ingest
+        # failure must not re-page every subscriber or re-run a rule for
+        # the same task state change (R6-F3).
+        await self._run_post_commit_hook(
+            "notifications",
+            self._evaluate_notifications(new_events),
+        )
+        await self._run_post_commit_hook(
+            "automation",
+            self._evaluate_automation(new_events),
+        )
+        return fully_durable
 
-        # Evaluate per-user notification subscriptions for task-related
-        # triggers. Each event may match one or more user subscriptions
-        # (in-app, Slack, email, ...). We run this AFTER the commit so
-        # the delivery log and any side-effect queries see the
-        # committed data. Pass the trimmed list (not
-        # ``frame.payload.events``) so the cap propagates here too.
-        await self._evaluate_notifications(events)
+    async def _run_post_commit_hook(self, name: str, coro: Awaitable[None]) -> None:
+        """Await a best-effort post-commit side effect, swallowing errors.
 
-        # Fire cross-engine automation rules for the NEW events only
-        # (``new_events``, not the full delivered batch). Re-delivered
-        # duplicates deduped at ingest, so a flaky-WS reconnect that
-        # re-flushes buffered ``task.failed`` events cannot fire a rule
-        # (and its notify/retry action) repeatedly for one failure. Runs
-        # after notifications + after the commit so rule actions see the
-        # persisted task rows.
-        await self._evaluate_automation(new_events)
+        The caller has already committed the batch; a hook failure must
+        not propagate (see ``_handle_event_batch`` / R6-F2).
+        """
+        try:
+            await coro
+        except Exception:
+            logger.exception(
+                "z4j frame_router: post-commit hook failed (events are committed; not re-sending)",
+                hook=name,
+                agent_id=str(self._agent_id),
+                project_id=str(self._project_id),
+            )
 
     # ------------------------------------------------------------------
     # heartbeat

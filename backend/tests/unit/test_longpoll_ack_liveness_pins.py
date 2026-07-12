@@ -30,6 +30,7 @@ import uuid
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
+from z4j_brain.domain.event_ingestor import BatchIngestResult
 from z4j_brain.main import create_app
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
@@ -172,7 +173,7 @@ class _FakeDB:
 
 class _FakeIngestor:
     async def ingest_batch(self, **_kwargs):
-        return []
+        return BatchIngestResult(new_events=[], transient_skips=0)
 
 
 class _RaisingIngestor:
@@ -180,6 +181,14 @@ class _RaisingIngestor:
 
     async def ingest_batch(self, **_kwargs):
         raise RuntimeError("simulated ingest failure before commit")
+
+
+class _TransientSkipIngestor:
+    """Commits the batch but reports a transiently-skipped event, so the
+    batch is committed-but-not-fully-durable (R6-panel-HIGH)."""
+
+    async def ingest_batch(self, **_kwargs):
+        return BatchIngestResult(new_events=[], transient_skips=1)
 
 
 def _router(send_frame=None, ingestor=None) -> FrameRouter:
@@ -215,6 +224,98 @@ async def test_dispatch_returns_false_on_ingest_failure() -> None:
         payload=EventBatchPayload(events=[{"engine": "celery", "kind": "task.succeeded"}]),
     )
     assert await router.dispatch(frame) is False
+
+
+async def test_transient_skip_reports_not_durable_and_withholds_ack() -> None:
+    """R6-panel-HIGH: a batch that COMMITTED but transiently skipped an
+    event is NOT fully durable.
+
+    dispatch() must return False (so the long-poll handler counts it
+    rejected and the agent re-sends) AND no event_batch_ack is emitted
+    (so a WS agent re-sends too). Pre-fix the batch committed the rest,
+    dispatch reported True, the ack fired, and the agent evicted the
+    only copy of the skipped event -- permanent data loss.
+    """
+    sent: list = []
+
+    async def send_frame(f) -> None:
+        sent.append(f)
+
+    router = _router(send_frame=send_frame, ingestor=_TransientSkipIngestor())
+    frame = EventBatchFrame(
+        id="evb_skip",
+        payload=EventBatchPayload(events=[{"engine": "celery", "kind": "task.failed"}]),
+    )
+    assert await router.dispatch(frame) is False
+    # give any (wrongly) spawned ack task a chance to run
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert sent == []  # no ack was emitted
+
+
+async def test_dispatch_stays_true_when_post_commit_hook_fails() -> None:
+    """R6-F2: a post-commit hook failure must NOT flip dispatch to False.
+
+    The events are already durably committed before the publish /
+    notification / automation hooks run. If a hook exception propagated,
+    dispatch would return False, the long-poll handler would count the
+    batch as not-stored, and the agent would re-send a batch that IS
+    stored -- re-running these same hooks. Each hook is isolated so its
+    failure is logged but does not affect the durability signal.
+    """
+    router = _router()  # _FakeIngestor commits fine (returns [])
+
+    async def _boom() -> None:
+        raise RuntimeError("post-commit publish failed")
+
+    router._publish_task_change = _boom  # type: ignore[method-assign]
+    frame = EventBatchFrame(
+        id="evb_hook",
+        payload=EventBatchPayload(events=[{"engine": "celery", "kind": "task.succeeded"}]),
+    )
+    assert await router.dispatch(frame) is True
+
+
+async def test_post_commit_hooks_receive_only_new_events() -> None:
+    """R6-F3: notifications AND automation fire on new_events only.
+
+    A re-delivered event was already notified/fired on first delivery;
+    firing on the full delivered list re-pages subscribers on every
+    reconnect re-flush. Both hooks must receive the ingestor's
+    new-events subset, not the full batch.
+    """
+    new_subset = [{"engine": "celery", "kind": "task.failed", "task_id": "t-new"}]
+
+    class _SubsetIngestor:
+        async def ingest_batch(self, **_kwargs):
+            # only 1 of the 2 delivered events is new; fully durable
+            return BatchIngestResult(new_events=new_subset, transient_skips=0)
+
+    router = _router(ingestor=_SubsetIngestor())
+    notified: list = []
+    automated: list = []
+
+    async def _cap_notify(events):
+        notified.append(events)
+
+    async def _cap_auto(events):
+        automated.append(events)
+
+    router._evaluate_notifications = _cap_notify  # type: ignore[method-assign]
+    router._evaluate_automation = _cap_auto  # type: ignore[method-assign]
+
+    frame = EventBatchFrame(
+        id="evb_replay",
+        payload=EventBatchPayload(
+            events=[
+                {"engine": "celery", "kind": "task.failed", "task_id": "t-new"},
+                {"engine": "celery", "kind": "task.failed", "task_id": "t-old"},
+            ],
+        ),
+    )
+    assert await router.dispatch(frame) is True
+    assert notified == [new_subset]
+    assert automated == [new_subset]
 
 
 async def test_longpoll_router_has_no_ack_channel() -> None:
