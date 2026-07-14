@@ -66,11 +66,13 @@ import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
-from z4j_core.errors import SignatureError
+from z4j_core.errors import ProtocolVersionError, SignatureError
 from z4j_core.transport.frames import (
     CommandFrame,
     CommandPayload,
     Frame,
+    HelloAckFrame,
+    HelloFrame,
 )
 from z4j_core.transport.framing import FrameSigner, FrameVerifier
 from z4j_core.transport.hmac import derive_project_secret
@@ -356,7 +358,7 @@ class CommandPullResponse(BaseModel):
 
 
 @router.post("/events", response_model=FrameUploadResponse)
-async def agent_events(
+async def agent_events(  # noqa: PLR0915  long-poll event-upload handler
     body: FrameUploadBody,
     request: Request,
     response: Response,
@@ -408,8 +410,22 @@ async def agent_events(
         automation_outbox_max_rows_per_project=settings.automation_outbox_max_rows_per_project,
     )
 
+    # Per-frame accounting, keyed to the brain's 3-state dispatch verdict:
+    #   ``accepted``      -- frames the agent should CONFIRM+DELETE: a
+    #     DURABLE store, a permanent DROP (deterministic; re-sending fails
+    #     identically), or an unparseable frame dropped at the source.
+    #   ``rejected``      -- frames the agent should RE-SEND: a TRANSIENT
+    #     failure (deadlock / pool timeout / transient skip) or a version-
+    #     skew frame that will land on an upgraded replica.
+    #   ``authenticated`` -- frames that passed parse + HMAC (reached
+    #     dispatch). This is the ONLY liveness signal: an unauthenticated
+    #     frame (parse fail before HMAC, version skew before HMAC, or a
+    #     signature failure) must never refresh ``last_seen_at`` (R5-L1).
+    # The RESPONSE accepted-count = ``accepted`` (DURABLE + DROP + parse-
+    # drop); the agent confirms iff it equals the frames it sent.
     accepted = 0
     rejected = 0
+    authenticated = 0
     errors: list[str] = []
     session_invalidated = False
     total = len(body.frames)
@@ -438,36 +454,100 @@ async def agent_events(
             session_invalidated = True
             rejected += total - idx
             break
-        except Exception as exc:
+        except ProtocolVersionError as exc:
+            # A version-skew frame is AUTHENTIC and RECOVERABLE: the same
+            # bytes parse against a peer built with the matching
+            # PROTOCOL_VERSION. During a rolling protocol upgrade it must be
+            # RE-SENT (it will land on an already-upgraded replica), not
+            # dropped -- so count it rejected (retry), not accepted. It is
+            # NOT authenticated (the version gate is before HMAC), so it
+            # does not refresh liveness.
             rejected += 1
-            errors.append(f"parse failed: {type(exc).__name__}")
+            errors.append(f"version skew (retry): {exc}")
+            logger.warning(
+                "z4j longpoll: protocol-version skew; asking agent to retry",
+                agent_id=str(agent.id),
+                error_class=type(exc).__name__,
+            )
+            continue
+        except Exception as exc:
+            # A frame that PARSE-fails (unknown type / malformed JSON -- not
+            # a signature or version error, handled above) is
+            # DETERMINISTICALLY undeliverable: the agent signed and sent
+            # these exact bytes, so re-sending them fails to parse
+            # identically forever. Drop-and-ack it at the source (count it
+            # accepted below) so the agent's confirm_on_send deletes it
+            # instead of looping on it and starving every frame behind it
+            # (R8). It does NOT count toward liveness: the parse failure is
+            # raised BEFORE HMAC verification, so an unauthenticated garbage
+            # frame must never refresh last_seen_at (R5-L1).
+            accepted += 1
+            logger.warning(
+                "z4j longpoll: dropping unparseable agent frame "
+                "(deterministic; acked so the agent does not loop)",
+                agent_id=str(agent.id),
+                error_class=type(exc).__name__,
+            )
             continue
 
-        # dispatch() returns True only when the frame was durably
-        # handled (for an event_batch: committed). Over long-poll the
-        # HTTP 200 accepted-count IS the ack the agent confirms against,
-        # so a swallowed ingest/commit failure must count as REJECTED,
-        # never accepted, or the agent's confirm_on_send would delete a
-        # buffer entry that never persisted (R5-M1). Replaying the whole
-        # upload on the retry is safe: the brain dedups by
-        # content-derived event_id.
+        # Unsigned handshake frames (hello / hello_ack) pass parse_and_verify
+        # WITHOUT HMAC (they precede the shared session secret), so they must
+        # NOT count toward the authenticated-liveness signal: a bearer-token
+        # holder without the project HMAC could otherwise keep a dead agent
+        # marked ONLINE by POSTing hello frames, defeating the offline sweep
+        # (R5-L1). Drop-and-ack it (accepted, matching the deterministic-drop
+        # pattern so a sender never loops) and skip the liveness counter.
+        if isinstance(frame, (HelloFrame, HelloAckFrame)):
+            accepted += 1
+            logger.warning(
+                "z4j longpoll: dropping unsigned handshake frame on /events "
+                "(no HMAC; excluded from liveness)",
+                agent_id=str(agent.id),
+                frame_type=getattr(frame, "type", None),
+            )
+            continue
+
+        # The frame passed parse + HMAC -> it proves an authenticated,
+        # live agent regardless of whether it stores (R5-L1 liveness).
+        authenticated += 1
+
+        # dispatch() returns a 3-state FrameOutcome; over long-poll the HTTP
+        # 200 accepted-count IS the ack the agent confirms against, so a
+        # CONFIRMED outcome (DURABLE store or permanent DROP) counts
+        # accepted and a TRANSIENT one counts rejected (agent re-sends).
+        # The brain resolves every DETERMINISTIC failure to DROP at source,
+        # so a rejected frame is always a genuine self-healing transient
+        # (round-8: this is what keeps the agent's no-drop retry safe).
         try:
-            handled = await frame_router.dispatch(frame)
-        except Exception as exc:  # defensive: dispatch is contracted not to raise
+            outcome = await frame_router.dispatch(frame)
+        except Exception:  # defensive: dispatch is contracted not to raise
             rejected += 1
-            errors.append(f"dispatch failed: {type(exc).__name__}")
+            errors.append("dispatch crashed (retry)")
             logger.exception(
                 "z4j longpoll: dispatch crashed",
                 agent_id=str(agent.id),
             )
             continue
-        if handled:
+        if outcome.confirmed:
             accepted += 1
         else:
             rejected += 1
-            errors.append("dispatch not durably committed")
+            errors.append("transient; agent re-sends")
 
-    await _record_longpoll_liveness(db, agent.id, ingested=accepted > 0)
+    # Liveness refreshes ONLY on an authenticated frame (passed parse +
+    # HMAC), never on garbage / version-skew / bad-signature traffic (R5-L1).
+    # Best-effort: the frame outcomes above are already RESOLVED, so a
+    # deterministic liveness-write failure (schema/permission) must NOT turn
+    # the resolved 200 into a 500 -- that would make the agent re-POST
+    # already-stored (or intentionally dropped) frames forever, since the
+    # fault re-fires on every request (round-8 external M-liveness).
+    try:
+        await _record_longpoll_liveness(db, agent.id, ingested=authenticated > 0)
+    except Exception:
+        logger.exception(
+            "z4j longpoll: liveness write failed; not failing the resolved delivery response",
+            agent_id=str(agent.id),
+        )
 
     if session_invalidated:
         await _drop_session(agent.id, session_nonce)

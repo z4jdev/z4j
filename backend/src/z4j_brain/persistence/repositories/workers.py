@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain.persistence.enums import WorkerState
@@ -51,6 +51,40 @@ _ATTR_TO_COL = {
 def _to_col(attr: str) -> str:
     """Return DB column name for a Worker attribute name."""
     return _ATTR_TO_COL.get(attr, attr)
+
+
+def _to_utc(value: Any) -> Any:
+    """Normalise a datetime to UTC so ``last_heartbeat`` is stored as a true
+    INSTANT, not an offset-dropped wall-clock.
+
+    ``DateTime(timezone=True)`` round-trips to a NAIVE local wall-clock on
+    SQLite (and other naive-offset dialects), silently dropping any non-UTC
+    offset -- which corrupts the monotonic ``greatest(stored, incoming)``
+    comparison (a "newer" 11:00-05:00 = 16:00Z would compare below a stored
+    12:00Z). Callers that do not run values through the event ingestor's
+    ``_parse_datetime`` (notably the WS heartbeat path,
+    ``frame_router._handle_heartbeat``, which passes ``last_flush_at`` straight
+    through) would otherwise store a non-normalised heartbeat (round-10 external
+    MED). ``astimezone`` can OverflowError on a boundary-year offset (mirrors
+    the event-path guard), so fall back to now(). Non-datetime values pass
+    through unchanged.
+
+    SCOPE (round-11 external LOW): this normalises NEW writes. A value already
+    stored on SQLite BEFORE this wave with a non-UTC offset kept only its naive
+    wall-clock (the offset is gone and unrecoverable), so the monotonic
+    comparison can reject a correct new UTC heartbeat until real UTC passes that
+    stale wall-clock. This affects worker LIVENESS only, is bounded by the old
+    offset, self-corrects on the first heartbeat past it, and does not occur on
+    Postgres (timestamptz stores true UTC) or for a conforming agent (which
+    emits UTC). Repairing a legacy row would need an upgrade-time reset of
+    ``workers.last_heartbeat``; deferred as not worth a migration.
+    """
+    if isinstance(value, datetime):
+        try:
+            return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+        except (OverflowError, OSError, ValueError):
+            return datetime.now(UTC)
+    return value
 
 
 #: Event kinds we count per worker. Source of truth is
@@ -125,6 +159,13 @@ class WorkerRepository(BaseRepository[Worker]):
         """
         from sqlalchemy.exc import IntegrityError
 
+        # Normalise last_heartbeat to a UTC instant BEFORE it is stored on
+        # either the INSERT or the UPDATE branch (round-10 external MED): a
+        # non-UTC value stored on SQLite loses its offset and later corrupts the
+        # monotonic comparison. Copy so the caller's dict is not mutated.
+        if "last_heartbeat" in updates:
+            updates = {**updates, "last_heartbeat": _to_utc(updates["last_heartbeat"])}
+
         result = await self.session.execute(
             select(Worker).where(
                 Worker.project_id == project_id,
@@ -161,6 +202,25 @@ class WorkerRepository(BaseRepository[Worker]):
             else:
                 return row
         for key, value in updates.items():
+            # MONOTONIC last_heartbeat (round-9 external MED): a re-flushed OLD
+            # batch must not rewind a live worker's heartbeat. Mirrors the CASE
+            # guard on the bulk ON CONFLICT path. Normalise tz BEFORE comparing:
+            # the incoming occurred_at is always tz-aware (UTC) but the stored
+            # value comes back tz-NAIVE on SQLite (and other naive-offset
+            # dialects), so a bare ``<`` would raise "can't compare offset-naive
+            # and offset-aware datetimes" and abort the update (round-9
+            # re-review). Both are UTC, so coerce naive -> aware-UTC.
+            if (
+                key == "last_heartbeat"
+                and value is not None
+                and existing.last_heartbeat is not None
+            ):
+                stored = existing.last_heartbeat
+                if stored.tzinfo is None:
+                    stored = stored.replace(tzinfo=UTC)
+                incoming = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+                if incoming < stored:
+                    continue
             setattr(existing, key, value)
         await self.session.flush()
         return existing
@@ -261,7 +321,9 @@ class WorkerRepository(BaseRepository[Worker]):
                 if col == "state":
                     continue
                 if col in r:
-                    row_payload[col] = r[col]
+                    # Normalise last_heartbeat to a UTC instant before it is
+                    # stored / compared (round-10 external MED).
+                    row_payload[col] = _to_utc(r[col]) if col == "last_heartbeat" else r[col]
                     present_update_cols.add(col)
             # ``state`` is always present (we just defaulted it) but
             # we only want to OVERWRITE on conflict if the caller
@@ -295,7 +357,26 @@ class WorkerRepository(BaseRepository[Worker]):
         update_cols: dict[str, Any] = {}
         for col in present_update_cols:
             db_col = _to_col(col)
-            update_cols[db_col] = getattr(stmt.excluded, db_col)
+            if db_col == "last_heartbeat":
+                # MONOTONIC (round-9 external MED): keep the greater of the
+                # stored and incoming heartbeat so a reconnect that re-flushes
+                # an OLD buffered batch (all duplicates, carrying stale
+                # occurred_at) cannot rewind a live worker's last_heartbeat and
+                # trip a false offline sweep / alert. Other columns (e.g.
+                # state) still overwrite so a live duplicate keeps the worker
+                # ONLINE. Portable CASE (no Postgres-only greatest()).
+                update_cols[db_col] = case(
+                    (
+                        or_(
+                            Worker.last_heartbeat.is_(None),
+                            Worker.last_heartbeat < stmt.excluded.last_heartbeat,
+                        ),
+                        stmt.excluded.last_heartbeat,
+                    ),
+                    else_=Worker.last_heartbeat,
+                )
+            else:
+                update_cols[db_col] = getattr(stmt.excluded, db_col)
 
         if not update_cols:
             # Nothing to update on conflict - degenerate case where

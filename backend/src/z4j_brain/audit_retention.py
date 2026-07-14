@@ -376,6 +376,12 @@ class AuditRetentionSweeper:
                 if rows < batch_size:
                     break
 
+        # Record the HMAC-chain prune boundary so `z4j audit verify`
+        # does not permanently false-positive on the first surviving row
+        # once retention has deleted the genesis row. (1.7 audit R2.)
+        if total:
+            await self._record_prune_watermark()
+
         self._last_deleted = total
         self._total_deleted += total
         # Write last_run_at LAST so a /metrics scrape that
@@ -463,6 +469,39 @@ class AuditRetentionSweeper:
             )
             await session.commit()
             return result.rowcount or 0
+
+    async def _record_prune_watermark(self) -> None:
+        """Advance the audit HMAC-chain prune watermark after a sweep.
+
+        Retention deletes the oldest rows, INCLUDING the genesis row
+        (``prev_row_hmac IS NULL``). Without a watermark the chain
+        verifier then flags the first surviving row -- which now carries
+        a non-NULL ``prev_row_hmac`` -- as a truncation MISMATCH forever.
+        We record the prune boundary, the ``row_hmac`` of the newest row
+        just deleted, which equals the oldest surviving row's
+        ``prev_row_hmac`` (the deleted set is a contiguous oldest-first
+        prefix; see ``AuditLogRepository.get_oldest_prev_row_hmac``), into
+        the ``z4j_meta`` watermark. The verifier accepts a first
+        surviving row whose ``prev_row_hmac`` matches it, while a genuine
+        tamper (a deleted MIDDLE row or an altered ``row_hmac``) still
+        fails.
+
+        Deriving the boundary from the surviving row keeps the DELETE SQL
+        untouched and behaves identically on Postgres and SQLite. If the
+        sweep emptied the table, the next audit row re-anchors as a NULL
+        genesis, so no watermark is needed and any prior value is left
+        untouched.
+        """
+        assert self._db is not None
+        from z4j_brain.persistence.repositories import AuditLogRepository
+
+        async with self._db.session() as session:
+            repo = AuditLogRepository(session)
+            boundary = await repo.get_oldest_prev_row_hmac()
+            if boundary is None:
+                return
+            await repo.set_prune_watermark(boundary)
+            await session.commit()
 
     # ------------------------------------------------------------------
     # agent_status_history sweep (1.5.0+)

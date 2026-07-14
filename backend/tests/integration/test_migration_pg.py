@@ -123,13 +123,14 @@ _Z4J_TABLES_THAT_MUST_BE_GONE = (
     "export_jobs",
     "user_preferences",
     "project_config",
-    # 1.7 rule engine: dropped by v1_7_automation_rules.downgrade() on the
-    # way down to base.
+    # 1.7 rule engine: dropped by the consolidated v1_7_schema.downgrade()
+    # (its _down_automation_rules step) on the way down to base.
     "automation_rules",
-    # 1.7 automation firing outbox: dropped by
-    # v1_7_automation_firing_outbox.downgrade() on the way to base.
+    # 1.7 automation firing outbox: dropped by v1_7_schema.downgrade()
+    # (its _down_automation_firing_outbox step) on the way to base.
     "automation_firing_outbox",
-    # 1.7 durable misfire dedup: dropped by v1_7_misfire_alerts.downgrade().
+    # 1.7 durable misfire dedup: dropped by v1_7_schema.downgrade()
+    # (its _down_misfire_alerts step).
     "misfire_alerts",
 )
 
@@ -618,13 +619,17 @@ class TestMigrationRoundTrip:
         migrated_engine: AsyncEngine,
         integration_settings: Settings,
     ) -> None:
-        """The 1.7 kill-switch migration is bidirectional at the COLUMN
-        level: ``projects.automation_enabled`` drops on a single-step
-        downgrade (head -> v1_7_automation_rules) and returns on re-upgrade.
+        """The 1.7 kill-switch change is bidirectional at the COLUMN level:
+        ``projects.automation_enabled`` drops when the consolidated
+        ``v1_7_schema`` migration is downgraded to the v1_6_6 floor (the
+        whole 1.7 delta, which includes the kill-switch column) and returns
+        on re-upgrade.
 
         Complements the full base round-trip above by exercising the
-        ADD/DROP COLUMN migration in isolation (a column drop is a
-        different Postgres code path from a table drop).
+        ADD/DROP COLUMN path specifically (a column drop is a different
+        Postgres code path from a table drop). The thirteen dev-time 1.7
+        migrations are now one atomic revision, so the only downgrade
+        boundary below the kill-switch column is the v1_6_6 floor.
         """
         from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -654,11 +659,12 @@ class TestMigrationRoundTrip:
         await migrated_engine.dispose()
         assert await _column_exists() is True
 
-        # One step back drops just the column, leaving automation_rules.
+        # Downgrade the whole 1.7 delta to the v1_6_6 floor: the
+        # kill-switch column is dropped along with the rest of the delta.
         await _run_alembic(
             integration_settings,
             "downgrade",
-            "v1_7_automation_rules",
+            "v1_6_6_scrub_worker_conf",
         )
         assert await _column_exists() is False
 
@@ -671,41 +677,52 @@ class TestMigrationRoundTrip:
         migrated_engine: AsyncEngine,
         integration_settings: Settings,
     ) -> None:
-        """Populated-DB round-trip across ``v1_7_schedule_fires_partition``.
+        """Populated-DB round-trip across the consolidated ``v1_7_schema``.
 
-        The partition migration recreates ``schedule_fires`` as a
-        RANGE-partitioned table and copies every row across with an
-        explicit column list (upgrade), then copies back into the
-        plain table (downgrade). The structural tests above prove the
-        SHAPE survives; this test proves REAL rows survive both copies
-        with identical values:
+        The consolidated migration's partition step recreates
+        ``schedule_fires`` as a RANGE-partitioned table and copies every
+        row across with an explicit column list (upgrade), then copies
+        back into the plain table (downgrade). The structural tests above
+        prove the SHAPE survives; this test proves REAL rows survive both
+        copies with identical values.
 
-        1. downgrade below the partition migration (plain table; the
-           ``triggered_by_user_id`` column already exists because 0008
-           sits further down the chain),
+        The thirteen dev-time 1.7 migrations are now one atomic revision,
+        so the only downgrade boundary below the partition step is the
+        v1_6_6 floor. At that floor ``schedule_fires`` is the plain
+        (id)-PK table WITHOUT ``triggered_by_user_id`` -- that column is
+        added by the same consolidated migration, so we seed the twelve
+        floor columns and let the migration backfill the new column NULL
+        as it partitions:
+
+        1. downgrade the whole 1.7 delta to the v1_6_6 floor (plain
+           schedule_fires, no ``triggered_by_user_id``),
         2. seed a project + user + schedule + fires whose
            ``scheduled_for`` spans a recent daily partition, a future
            daily, and a row old enough that it can ONLY land in the
            DEFAULT partition,
         3. upgrade head (runs the recreate-and-copy) and assert every
-           column of every row survived and each row landed in the
-           expected partition,
-        4. downgrade below the partition migration again (copy-back)
-           and assert the plain table holds the same rows.
+           seeded column of every row survived, the new
+           ``triggered_by_user_id`` column is present and backfilled
+           NULL, and each row landed in the expected partition,
+        4. downgrade to the v1_6_6 floor again (copy-back) and assert the
+           plain table holds the same rows.
         """
         import uuid
         from datetime import UTC, datetime, timedelta
 
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        # Mirrors the migration's explicit _COLUMNS copy list.
+        # The twelve schedule_fires columns present at the v1_6_6 floor
+        # (the migration's _COLUMNS copy list MINUS triggered_by_user_id,
+        # which the same consolidated migration adds). snapshot() selects
+        # exactly these so it works against both the plain floor table and
+        # the partitioned head table.
         fire_columns = (
             "id",
             "fire_id",
             "schedule_id",
             "project_id",
             "command_id",
-            "triggered_by_user_id",
             "status",
             "scheduled_for",
             "fired_at",
@@ -729,7 +746,6 @@ class TestMigrationRoundTrip:
             {
                 "id": uuid.uuid4(),
                 "fire_id": uuid.uuid4(),
-                "triggered_by_user_id": None,
                 "status": "delivered",
                 "scheduled_for": now,
                 "fired_at": now + timedelta(milliseconds=250),
@@ -741,7 +757,6 @@ class TestMigrationRoundTrip:
             {
                 "id": uuid.uuid4(),
                 "fire_id": uuid.uuid4(),
-                "triggered_by_user_id": user_id,
                 "status": "failed",
                 "scheduled_for": now - timedelta(days=3),
                 "fired_at": now - timedelta(days=3) + timedelta(seconds=2),
@@ -755,7 +770,6 @@ class TestMigrationRoundTrip:
                 # partition is the only possible landing spot.
                 "id": uuid.uuid4(),
                 "fire_id": uuid.uuid4(),
-                "triggered_by_user_id": user_id,
                 "status": "acked_success",
                 "scheduled_for": now - timedelta(days=400),
                 "fired_at": now - timedelta(days=400, milliseconds=-5),
@@ -767,7 +781,6 @@ class TestMigrationRoundTrip:
             {
                 "id": uuid.uuid4(),
                 "fire_id": uuid.uuid4(),
-                "triggered_by_user_id": None,
                 "status": "buffered",
                 "scheduled_for": now + timedelta(days=3),
                 "fired_at": now,
@@ -780,14 +793,14 @@ class TestMigrationRoundTrip:
         default_partition_fire_id = fires[2]["id"]
 
         def expected_row(fire: dict) -> tuple:
-            """The full column tuple a survived row must equal."""
+            """The seeded column tuple a survived row must equal (the twelve
+            floor columns, in ``fire_columns`` order)."""
             return (
                 fire["id"],
                 fire["fire_id"],
                 schedule_id,
                 project_id,
                 None,  # command_id stays NULL throughout
-                fire["triggered_by_user_id"],
                 fire["status"],
                 fire["scheduled_for"],
                 fire["fired_at"],
@@ -834,13 +847,15 @@ class TestMigrationRoundTrip:
             finally:
                 await eng.dispose()
 
-        # The fixture upgraded to head. Step below the partition
-        # migration so schedule_fires is the plain (id)-PK table.
+        # The fixture upgraded to head. Downgrade the whole 1.7 delta to
+        # the v1_6_6 floor so schedule_fires is the plain (id)-PK table
+        # without triggered_by_user_id (the only boundary below the
+        # partition step now that the 1.7 chain is one revision).
         await migrated_engine.dispose()
         await _run_alembic(
             integration_settings,
             "downgrade",
-            "v1_7_automation_firing_outbox",
+            "v1_6_6_scrub_worker_conf",
         )
 
         seed_engine = create_async_engine(
@@ -881,9 +896,8 @@ class TestMigrationRoundTrip:
                         text(
                             f"INSERT INTO schedule_fires ({col_list}) VALUES "
                             "(:id, :fire_id, :schedule_id, :project_id, NULL, "
-                            ":triggered_by_user_id, :status, :scheduled_for, "
-                            ":fired_at, :acked_at, :latency_ms, :error_code, "
-                            ":error_message)",
+                            ":status, :scheduled_for, :fired_at, :acked_at, "
+                            ":latency_ms, :error_code, :error_message)",
                         ),
                         {
                             **fire,
@@ -920,12 +934,35 @@ class TestMigrationRoundTrip:
                 f"fire {fire['id']} expected in a daily partition, found in {placement[fire['id']]}"
             )
 
-        # Downgrade back below the partition migration: the copy-back
+        # The consolidated migration also ADDED triggered_by_user_id as
+        # part of the same upgrade: it must exist on the partitioned table
+        # and be backfilled NULL for every copied row.
+        add_col_engine = create_async_engine(
+            integration_settings.database_url,
+            future=True,
+        )
+        try:
+            async with add_col_engine.connect() as conn:
+                nulls = (
+                    await conn.execute(
+                        text(
+                            "SELECT count(*) FROM schedule_fires "
+                            "WHERE triggered_by_user_id IS NOT NULL",
+                        ),
+                    )
+                ).scalar_one()
+            assert nulls == 0, (
+                "upgrade should backfill triggered_by_user_id NULL on every copied row"
+            )
+        finally:
+            await add_col_engine.dispose()
+
+        # Downgrade the whole 1.7 delta to the v1_6_6 floor: the copy-back
         # into the plain table must preserve the rows too.
         await _run_alembic(
             integration_settings,
             "downgrade",
-            "v1_7_automation_firing_outbox",
+            "v1_6_6_scrub_worker_conf",
         )
 
         post_kind, post_rows, post_placement = await snapshot()

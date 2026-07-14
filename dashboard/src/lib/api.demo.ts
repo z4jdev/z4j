@@ -126,6 +126,14 @@ const ROUTES: RouteHandler[] = [
   { method: "POST", pattern: /^\/api\/v1\/auth\/logout$/, handler: handleLogout },
   { method: "GET", pattern: /^\/api\/v1\/auth\/me$/, handler: serveJson("auth/me.json") },
 
+  // MFA / trust shell (Settings > Security). The demo admin is already
+  // enrolled, so the Security tab renders the "MFA is on" panel with a
+  // recovery-code count and a trusted-devices list rather than the
+  // enroll flow. enroll/disable/verify/regenerate are mutations, so
+  // they fall through to the demo-toast (no real second factor changes).
+  { method: "GET", pattern: /^\/api\/v1\/auth\/mfa\/status$/, handler: serveJson("auth/mfa-status.json") },
+  { method: "GET", pattern: /^\/api\/v1\/auth\/mfa\/trusted-devices$/, handler: serveJson("auth/mfa-trusted-devices.json") },
+
   // Server health pill in the topbar (refetches every 30s; if this
   // 404s the pill flips to "z4j offline" which makes the demo feel
   // half-broken).
@@ -150,6 +158,12 @@ const ROUTES: RouteHandler[] = [
         headers: { "content-type": "application/json" },
       }),
   },
+
+  // Admin > Schedulers fleet. Brain fans out to each enrolled
+  // z4j-scheduler /info; the demo serves a fixed two-instance fleet
+  // (both healthy) so the scheduler-reliability surface renders with
+  // content instead of an empty header.
+  { method: "GET", pattern: /^\/api\/v1\/schedulers$/, handler: serveJson("system/schedulers.json") },
 
   // Home (landing dashboard for the global view)
   { method: "GET", pattern: /^\/api\/v1\/home\/summary$/, handler: serveJson("home/summary.json") },
@@ -253,6 +267,21 @@ const ROUTES: RouteHandler[] = [
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/memberships/,
     handler: (_req, match) => serveJson(`projects/${match[1]}/memberships.json`)(),
+  },
+
+  // Automation rule engine (per-project). rules returns a paged
+  // envelope ({ items: [...] }); settings returns the kill-switch
+  // state. Create / edit / delete / reset-circuit are mutations, so
+  // they surface the demo-toast rather than persisting.
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/automation\/rules/,
+    handler: (_req, match) => serveJson(`projects/${match[1]}/automation-rules.json`)(),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/automation\/settings/,
+    handler: (_req, match) => serveJson(`projects/${match[1]}/automation-settings.json`)(),
   },
   {
     method: "GET",

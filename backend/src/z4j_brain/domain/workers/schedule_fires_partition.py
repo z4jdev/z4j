@@ -1,7 +1,7 @@
 """``ScheduleFiresPartitionWorker`` -- daily partition manager for
 ``schedule_fires`` (Postgres only).
 
-After migration ``v1_7_schedule_fires_partition`` makes ``schedule_fires``
+After migration ``v1_7_schema`` makes ``schedule_fires``
 PARTITION BY RANGE (scheduled_for), this worker owns the going-forward
 lifecycle:
 

@@ -12,11 +12,20 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from z4j_brain.persistence.models import AuditLog
+from z4j_brain.persistence.models import AuditLog, Z4JMeta
 from z4j_brain.persistence.repositories._base import BaseRepository
+
+#: ``z4j_meta`` key under which the audit-log retention sweeper stores the
+#: HMAC-chain prune watermark: the ``row_hmac`` of the newest row it has
+#: deleted. The chain verifier accepts a first surviving row whose
+#: ``prev_row_hmac`` equals this value instead of demanding the
+#: NULL-genesis anchor (which retention legitimately deletes), so an
+#: enabled retention policy no longer produces a permanent false-positive
+#: chain-truncation MISMATCH.
+AUDIT_PRUNE_WATERMARK_KEY = "audit_prune_watermark"
 
 
 class AuditLogRepository(BaseRepository[AuditLog]):
@@ -102,6 +111,37 @@ class AuditLogRepository(BaseRepository[AuditLog]):
             )
             .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
             .limit(limit),
+        )
+        return list(result.scalars().all())
+
+    async def list_misfires_for_project(
+        self,
+        *,
+        project_id: UUID,
+        limit: int = 50,
+    ) -> list[AuditLog]:
+        """Return a project's ``scheduler.misfire_detected`` rows across
+        ALL its schedules, newest first.
+
+        Backs the project-wide misfire view + the ``z4j misfires`` CLI.
+        Mirrors :meth:`list_misfires_for_schedule` but drops the
+        per-schedule ``target_id`` filter, so the result spans every
+        schedule in the project; each returned row's ``target_id`` IS its
+        own schedule id. The ``(project_id, action)`` filter keeps it
+        project-scoped + IDOR-safe. Bounded by ``limit`` (hard-capped at
+        1000 so a caller -- including the CLI, which hits this repo
+        directly, not via the API's own cap -- can never runaway-scan the
+        hot audit table).
+        """
+        capped = max(1, min(1000, limit))
+        result = await self.session.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.project_id == project_id,
+                AuditLog.action == "scheduler.misfire_detected",
+            )
+            .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
+            .limit(capped),
         )
         return list(result.scalars().all())
 
@@ -280,5 +320,57 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         result = await self.session.execute(stmt.limit(chunk))
         return list(result.scalars().all())
 
+    # ------------------------------------------------------------------
+    # Retention prune watermark (1.7 security hardening)
+    # ------------------------------------------------------------------
 
-__all__ = ["AuditLogRepository"]
+    async def get_oldest_prev_row_hmac(self) -> str | None:
+        """Return the ``prev_row_hmac`` of the oldest surviving audit row.
+
+        Chain order is ``(occurred_at, id)`` ascending. After an
+        oldest-first retention prune this value is, by construction, the
+        ``row_hmac`` of the newest row the sweep deleted: the deleted set
+        is a contiguous prefix (rows are deleted strictly oldest-first by
+        ``occurred_at``, which is monotonic with insert order), so the
+        oldest survivor's chain-predecessor is exactly the last-deleted
+        row. The retention sweeper reads this back and stores it as the
+        prune watermark. Returns None when the table is empty or the
+        oldest surviving row is a NULL-genesis row (no prune has crossed
+        it, so no watermark is needed).
+        """
+        stmt = (
+            select(AuditLog.prev_row_hmac)
+            .order_by(AuditLog.occurred_at.asc(), AuditLog.id.asc())
+            .limit(1)
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def get_prune_watermark(self) -> str | None:
+        """Return the stored audit-prune watermark, or None if unset.
+
+        Read by the chain verifiers (``AuditService.verify_chain`` and
+        the ``z4j audit verify`` CLI). Stored in the existing ``z4j_meta``
+        key-value table under :data:`AUDIT_PRUNE_WATERMARK_KEY`; no
+        dedicated table.
+        """
+        stmt = select(Z4JMeta.value).where(Z4JMeta.key == AUDIT_PRUNE_WATERMARK_KEY)
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def set_prune_watermark(self, row_hmac: str) -> None:
+        """Upsert the audit-prune watermark into ``z4j_meta``.
+
+        Idempotent single-row upsert: update the value in place when the
+        key exists, insert it otherwise. Only one retention sweep runs at
+        a time (Postgres advisory lock; SQLite single-writer), so the
+        update-then-insert needs no further concurrency guard.
+        ``z4j_meta.updated_at`` doubles as the ``pruned_at`` timestamp.
+        """
+        result = await self.session.execute(
+            update(Z4JMeta).where(Z4JMeta.key == AUDIT_PRUNE_WATERMARK_KEY).values(value=row_hmac),
+        )
+        if int(result.rowcount or 0) == 0:
+            self.session.add(Z4JMeta(key=AUDIT_PRUNE_WATERMARK_KEY, value=row_hmac))
+            await self.session.flush()
+
+
+__all__ = ["AUDIT_PRUNE_WATERMARK_KEY", "AuditLogRepository"]

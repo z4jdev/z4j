@@ -197,6 +197,148 @@ class TestBulkUpsertConflict:
         assert a.last_heartbeat is not None
         assert a.concurrency == 8
 
+    async def test_last_heartbeat_compared_as_utc_instant_not_wallclock(
+        self,
+        session: AsyncSession,
+        project: Project,
+    ) -> None:
+        """Round-10 external MED: a non-UTC last_heartbeat (e.g. from the WS
+        heartbeat path's ``last_flush_at``) must be normalised to a UTC INSTANT
+        before the monotonic comparison, else SQLite drops the offset and
+        compares wall-clocks. The reviewer's exact probe: stored 12:00Z; a
+        newer 11:00-05:00 (=16:00Z) was wrongly SKIPPED and an older 13:00+05:00
+        (=08:00Z) wrongly ADVANCED the value."""
+        from datetime import timezone
+
+        repo = WorkerRepository(session)
+        utc_12 = datetime(2026, 7, 12, 12, 0, 0, tzinfo=UTC)
+        later_instant = datetime(2026, 7, 12, 11, 0, 0, tzinfo=timezone(timedelta(hours=-5)))
+        earlier_instant = datetime(2026, 7, 12, 13, 0, 0, tzinfo=timezone(timedelta(hours=5)))
+
+        def _as_utc(dt: datetime) -> datetime:
+            return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+        async def _hb() -> datetime:
+            w = (
+                await session.execute(select(Worker).where(Worker.name == "celery@a"))
+            ).scalar_one()
+            return _as_utc(w.last_heartbeat)
+
+        await repo.upsert_from_events_bulk(
+            [_row(project.id, name="celery@a", last_heartbeat=utc_12)]
+        )
+        await session.commit()
+
+        # 11:00-05:00 == 16:00Z is a LATER instant -> must ADVANCE.
+        await repo.upsert_from_events_bulk(
+            [_row(project.id, name="celery@a", last_heartbeat=later_instant)]
+        )
+        await session.commit()
+        assert await _hb() == datetime(2026, 7, 12, 16, 0, 0, tzinfo=UTC)
+
+        # 13:00+05:00 == 08:00Z is an EARLIER instant -> must be SKIPPED.
+        await repo.upsert_from_events_bulk(
+            [_row(project.id, name="celery@a", last_heartbeat=earlier_instant)]
+        )
+        await session.commit()
+        assert await _hb() == datetime(2026, 7, 12, 16, 0, 0, tzinfo=UTC)
+
+    async def test_last_heartbeat_is_monotonic_never_rewinds(
+        self,
+        session: AsyncSession,
+        project: Project,
+    ) -> None:
+        """Round-9 external MED: a reconnect that re-flushes an OLD buffered
+        batch (stale occurred_at) must NOT rewind a live worker's
+        last_heartbeat -- otherwise the worker trips a false offline sweep.
+        The ON CONFLICT keeps the greater of stored vs incoming; OTHER columns
+        (state) still update so a live duplicate keeps the worker ONLINE."""
+        repo = WorkerRepository(session)
+        t_new = datetime.now(UTC)
+        t_old = t_new - timedelta(minutes=10)
+
+        async def _hb() -> object:
+            w = (
+                await session.execute(select(Worker).where(Worker.name == "celery@a"))
+            ).scalar_one()
+            return w.last_heartbeat, w.state
+
+        # First: a fresh heartbeat at t_new. Capture the readback as the
+        # reference (SQLite returns naive datetimes, so == against the aware
+        # input would spuriously fail).
+        await repo.upsert_from_events_bulk(
+            [_row(project.id, name="celery@a", last_heartbeat=t_new, state=WorkerState.ONLINE)]
+        )
+        await session.commit()
+        after_new, _ = await _hb()
+        assert after_new is not None
+
+        # Then: a replay of an OLD batch (t_old < t_new) also marking ONLINE.
+        await repo.upsert_from_events_bulk(
+            [_row(project.id, name="celery@a", last_heartbeat=t_old, state=WorkerState.ONLINE)]
+        )
+        await session.commit()
+        after_replay, state_replay = await _hb()
+        # last_heartbeat did NOT rewind ...
+        assert after_replay == after_new
+        # ... but the (non-monotonic) state column still refreshed.
+        assert state_replay == WorkerState.ONLINE
+
+        # A genuinely-newer heartbeat DOES advance it.
+        t_newer = t_new + timedelta(minutes=5)
+        await repo.upsert_from_events_bulk(
+            [_row(project.id, name="celery@a", last_heartbeat=t_newer)]
+        )
+        await session.commit()
+        after_newer, _ = await _hb()
+        assert after_newer > after_new
+
+    async def test_per_row_fallback_last_heartbeat_monotonic_tz_safe(
+        self,
+        session: AsyncSession,
+        project: Project,
+    ) -> None:
+        """Round-9 re-review: the per-row fallback's monotonic guard compares
+        the incoming (tz-AWARE) occurred_at against the stored last_heartbeat,
+        which comes back tz-NAIVE on SQLite. A bare ``<`` would raise
+        "can't compare offset-naive and offset-aware datetimes" and abort the
+        heartbeat update; the guard must normalise tz and stay monotonic.
+
+        Seed the stored value tz-NAIVE (the SQLite readback shape) so the
+        UPDATE-branch comparison exercises the mixed-tz path directly."""
+        repo = WorkerRepository(session)
+        t_new_naive = datetime(2026, 7, 12, 12, 0, 0)  # tz-naive, as SQLite returns
+        t_old_aware = datetime(2026, 7, 12, 11, 50, 0, tzinfo=UTC)  # older, tz-aware
+        t_newer_aware = datetime(2026, 7, 12, 12, 5, 0, tzinfo=UTC)  # newer, tz-aware
+
+        # INSERT branch with a NAIVE stored heartbeat.
+        await repo.upsert_from_event(
+            project_id=project.id,
+            engine="celery",
+            name="celery@a",
+            updates={"state": WorkerState.ONLINE, "last_heartbeat": t_new_naive},
+        )
+        await session.flush()
+
+        # UPDATE branch, OLD (aware) heartbeat vs the NAIVE stored one: must NOT
+        # raise a naive-vs-aware TypeError, and must NOT rewind.
+        w = await repo.upsert_from_event(
+            project_id=project.id,
+            engine="celery",
+            name="celery@a",
+            updates={"state": WorkerState.ONLINE, "last_heartbeat": t_old_aware},
+        )
+        assert w.last_heartbeat == t_new_naive  # not rewound
+
+        # A genuinely-newer (aware) heartbeat DOES advance it (also mixed-tz).
+        w = await repo.upsert_from_event(
+            project_id=project.id,
+            engine="celery",
+            name="celery@a",
+            updates={"state": WorkerState.ONLINE, "last_heartbeat": t_newer_aware},
+        )
+        assert w.last_heartbeat == t_newer_aware
+
     async def test_partial_update_preserves_unspecified_columns(
         self,
         session: AsyncSession,

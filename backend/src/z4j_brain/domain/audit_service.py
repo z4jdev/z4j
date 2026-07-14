@@ -400,6 +400,8 @@ class AuditService:
     def verify_chain(
         self,
         rows: list[AuditLog],
+        *,
+        prune_watermark: str | None = None,
     ) -> tuple[bool, list[str]]:
         """Walk a sequence of rows and verify the HMAC chain.
 
@@ -412,6 +414,17 @@ class AuditService:
         ``(ok, reasons)`` where ``reasons`` is a list of human-
         readable descriptions of any chain break.
 
+        ``prune_watermark`` is the ``row_hmac`` of the newest row the
+        retention sweeper has deleted (stored in ``z4j_meta``; see
+        ``AuditLogRepository.get_prune_watermark``). When retention has
+        legitimately deleted the genesis row, the first surviving row's
+        ``prev_row_hmac`` equals this watermark, so we accept it as the
+        new anchor instead of flagging a truncation. A first row whose
+        ``prev_row_hmac`` is neither NULL nor the watermark is still
+        flagged -- that is a real prefix truncation. When no prune has
+        occurred (``prune_watermark`` is None) the NULL-genesis anchor is
+        required exactly as before.
+
         A clean, fully-anchored chain returns ``(True, [])``.
         """
         reasons: list[str] = []
@@ -421,8 +434,10 @@ class AuditService:
         # DB write access who deletes the first N rows would produce
         # a "valid" trimmed chain because the verifier silently
         # re-anchors at whatever row is fed in first. (1.6.0
-        # round-2 audit High-3.)
-        if rows and rows[0].prev_row_hmac is not None:
+        # round-2 audit High-3.) Exception: after retention prunes the
+        # genesis row, the first survivor legitimately anchors on the
+        # stored prune watermark rather than NULL. (1.7 audit R2.)
+        if rows and rows[0].prev_row_hmac is not None and rows[0].prev_row_hmac != prune_watermark:
             reasons.append(
                 f"row {rows[0].id}: input does not start at the "
                 f"genesis row (prev_row_hmac is not NULL); the "

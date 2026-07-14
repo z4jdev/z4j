@@ -1,0 +1,38 @@
+{
+  "items": [
+    {
+      "id": "a4000000-0000-4000-b000-000000000001",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "name": "Alert on schedule misfire",
+      "is_enabled": true,
+      "dry_run": false,
+      "trigger": "schedule.misfired",
+      "conditions": {},
+      "actions": [{ "type": "notify" }],
+      "max_executions_per_window": 50,
+      "window_seconds": 3600,
+      "cb_tripped": false,
+      "cb_execution_count": 0,
+      "created_by": "00000000-0000-4000-8000-000000000001",
+      "created_at_offset_s": -5184000,
+      "updated_at_offset_s": -3600
+    },
+    {
+      "id": "a4000000-0000-4000-b000-000000000002",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "name": "Retry transient worker failures",
+      "is_enabled": true,
+      "dry_run": true,
+      "trigger": "task.failed",
+      "conditions": { "engine": "rq" },
+      "actions": [{ "type": "retry" }],
+      "max_executions_per_window": 100,
+      "window_seconds": 1800,
+      "cb_tripped": false,
+      "cb_execution_count": 5,
+      "created_by": "00000000-0000-4000-8000-000000000001",
+      "created_at_offset_s": -1209600,
+      "updated_at_offset_s": -900
+    }
+  ]
+}

@@ -396,6 +396,92 @@ class TestPasswordResetConfirmR5M2:
 
 
 @pytest.mark.asyncio
+class TestPasswordResetFailedAudit:
+    """1.7 audit R4: a FAILED password-reset confirm must leave a
+    durable ``auth.password_reset_failed`` audit row.
+
+    Pre-fix the invalid / expired / replayed-token path raised before
+    any ``AuditService.record``, so brute-force + replay attempts
+    against the reset endpoint were invisible in the chained log. The
+    response body stays the generic ``invalid_or_expired`` so token
+    existence is not leaked.
+    """
+
+    async def _failed_reset_rows(self, brain_app):  # type: ignore[no-untyped-def]
+        from sqlalchemy import select
+        from z4j_brain.persistence.models import AuditLog
+
+        db = brain_app.state.db
+        async with db.session() as s:
+            return (
+                (
+                    await s.execute(
+                        select(AuditLog).where(
+                            AuditLog.action == "auth.password_reset_failed",
+                        ),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    async def test_invalid_token_writes_failure_audit_row(
+        self,
+        client,
+        brain_app,
+    ) -> None:
+        r = await client.post(
+            "/api/v1/auth/password-reset/confirm",
+            json={
+                "token": "totally-invalid-token-abcdef0123456789",
+                "new_password": "brand-new-pw-1!Aa",
+            },
+        )
+        assert r.status_code == 404
+        assert r.json()["message"] == "invalid_or_expired"
+
+        rows = await self._failed_reset_rows(brain_app)
+        assert len(rows) == 1
+        assert rows[0].result == "failure"
+        assert rows[0].outcome == "deny"
+        assert rows[0].audit_metadata.get("reason") == "invalid_or_expired_token"
+
+    async def test_successful_reset_writes_no_failure_row(
+        self,
+        client,
+        settings: Settings,
+        brain_app,
+        seeded_user,
+    ) -> None:
+        """The happy path records ``auth.password_reset_completed`` only;
+        no spurious failure row is emitted.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from z4j_brain.api.auth import _hash_reset_token
+        from z4j_brain.persistence.models import PasswordResetToken
+
+        plaintext = "valid-reset-token-abcdef0123456789xyz"
+        db = brain_app.state.db
+        async with db.session() as s:
+            s.add(
+                PasswordResetToken(
+                    user_id=seeded_user.id,
+                    token_hash=_hash_reset_token(plaintext, settings),
+                    expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                ),
+            )
+            await s.commit()
+
+        r = await client.post(
+            "/api/v1/auth/password-reset/confirm",
+            json={"token": plaintext, "new_password": "brand-new-pw-1!Aa"},
+        )
+        assert r.status_code == 200, r.text
+        assert await self._failed_reset_rows(brain_app) == []
+
+
+@pytest.mark.asyncio
 class TestLockout:
     async def test_lockout_triggers_after_threshold(
         self,

@@ -1355,12 +1355,47 @@ async def password_reset_confirm(
     )
     claimed = (await db_session.execute(claim_stmt)).first()
     if claimed is None:
+        # Failed reset (invalid / expired / already-consumed / replayed
+        # token) must leave a durable audit row -- previously this path
+        # raised before any AuditService.record, so brute-force + replay
+        # attempts against the reset endpoint were invisible in the
+        # chained log (audit 1.7 R4). Commit BEFORE raising so the
+        # raise's rollback does not discard the row (the same
+        # commit-before-raise discipline the MFA verify-failure paths
+        # use). The response body stays the generic ``invalid_or_expired``
+        # so token existence is not leaked.
+        await AuditService(settings).record(
+            audit_log,
+            action="auth.password_reset_failed",
+            target_type="user",
+            result="failure",
+            outcome="deny",
+            source_ip=ip,
+            metadata={"reason": "invalid_or_expired_token"},
+        )
+        await db_session.commit()
         raise NotFoundError("invalid_or_expired")
     claimed_token_id, claimed_user_id = claimed
 
     users_repo = UserRepository(db_session)
     user = await users_repo.get(claimed_user_id)
     if user is None:
+        # The token was valid + just consumed above, but the user row is
+        # gone (deleted between mint and confirm). Record the failed
+        # reset -- the claimed user id is known here -- then commit so the
+        # consumed token AND the audit row both persist before the raise.
+        await AuditService(settings).record(
+            audit_log,
+            action="auth.password_reset_failed",
+            target_type="user",
+            target_id=str(claimed_user_id),
+            result="failure",
+            outcome="deny",
+            user_id=claimed_user_id,
+            source_ip=ip,
+            metadata={"reason": "user_missing"},
+        )
+        await db_session.commit()
         raise NotFoundError("invalid_or_expired")
 
     hasher = PasswordHasher(settings)
@@ -1389,6 +1424,17 @@ async def password_reset_confirm(
         user.id,
         reason="password_reset",
     )
+    # Drop every "remember this device" row as well. A reset is a recovery
+    # from account compromise, and a trusted-device row lets the NEXT login
+    # skip the second factor for its full 30-day TTL -- so a row an attacker
+    # planted during a transient session compromise would survive the reset
+    # and keep bypassing MFA. change_password already wipes these for the
+    # same reason; the reset path omitted it, leaving an MFA-bypass
+    # persistence hole (audit 1.7 round-2). Server-side deletion invalidates
+    # the trust regardless of which browser holds the cookie.
+    from z4j_brain.persistence.repositories import TrustedDeviceRepository
+
+    await TrustedDeviceRepository(db_session).delete_all_for_user(user.id)
     # Invalidate any OTHER unconsumed reset tokens for this user
     # so a minted-but-unused token from an earlier request can't
     # second-reset the account.

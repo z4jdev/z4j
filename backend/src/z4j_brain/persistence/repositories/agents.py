@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain.persistence.enums import AgentState
@@ -312,17 +312,27 @@ class AgentRepository(BaseRepository[Agent]):
         *,
         when: datetime | None = None,
     ) -> None:
-        """Bump ``last_seen_at`` to ``when`` (defaults to now).
+        """Bump ``last_seen_at`` to ``when`` (defaults to now), MONOTONICALLY.
 
         Added in v1.0.15 (P-1) so :class:`EventIngestor.ingest_batch`
         can carry the ``max(occurred_at)`` from the batch instead of
         racing with wall-clock ``now()`` on every batch. Single
         indexed UPDATE either way.
+
+        The update never moves ``last_seen_at`` BACKWARDS (round-9 external
+        MED): ``ingest_batch`` passes the batch ``max(occurred_at)``, so a
+        reconnect that re-flushes an OLD buffered batch (all duplicates) would
+        otherwise rewind a live agent's ``last_seen_at`` to that stale
+        timestamp and trip a false offline sweep / alert. The WHERE guard
+        makes the write a no-op unless it advances the clock; for a plain
+        ``when=None`` heartbeat (``now()``), the guard is satisfied normally.
         """
+        resolved = when or datetime.now(UTC)
         await self.session.execute(
             update(Agent)
             .where(Agent.id == agent_id)
-            .values(last_seen_at=when or datetime.now(UTC)),
+            .where(or_(Agent.last_seen_at.is_(None), Agent.last_seen_at < resolved))
+            .values(last_seen_at=resolved),
         )
 
     async def sweep_offline(self, *, cutoff: datetime) -> int:

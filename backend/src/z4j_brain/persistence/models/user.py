@@ -10,7 +10,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, LargeBinary, String
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from z4j_brain.persistence.base import Base
@@ -134,6 +142,41 @@ class User(PKMixin, TimestampsMixin, Base):
     #: enrolled.
     mfa_enforcement_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Per-account MFA lockout + TOTP anti-replay (1.7 security hardening).
+    # ------------------------------------------------------------------
+    #: Consecutive failed-MFA-code counter (NIST 800-63B 5.2.2). The
+    #: per-IP verify throttle alone is bypassable by IP rotation and by
+    #: horizontal replicas, so we ALSO limit per account: after
+    #: ``Z4J_MFA_LOCKOUT_THRESHOLD`` wrong codes across /auth/mfa/verify,
+    #: /enroll-complete, and /disable the account is locked. Mirrors
+    #: ``failed_login_count``. Reset to 0 by any successful verification.
+    failed_mfa_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    #: When set and in the future, MFA code entry is refused for this
+    #: user (the lock boundary written at the failure threshold). Cleared
+    #: by a successful verification. Mirrors ``locked_until``.
+    mfa_locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    #: TOTP single-use high-water mark (RFC 6238 5.2, anti-replay). The
+    #: 30s time-step counter of the last accepted TOTP code. A code that
+    #: matches a step <= this value has already been spent and is
+    #: rejected as a replay, closing the ~90s window in which a captured
+    #: code was otherwise reusable. NULL means no code has been consumed
+    #: yet (a fresh or just-completed enrollment starts a clean counter
+    #: space). ``BigInteger`` because the step counter is
+    #: ``epoch_seconds // 30``.
+    last_totp_counter: Mapped[int | None] = mapped_column(
+        BigInteger,
         nullable=True,
     )
 

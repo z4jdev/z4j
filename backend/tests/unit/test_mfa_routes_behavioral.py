@@ -907,6 +907,15 @@ class TestDisableFlow:
                 enrolled=True,
             )
             await login(client, "frank@example.com")
+            # Pass the second factor first: the baseline enforce_mfa_verified
+            # gate requires an MFA-enrolled user's session to be verified before
+            # it can reach MFA-management routes such as /disable.
+            vr = await client.post(
+                "/api/v1/auth/mfa/verify",
+                json={"code": current_totp_code(secret)},
+                headers=csrf_header(client, settings),
+            )
+            assert vr.status_code == 200, vr.text
 
             r = await client.post(
                 "/api/v1/auth/mfa/disable",

@@ -8,7 +8,7 @@ debug "did the 3am cron actually fire?"
 One row per fire_id. The scheduler's idempotency-keyed retries
 collapse here via the unique constraint on fire_id.
 
-POSTGRES PARTITIONING (migration ``v1_7_schedule_fires_partition``): on
+POSTGRES PARTITIONING (migration ``v1_7_schema``): on
 Postgres this table is RANGE-partitioned by ``scheduled_for``, so its real
 PK is ``(id, scheduled_for)`` and its real unique is
 ``(fire_id, scheduled_for)`` -- Postgres requires the partition key in both.

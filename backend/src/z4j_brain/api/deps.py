@@ -668,6 +668,76 @@ def enforce_mfa_enrollment(
     )
 
 
+#: Routes a cookie session may reach when its owner HAS MFA enrolled but the
+#: session has not yet passed the second factor (``mfa_verified_at`` is NULL):
+#: exactly the routes needed to COMPLETE verification (submit a TOTP or
+#: recovery code at ``/auth/mfa/verify``), plus whoami / mfa-status so the
+#: dashboard can render the prompt, plus logout. Everything else is refused
+#: until the second factor is presented. Matched against the same
+#: ``request.scope["route"].path`` template as the enrollment allowlist.
+_MFA_VERIFICATION_EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/auth/mfa/verify"),
+        ("POST", "/api/v1/auth/logout"),
+        ("GET", "/api/v1/auth/me"),
+        ("GET", "/api/v1/auth/mfa/status"),
+    },
+)
+
+
+def enforce_mfa_verified(
+    *,
+    request: Request,
+    user: User,
+    session_row: SessionRow,
+    settings: Settings,
+) -> None:
+    """Raise 403 ``mfa_reverify_required`` for a password-only session.
+
+    Request-time enforcement of the second factor. A user with MFA
+    ENROLLED whose current cookie session has never passed the second
+    factor (``session.mfa_verified_at`` is NULL) is holding a
+    password-only session: login issues the session cookie at the
+    password step and only RETURNS ``mfa_required`` as a hint, so without
+    this gate that session could reach the whole control plane on the
+    password alone -- defeating the advertised "a stolen password is
+    useless without the TOTP code" guarantee (docs/MFA-DESIGN.md). This
+    gate refuses every route except the small allowlist a session needs to
+    COMPLETE verification, so an attacker who ignores the client-side
+    prompt gains nothing beyond whoami/logout.
+
+    Reuses the ``mfa_reverify_required`` code (the same one the per-action
+    step-up gate raises) so the dashboard's existing "prompt for a TOTP
+    code and retry" handler resolves it: the user submits the code to
+    ``/auth/mfa/verify`` (allowlisted), which stamps ``mfa_verified_at``,
+    and the retried request passes. Any non-allowlisted route that trips
+    this therefore self-heals through the same prompt.
+
+    No-op for a user with no ACTIVE MFA (never enrolled, or mid-first-
+    enrollment with ``mfa_enrolled_at`` NULL) -- those are the enrollment
+    policy's concern, not this gate. The trust-cookie login branch stamps
+    ``mfa_verified_at`` at login, so a remembered device passes. Cheap:
+    pure computation over the already-loaded user + session rows.
+
+    Bearer-only (API-key) requests never reach this gate -- they carry no
+    cookie session, so ``get_optional_session`` returns None and the
+    caller resolves via the API-key path, which does not call this.
+    """
+    has_mfa = user.mfa_secret_encrypted is not None and user.mfa_enrolled_at is not None
+    if not has_mfa:
+        return
+    if session_row.mfa_verified_at is not None:
+        return
+    route = request.scope.get("route")
+    path_template = getattr(route, "path", request.url.path)
+    if (request.method.upper(), path_template) in _MFA_VERIFICATION_EXEMPT_ROUTES:
+        return
+    raise MfaReverifyRequiredError(
+        "second-factor verification required before this account can be used",
+        details={"reason": "mfa_verification_required"},
+    )
+
+
 async def get_current_user(
     request: Request,
     resolved: tuple[SessionRow, User] | None = Depends(get_optional_session),
@@ -689,6 +759,12 @@ async def get_current_user(
         enforce_mfa_enrollment(
             request=request,
             user=resolved[1],
+            settings=settings,
+        )
+        enforce_mfa_verified(
+            request=request,
+            user=resolved[1],
+            session_row=resolved[0],
             settings=settings,
         )
         return resolved[1]
@@ -715,6 +791,12 @@ async def get_current_session(
     enforce_mfa_enrollment(
         request=request,
         user=resolved[1],
+        settings=settings,
+    )
+    enforce_mfa_verified(
+        request=request,
+        user=resolved[1],
+        session_row=resolved[0],
         settings=settings,
     )
     return resolved[0]
@@ -875,6 +957,7 @@ async def require_csrf(
 __all__ = [
     "enforce_fresh_mfa",
     "enforce_mfa_enrollment",
+    "enforce_mfa_verified",
     "get_audit_log_repo",
     "get_audit_service",
     "get_auth_service",

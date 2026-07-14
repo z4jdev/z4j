@@ -122,10 +122,11 @@ async def test_events_route_advertises_identity_too(
         json={"frames": ["not-a-real-frame"]},
         headers={"Authorization": f"Bearer {AGENT_TOKEN}"},
     )
-    # The garbage frame is rejected, but auth succeeded, so the
+    # The garbage frame is dropped-and-acked (deterministic parse failure,
+    # R8: accepted so the agent stops looping), but auth succeeded, so the
     # identity headers must be present on the 200.
     assert r.status_code == 200
-    assert r.json()["rejected"] == 1
+    assert r.json()["accepted"] == 1
     assert r.headers["X-Z4J-Agent-Id"] == str(agent_ids["agent_id"])
     assert r.headers["X-Z4J-Project-Id"] == str(agent_ids["project_id"])
 

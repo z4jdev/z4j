@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain.persistence.models import User
@@ -227,6 +227,131 @@ class UserRepository(BaseRepository[User]):
                 last_failed_login_at=None,
                 last_failed_login_ip=None,
             ),
+        )
+
+    # ------------------------------------------------------------------
+    # MFA lockout bookkeeping (1.7 security hardening)
+    # ------------------------------------------------------------------
+
+    async def record_mfa_failure(
+        self,
+        user_id: UUID,
+        *,
+        lockout_threshold: int,
+        lockout_duration_seconds: int,
+    ) -> User | None:
+        """Atomically increment the failed-MFA counter + maybe lock.
+
+        Per-account failed-MFA lockout (NIST 800-63B 5.2.2). Direct
+        analogue of :meth:`record_failed_login`: a single-statement
+        ``UPDATE ... SET failed_mfa_count = failed_mfa_count + 1`` so two
+        attacker workers (or replicas) hammering the same account's
+        /verify, /enroll-complete, or /disable endpoint can never race to
+        lose an increment. When the bumped count reaches
+        ``lockout_threshold`` we set ``mfa_locked_until = now + duration``.
+
+        Implemented as an atomic increment + conditional lock on Postgres
+        (increment with RETURNING, then a guarded second UPDATE) and a
+        read-then-write fallback on SQLite (single-writer, serialised at
+        the sqlite-lock level), exactly like ``record_failed_login``.
+
+        Returns the updated User row, or None if user_id is unknown.
+        """
+        now = datetime.now(UTC)
+        locked_boundary = now + timedelta(seconds=lockout_duration_seconds)
+
+        bind = self.session.get_bind() if hasattr(self.session, "get_bind") else None
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+
+        if dialect_name == "postgresql":
+            stmt = (
+                update(User)
+                .where(User.id == user_id)
+                .values(failed_mfa_count=User.failed_mfa_count + 1)
+                .returning(User.failed_mfa_count)
+            )
+            result = await self.session.execute(stmt)
+            row = result.first()
+            if row is None:
+                return None
+            new_count = int(row[0])
+            if new_count >= lockout_threshold:
+                await self.session.execute(
+                    update(User).where(User.id == user_id).values(mfa_locked_until=locked_boundary),
+                )
+            await self.session.flush()
+            return await self.get(user_id)
+
+        # SQLite fallback: single-writer DB serialises writes, so the
+        # read-then-write is atomic enough for the dev + single-process
+        # deployments SQLite targets (mirrors ``record_failed_login``).
+        user = await self.get(user_id)
+        if user is None:
+            return None
+        user.failed_mfa_count = user.failed_mfa_count + 1
+        if user.failed_mfa_count >= lockout_threshold:
+            user.mfa_locked_until = locked_boundary
+        await self.session.flush()
+        return user
+
+    async def reset_mfa_failures(self, user_id: UUID) -> None:
+        """Clear the failed-MFA counter and any active MFA lock.
+
+        Called after a successful MFA verification: a good code proves
+        possession of the second factor, so the brute-force counter
+        resets. Mirrors :meth:`reset_failed_login`.
+        """
+        await self.session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(
+                failed_mfa_count=0,
+                mfa_locked_until=None,
+            ),
+        )
+
+    async def consume_totp_counter(self, user_id: UUID, *, counter: int) -> bool:
+        """Atomically claim a TOTP time-step as single-use (anti-replay).
+
+        RFC 6238 5.2: a TOTP code stays valid across the +/-1 step
+        acceptance window (~90s), so a captured code is replayable until
+        it ages out. This closes that window with a single monotonic-
+        advance UPDATE::
+
+            UPDATE users SET last_totp_counter = :counter
+             WHERE id = :id
+               AND (last_totp_counter IS NULL OR last_totp_counter < :counter)
+
+        ``rowcount == 1`` -> the step was unused (or strictly older than
+        this one) and is now claimed: accept. ``rowcount == 0`` -> the
+        step was already consumed (an equal-or-newer counter is stored):
+        the caller rejects it as a replay. One statement, no read-then-
+        write, so two parallel verifies presenting the same code can
+        never both win.
+        """
+        result = await self.session.execute(
+            update(User)
+            .where(
+                User.id == user_id,
+                or_(
+                    User.last_totp_counter.is_(None),
+                    User.last_totp_counter < counter,
+                ),
+            )
+            .values(last_totp_counter=counter),
+        )
+        return int(result.rowcount or 0) == 1
+
+    async def reset_totp_counter(self, user_id: UUID) -> None:
+        """Reset the TOTP anti-replay high-water mark to NULL.
+
+        Called on enroll-complete (a NEW secret starts a fresh counter
+        space -- otherwise a stale high-water mark from a prior
+        enrollment could pre-reject the first post-enroll code) and on
+        disable (MFA removed). See :meth:`consume_totp_counter`.
+        """
+        await self.session.execute(
+            update(User).where(User.id == user_id).values(last_totp_counter=None),
         )
 
     async def update_profile(

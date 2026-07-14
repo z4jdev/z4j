@@ -31,7 +31,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from z4j_brain.domain.audit_service import AuditService
@@ -183,6 +183,36 @@ async def _delete_row(settings: Settings, row_id: uuid.UUID) -> None:
         await engine.dispose()
 
 
+async def _row_hmac(settings: Settings, row_id: uuid.UUID) -> str:
+    """Return the stored ``row_hmac`` of a row."""
+    engine = create_async_engine(settings.database_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            res = await conn.execute(select(AuditLog.row_hmac).where(AuditLog.id == row_id))
+            return res.scalar_one()
+    finally:
+        await engine.dispose()
+
+
+async def _set_prune_watermark(settings: Settings, row_hmac: str) -> None:
+    """Simulate a legitimate retention prune by recording its watermark."""
+    from z4j_brain.persistence.models import Z4JMeta
+    from z4j_brain.persistence.repositories.audit_log import AUDIT_PRUNE_WATERMARK_KEY
+
+    engine = create_async_engine(settings.database_url, future=True)
+    try:
+        factory = sessionmaker(  # type: ignore[call-overload]
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        async with factory() as session:
+            session.add(Z4JMeta(key=AUDIT_PRUNE_WATERMARK_KEY, value=row_hmac))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
 def _run_verify(*extra: str) -> int:
     """Invoke the real console-script path: ``z4j audit verify``."""
     from z4j_brain.cli import main
@@ -281,6 +311,49 @@ class TestAuditVerifyCLI:
         err = capsys.readouterr().err
         assert rc == 2
         assert "--limit must be between 1 and 5000" in err
+
+
+class TestAuditVerifyCLIPruneWatermark:
+    """After retention deletes the genesis row, the CLI must accept the
+    first surviving row's non-null prev_row_hmac when it matches the
+    stored prune watermark (1.7 audit R2) -- while still catching a
+    genuine tamper.
+    """
+
+    def test_pruned_genesis_with_watermark_verifies_clean(
+        self,
+        cli_settings: Settings,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ids = asyncio.run(_seed_chain(cli_settings, 5))
+        genesis_hmac = asyncio.run(_row_hmac(cli_settings, ids[0]))
+        # A legitimate prune deletes the genesis row and records its
+        # row_hmac as the watermark.
+        asyncio.run(_set_prune_watermark(cli_settings, genesis_hmac))
+        asyncio.run(_delete_row(cli_settings, ids[0]))
+        rc = _run_verify()
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "MISMATCHES" not in out
+        assert "chain truncation" not in out
+        assert "verified: 4" in out
+
+    def test_tamper_after_pruned_genesis_still_fails(
+        self,
+        cli_settings: Settings,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ids = asyncio.run(_seed_chain(cli_settings, 6))
+        genesis_hmac = asyncio.run(_row_hmac(cli_settings, ids[0]))
+        asyncio.run(_set_prune_watermark(cli_settings, genesis_hmac))
+        asyncio.run(_delete_row(cli_settings, ids[0]))
+        # A field edit on a SURVIVING row (no re-sign) is still caught.
+        asyncio.run(_tamper_row(cli_settings, ids[3]))
+        rc = _run_verify()
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "MISMATCHES" in out
+        assert str(ids[3]) in out
 
 
 class TestAuditVerifyCLIPaging:

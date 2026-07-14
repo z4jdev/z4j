@@ -341,12 +341,15 @@ class AuthService:
         user_agent: str | None,
         event_id: uuid.UUID,
     ) -> None:
-        """Lockout bookkeeping + backoff sleep + audit row.
+        """Lockout bookkeeping + audit row for a failed login.
 
-        Runs after the constant-time path has finished, so it does
-        NOT contribute to the timing oracle. The audit row is
-        always written; the sleep happens after the audit but
-        before the caller raises.
+        Runs after ``_hold_minimum_response_time`` has equalized the
+        response duration. It performs NO account-existence-dependent
+        delay that would reintroduce a timing oracle: the per-account
+        exponential backoff sleep was removed (it leaked whether the
+        account existed). The remaining lockout write happens only on
+        the existing-account branch and is bounded; the audit row is
+        always written.
         """
         # Reason metadata used in the audit row but NEVER in the
         # response.
@@ -365,20 +368,24 @@ class AuthService:
         )
 
         if user is not None:
-            updated = await users.record_failed_login(
+            # Lockout bookkeeping only. The per-account exponential backoff
+            # sleep that used to run here was REMOVED: its duration was
+            # derived from this account's ``failed_login_count``, a value
+            # that exists ONLY for real accounts, so a wrong password against
+            # an existing account slept ~1s+ while a non-existent email
+            # returned at the response-hold floor. That observable delta is a
+            # username-enumeration timing oracle that defeats the dummy-hash +
+            # ``_hold_minimum_response_time`` constant-time login above (audit
+            # 1.7 round-1, auth-session LOW). Online brute force stays bounded
+            # by the account lockout applied inside ``record_failed_login`` and
+            # by the per-IP login rate limiter; neither depends on, nor leaks,
+            # whether the submitted account exists.
+            await users.record_failed_login(
                 user.id,
                 ip=ip,
                 lockout_threshold=self._settings.login_lockout_threshold,
                 lockout_duration_seconds=self._settings.login_lockout_duration_seconds,
             )
-            if updated is not None:
-                await asyncio.sleep(
-                    min(
-                        self._settings.login_backoff_max_seconds,
-                        self._settings.login_backoff_base_seconds
-                        * (2 ** min(updated.failed_login_count, 16)),
-                    ),
-                )
 
         # Audit row. Email is always recorded for forensics; the
         # stdout log path respects ``log_login_email``.

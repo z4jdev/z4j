@@ -412,6 +412,59 @@ async def list_schedule_misfires(
     return [_misfire_payload(r, schedule.id) for r in rows]
 
 
+@router.get(
+    "/misfires",
+    response_model=list[ScheduleMisfirePublic],
+)
+async def list_project_misfires(
+    slug: str,
+    limit: int = 50,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+) -> list[ScheduleMisfirePublic]:
+    """Return every detected misfire across the project's schedules,
+    newest first.
+
+    Authorization: VIEWER. Same rationale as the per-schedule view
+    (:func:`list_schedule_misfires`): a misfire is system-detected
+    operational data about schedules the member can already read, so it
+    is safe for any project member. Unlike that endpoint this spans ALL
+    of the project's schedules, so each row carries its own
+    ``schedule_id`` read from the audit row's ``target_id`` (the misfire
+    detector writes that column as the schedule id).
+
+    This route is declared BEFORE ``GET /{schedule_id}`` so the literal
+    ``/misfires`` segment is matched instead of being coerced into the
+    ``schedule_id`` path param.
+
+    Limit capped at 1000; the dashboard defaults to a short window.
+    """
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.repositories import AuditLogRepository
+
+    if limit < 1 or limit > 1000:
+        limit = max(1, min(1000, limit))
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.VIEWER,
+    )
+
+    rows = await AuditLogRepository(db_session).list_misfires_for_project(
+        project_id=project.id,
+        limit=limit,
+    )
+    # Each row spans a different schedule; the schedule id is the audit
+    # row's target_id (written by the misfire detector).
+    return [_misfire_payload(r, uuid.UUID(str(r.target_id))) for r in rows]
+
+
 @router.get("/{schedule_id}", response_model=SchedulePublic)
 async def get_schedule(
     slug: str,

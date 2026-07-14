@@ -1,0 +1,1 @@
+import{t as e}from"./utils-C_i6GM-Y.js";import{o as t}from"./query-3UfHzu-Z.js";var n=t(),r={sm:`space-y-4`,md:`space-y-6`,lg:`space-y-8`};function i({children:t,spacing:i=`md`,className:a}){return(0,n.jsx)(`div`,{className:e(r[i],`p-4 md:p-6`,a),children:t})}export{i as t};

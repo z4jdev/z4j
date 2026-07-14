@@ -25,6 +25,7 @@ import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain import __version__
@@ -82,7 +83,20 @@ async def check_and_update_schema_version(session: AsyncSession) -> None:
         session.add(Z4JMeta(key="schema_version", value=code_version))
         session.add(Z4JMeta(key="installed_at", value=datetime.now(UTC).isoformat()))
         session.add(Z4JMeta(key="last_upgraded_at", value=datetime.now(UTC).isoformat()))
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Multi-worker first-boot race: several uvicorn workers can
+            # reach this branch before any of them commits, and all but
+            # one lose on the z4j_meta.key unique constraint. That is
+            # benign (the winner stored the exact same version), so roll
+            # back and continue quietly rather than surfacing a full
+            # IntegrityError traceback on every fresh multi-worker boot.
+            await session.rollback()
+            logger.debug(
+                "z4j schema version already initialized by a peer worker",
+            )
+            return
         logger.info(
             "z4j schema version initialized (version=%s)",
             code_version,

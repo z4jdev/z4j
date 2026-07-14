@@ -49,9 +49,26 @@ const env = {
   VITE_Z4J_DEMO_MODE: "true",
   NODE_ENV: "production",
 };
+// ``--config.verify-deps-before-run=false``: pnpm 11 no longer reads the
+// ``pnpm.onlyBuiltDependencies`` allowlist from package.json (it moved to
+// pnpm-workspace.yaml), so with ``ignore-scripts``/``enable-pre-post-scripts``
+// on, esbuild's build script counts as "ignored" and pnpm's pre-run
+// deps-status reconcile aborts ``pnpm exec`` with ERR_PNPM_IGNORED_BUILDS
+// before vite ever runs. node_modules is already installed and in policy;
+// the reconcile is spurious, so we skip it -- the same posture the
+// sites/z4j-demo/.npmrc already documents for the wrapper's own pnpm calls.
+// This only skips the pre-run check; it does NOT enable any install script.
 const result = spawnSync(
   "pnpm",
-  ["exec", "vite", "build", "--outDir", "dist-demo", "--emptyOutDir"],
+  [
+    "--config.verify-deps-before-run=false",
+    "exec",
+    "vite",
+    "build",
+    "--outDir",
+    "dist-demo",
+    "--emptyOutDir",
+  ],
   {
     cwd: dashboardRoot,
     env,

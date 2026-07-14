@@ -317,6 +317,48 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         help="print the count of rows that WOULD be rewritten and exit",
     )
 
+    # misfires: project-wide misfire history. The shell-side twin of the
+    # VIEWER-facing REST endpoint -- lists the project's
+    # ``scheduler.misfire_detected`` audit rows across ALL its schedules,
+    # newest first, so an operator can triage missed slots without the
+    # dashboard. ``--json`` mirrors the machine-readable output shape the
+    # other read-only commands (e.g. ``upgrade``) use for scripting.
+    misfires_cmd = sub.add_parser(
+        "misfires",
+        help="list a project's detected schedule misfires (newest first)",
+        description=(
+            "List the project's detected schedule misfires, newest "
+            "first. A misfire is a system-detected 'this enabled "
+            "schedule missed its expected slot past the grace window' "
+            "event, recorded by the brain's misfire detector. The rows "
+            "span every schedule in the project; each row shows its own "
+            "schedule id.\n"
+            "\n"
+            "Default output is an aligned text table; pass --json for a "
+            "machine-readable array."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    misfires_cmd.add_argument(
+        "--project",
+        "--slug",
+        dest="project",
+        required=True,
+        metavar="SLUG",
+        help="project slug (URL-safe identifier)",
+    )
+    misfires_cmd.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="max rows to return (default: 50, capped at 1000)",
+    )
+    misfires_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON instead of a text table",
+    )
+
     # bootstrap-admin: imperative first-boot admin creation.
     # Complements the Z4J_BOOTSTRAP_ADMIN_* env var path so operators
     # who prefer a CLI step (or want to re-create an admin after
@@ -744,6 +786,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
 
     if args.command == "projects":
         return _run_projects(args)
+
+    if args.command == "misfires":
+        return _run_misfires(args)
 
     if args.command == "bootstrap-admin":
         return _run_bootstrap_admin(args)
@@ -2784,6 +2829,141 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def _misfire_cli_record(row: Any) -> dict[str, Any]:
+    """Flatten one ``scheduler.misfire_detected`` audit row for CLI output.
+
+    ``target_id`` is the schedule id (the misfire detector writes it as
+    such); the remaining fields come from the detector's audit metadata,
+    the same shape the REST projection reads.
+    """
+    meta = row.audit_metadata or {}
+    return {
+        "schedule_id": str(row.target_id),
+        "detected_at": row.occurred_at.isoformat() if row.occurred_at else None,
+        "name": meta.get("name"),
+        "engine": meta.get("engine"),
+        "kind": meta.get("kind"),
+        "expected_fire_at": meta.get("expected_fire_at"),
+        "lateness_seconds": meta.get("lateness_seconds"),
+        "grace_seconds": meta.get("grace_seconds"),
+    }
+
+
+def _print_misfires_table(slug: str, records: list[dict[str, Any]]) -> None:
+    """Render the flattened misfire records as an aligned text table.
+
+    Mirrors the column-width computation used by ``z4j upgrade`` so the
+    two read-only tables look consistent.
+    """
+    if not records:
+        print(f"z4j misfires: no misfires recorded for project {slug!r}.")  # noqa: T201
+        return
+
+    cols: tuple[tuple[str, str], ...] = (
+        ("SCHEDULE ID", "schedule_id"),
+        ("DETECTED AT", "detected_at"),
+        ("NAME", "name"),
+        ("ENGINE", "engine"),
+        ("KIND", "kind"),
+        ("LATE(s)", "lateness_seconds"),
+        ("GRACE(s)", "grace_seconds"),
+    )
+
+    def _cell(rec: dict[str, Any], key: str) -> str:
+        val = rec.get(key)
+        return "" if val is None else str(val)
+
+    widths = {
+        key: max(len(header), *(len(_cell(rec, key)) for rec in records)) + 2
+        for header, key in cols
+    }
+    header_line = "".join(f"{header:<{widths[key]}}" for header, key in cols)
+    print(header_line)  # noqa: T201
+    print("-" * len(header_line))  # noqa: T201
+    for rec in records:
+        print("".join(f"{_cell(rec, key):<{widths[key]}}" for _, key in cols))  # noqa: T201
+    print()  # noqa: T201
+    print(  # noqa: T201
+        f"{len(records)} misfire(s) for project {slug!r} (newest first).",
+    )
+
+
+def _run_misfires(args: argparse.Namespace) -> int:
+    """Dispatch ``z4j misfires --project <slug>``.
+
+    Prints the project's ``scheduler.misfire_detected`` history across
+    ALL its schedules, newest first -- the shell-side twin of the
+    VIEWER-facing REST endpoint. ``--json`` emits a machine-readable
+    object (``{"project": <slug>, "misfires": [...]}``) for scripting;
+    the default is an aligned text table.
+
+    Exit codes:
+        0 - success (including an empty history)
+        2 - misconfiguration (bad slug / project not found / DB down)
+    """
+    import asyncio
+
+    _bootstrap_env_for_management_commands()
+
+    from z4j_brain.persistence.database import (
+        DatabaseManager,
+        create_engine_from_settings,
+    )
+    from z4j_brain.persistence.repositories import (
+        AuditLogRepository,
+        ProjectRepository,
+    )
+    from z4j_brain.settings import Settings
+
+    try:
+        settings = Settings()  # type: ignore[call-arg]
+    except Exception as exc:
+        print(  # noqa: T201
+            f"z4j misfires: failed to load settings: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Cap the fetch at the CLI boundary too (the repo caps as well;
+    # belt-and-suspenders keeps a scripted --limit from surprising).
+    limit = max(1, min(1000, args.limit))
+
+    async def _run() -> int:
+        engine = create_engine_from_settings(settings)
+        db = DatabaseManager(engine)
+        try:
+            async with db.session() as session:
+                project = await ProjectRepository(session).get_by_slug(args.project)
+                if project is None:
+                    print(  # noqa: T201
+                        f"z4j misfires: project {args.project!r} not found",
+                        file=sys.stderr,
+                    )
+                    return 2
+                rows = await AuditLogRepository(session).list_misfires_for_project(
+                    project_id=project.id,
+                    limit=limit,
+                )
+                # Materialise inside the session so attribute access does
+                # not touch a closed/expired session after dispose.
+                records = [_misfire_cli_record(r) for r in rows]
+        finally:
+            await db.dispose()
+
+        if args.json:
+            import json as _json
+
+            print(  # noqa: T201
+                _json.dumps({"project": args.project, "misfires": records}),
+            )
+            return 0
+
+        _print_misfires_table(args.project, records)
+        return 0
+
+    return asyncio.run(_run())
+
+
 def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit chain verification
     """Stream the audit log and report any HMAC mismatches.
 
@@ -2849,6 +3029,13 @@ def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit 
         try:
             async with db.session() as session:
                 repo = AuditLogRepository(session)
+                # Retention prune boundary: after the sweeper deletes the
+                # genesis row, the first surviving row legitimately
+                # anchors on this stored watermark rather than a NULL
+                # prev_row_hmac. Absent a prune it is None and the
+                # NULL-genesis anchor is required exactly as before.
+                # (1.7 audit R2.)
+                prune_watermark = await repo.get_prune_watermark()
                 while True:
                     rows = await repo.stream_for_verify(
                         chunk=page_size,
@@ -2860,7 +3047,10 @@ def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit 
                     for row in rows:
                         if first_row:
                             first_row = False
-                            if row.prev_row_hmac is not None:
+                            if (
+                                row.prev_row_hmac is not None
+                                and row.prev_row_hmac != prune_watermark
+                            ):
                                 mismatches.append(
                                     f"{row.id} (chain truncation: first "
                                     f"row has non-null prev_row_hmac; "

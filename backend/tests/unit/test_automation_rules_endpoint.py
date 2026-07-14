@@ -117,7 +117,16 @@ async def _seed_actor(
             expires_at=datetime.now(UTC) + timedelta(hours=1),
             ip_at_issue="127.0.0.1",
             user_agent_at_issue="test",
-            mfa_verified_at=datetime.now(UTC) if (mfa and mfa_fresh) else None,
+            # mfa_fresh=False is a STALE-but-verified session: MFA was verified
+            # at login (so it passes the baseline enforce_mfa_verified gate) but
+            # is old enough that the per-action require_fresh_mfa step-up still
+            # fires. Distinct from a never-verified session (None), which the
+            # baseline gate refuses outright.
+            mfa_verified_at=(
+                datetime.now(UTC)
+                if (mfa and mfa_fresh)
+                else (datetime.now(UTC) - timedelta(days=1) if mfa else None)
+            ),
         )
         s.add(session_row)
         await s.commit()

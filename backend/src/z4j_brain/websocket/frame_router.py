@@ -23,6 +23,7 @@ import asyncio
 import time
 from collections import deque
 from datetime import UTC, datetime
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -39,8 +40,44 @@ from z4j_core.transport.frames import (
     RegistryDeltaFrame,
 )
 
+from z4j_brain.domain.event_ingestor import _is_transient_db_error
+
+
+class FrameOutcome(Enum):
+    """Per-frame dispatch verdict -- the brain's instruction to the agent.
+
+    The agent's delivery bookkeeping only needs to know CONFIRM vs RETRY,
+    but the brain distinguishes DURABLE from DROP for its own logging.
+
+    * ``DURABLE``   -- the frame was stored / handled. The agent confirms
+      (deletes) it. Wire signal: WS ack sent / long-poll counts it accepted.
+    * ``TRANSIENT`` -- a transient failure (deadlock, pool timeout, a
+      transiently-skipped event). The agent RETRIES: WS ack withheld (the
+      watchdog re-sends) / long-poll counts it rejected. The frame is
+      deliverable and will succeed on a later attempt.
+    * ``DROP``      -- a PERMANENT / deterministic failure (a content or
+      schema error, a malformed payload, a non-DB bug). Re-sending the
+      identical frame fails identically forever, so the brain drops it and
+      tells the agent to confirm (delete) it too -- otherwise the agent
+      would loop on it, pinning its buffer head and overflow-losing later
+      frames. Logged loudly. Wire signal is the SAME as DURABLE (confirm);
+      only the brain-side bookkeeping differs.
+    """
+
+    DURABLE = "durable"
+    TRANSIENT = "transient"
+    DROP = "drop"
+
+    @property
+    def confirmed(self) -> bool:
+        """True when the agent should delete the frame (DURABLE or DROP)."""
+        return self is not FrameOutcome.TRANSIENT
+
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
     from z4j_brain.domain import CommandDispatcher, EventIngestor
     from z4j_brain.domain.notifications import NotificationService
@@ -233,6 +270,18 @@ def _log_notify_task_exception(task: asyncio.Task[object]) -> None:
 # fits inside the window.
 _AGENT_STATUS_RATE_PER_MINUTE = 12
 
+# command_ack / command_result frames are fire-and-forget on the WS
+# transport: the agent deletes the outbound control frame the instant it
+# is written, so a transient DB failure while persisting the ack/result
+# has no agent-side resend to recover it (unlike event_batch, which the
+# agent retries until the brain confirms durable storage). The brain must
+# therefore own a bounded internal retry for the control-plane persist so
+# a momentary deadlock / serialization failure does not silently drop a
+# command outcome. Permanent failures still fall through to dispatch,
+# which classifies + logs them.
+_CONTROL_FRAME_DB_RETRIES = 3
+_CONTROL_FRAME_RETRY_BACKOFF = 0.1
+
 
 class FrameRouter:
     """Per-connection inbound-frame dispatcher."""
@@ -382,27 +431,37 @@ class FrameRouter:
                     frame_type=getattr(out, "type", None),
                 )
 
-    async def dispatch(self, frame: Frame) -> bool:
+    async def dispatch(self, frame: Frame) -> FrameOutcome:
         """Route ``frame`` to the right service. Never raises.
 
-        Returns ``True`` when the frame was handled without a swallowed
-        exception, ``False`` when a handler raised (the exception is
-        logged and absorbed so the connection survives). For an
-        ``event_batch`` a ``True`` return means the batch DURABLY
-        committed (the handler only returns cleanly after
-        ``session.commit()``), which is exactly the signal the
-        long-poll ``POST /events`` needs: over long-poll the HTTP 200
-        accepted-count IS the acknowledgement, so a swallowed ingest or
-        commit failure must NOT be counted as accepted, or the agent's
-        ``confirm_on_send`` would delete a buffer entry that never
-        persisted (R5-M1). The WebSocket gateway ignores the return and
-        relies on the ack frame instead, so its contract is unchanged.
+        Returns a :class:`FrameOutcome`. For an ``event_batch`` the outcome
+        comes from :meth:`_handle_event_batch`. For a control frame the
+        handler runs and, if it raises, the exception is CLASSIFIED: a
+        transient DB error -> ``TRANSIENT`` (the agent re-sends), a
+        permanent one (a deterministic constraint / data error from an
+        agent-supplied payload, e.g. a NUL byte in a command_result) ->
+        ``DROP`` (the agent confirms + deletes it so it does not loop). A
+        clean run -> ``DURABLE``.
+
+        This 3-state verdict is exactly what the long-poll ``POST /events``
+        accounting needs: over long-poll the HTTP 200 accepted-count IS the
+        acknowledgement, so a TRANSIENT must count rejected (agent retries)
+        while a DURABLE or DROP counts accepted (agent confirms) -- so a
+        deterministic per-frame failure is resolved at the brain instead of
+        wedging the agent's send loop forever (round-8 finding). On the
+        WebSocket path event_batch acks are emitted inside
+        :meth:`_handle_event_batch`; control frames are confirmed on send by
+        the agent, so the gateway ignores this return for them.
+
+        The whole body (INCLUDING the event_batch path) is inside the
+        try/except so ``dispatch`` truly NEVER raises: the WS ingest worker
+        (``gateway.py``) has no per-frame error handling and relies on that
+        contract, so a raise here (e.g. an unexpected error while building an
+        ack) would crash the worker and wedge the connection (R9). An
+        unexpected failure classifies TRANSIENT (agent re-sends) not lost.
         """
         try:
             if isinstance(frame, EventBatchFrame):
-                # The event_batch handler returns its own durability bool
-                # (False when an event was transiently skipped), which IS
-                # the durability signal for this frame.
                 return await self._handle_event_batch(frame)
             if isinstance(frame, HeartbeatFrame):
                 await self._handle_heartbeat(frame)
@@ -424,29 +483,74 @@ class FrameRouter:
                     frame_type=getattr(frame, "type", None),
                 )
         except Exception as exc:
+            outcome = FrameOutcome.TRANSIENT if _is_transient_db_error(exc) else FrameOutcome.DROP
             logger.exception(
-                "z4j frame_router: dispatch crashed; connection survives",
+                "z4j frame_router: control-frame handler raised; connection survives",
                 frame_type=getattr(frame, "type", None),
                 agent_id=str(self._agent_id),
                 project_id=str(self._project_id),
                 error_class=type(exc).__name__,
+                outcome=outcome.value,
             )
-            return False
-        return True
+            return outcome
+        return FrameOutcome.DURABLE
 
     # ------------------------------------------------------------------
     # event_batch
     # ------------------------------------------------------------------
 
-    async def _handle_event_batch(self, frame: EventBatchFrame) -> bool:
-        """Ingest an event batch. Returns True only when the batch is
-        FULLY durable (committed with no transiently-skipped event).
+    def _extract_events(self, frame: EventBatchFrame, cap: int) -> list[dict[str, Any]]:
+        """Extract + cap the event list from an event_batch payload.
 
-        A False return (commit failed, OR the commit succeeded but an
-        event was dropped for a transient DB error) means the agent must
-        re-send: the ack is withheld (WS) and dispatch returns False
-        (long-poll), so no un-stored event is ever evicted on the agent
-        (R6-panel-HIGH). The committed events dedup on the replay.
+        Raises ``TypeError`` on a non-list ``events`` (a WS fast-path frame is
+        ``model_construct``'d, so Pydantic is bypassed and ``events`` may be
+        null / a non-list). The caller runs this INSIDE its try so a malformed
+        payload classifies as a DROP (and the finally still acks it), rather
+        than ``list(non_list)`` silently coercing a str/dict into invalid
+        elements that ingest to nothing yet ack DURABLE (round-9 LOW).
+        """
+        raw_events = frame.payload.events
+        if raw_events is None:
+            # Absent / null == an empty batch (the schema default is an
+            # empty list). Nothing to ingest, commits cleanly -> DURABLE.
+            events: list[dict[str, Any]] = []
+        elif isinstance(raw_events, list):
+            events = raw_events
+        else:
+            raise TypeError(
+                f"event_batch payload.events must be a list, got {type(raw_events).__name__}"
+            )
+        if len(events) > cap:
+            logger.warning(
+                "z4j frame_router: event_batch over cap; trimming",
+                project_id=str(self._project_id),
+                agent_id=str(self._agent_id),
+                received=len(events),
+                cap=cap,
+            )
+            events = events[:cap]
+        return events
+
+    async def _handle_event_batch(self, frame: EventBatchFrame) -> FrameOutcome:
+        """Ingest an event batch. Returns a :class:`FrameOutcome`:
+
+        * ``DURABLE``   -- committed with no transiently-skipped event; the
+          agent confirms (WS ack sent / long-poll counts accepted).
+        * ``TRANSIENT`` -- the commit succeeded but an event was
+          transiently skipped, OR ingest/commit hit a transient DB error
+          (deadlock, pool timeout). The ack is withheld (WS) / the frame
+          counts rejected (long-poll) so the agent re-sends; the committed
+          events dedup on the replay (R6-panel-HIGH).
+        * ``DROP``      -- ingest/commit failed for a PERMANENT reason (a
+          deterministic constraint / data error at commit that recurs on
+          every replay). The batch is dropped-and-acked (logged loudly) so
+          the agent does not loop on it forever; the events in it are lost,
+          which is the bounded cost of not wedging the whole send loop.
+
+        A permanent per-EVENT error is already dropped-and-acked INSIDE
+        ``ingest_batch`` (so the batch stays DURABLE); this ``DROP`` outcome
+        is only for a BATCH-level permanent failure (a deterministic commit
+        error), which is rare.
         """
         # The agent's frame.payload.events list is exactly what
         # EventIngestor expects - a list of dicts with engine /
@@ -461,31 +565,32 @@ class FrameRouter:
 
         # Cap the per-frame
         # event count. The wire-frame validator already enforces
-        # ``max_ws_frame_bytes`` (1 MiB by default), but events are
-        # small JSON dicts so a single 1 MiB frame can carry
-        # ~5_000-10_000 events. Cap to a defensive ceiling so the
-        # downstream notification-evaluation loop (one query per
-        # event) cannot be amplified by a malicious or buggy agent.
-        # The agent's own batcher tops out near 500.
-        event_batch_cap = 1_000
-        events = list(frame.payload.events)
-        if len(events) > event_batch_cap:
-            logger.warning(
-                "z4j frame_router: event_batch over cap; trimming",
-                project_id=str(self._project_id),
-                agent_id=str(self._agent_id),
-                received=len(events),
-                cap=event_batch_cap,
-            )
-            events = events[:event_batch_cap]
+        # ``max_ws_frame_bytes`` (1 MiB by default). The cap is the PROTOCOL
+        # maximum (``EventBatchPayload.events`` max_length, z4j_core frames),
+        # so no protocol-legal frame is silently truncated while its ack
+        # confirms the whole frame by id -- which would lose the tail
+        # (R8-M2/round-8-external). The downstream notification/automation
+        # fan-out is independently bounded (detached-task cap + semaphores +
+        # durable outbox), so this does not reopen the amplification concern.
+        event_batch_cap = 5_000
 
         accepted_count = 0
         # The NEW (non-duplicate) events this batch actually ingested.
         # Automation fires only on these so an agent-reconnect buffer
         # re-flush (same event_ids) cannot re-fire a rule N times.
         new_events: list[dict[str, Any]] = []
-        fully_durable = False
+        committed = False
+        outcome = FrameOutcome.TRANSIENT
+        # Initialised before the try so the finally's ack can reference it
+        # even if the events extraction itself raises. The extraction is
+        # INSIDE the try (a WS fast-path frame is model_construct'd, so
+        # ``payload.events`` may be null/non-list); a failure there is then
+        # classified -> DROP and the finally STILL emits the ack, so the
+        # agent confirms+deletes the malformed frame instead of the WS
+        # ingest worker silently withholding it forever (round-8 external).
+        events: list[dict[str, Any]] = []
         try:
+            events = self._extract_events(frame, event_batch_cap)
             async with self._db.session() as session:
                 result = await self._ingestor.ingest_batch(
                     events=events,
@@ -500,13 +605,21 @@ class FrameRouter:
                 new_events = result.new_events
                 accepted_count = len(new_events)
                 await session.commit()
-                # FULLY durable only when nothing was transiently skipped.
-                # If an event was dropped for a transient DB error, the
-                # committed events are real (they dedup on replay) but the
-                # batch must NOT be acked, so the agent re-sends and the
-                # skipped event gets another chance (R6-panel-HIGH).
-                fully_durable = result.fully_durable
-                if not fully_durable:
+                committed = True
+                # Emit the deferred Prometheus increments only NOW, after the
+                # commit durably persisted the rows -- a transient rollback
+                # before this point discards them, so a re-send counts each row
+                # exactly once (round-9 external LOW). Best-effort inside.
+                result.emit_metrics()
+                # DURABLE only when nothing was transiently skipped. A
+                # transient skip means the committed events are real (they
+                # dedup on replay) but the batch must NOT be confirmed, so
+                # the agent re-sends and the skipped event gets another
+                # chance (R6-panel-HIGH).
+                if result.fully_durable:
+                    outcome = FrameOutcome.DURABLE
+                else:
+                    outcome = FrameOutcome.TRANSIENT
                     logger.warning(
                         "z4j frame_router: event_batch had transient "
                         "skips; withholding ack so the agent re-sends",
@@ -514,27 +627,88 @@ class FrameRouter:
                         agent_id=str(self._agent_id),
                         transient_skips=result.transient_skips,
                     )
+        except Exception as exc:
+            # ingest_batch or session.commit() raised. Classify so a
+            # TRANSIENT DB error (deadlock / pool timeout at commit)
+            # withholds the ack for a re-send, while a PERMANENT one (a
+            # deterministic constraint / data error that recurs every
+            # replay) is dropped-and-acked so the agent does not loop on
+            # this batch forever (round-8: a persistent partial-200 /
+            # withheld-ack on the no-drop transient path wedged the agent).
+            if _is_transient_db_error(exc):
+                outcome = FrameOutcome.TRANSIENT
+                logger.warning(
+                    "z4j frame_router: event_batch transient DB failure; "
+                    "withholding ack so the agent re-sends",
+                    project_id=str(self._project_id),
+                    agent_id=str(self._agent_id),
+                    error_class=type(exc).__name__,
+                )
+            else:
+                outcome = FrameOutcome.DROP
+                logger.exception(
+                    "z4j frame_router: event_batch PERMANENT failure; "
+                    "dropping the batch (re-send would fail identically)",
+                    project_id=str(self._project_id),
+                    agent_id=str(self._agent_id),
+                    error_class=type(exc).__name__,
+                )
         finally:
-            # Emit an ``event_batch_ack`` so the agent can confirm-
-            # and-evict the matching buffer entries. Sending ONLY on
-            # FULL durability (committed with no transient skip) means a
+            # Emit an ``event_batch_ack`` so the agent confirms-and-evicts
+            # the matching buffer entries -- on DURABLE (stored) OR DROP
+            # (permanently undeliverable). Withhold ONLY on TRANSIENT, so a
             # deadlock storm in ingest does NOT silently consume buffer
-            # entries on the agent.
+            # entries but a deterministic poison batch is not looped forever.
             #
-            # Fire-and-forget the send so the next event_batch can
-            # start ingesting immediately. Awaiting the ack send
-            # inline would serialize ``ingest_one x N + commit +
-            # ack_send`` per frame, which under high event rate +
-            # high fanout would push the ack ~30s past commit and
-            # trip the agent's ack watchdog. Spawning a task lets
-            # the websocket send write happen concurrently with the
-            # next ingest.
-            if fully_durable and self._send_frame is not None:
+            # Fire-and-forget the send so the next event_batch can start
+            # ingesting immediately (awaiting inline would push the ack past
+            # the agent's watchdog under high fanout).
+            if outcome.confirmed and self._send_frame is not None:
+                # Coerce + truncate ``acked_id`` to the payload's strict
+                # ``max_length=64``: on the WS fast path the inbound frame is
+                # built via ``model_construct`` (HMAC verified, Pydantic
+                # constraints bypassed), so a buggy/compromised agent's
+                # >64-char, non-str, or MISSING ``id`` would otherwise raise a
+                # strict ValidationError HERE (in the finally) and, before R9's
+                # try-wrap, crash the WS ingest worker (R9). Normalise the id
+                # to a str ONCE: a None / non-str id becomes "" (round-9 LOW),
+                # which the agent's _handle_event_batch_ack ignores -> it
+                # re-sends and the brain dedups, rather than a misleading
+                # "None" acked_id.
+                #
+                # SCOPED LIMITATION (round-10 external LOW): this is crash-
+                # HARDENING, not a full protocol-level fix. An empty (or
+                # over-64 truncated) acked_id does NOT correlate to a buffer
+                # entry, so the agent re-sends and the brain DEDUPES rather than
+                # the agent confirming-and-evicting -- loss-free but not a clean
+                # confirm. This is only reachable by an HMAC-valid NON-CONFORMING
+                # sender: the official agent's outbound path force-purges an
+                # unparseable / malformed frame before it is ever sent
+                # (UndeliverableFrameError), and a conforming agent's ids are
+                # ~15 chars. A complete fix needs a second wire correlation key
+                # for malformed-id frames; deferred (no conforming agent hits
+                # it).
+                raw_id = getattr(frame, "id", None)
+                frame_id = raw_id if isinstance(raw_id, str) else ""
+                acked_id = frame_id[:64]
+                if acked_id != frame_id:
+                    # UNREACHABLE for a conforming agent (event_batch ids are
+                    # ~15 chars). If it ever fires, the truncated ack cannot
+                    # correlate with the agent's full-id pending entry, so the
+                    # agent would re-send until the brain-side dedupe/overflow
+                    # settles it -- log so a future id-length regression is
+                    # observable rather than a silent re-send storm.
+                    logger.warning(
+                        "z4j frame_router: event_batch id exceeds 64 chars; "
+                        "ack acked_id was truncated and may not correlate",
+                        agent_id=str(self._agent_id),
+                        id_len=len(frame_id),
+                    )
                 ack = EventBatchAckFrame(
-                    id=f"eba_{frame.id}"[:64],
+                    id=f"eba_{frame_id}"[:64],
                     ts=datetime.now(UTC),
                     payload=EventBatchAckPayload(
-                        acked_id=frame.id,
+                        acked_id=acked_id,
                         received=len(events),
                         accepted=accepted_count,
                         rejected=max(len(events) - accepted_count, 0),
@@ -542,38 +716,34 @@ class FrameRouter:
                 )
                 ack_task = asyncio.create_task(
                     self._send_frame_safe(ack),
-                    name=f"z4j_ack_{frame.id}",
+                    name=f"z4j_ack_{frame_id}"[:255],
                 )
                 # Hold a strong reference so the task isn't GC'd
                 # mid-flight; it removes itself when done.
                 self._pending_ack_tasks.add(ack_task)
                 ack_task.add_done_callback(self._pending_ack_tasks.discard)
 
-        # Post-commit side effects. These run AFTER the events are
-        # durably committed, and each is best-effort: an exception here
-        # must NOT propagate to ``dispatch``, because ``dispatch``'s
-        # return value is the long-poll durability signal and the data
-        # is already persisted. If a post-commit hook could flip the
-        # return to False, the agent would treat a stored batch as
-        # undelivered and re-send it (harmless for row/automation dedup,
-        # but it would re-run these very hooks) (R6-F2). Each hook is
-        # isolated so one failing does not skip the others.
-        await self._run_post_commit_hook("publish", self._publish_task_change())
-        # Notifications + automation fire on the NEW events only
-        # (``new_events``, not the full delivered batch): a re-delivered
-        # event was already notified/fired on its first delivery, so a
-        # reconnect re-flush or a long-poll retry after a partial-ingest
-        # failure must not re-page every subscriber or re-run a rule for
-        # the same task state change (R6-F3).
-        await self._run_post_commit_hook(
-            "notifications",
-            self._evaluate_notifications(new_events),
-        )
-        await self._run_post_commit_hook(
-            "automation",
-            self._evaluate_automation(new_events),
-        )
-        return fully_durable
+        # Post-commit side effects run ONLY when the batch actually
+        # committed (DURABLE, or a TRANSIENT whose commit succeeded with a
+        # skipped sibling). Never on DROP (nothing persisted). Each is
+        # best-effort: an exception here must NOT change ``outcome`` -- the
+        # data is already committed and the confirm decision is made (R6-F2).
+        if committed:
+            await self._run_post_commit_hook("publish", self._publish_task_change())
+            # Notifications + automation fire on the NEW events only
+            # (``new_events``, deduped): a re-delivered event was already
+            # notified/fired on its first delivery, so a reconnect re-flush
+            # or a long-poll retry must not re-page subscribers or re-run a
+            # rule for the same task state change (R6-F3).
+            await self._run_post_commit_hook(
+                "notifications",
+                self._evaluate_notifications(new_events),
+            )
+            await self._run_post_commit_hook(
+                "automation",
+                self._evaluate_automation(new_events),
+            )
+        return outcome
 
     async def _run_post_commit_hook(self, name: str, coro: Awaitable[None]) -> None:
         """Await a best-effort post-commit side effect, swallowing errors.
@@ -1009,31 +1179,70 @@ class FrameRouter:
     # command_ack / command_result
     # ------------------------------------------------------------------
 
-    async def _handle_command_ack(self, frame: CommandAckFrame) -> None:
-        from uuid import UUID as _UUID
+    async def _run_control_persist(
+        self,
+        label: str,
+        command_id: UUID,
+        persist: Callable[[AsyncSession], Awaitable[None]],
+    ) -> None:
+        """Persist a fire-and-forget control frame with bounded retry.
 
+        The agent deletes the control frame on send, so a transient DB
+        failure has no agent-side resend to recover it. Retry the persist
+        a bounded number of times on a transient (self-healing) DB error;
+        re-raise on a permanent error or after the budget is spent so
+        dispatch() classifies + logs it (and the long-poll path, where
+        the agent CAN retry, sees the TRANSIENT verdict).
+        """
+        last_exc: Exception | None = None
+        for attempt in range(_CONTROL_FRAME_DB_RETRIES):
+            try:
+                async with self._db.session() as session:
+                    await persist(session)
+                    await session.commit()
+                return
+            except Exception as exc:
+                last_exc = exc
+                transient = _is_transient_db_error(exc)
+                if transient and attempt + 1 < _CONTROL_FRAME_DB_RETRIES:
+                    logger.warning(
+                        "z4j frame_router: %s persist transient failure; retrying",
+                        label,
+                        attempt=attempt + 1,
+                        command_id=str(command_id),
+                        agent_id=str(self._agent_id),
+                    )
+                    await asyncio.sleep(_CONTROL_FRAME_RETRY_BACKOFF * (attempt + 1))
+                    continue
+                # Permanent, or transient with the retry budget spent:
+                # surface to dispatch(), which classifies + logs.
+                raise
+        # Unreachable (the loop either returns or raises) but keeps the
+        # type checker happy about last_exc's use.
+        if last_exc is not None:  # pragma: no cover
+            raise last_exc
+
+    async def _handle_command_ack(self, frame: CommandAckFrame) -> None:
         try:
-            command_id = _UUID(frame.id)
+            command_id = UUID(frame.id)
         except ValueError:
             return
         from z4j_brain.persistence.repositories import CommandRepository
 
-        async with self._db.session() as session:
+        async def _persist(session: AsyncSession) -> None:
             await self._dispatcher.handle_ack(
                 commands=CommandRepository(session),
                 command_id=command_id,
                 project_id=self._project_id,
                 agent_id=self._agent_id,
             )
-            await session.commit()
 
+        await self._run_control_persist("command_ack", command_id, _persist)
         await self._publish_command_change()
 
     async def _handle_command_result(self, frame: CommandResultFrame) -> None:
-        from uuid import UUID as _UUID
-
         try:
-            command_id = _UUID(frame.id)
+            command_id = UUID(frame.id)
         except ValueError:
             return
         from z4j_brain.persistence.repositories import (
@@ -1041,7 +1250,7 @@ class FrameRouter:
             CommandRepository,
         )
 
-        async with self._db.session() as session:
+        async def _persist(session: AsyncSession) -> None:
             await self._dispatcher.handle_result(
                 commands=CommandRepository(session),
                 audit_log=AuditLogRepository(session),
@@ -1052,8 +1261,8 @@ class FrameRouter:
                 project_id=self._project_id,
                 agent_id=self._agent_id,
             )
-            await session.commit()
 
+        await self._run_control_persist("command_result", command_id, _persist)
         await self._publish_command_change()
 
     # ------------------------------------------------------------------

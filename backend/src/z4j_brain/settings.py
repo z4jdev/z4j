@@ -675,6 +675,16 @@ class Settings(BaseSettings):
     #: minting thousands of trust rows. When the cap is hit, the
     #: oldest active row is revoked to make room.
     mfa_trusted_devices_max_per_user: int = Field(default=20, ge=1, le=200)
+    #: Consecutive wrong-MFA-code attempts before the ACCOUNT is locked
+    #: (NIST 800-63B 5.2.2). Complements the per-IP verify throttle,
+    #: which is bypassable by IP rotation / horizontal replicas. Counts
+    #: wrong TOTP codes across /auth/mfa/verify, /enroll-complete, and
+    #: /disable; a successful verification resets the counter. Mirrors
+    #: ``login_lockout_threshold``.
+    mfa_lockout_threshold: int = Field(default=5, ge=3, le=100)
+    #: How long the per-account MFA lock lasts once the threshold trips.
+    #: Mirrors ``login_lockout_duration_seconds`` (default 15 minutes).
+    mfa_lockout_duration_seconds: int = Field(default=900, ge=60, le=86_400)
 
     # ------------------------------------------------------------------
     # First-boot

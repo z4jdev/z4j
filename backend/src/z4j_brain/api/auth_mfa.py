@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
 from z4j_brain.api.deps import (
+    enforce_fresh_mfa,
     get_audit_log_repo,
     get_client_ip,
     get_current_session,
@@ -73,6 +74,7 @@ from z4j_brain.errors import (
     AuthenticationError,
     ConflictError,
     NotFoundError,
+    RateLimitExceeded,
     ValidationError,
 )
 
@@ -223,6 +225,60 @@ async def _audit_verify_failure(
     )
 
 
+def _mfa_lockout_active(user: User) -> bool:
+    """True when the account's MFA lock is set and still in the future.
+
+    Normalises a naive SQLite timestamp to UTC before comparing, the
+    same way ``enforce_fresh_mfa`` does, so the check is correct on both
+    Postgres (aware) and SQLite (naive) backends.
+    """
+    locked_until = user.mfa_locked_until
+    if locked_until is None:
+        return False
+    locked_until_aware = (
+        locked_until if locked_until.tzinfo is not None else locked_until.replace(tzinfo=UTC)
+    )
+    return locked_until_aware > datetime.now(UTC)
+
+
+async def _reject_if_mfa_locked(
+    *,
+    user: User,
+    audit_log: AuditLogRepository,
+    settings: Settings,
+    db_session: AsyncSession,
+    ip: str,
+    action: str,
+) -> None:
+    """Refuse a code-verification request while the account is MFA-locked.
+
+    Per-account failed-MFA lockout (NIST 800-63B 5.2.2): the per-IP
+    verify throttle is bypassable by IP rotation and by horizontal
+    replicas, so once ``settings.mfa_lockout_threshold`` wrong codes have
+    been recorded the account itself is locked for
+    ``settings.mfa_lockout_duration_seconds``. Writes the lockout-refused
+    audit row FIRST and commits it (matching the
+    ``_audit_verify_failure``-then-commit discipline used by the wrong-
+    code paths) so a brute-force attempt against a locked account still
+    leaves a durable trail, then raises a 429.
+    """
+    if not _mfa_lockout_active(user):
+        return
+    await _audit_verify_failure(
+        audit_log=audit_log,
+        settings=settings,
+        user_id=user.id,
+        ip=ip,
+        reason="mfa_locked",
+        action=action,
+    )
+    await db_session.commit()
+    raise RateLimitExceeded(
+        "too many failed MFA attempts; the account is temporarily locked",
+        details={"reason": "mfa_locked"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -238,6 +294,7 @@ async def _audit_verify_failure(
 )
 async def enroll_start(
     user: User = Depends(get_current_user),
+    session_row: SessionRow = Depends(get_current_session),
     users: UserRepository = Depends(get_user_repo),
     recovery_codes_repo: MfaRecoveryCodeRepository = Depends(
         get_mfa_recovery_codes_repo,
@@ -255,6 +312,18 @@ async def enroll_start(
     Any prior MFA state for the user is cleared in the same
     transaction so a fresh start cannot be raced by a stale flow.
     """
+    # Re-enrolling wipes the victim's existing TOTP secret + recovery codes
+    # and rebinds MFA to whatever device completes the flow -- as sensitive
+    # as /disable, which requires the second factor. Require a fresh MFA
+    # verification FIRST so a password-only or hijacked session (whose
+    # mfa_verified_at is NULL) cannot silently take over the second factor.
+    # enforce_fresh_mfa is a no-op when the user has no ACTIVE MFA -- i.e. a
+    # first enrollment (never enrolled) and a pending-enrollment restart
+    # (mfa_enrolled_at IS NULL) both pass -- so the freeze-race restart and
+    # recovery-code-based device replacement (which stamps mfa_verified_at)
+    # are preserved; only an already-enrolled user is gated.
+    enforce_fresh_mfa(user=user, session_row=session_row, settings=settings)
+
     # Whether or not the user already had MFA; restart_of_enrolled
     # going to True means a previously-enrolled user is wiping their
     # secret + codes. The audit row distinguishes the two so an
@@ -352,13 +421,25 @@ async def enroll_complete(
             details={"reason": "already_enrolled"},
         )
 
+    # Per-account MFA lockout gate (NIST 800-63B 5.2.2). enroll-complete
+    # verifies a 6-digit code against the pending secret, so it is a
+    # brute-force surface just like /verify and /disable.
+    await _reject_if_mfa_locked(
+        user=user,
+        audit_log=audit_log,
+        settings=settings,
+        db_session=db_session,
+        ip=ip,
+        action="user.mfa_enroll_failed",
+    )
+
     plaintext_secret, needs_rewrite = decrypt_totp_secret(
         user.mfa_secret_encrypted,
         master_secret=_master_secret_bytes(settings),
         user_id=user.id,
         previous_secrets=_previous_secrets_bytes(settings),
     )
-    if not verify_totp_code(plaintext_secret, body.code):
+    if verify_totp_code(plaintext_secret, body.code) is None:
         await _audit_verify_failure(
             audit_log=audit_log,
             settings=settings,
@@ -366,6 +447,12 @@ async def enroll_complete(
             ip=ip,
             reason="wrong_totp",
             action="user.mfa_enroll_failed",
+        )
+        # Count this toward the per-account lockout (Fix 1).
+        await users.record_mfa_failure(
+            user.id,
+            lockout_threshold=settings.mfa_lockout_threshold,
+            lockout_duration_seconds=settings.mfa_lockout_duration_seconds,
         )
         # Commit BEFORE raising: the error path rolls the request
         # session back, which would silently discard the audit row
@@ -375,6 +462,9 @@ async def enroll_complete(
             "invalid code",
             details={"reason": "wrong_totp"},
         )
+
+    # Good code: clear the failed-MFA counter/lock (Fix 1).
+    await users.reset_mfa_failures(user.id)
 
     # Optionally re-encrypt with the current key if the prior blob
     # was wrapped under a rotated-out Z4J_SECRET.
@@ -392,6 +482,11 @@ async def enroll_complete(
         secret_encrypted=blob,
         enrolled_at=now,
     )
+    # New secret => fresh TOTP counter space. Reset the anti-replay
+    # high-water mark to NULL (rather than consuming this code's counter)
+    # so the FIRST post-enroll code is not pre-rejected by a stale mark
+    # left over from a previous enrollment. (Fix 2, RFC 6238 5.2.)
+    await users.reset_totp_counter(user.id)
 
     plaintext_codes = generate_recovery_codes(
         settings.mfa_recovery_code_count,
@@ -463,6 +558,22 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
             "MFA is not enabled for this user",
             details={"reason": "mfa_not_enrolled"},
         )
+
+    # Per-account MFA lockout gate (NIST 800-63B 5.2.2). Refuse further
+    # attempts -- TOTP or recovery code -- while the account is locked
+    # after too many wrong codes; a successful verification below clears
+    # the counter. (Fix 1.)
+    from z4j_brain.persistence.repositories import UserRepository
+
+    users = UserRepository(db_session)
+    await _reject_if_mfa_locked(
+        user=user,
+        audit_log=audit_log,
+        settings=settings,
+        db_session=db_session,
+        ip=ip,
+        action="user.mfa_verify_failed",
+    )
 
     raw = body.code
     used_recovery = False
@@ -541,7 +652,8 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
             user_id=user.id,
             previous_secrets=_previous_secrets_bytes(settings),
         )
-        if not verify_totp_code(plaintext_secret, raw):
+        counter = verify_totp_code(plaintext_secret, raw)
+        if counter is None:
             await _audit_verify_failure(
                 audit_log=audit_log,
                 settings=settings,
@@ -549,15 +661,41 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
                 ip=ip,
                 reason="wrong_totp",
             )
+            await users.record_mfa_failure(
+                user.id,
+                lockout_threshold=settings.mfa_lockout_threshold,
+                lockout_duration_seconds=settings.mfa_lockout_duration_seconds,
+            )
+            await db_session.commit()
+            raise AuthenticationError(
+                "invalid code",
+                details={"reason": "wrong_totp"},
+            )
+        # Anti-replay single-use claim (Fix 2, RFC 6238 5.2). The +/-1
+        # step window keeps a captured code valid for ~90s; consuming the
+        # matched counter here means a second presentation of the SAME
+        # code finds the high-water mark already advanced and is rejected
+        # exactly like a wrong code (and counts toward the lockout).
+        if not await users.consume_totp_counter(user.id, counter=counter):
+            await _audit_verify_failure(
+                audit_log=audit_log,
+                settings=settings,
+                user_id=user.id,
+                ip=ip,
+                reason="wrong_totp",
+            )
+            await users.record_mfa_failure(
+                user.id,
+                lockout_threshold=settings.mfa_lockout_threshold,
+                lockout_duration_seconds=settings.mfa_lockout_duration_seconds,
+            )
             await db_session.commit()
             raise AuthenticationError(
                 "invalid code",
                 details={"reason": "wrong_totp"},
             )
         if needs_rewrite:
-            from z4j_brain.persistence.repositories import UserRepository
-
-            await UserRepository(db_session).set_mfa_state(
+            await users.set_mfa_state(
                 user.id,
                 secret_encrypted=encrypt_totp_secret(
                     plaintext_secret,
@@ -566,6 +704,10 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
                 ),
                 enrolled_at=user.mfa_enrolled_at,
             )
+
+    # Good code (TOTP or recovery): clear the failed-MFA counter/lock
+    # so a subsequent wrong attempt starts from zero. (Fix 1.)
+    await users.reset_mfa_failures(user.id)
 
     await sessions.set_mfa_verified(session_row.id)
 
@@ -578,9 +720,7 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
         # is held until commit / rollback; under SQLite it is a no-op
         # (per-process serialisation is sufficient there). (1.6.0
         # round-2 audit High-1.)
-        from z4j_brain.persistence.repositories import UserRepository
-
-        await UserRepository(db_session).lock_for_password_change(user.id)
+        await users.lock_for_password_change(user.id)
         # Enforce a per-user cap on active trust rows. If the user is
         # already at the cap, revoke the oldest active row to make
         # room. This bounds the blast radius of a stolen session that
@@ -708,6 +848,18 @@ async def disable(
             details={"reason": "mfa_not_enrolled"},
         )
 
+    # Per-account MFA lockout gate (NIST 800-63B 5.2.2). /disable accepts
+    # password + a 6-digit TOTP code, so the code is a brute-force
+    # surface here too; refuse while the account is locked. (Fix 1.)
+    await _reject_if_mfa_locked(
+        user=user,
+        audit_log=audit_log,
+        settings=settings,
+        db_session=db_session,
+        ip=ip,
+        action="user.mfa_disable_failed",
+    )
+
     hasher = PasswordHasher(settings)
     if not hasher.verify(user.password_hash, body.password):
         await _audit_verify_failure(
@@ -732,7 +884,13 @@ async def disable(
         user_id=user.id,
         previous_secrets=_previous_secrets_bytes(settings),
     )
-    if not verify_totp_code(plaintext_secret, body.code):
+    counter = verify_totp_code(plaintext_secret, body.code)
+    if counter is None or not await users.consume_totp_counter(user.id, counter=counter):
+        # ``counter is None`` = wrong code; a non-None counter that fails
+        # to consume = a replay of an already-spent code (Fix 2). Both are
+        # rejected as a wrong TOTP and both count toward the per-account
+        # lockout. ``or`` short-circuits so consume_totp_counter only runs
+        # on a well-formed, in-window code.
         await _audit_verify_failure(
             audit_log=audit_log,
             settings=settings,
@@ -741,6 +899,11 @@ async def disable(
             reason="wrong_totp",
             action="user.mfa_disable_failed",
         )
+        await users.record_mfa_failure(
+            user.id,
+            lockout_threshold=settings.mfa_lockout_threshold,
+            lockout_duration_seconds=settings.mfa_lockout_duration_seconds,
+        )
         # Commit BEFORE raising (see /verify): the error path rolls
         # the request session back and would discard the audit row.
         await db_session.commit()
@@ -748,6 +911,9 @@ async def disable(
             "invalid code",
             details={"reason": "wrong_totp"},
         )
+
+    # Good password + code: clear the failed-MFA counter/lock. (Fix 1.)
+    await users.reset_mfa_failures(user.id)
 
     # Count side effects before the writes so the audit row records
     # what was actually wiped. Forensics needs this when an attacker
@@ -761,6 +927,9 @@ async def disable(
         secret_encrypted=None,
         enrolled_at=None,
     )
+    # MFA is gone: reset the TOTP anti-replay high-water mark to NULL so a
+    # later re-enrollment starts from a clean counter space. (Fix 2.)
+    await users.reset_totp_counter(user.id)
     await recovery_codes_repo.delete_all_for_user(user.id)
     await trusted_devices.delete_all_for_user(user.id)
     clear_trust_cookie(response, environment=settings.environment)
