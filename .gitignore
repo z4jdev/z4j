@@ -3,6 +3,17 @@ dist/
 build/
 *.egg-info/
 
+# ...except the compiled dashboard SPA, which is a SHIPPED artifact rather
+# than local build output. The packaged Dockerfile does `COPY . /build/z4j`
+# and pip-installs that tree, so excluding this directory publishes a brain
+# with a working API and no user interface. The wheel and sdist are built
+# from the working tree before git filters anything, which is why they stay
+# correct while the image does not, and why nothing catches it upstream.
+# Both lines are required: git cannot re-include a file whose parent
+# directory is itself excluded.
+!backend/src/z4j_brain/dashboard/dist/
+!backend/src/z4j_brain/dashboard/dist/**
+
 # Python caches
 __pycache__/
 *.pyc

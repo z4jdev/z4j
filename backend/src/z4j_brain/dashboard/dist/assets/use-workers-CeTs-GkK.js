@@ -1,0 +1,1 @@
+import{r as e}from"./query-D1CFNvFD.js";import{Z as t}from"./index-C_28s6zz.js";function n(n){return e({queryKey:[`workers`,n],queryFn:()=>t.get(`/projects/${n}/workers`),enabled:!!n,refetchInterval:15e3})}function r(n,r){return e({queryKey:[`workers`,n,r],queryFn:()=>t.get(`/projects/${n}/workers/${r}`),enabled:!!n&&!!r,staleTime:1e4,refetchInterval:15e3})}export{n,r as t};
