@@ -1,0 +1,50 @@
+{
+  "items": [
+    {
+      "fingerprint": "e5f6071829a1b2c3d4e5f6a0b1c2d3e4",
+      "status": "ongoing",
+      "occurrences": 31,
+      "open_count": 9,
+      "recovered_count": 22,
+      "first_seen_offset_s": -93600,
+      "last_seen_offset_s": -720,
+      "engine_count": 1,
+      "engines": [
+        "celery"
+      ],
+      "sample_exception": "django.db.utils.OperationalError: server closed the connection unexpectedly",
+      "sample_task_name": "orders.settle_payments"
+    },
+    {
+      "fingerprint": "f6071829a1b2c3d4e5f6a0b1c2d3e4f5",
+      "status": "recovered",
+      "occurrences": 12,
+      "open_count": 0,
+      "recovered_count": 12,
+      "first_seen_offset_s": -108000,
+      "last_seen_offset_s": -24600,
+      "engine_count": 1,
+      "engines": [
+        "celery"
+      ],
+      "sample_exception": "ValueError: invalid literal for int() with base 10: ''",
+      "sample_task_name": "imports.parse_supplier_feed"
+    },
+    {
+      "fingerprint": "071829a1b2c3d4e5f6a0b1c2d3e4f506",
+      "status": "ongoing",
+      "occurrences": 6,
+      "open_count": 2,
+      "recovered_count": 4,
+      "first_seen_offset_s": -14400,
+      "last_seen_offset_s": -1140,
+      "engine_count": 1,
+      "engines": [
+        "celery"
+      ],
+      "sample_exception": "ConnectionError: redis://cache:6379 connection refused",
+      "sample_task_name": "sessions.expire_stale"
+    }
+  ],
+  "next_cursor": null
+}

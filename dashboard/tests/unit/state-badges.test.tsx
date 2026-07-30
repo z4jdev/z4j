@@ -12,6 +12,7 @@ import { render, screen } from "@testing-library/react";
 
 import {
   AgentStateBadge,
+  TaskPriorityBadge,
   TaskStateBadge,
   WorkerStateBadge,
 } from "@/components/domain/state-badges";
@@ -62,4 +63,24 @@ describe("WorkerStateBadge", () => {
       expect(screen.getByText(state)).toBeInTheDocument();
     },
   );
+});
+
+describe("TaskPriorityBadge", () => {
+  // Regression: the Tasks table passed `compact`, which returned null
+  // for "normal" and dropped the label for everything else. The column
+  // rendered a row of undecodable coloured icons interleaved with blank
+  // cells, and the product ships no priority legend anywhere.
+  it.each(["critical", "high", "normal", "low"] as const)(
+    "always renders a readable label for %s",
+    (priority) => {
+      const { unmount } = render(<TaskPriorityBadge priority={priority} />);
+      expect(screen.getByText(priority)).toBeInTheDocument();
+      unmount();
+    },
+  );
+
+  it("renders a value for normal rather than an empty cell", () => {
+    const { container } = render(<TaskPriorityBadge priority="normal" />);
+    expect(container.textContent?.trim()).toBe("normal");
+  });
 });

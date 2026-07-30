@@ -40,6 +40,9 @@ from z4j_brain.persistence.repositories.automation_rule import (
     AutomationRuleRepository,
     CircuitDecision,
 )
+from z4j_brain.persistence.repositories.bulk_retry_requests import (
+    BulkRetryRequestRepository,
+)
 from z4j_brain.persistence.repositories.commands import CommandRepository
 from z4j_brain.persistence.repositories.events import EventRepository
 from z4j_brain.persistence.repositories.first_boot_tokens import (
@@ -67,6 +70,9 @@ from z4j_brain.persistence.repositories.pending_fires import (
 )
 from z4j_brain.persistence.repositories.projects import ProjectRepository
 from z4j_brain.persistence.repositories.queues import QueueRepository
+from z4j_brain.persistence.repositories.schedule_external import (
+    ScheduleExternalRepository,
+)
 from z4j_brain.persistence.repositories.schedule_fires import (
     ScheduleFireRepository,
 )
@@ -92,6 +98,7 @@ __all__ = [
     "AutomationFiringOutboxRepository",
     "AutomationRuleRepository",
     "BaseRepository",
+    "BulkRetryRequestRepository",
     "CircuitDecision",
     "CommandRepository",
     "EventRepository",
@@ -107,6 +114,7 @@ __all__ = [
     "ProjectDefaultSubscriptionRepository",
     "ProjectRepository",
     "QueueRepository",
+    "ScheduleExternalRepository",
     "ScheduleFireRepository",
     "ScheduleRepository",
     "SessionRepository",

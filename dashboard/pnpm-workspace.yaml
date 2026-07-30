@@ -1,0 +1,42 @@
+# pnpm 11+ settings home.
+#
+# pnpm 11 stopped reading the "pnpm" field from package.json (onlyBuiltDependencies,
+# auditConfig, ...) and reads them here instead. This file restores the
+# supply-chain hardening that used to live in package.json.
+#
+# The dashboard is one package, but an explicit root keeps this file valid for
+# the pinned pnpm 9 CI jobs as well as pnpm 11.
+packages:
+  - "."
+
+# Supply-chain hardening: keep the built-dependency allowlist EMPTY so NO
+# transitive package may run a build / install / postinstall script. The most
+# common npm supply-chain payload fires from a compromised dep's postinstall;
+# blocking all of them closes that vector. .npmrc also sets ignore-scripts=true
+# + enable-pre-post-scripts=false as defense in depth.
+onlyBuiltDependencies: []
+
+# esbuild (pulled transitively by vite / router-plugin / tailwind) ships a build
+# script, but it does NOT need it: its platform binary arrives as an optional
+# dependency, so the SPA builds correctly with the script blocked. Declaring the
+# decision explicitly (false = do NOT run its build) keeps the script blocked AND
+# makes `pnpm install --frozen-lockfile` exit 0 -- an UNdeclared ignored-build
+# makes pnpm 11 exit 1, which would fail CI.
+allowBuilds:
+  esbuild: false
+
+# Force vulnerable build-chain dependencies to patched releases. The current
+# brace-expansion advisory affects both transitive branches in this lockfile,
+# so the override deliberately covers the package rather than one parent.
+# esbuild < 0.28.1 (GHSA-g7r4-m6w7-qqqr) lets any website send requests to the
+# local esbuild dev server and read the response. Dev-time only -- esbuild's dev
+# server never runs in the shipped SPA bundle or Docker image -- but pinning it
+# keeps the audit clean. Pin exact (0.x minors can break) rather than a range;
+# revisit on vite bumps.
+overrides:
+  brace-expansion: 5.0.8
+  esbuild: 0.28.1
+  "js-yaml@>=4.0.0 <4.3.0": 4.3.0
+
+auditConfig:
+  ignoreCves: []

@@ -121,9 +121,9 @@ export function computeDstWarning(
 
 interface DstTransition {
   kind: "fall_back" | "spring_forward";
-  transitionAt: Date;       // UTC instant of the transition
-  ambiguousHour: number;    // (fall_back only) wall-clock hour that fires twice
-  skippedHour: number;      // (spring_forward only) wall-clock hour that's skipped
+  transitionAt: Date; // UTC instant of the transition
+  ambiguousHour: number; // (fall_back only) wall-clock hour that fires twice
+  skippedHour: number; // (spring_forward only) wall-clock hour that's skipped
 }
 
 /**
@@ -133,7 +133,10 @@ interface DstTransition {
  * Returns transitions in chronological order. Empty when the
  * timezone doesn't observe DST.
  */
-function findDstTransitions(timezone: string, monthsAhead: number): DstTransition[] {
+function findDstTransitions(
+  timezone: string,
+  monthsAhead: number,
+): DstTransition[] {
   let prevOffset: number | null = null;
   const out: DstTransition[] = [];
   const now = new Date();
@@ -153,7 +156,10 @@ function findDstTransitions(timezone: string, monthsAhead: number): DstTransitio
       // just after. We use cursor (just after) as the transition
       // instant, accurate to within an hour.
       const isSpringForward = offset > prevOffset;
-      const localHour = getTzWallHour(timezone, new Date(cursor.getTime() - 3600_000));
+      const localHour = getTzWallHour(
+        timezone,
+        new Date(cursor.getTime() - 3600_000),
+      );
       out.push({
         kind: isSpringForward ? "spring_forward" : "fall_back",
         transitionAt: new Date(cursor),
@@ -203,8 +209,13 @@ interface FormattedParts {
   second: string;
 }
 
-function formatToParts(date: Date, timezone: string): FormattedParts {
-  const fmt = new Intl.DateTimeFormat("en-US", {
+const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function getDateTimeFormatter(timezone: string): Intl.DateTimeFormat {
+  const existing = dateTimeFormatters.get(timezone);
+  if (existing) return existing;
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: timezone,
     year: "numeric",
     month: "2-digit",
@@ -214,6 +225,12 @@ function formatToParts(date: Date, timezone: string): FormattedParts {
     second: "2-digit",
     hour12: false,
   });
+  dateTimeFormatters.set(timezone, formatter);
+  return formatter;
+}
+
+function formatToParts(date: Date, timezone: string): FormattedParts {
+  const fmt = getDateTimeFormatter(timezone);
   const parts = fmt.formatToParts(date);
   const out: Record<string, string> = {};
   for (const p of parts) {

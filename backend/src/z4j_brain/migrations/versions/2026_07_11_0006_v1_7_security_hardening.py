@@ -16,7 +16,7 @@ Adds three columns to ``users`` for the 1.7 security-hardening wave:
    high-water mark (RFC 6238 5.2) that closes the ~90s replay window on
    the +/-1 step acceptance skew.
 
-The audit-log HMAC-chain prune watermark (1.7 audit R2) needs NO new
+The audit-log HMAC-chain prune watermark (1.7 audit) needs NO new
 schema: it is stored in the existing ``z4j_meta`` key-value table under
 the ``audit_prune_watermark`` key, so this migration carries only the
 three ``users`` columns.
@@ -34,8 +34,7 @@ Cross-dialect + round-trip. ``upgrade()`` adds the three columns;
 cannot ``ALTER TABLE ... DROP COLUMN`` in place on older engines) and a
 plain ``drop_column`` on Postgres, mirroring the drop discipline in
 ``v1_7_schema``. The revision round-trips on Postgres and SQLite per the
-1.4 compatibility floor.
-"""
+1.4 compatibility floor."""
 
 from __future__ import annotations
 

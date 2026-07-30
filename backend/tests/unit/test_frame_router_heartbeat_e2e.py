@@ -241,7 +241,7 @@ class TestFrameRouterHeartbeatE2E:
 
 
 # ---------------------------------------------------------------------------
-# Round-7 audit, R7-H1: defense-in-depth allowlist at brain side
+# Round-7 audit: defense-in-depth allowlist at brain side
 # ---------------------------------------------------------------------------
 
 
@@ -309,7 +309,7 @@ def malicious_heartbeat_frame() -> HeartbeatFrame:
 
 @pytest.mark.asyncio
 class TestFrameRouterConfScrubR7H1:
-    """R7-H1 defense-in-depth: brain MUST allowlist-filter the conf
+    """Defense-in-depth: brain MUST allowlist-filter the conf
     sub-object even when a (broken or malicious) adapter ships
     credentialed keys.
 
@@ -370,7 +370,7 @@ class TestFrameRouterConfScrubR7H1:
                 "beat_schedule",
             ):
                 assert forbidden not in persisted_conf, (
-                    f"R7-H1: brain persisted {forbidden!r} into "
+                    f": brain persisted {forbidden!r} into "
                     "workers.metadata.conf; ProjectRole.VIEWER would "
                     "read it via GET /api/v1/projects/{slug}/workers/{worker_id}"
                 )
@@ -386,7 +386,7 @@ class TestFrameRouterConfScrubR7H1:
                 "LEAKED_AWS_SECRET",
             ):
                 assert needle not in persisted_blob, (
-                    f"R7-H1: {needle!r} leaked into the persisted worker_metadata "
+                    f": {needle!r} leaked into the persisted worker_metadata "
                     "JSON blob despite the structural strip"
                 )
 

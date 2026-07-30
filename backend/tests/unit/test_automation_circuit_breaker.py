@@ -1,4 +1,4 @@
-"""Automation rule circuit breaker: rolling-window trip + reset (R2)."""
+"""Automation rule circuit breaker: rolling-window trip + reset."""
 
 from __future__ import annotations
 

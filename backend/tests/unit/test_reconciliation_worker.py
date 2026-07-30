@@ -4,17 +4,16 @@ Covers:
 
 - ``TaskRepository.list_stuck_for_reconciliation`` returns only
   non-terminal tasks older than the cutoff, including tasks that
-  never started (R3 M2(a): age anchor falls back to ``received_at``
+  never started ((a): age anchor falls back to ``received_at``
   then ``created_at``).
 - Worker.tick returns cleanly when no stuck tasks exist.
 - Worker.tick with stuck tasks + no online agent → skipped_no_agent.
 - Worker.tick with stuck tasks + online agent → dispatched counter.
 - Worker respects the per-tick cap.
 - Probe commands carry the deterministic per-task / per-sweep-window
-  idempotency key (R3 M2(c)).
+  idempotency key ((c)).
 - The main.py wiring leader-locks the tick so only one brain process
-  sweeps per interval (R3 M2(b)).
-"""
+  sweeps per interval ((b))."""
 
 from __future__ import annotations
 
@@ -41,7 +40,8 @@ class _FakeDb:
     def __init__(self, factory):
         self._factory = factory
 
-    def session(self):
+    def session(self, *, write: bool = False):
+        assert write is True
         return self._factory()
 
 
@@ -194,7 +194,7 @@ class TestStuckTasksRepo:
         assert len(stuck) == 2
 
     async def test_never_started_old_pending_is_selected(self, engine, project):
-        # R3 M2(a): pre-fix, ``started_at IS NOT NULL`` silently
+        # (a): pre-fix, ``started_at IS NOT NULL`` silently
         # excluded tasks that never got a start event, so an old
         # PENDING task was never reconciled. The age anchor now falls
         # back to received_at, then created_at.
@@ -333,7 +333,7 @@ _HUGE_WINDOW_SECONDS = 10**9
 
 
 class TestProbeIdempotencyKey:
-    """R3 M2(c): probes carry a deterministic per-task / per-window key."""
+    """(c): probes carry a deterministic per-task / per-window key."""
 
     def _expected_window(self) -> int:
         return int(datetime.now(UTC).timestamp() // _HUGE_WINDOW_SECONDS)
@@ -404,7 +404,7 @@ class TestProbeIdempotencyKey:
 
 
 class TestReconciliationLeaderGating:
-    """R3 M2(b): with ``z4j serve``'s min(4, cpu) uvicorn workers,
+    """(b): with ``z4j serve``'s min(4, cpu) uvicorn workers,
     only the process that wins the per-worker advisory lock may
     sweep; the others no-op until the next interval."""
 
@@ -467,7 +467,7 @@ class TestReconciliationLeaderGating:
     def test_main_wires_reconciliation_tick_through_leader_gate(self) -> None:
         # Wiring tripwire: the PeriodicWorker registration for the
         # reconciliation worker must route its tick through
-        # ``_leader_gated_tick`` - pre-R3-M2(b) it was registered
+        # ``_leader_gated_tick`` - pre-(b) it was registered
         # ungated, so every brain process issued duplicate probe
         # commands each sweep.
         import inspect

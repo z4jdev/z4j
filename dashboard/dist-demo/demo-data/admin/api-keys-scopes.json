@@ -1,0 +1,28 @@
+{
+  "scopes": [
+    "auth:read",
+    "home:read",
+    "projects:read",
+    "tasks:read",
+    "workers:read",
+    "queues:read",
+    "agents:read",
+    "commands:read",
+    "schedules:read",
+    "audit:read",
+    "memberships:read",
+    "notifications:read",
+    "automation:read",
+    "tasks:write",
+    "commands:write",
+    "agents:write",
+    "projects:write",
+    "memberships:write",
+    "notifications:write",
+    "automation:write",
+    "users:read",
+    "users:write",
+    "admin:*"
+  ],
+  "admin_only": ["admin:*", "projects:write", "users:read", "users:write"]
+}

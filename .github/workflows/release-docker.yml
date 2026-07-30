@@ -1,20 +1,9 @@
 # =============================================================================
-# z4j release-docker.yml
+# z4j standalone Docker release
 #
-# Builds + pushes the z4jdev/z4j Docker image to Docker Hub on every
-# release tag. Native multi-arch via GitHub's amd64 + arm64 runners
-# (no QEMU emulation - much faster + more reliable than buildx with
-# --platform=linux/arm64 on an amd64 host).
-#
-# Triggers:
-#   - Tag push matching ``v*.*.*`` -> auto-build that version
-#   - Manual workflow_dispatch with ``version`` input -> rebuild any
-#     prior version (used to backfill arm64 for v1.0.1)
-#
-# Strategy: matrix builds one image per arch, pushes by digest,
-# then a final job stitches them into a multi-arch manifest tag.
-# This is the canonical pattern from docker/build-push-action docs:
-# https://docs.docker.com/build/ci/github-actions/multi-platform/
+# Builds native amd64 + arm64 images, joins them behind a temporary staging
+# reference, signs and attests that multi-arch digest, and only then promotes
+# the same digest to the public version tag (and, when eligible, ``latest``).
 # =============================================================================
 
 name: release-docker
@@ -22,27 +11,121 @@ name: release-docker
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'z4j-brain version to build (e.g. 1.0.1). Leave blank to use the git tag.'
-        required: false
+        description: "Existing tag to rebuild, without the leading v"
+        required: true
         type: string
+
+concurrency:
+  group: release-docker-${{ github.event.inputs.version || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
 
 env:
   IMAGE: z4jdev/z4j
-  # Allow manual dispatch to override the version (handy for backfilling
-  # arm64 onto an existing release). Otherwise derive from the tag.
   Z4J_VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
 jobs:
-  # -----------------------------------------------------------------
-  # Per-arch build. Each job runs on a NATIVE runner for its arch.
-  # Pushes by digest only (no human-readable tag yet) so the merge
-  # job can stitch them into a multi-arch manifest.
-  # -----------------------------------------------------------------
+  prepare:
+    name: Validate release identity
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_latest: ${{ steps.version.outputs.is_latest }}
+      release_ref: ${{ steps.version.outputs.release_ref }}
+      release_sha: ${{ steps.version.outputs.release_sha }}
+    steps:
+      - name: Resolve requested source ref
+        id: requested
+        env:
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            printf 'ref=refs/tags/v%s\n' "${DISPATCH_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            printf 'ref=%s\n' "${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout requested tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ steps.requested.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Resolve version and latest eligibility
+        id: version
+        run: |
+          VERSION="${Z4J_VERSION#v}"
+          if ! printf '%s' "${VERSION}" \
+            | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::refusing to release '${VERSION}': not a SemVer version"
+            exit 1
+          fi
+
+          RELEASE_REF="refs/tags/v${VERSION}"
+          if [ "${GITHUB_REF}" != "${RELEASE_REF}" ] \
+            && [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
+            echo "::error::release ref '${GITHUB_REF}' does not match ${RELEASE_REF}"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_ref=${RELEASE_REF}" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          case "${VERSION}" in
+            *-*)
+              echo "is_latest=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              STABLE_TAGS=$(git ls-remote --tags --refs origin 'v*' \
+                | sed 's|.*refs/tags/||' \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                | sed 's/^v//' || true)
+              HIGHEST=$(printf '%s\n%s\n' "${STABLE_TAGS}" "${VERSION}" \
+                | sed '/^$/d' | sort -V | tail -n 1)
+              if [ "${HIGHEST}" = "${VERSION}" ]; then
+                echo "is_latest=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "is_latest=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+          esac
+
+      - name: Release identity gate
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          fail=0
+          check() {
+            if [ "$2" != "${VERSION}" ]; then
+              echo "::error::identity mismatch: $1 says '$2', release says '${VERSION}'"
+              fail=1
+            else
+              echo "ok: $1 = ${VERSION}"
+            fi
+          }
+          check "pyproject.toml [project].version" \
+            "$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          check "versions.json packages.z4j" \
+            "$(python3 -c "import json; print(json.load(open('versions.json'))['packages']['z4j'])")"
+          check "backend/src/z4j_brain/data/versions.json packages.z4j" \
+            "$(python3 -c "import json; print(json.load(open('backend/src/z4j_brain/data/versions.json'))['packages']['z4j'])")"
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::release identity gate failed"
+            exit 1
+          fi
+
   build:
+    name: Build ${{ matrix.arch }}
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -55,110 +138,213 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Normalize version (strip leading v if present)
-        id: version
-        run: |
-          v="${Z4J_VERSION#v}"
-          echo "z4j_version=${v}" >> "$GITHUB_OUTPUT"
+      - name: Checkout validated tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.prepare.outputs.release_ref }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push (${{ matrix.arch }}, by digest)
+      - name: Build and push native image by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
           context: ${{ github.workspace }}
           file: ${{ github.workspace }}/Dockerfile
           platforms: ${{ matrix.platform }}
           push: true
-          provenance: false
+          provenance: mode=max
+          sbom: true
           build-args: |
-            Z4J_BRAIN_VERSION=${{ steps.version.outputs.z4j_version }}
+            Z4J_VERSION=${{ needs.prepare.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.release_sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
           outputs: |
             type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
+          case "${DIGEST}" in
+            sha256:*) ;;
+            *)
+              echo "::error::build did not return a sha256 digest"
+              exit 1
+              ;;
+          esac
           mkdir -p /tmp/digests
-          digest='${{ steps.build.outputs.digest }}'
-          touch "/tmp/digests/${digest#sha256:}"
+          touch "/tmp/digests/${DIGEST#sha256:}"
 
       - name: Upload digest artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: digests-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  # -----------------------------------------------------------------
-  # Stitch the per-arch images into a multi-arch manifest under the
-  # human-readable tag (e.g. z4jdev/z4j:1.0.1) plus :latest.
-  # -----------------------------------------------------------------
   merge:
-    needs: build
+    name: Sign, attest, and promote multi-arch image
+    needs: [prepare, build]
     runs-on: ubuntu-24.04
     steps:
-      - name: Normalize version
-        id: version
-        run: |
-          v="${Z4J_VERSION#v}"
-          echo "z4j_version=${v}" >> "$GITHUB_OUTPUT"
+      - name: Checkout validated tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.prepare.outputs.release_ref }}
 
       - name: Download digest artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Create multi-arch manifest
+      - name: Push staging multi-arch reference
+        id: staging
         working-directory: /tmp/digests
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
         run: |
+          mapfile -t DIGEST_FILES < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [ "${#DIGEST_FILES[@]}" -ne 2 ]; then
+            echo "::error::expected exactly two native image digests"
+            exit 1
+          fi
+          SOURCES=()
+          for digest in "${DIGEST_FILES[@]}"; do
+            if ! printf '%s' "${digest}" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::invalid sha256 digest artifact '${digest}'"
+              exit 1
+            fi
+            SOURCES+=("${IMAGE}@sha256:${digest}")
+          done
+
+          STAGING_TAG="staging-${RELEASE_SHA}"
           docker buildx imagetools create \
-            -t "${IMAGE}:${{ steps.version.outputs.z4j_version }}" \
-            -t "${IMAGE}:latest" \
-            $(printf "${IMAGE}@sha256:%s " *)
+            --tag "${IMAGE}:${STAGING_TAG}" \
+            "${SOURCES[@]}"
+          DIGEST=$(docker buildx imagetools inspect \
+            "${IMAGE}:${STAGING_TAG}" --format '{{ .Manifest.Digest }}')
+          case "${DIGEST}" in
+            sha256:*) ;;
+            *)
+              echo "::error::could not resolve the staging manifest digest"
+              exit 1
+              ;;
+          esac
+          echo "tag=${STAGING_TAG}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@61119d458adab75f756bc0b9e4bde25725f86a7a # v0.17.2
+
+      - name: Generate multi-arch image SBOM
+        env:
+          DIGEST: ${{ steps.staging.outputs.digest }}
+        run: |
+          syft "${IMAGE}@${DIGEST}" \
+            -o cyclonedx-json=sbom.cyclonedx.json \
+            -o spdx-json=sbom.spdx.json
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-${{ needs.prepare.outputs.version }}
+          path: |
+            sbom.cyclonedx.json
+            sbom.spdx.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign multi-arch image
+        env:
+          DIGEST: ${{ steps.staging.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Attach SBOM attestation
+        env:
+          DIGEST: ${{ steps.staging.outputs.digest }}
+        run: |
+          cosign attest --yes \
+            --predicate sbom.cyclonedx.json \
+            --type cyclonedx \
+            "${IMAGE}@${DIGEST}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: docker.io/${{ env.IMAGE }}
+          subject-digest: ${{ steps.staging.outputs.digest }}
+          push-to-registry: true
+
+      - name: Promote signed digest to release tags
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          IS_LATEST: ${{ needs.prepare.outputs.is_latest }}
+          DIGEST: ${{ steps.staging.outputs.digest }}
+        run: |
+          TAGS=(--tag "${IMAGE}:${VERSION}")
+          if [ "${IS_LATEST}" = "true" ]; then
+            TAGS+=(--tag "${IMAGE}:latest")
+          fi
+          docker buildx imagetools create \
+            "${TAGS[@]}" "${IMAGE}@${DIGEST}"
+
+          fail=0
+          check_tag() {
+            resolved=$(docker buildx imagetools inspect \
+              "${IMAGE}:$1" --format '{{ .Manifest.Digest }}')
+            if [ "${resolved}" != "${DIGEST}" ]; then
+              echo "::error::promoted tag $1 resolves to ${resolved}; signed digest is ${DIGEST}"
+              fail=1
+            else
+              echo "ok: ${IMAGE}:$1 -> ${DIGEST} (signed digest)"
+            fi
+          }
+          check_tag "${VERSION}"
+          if [ "${IS_LATEST}" = "true" ]; then
+            check_tag latest
+          fi
+          exit "${fail}"
 
       - name: Inspect resulting manifest
-        run: |
-          docker buildx imagetools inspect "${IMAGE}:${{ steps.version.outputs.z4j_version }}"
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: docker buildx imagetools inspect "${IMAGE}:${VERSION}"
 
-  # 1.6.3 release-flow hardening: open or comment on a GitHub issue
-  # when any job in this workflow fails. Pre-1.6.3 every release-
-  # docker run from v1.5.0 -> v1.6.2 failed silently at the
-  # "Login to Docker Hub" step because the DOCKERHUB_USERNAME +
-  # DOCKERHUB_TOKEN secrets had been wiped during the May 4 repo
-  # recreation incident. Twelve days of stale Docker Hub publishes
-  # before anyone noticed. This step makes failures loud.
   notify-on-failure:
-    needs: [build, merge]
+    needs: [prepare, build, merge]
     if: failure()
     runs-on: ubuntu-24.04
     permissions:
       issues: write
     steps:
       - name: Open or comment on tracking issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
             const title = 'release-docker workflow failed';
@@ -167,12 +353,8 @@ jobs:
               '',
               `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
-              'Common causes:',
-              '- DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets missing or expired',
-              '- Docker Hub rate-limit / outage',
-              '- Dockerfile build failure (check the per-arch build logs)',
-              '',
-              'Once fixed, re-run via the `workflow_dispatch` trigger with the same `version` input.',
+              'The public version tag is promoted only after signing and attestation.',
+              'Inspect the failed gate, fix it, and rerun the same release tag.',
             ].join('\n');
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
@@ -180,7 +362,7 @@ jobs:
               state: 'open',
               labels: 'release-docker-failure',
             });
-            const match = existing.data.find(i => i.title === title);
+            const match = existing.data.find(issue => issue.title === title);
             if (match) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,

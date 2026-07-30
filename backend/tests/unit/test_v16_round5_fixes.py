@@ -33,12 +33,12 @@ from z4j_brain.observability.sentry import scrub_event
 
 
 class TestPostTimeoutReachesTransport:
-    """The R2 fix tried `extensions["timeout"] = dict(...)`; the R5
-    agent flagged that httpx 0.28+ expects an httpx.Timeout object,
-    not a dict. The R5 fix pivots to `build_request(timeout=...)`
-    which httpx unwraps to the right transport shape. This test
-    pins the contract: the request's transport-side extensions
-    carry the per-call timeout."""
+    """An earlier fix tried `extensions["timeout"] = dict(...)`, which
+    httpx 0.28+ rejects: it expects an httpx.Timeout object, not a dict.
+    The current fix pivots to `build_request(timeout=...)`, which
+    httpx unwraps to the right transport shape. This test pins the
+    contract: the request's transport-side extensions carry the per-call
+    timeout."""
 
     @pytest.mark.asyncio
     async def test_timeout_reaches_mock_transport(self) -> None:
@@ -93,7 +93,7 @@ class TestPostTimeoutReachesTransport:
 
 class TestRateLimitLRUDoesNotPinDeniedCallers:
     """A hostile caller hitting 429s repeatedly must NOT keep their
-    entry pinned at MRU forever. The R5 fix only touches LRU order
+    entry pinned at MRU forever. The fix only touches LRU order
     on the GRANTED path."""
 
     def setup_method(self) -> None:
@@ -135,7 +135,7 @@ class TestRateLimitLRUDoesNotPinDeniedCallers:
         # 'a' must be the one evicted, not 'b' or 'c'.
         assert "a" not in _user_bucket, (
             "denied-call LRU touch let 'a' stay pinned at MRU -- "
-            "rate-limit pin DoS regressed (R5 F2). "
+            "rate-limit pin DoS regressed. "
             f"Current bucket order: {list(_user_bucket.keys())}"
         )
 
@@ -150,7 +150,7 @@ class TestDecodeCursorNaiveDatetime:
         """A cursor without timezone offset (e.g.,
         ``2026-05-13T10:00:00|<uuid>``) must NOT produce a naive
         datetime; comparing naive vs aware in Postgres raises 500.
-        The R5 fix forces UTC."""
+        The fix forces UTC."""
         cursor = "2026-05-13T10:00:00|aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         dt, row_id = _decode_cursor(cursor)
         assert dt.tzinfo is not None
@@ -276,7 +276,7 @@ class TestAuditForwarderSwallowedCoverage:
 class TestActivityFeedUserScopedRowVisibility:
     """A non-admin user has MFA / auth audit rows that carry
     ``project_id=NULL`` because they aren't project-scoped. The
-    pre-Round-5 filter excluded these. The R5 fix widens the
+    pre-Round-5 filter excluded these. The fix widens the
     filter so the user sees their OWN user-scoped rows (e.g.,
     their own MFA enroll) even though no project_id is set."""
 

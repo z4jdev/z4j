@@ -454,16 +454,28 @@ def _up_schedule_fires_partition(bind) -> None:
     #    reuse pk_schedule_fires / uq_schedule_fires_fire_id / ix_* while the
     #    old ones still exist (the metadata naming_convention names the PK
     #    pk_schedule_fires, NOT the Postgres default schedule_fires_pkey).
+    unique_names = {
+        constraint["name"]
+        for constraint in sa.inspect(bind).get_unique_constraints(
+            "schedule_fires",
+        )
+    }
     op.execute("ALTER TABLE schedule_fires RENAME TO schedule_fires_legacy")
     op.execute(
         "ALTER TABLE schedule_fires_legacy "
         "RENAME CONSTRAINT pk_schedule_fires TO pk_schedule_fires_legacy",
     )
-    op.execute(
-        "ALTER TABLE schedule_fires_legacy "
-        "RENAME CONSTRAINT uq_schedule_fires_fire_id "
-        "TO uq_schedule_fires_fire_id_legacy",
-    )
+    # A fresh historical-chain run invokes live Base.metadata at the initial
+    # revision.  Boundary-D model code may therefore have precreated its inert
+    # generation-scoped unique instead of the old fire-id unique.  Only rename
+    # the old name when that is the shape we actually observed; both shapes
+    # are discarded after the explicit v1.7 column copy.
+    if "uq_schedule_fires_fire_id" in unique_names:
+        op.execute(
+            "ALTER TABLE schedule_fires_legacy "
+            "RENAME CONSTRAINT uq_schedule_fires_fire_id "
+            "TO uq_schedule_fires_fire_id_legacy",
+        )
     op.execute(
         "ALTER INDEX ix_schedule_fires_schedule_recent "
         "RENAME TO ix_schedule_fires_schedule_recent_legacy",

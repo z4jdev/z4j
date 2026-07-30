@@ -219,6 +219,139 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             "rows are fetched per query, not how many are verified."
         ),
     )
+    audit_verify.add_argument(
+        "--known-head",
+        default=None,
+        metavar="JSON",
+        help=(
+            "optional versioned known-head JSON envelope. The exact result is "
+            "CURRENT_MATCH, PRUNE_MATCH, CURRENT_PRUNE_MATCH, "
+            "VERIFIED_ANCESTOR, INVALID, or UNPROVABLE."
+        ),
+    )
+    audit_rotate_key = audit_sub.add_parser(
+        "rotate-chain-key",
+        help=(
+            "complete an explicit audit-key rotation, or begin/resume the "
+            "crash-safe packaged-SQLite safe-store rotation"
+        ),
+    )
+    audit_rotate_key.add_argument(
+        "--begin-managed",
+        action="store_true",
+        help=(
+            "mint and begin one new safe-store-managed SQLite rotation when "
+            "the file and authenticated state currently agree. Omit this flag "
+            "to resume a file-first pending transition idempotently."
+        ),
+    )
+    audit_retire_key = audit_sub.add_parser(
+        "retire-chain-key",
+        help=(
+            "prove an old audit key has no live active rows and retire it from "
+            "the packaged safe store, or authorize explicit-config removal"
+        ),
+    )
+    audit_retire_key.add_argument(
+        "--key-id",
+        required=True,
+        help="exact lowercase 64-hex hmac_key_id to retire",
+    )
+    audit_activate = audit_sub.add_parser(
+        "activate-chain-state",
+        help=(
+            "finalize or apply the offline manifest-bound Boundary-F "
+            "legacy-audit activation ceremony"
+        ),
+    )
+    audit_activate.add_argument(
+        "--manifest",
+        required=True,
+        metavar="PATH",
+        help=(
+            "owner-private finalized manifest path; generation creates it "
+            "exclusively and --apply reads the same immutable document"
+        ),
+    )
+    audit_activate.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply a previously finalized manifest to the preparation-head DB",
+    )
+    audit_activate.add_argument(
+        "--legacy-key-window-complete",
+        action="store_true",
+        default=None,
+        help=(
+            "attest that every candidate pre-1.8 master key is configured, "
+            "allowing unmatched signed rows to be classified as invalid"
+        ),
+    )
+    audit_activate.add_argument(
+        "--attest-manifest-digest",
+        default=None,
+        metavar="SHA256",
+        help=(
+            "exact finalized manifest digest required to apply any ambiguous "
+            "classification; this is not a generic yes/no confirmation"
+        ),
+    )
+    audit_activate.add_argument(
+        "--known-head",
+        default=None,
+        metavar="JSON",
+        help=(
+            "optional pre-1.8 external head envelope to assess and bind into "
+            "the finalized cutover manifest"
+        ),
+    )
+    audit_activate.add_argument(
+        "--restore-operation",
+        default=None,
+        metavar="UUID",
+        help=(
+            "bind manifest generation/application to one exact pending "
+            "legacy database-restore operation"
+        ),
+    )
+    audit_export_frozen = audit_sub.add_parser(
+        "export-and-delete-frozen",
+        help=(
+            "offline crash-resumable export and exact deletion of all frozen pre-1.8 audit history"
+        ),
+    )
+    audit_export_frozen.add_argument(
+        "--operation",
+        required=True,
+        metavar="UUID",
+        help=("operator-chosen operation UUID; reuse the exact value to resume after a crash"),
+    )
+    audit_export_frozen.add_argument(
+        "--destination",
+        required=True,
+        metavar="PATH",
+        help=(
+            "new or byte-identical local owner-private regular file populated "
+            "from the retained private spool"
+        ),
+    )
+    audit_export_frozen.add_argument(
+        "--acknowledge-destination-digest",
+        default=None,
+        metavar="SHA256",
+        help=(
+            "after deletion, acknowledge the exact ceremony export digest; "
+            "the private spool remains until this acknowledgement"
+        ),
+    )
+    audit_export_frozen.add_argument(
+        "--cleanup",
+        action="store_true",
+        help=(
+            "remove only the identity-checked private spool/phase after exact "
+            "destination-digest acknowledgement"
+        ),
+    )
 
     # audit fork-cleanup: quarantine duplicate prev_row_hmac rows
     # so the v1.1.0+ partial UNIQUE index can apply. Shipped in
@@ -251,6 +384,45 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         ),
     )
 
+    # audit reseal-watermark (H1): re-sign a LEGACY, unauthenticated prune
+    # watermark under the current secret. Needed once after upgrading an
+    # install that pruned under a pre-1.7.1 z4j: those watermarks were
+    # stored as a bare row_hmac (no MAC) and now fail authentication, so
+    # ``z4j audit verify`` false-alarms "chain truncation". We NEVER
+    # auto-retag (signing an unauthenticated value would bless a possibly
+    # forged truncation anchor); the operator runs this explicitly AFTER
+    # confirming the chain verifies.
+    audit_reseal = audit_sub.add_parser(
+        "reseal-watermark",
+        help=(
+            "re-sign a legacy (pre-1.7.1) unauthenticated prune watermark "
+            "under the current secret, after you have verified the chain"
+        ),
+    )
+    audit_reseal.add_argument(
+        "--i-have-verified-the-chain",
+        action="store_true",
+        dest="chain_verified",
+        help=(
+            "REQUIRED to write. Assert that you have independently run "
+            "`z4j audit verify` and confirmed the chain is intact apart "
+            "from the unauthenticated watermark. Resealing blesses the "
+            "row_hmac the watermark points at as the genuine prune anchor; "
+            "only do this when you trust the chain."
+        ),
+    )
+    audit_reseal.add_argument(
+        "--force-bare",
+        action="store_true",
+        help=(
+            "also reseal a TAGGED watermark that fails to verify under the "
+            "current secret window (normally that means a forged value OR a "
+            "secret rotated fully out of Z4J_SECRETS_PREVIOUS). Prefer "
+            "restoring the rotated-out secret instead; use this only if you "
+            "are certain the embedded row_hmac is genuine."
+        ),
+    )
+
     # projects: operator-initiated project-scoped data operations.
     # Currently exposes ``rewrite-scheduler`` for the explicit
     # migration of ``Schedule.scheduler`` values when an operator
@@ -268,21 +440,15 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     )
     rewrite_sched = projects_sub.add_parser(
         "rewrite-scheduler",
-        help=(
-            "rewrite Schedule.scheduler from one value to another "
-            "for declarative-source rows in a project"
-        ),
+        help=("preview or finalize an explicit scheduler-owner cutover"),
         description=(
-            "Explicit operator-initiated migration of stored "
-            "``Schedule.scheduler`` values. Use this AFTER flipping "
-            "a project's ``default_scheduler_owner`` if you want "
-            "existing reconciler-managed rows to move to the new "
-            "owner (otherwise they stay where they are and the "
-            "next reconcile will delete them via "
-            "``replace_for_source``). Targets only declarative- "
-            "and importer-source rows by default; operator-set "
-            "``scheduler`` overrides on dashboard-created rows are "
-            "left alone unless ``--all-sources`` is passed."
+            "Owner changes are a two-step, manifest-bound operation. First run "
+            "with --dry-run and save the printed manifest digest. Quiesce the "
+            "old and new scheduler fleets, then rerun with --operation-id, "
+            "--preview-manifest-digest, and "
+            "--attest-all-schedulers-quiesced. External-source cutovers always "
+            "move the complete sealed stream; reserved-source cutovers require "
+            "one or more explicit --schedule-id values."
         ),
     )
     rewrite_sched.add_argument(
@@ -303,18 +469,73 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         help="new scheduler value to rewrite to",
     )
     rewrite_sched.add_argument(
+        "--source-scope",
+        required=True,
+        help="canonical source scope for the current owner",
+    )
+    rewrite_sched.add_argument(
+        "--target-source-scope",
+        help="canonical target source scope (required when --to is external)",
+    )
+    rewrite_sched.add_argument(
+        "--schedule-id",
+        action="append",
+        default=[],
+        help=(
+            "exact schedule UUID to move; repeatable and required only when --from z4j-scheduler"
+        ),
+    )
+    rewrite_sched.add_argument(
+        "--cursor-policy",
+        choices=("PRESERVE", "PRESERVE_FUTURE", "RESET_CURSOR"),
+        default="PRESERVE",
+        help="cursor handling policy bound into the preview (default: PRESERVE)",
+    )
+    rewrite_sched.add_argument(
+        "--operation-id",
+        help="stable UUID for finalization and exact replay",
+    )
+    rewrite_sched.add_argument(
+        "--preview-manifest-digest",
+        help="digest emitted by the matching --dry-run preview",
+    )
+    rewrite_sched.add_argument(
+        "--attest-all-schedulers-quiesced",
+        action="store_true",
+        help="REQUIRED to finalize: attest both old and new scheduler fleets are stopped",
+    )
+    rewrite_sched.add_argument(
+        "--target-adapter-instance-id",
+        help="fresh external adapter instance id (required for an external target)",
+    )
+    rewrite_sched.add_argument(
+        "--target-agent-id",
+        help="target external executor agent UUID",
+    )
+    rewrite_sched.add_argument(
+        "--target-registry-owner-id",
+        help="target external executor registry-owner UUID",
+    )
+    rewrite_sched.add_argument(
+        "--target-session-generation",
+        help="target external executor immutable session generation",
+    )
+    rewrite_sched.add_argument(
+        "--target-worker-id",
+        help="target external executor worker id, when present",
+    )
+    rewrite_sched.add_argument(
         "--all-sources",
         action="store_true",
         help=(
-            "rewrite EVERY row matching --from, including "
-            "dashboard-created and operator-set rows. Default is "
-            "to scope to declarative/imported sources only."
+            "deprecated and refused: use a complete external stream or explicit "
+            "--schedule-id selection"
         ),
     )
     rewrite_sched.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the count of rows that WOULD be rewritten and exit",
+        help="print the canonical cutover preview and digest without writing",
     )
 
     # misfires: project-wide misfire history. The shell-side twin of the
@@ -443,6 +664,51 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             "fresh HMAC keys. Any existing session cookies + agent "
             "tokens become invalid."
         ),
+    )
+    reset.add_argument(
+        "--preview-manifest",
+        metavar="PATH",
+        help=(
+            "write an owner-private, non-mutating finalized reset "
+            "manifest and stopped-executor attestation challenge"
+        ),
+    )
+    reset.add_argument(
+        "--attest-stopped-executors",
+        metavar="SHA256",
+        help=(
+            "attest that every executor in the exact preview manifest "
+            "is stopped; value must equal that preview's challenge"
+        ),
+    )
+
+    recovery = sub.add_parser(
+        "recovery",
+        help="manage crash-resumable packaged installation recovery bundles",
+    )
+    recovery_sub = recovery.add_subparsers(
+        dest="recovery_action",
+        title="actions",
+        metavar="<action>",
+    )
+    destroy_retired = recovery_sub.add_parser(
+        "destroy-retired-installation",
+        help=(
+            "logically remove one exact retained installation bundle after "
+            "checking its authenticated replacement binding"
+        ),
+    )
+    destroy_retired.add_argument(
+        "--operation",
+        required=True,
+        metavar="UUID",
+        help="exact packaged retirement operation UUID",
+    )
+    destroy_retired.add_argument(
+        "--confirm-manifest-digest",
+        required=True,
+        metavar="SHA256",
+        help="typed old-bundle manifest digest shown by reset --nuke-secrets",
     )
 
     # createsuperuser (alias to bootstrap-admin; Django-familiar name)
@@ -587,14 +853,14 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     restore = sub.add_parser(
         "restore",
         help=(
-            "restore the brain database from a backup file. STOP the "
-            "brain process before running. SQLite replaces the live "
-            "DB file (existing one preserved as .pre-restore-bak). "
-            "PostgreSQL uses pg_restore --clean --if-exists."
+            "run the authenticated, crash-resumable database restore "
+            "ceremony. STOP every brain and scheduler/executor process "
+            "before running."
         ),
     )
     restore.add_argument(
         "source",
+        nargs="?",
         metavar="PATH",
         help="path to a backup file produced by `z4j backup`",
     )
@@ -602,6 +868,40 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         "--force",
         action="store_true",
         help="acknowledge that the brain process is stopped",
+    )
+    restore.add_argument(
+        "--operation",
+        metavar="UUID",
+        help=(
+            "resume one exact staged restore operation (required when "
+            "the first pass reports a stopped-executor challenge)"
+        ),
+    )
+    restore.add_argument(
+        "--expected-sha256",
+        metavar="SHA256",
+        help="require the first staged source bytes to match this digest",
+    )
+    restore.add_argument(
+        "--known-head",
+        metavar="JSON",
+        help=(
+            "optional retained audit-head JSON envelope used to assess "
+            "whether the restored history is current or an ancestor"
+        ),
+    )
+    restore.add_argument(
+        "--attest-stopped-executors",
+        metavar="SHA256",
+        help=(
+            "attest every source/target executor named by the staged "
+            "operation is stopped; must equal its exact challenge"
+        ),
+    )
+    restore.add_argument(
+        "--rollback-operation",
+        metavar="UUID",
+        help=("restore the exact retained pre-operation target for one pending restore UUID"),
     )
 
     # metrics-token
@@ -798,6 +1098,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
 
     if args.command == "reset":
         return _run_reset(args)
+
+    if args.command == "recovery":
+        return _run_recovery(args)
 
     if args.command == "createsuperuser":
         # Identical shape to bootstrap-admin; dispatch through the
@@ -1124,20 +1427,17 @@ def _run_metrics_token_show(args: argparse.Namespace) -> int:
     Writes ONLY the token to stdout so scripts can use
     ``$(z4j metrics-token)`` safely.
     """
-    import os
+    from z4j_brain.configuration import capture_configuration
 
-    token = os.environ.get("Z4J_METRICS_AUTH_TOKEN")
+    try:
+        snapshot = capture_configuration()
+    except Exception as exc:
+        print(f"z4j metrics-token: configuration refused: {exc}", file=sys.stderr)  # noqa: T201
+        return 2
+    token = snapshot.values.get("Z4J_METRICS_AUTH_TOKEN")
     if token:
         print(token)  # noqa: T201
         return 0
-
-    secret_env = z4j_home() / "secret.env"
-    if secret_env.exists():
-        for line in secret_env.read_text(encoding="utf-8").splitlines():
-            line = line.strip()  # noqa: PLW2901  normalized in-loop
-            if line.startswith("Z4J_METRICS_AUTH_TOKEN="):
-                print(line.split("=", 1)[1])  # noqa: T201
-                return 0
 
     print(  # noqa: T201
         "z4j metrics-token: no token found. "
@@ -1167,75 +1467,45 @@ def _run_metrics_token_rotate(args: argparse.Namespace) -> int:
     scripts can ``new=$(z4j metrics-token rotate)`` and immediately
     push the value to a Prometheus reload.
     """
-    import os
     import secrets as _secrets
 
+    from z4j_brain.configuration import capture_configuration
+    from z4j_brain.secret_store import update_secret_store
+
     secret_env = z4j_home() / "secret.env"
-    if not secret_env.exists():
+    try:
+        snapshot = capture_configuration()
+    except Exception as exc:
         print(  # noqa: T201
-            f"z4j metrics-token rotate: {secret_env} does not exist. "
-            "Run `z4j serve` once to auto-mint the secret store first.",
+            f"z4j metrics-token rotate: configuration refused: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    source = snapshot.source_for_env_key("Z4J_METRICS_AUTH_TOKEN")
+    if source != "secret.env":
+        print(  # noqa: T201
+            "z4j metrics-token rotate: refusing to rewrite secret.env because "
+            f"the effective token source is {source}. Rotate that source "
+            "instead; the lower-precedence store was not changed.",
             file=sys.stderr,
         )
         return 2
 
     new_token = _secrets.token_urlsafe(32)
-    lines = secret_env.read_text(encoding="utf-8").splitlines()
-    out_lines: list[str] = []
-    found = False
-    for line in lines:
-        if line.strip().startswith("Z4J_METRICS_AUTH_TOKEN="):
-            out_lines.append(f"Z4J_METRICS_AUTH_TOKEN={new_token}")
-            found = True
-        else:
-            out_lines.append(line)
-    if not found:
-        # Pre-1.0.13 file with no metrics token line. Append.
-        out_lines.append(f"Z4J_METRICS_AUTH_TOKEN={new_token}")
-    new_content = ("\n".join(out_lines) + "\n").encode("utf-8")
-
-    # Atomic write: tmp file in the same directory, then rename.
-    # The tmp file is created with O_EXCL + 0o600 from the start so
-    # no race window exists where a local user could read the new
-    # token from the temp file before chmod tightens it. Pre-1.0.14
-    # used Path.write_text which created the file with the process
-    # umask (typically 0o644) and only narrowed it after; on Windows
-    # the followup chmod is a no-op so the file inherited the parent
-    # dir's ACLs.
-    tmp = secret_env.with_suffix(secret_env.suffix + ".rotate-tmp")
-    # If a previous rotate crashed mid-write, the EXCL would refuse
-    # to overwrite a stale tmp. Best-effort cleanup first.
-    with contextlib.suppress(FileNotFoundError):
-        tmp.unlink()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_BINARY"):
-        flags |= os.O_BINARY  # Windows: no implicit \r\n translation
-    fd = os.open(str(tmp), flags, 0o600)
     try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(new_content)
-    except Exception:
-        # Roll back the tmp file if the write fails so we don't leave
-        # a half-written sibling. Re-raise so the operator sees the
-        # original error - rotation should fail loudly, not silently.
-        with contextlib.suppress(FileNotFoundError):
-            tmp.unlink()
-        raise
-    # On POSIX chmod is redundant (we already opened with 0o600) but
-    # this defends against rare umask-application bugs. On Windows
-    # chmod is a no-op; ACL handling is the file system's job.
-    if hasattr(os, "chmod"):
-        try:
-            tmp.chmod(0o600)
-        except OSError as exc:
-            print(  # noqa: T201
-                f"z4j metrics-token rotate: WARNING - chmod 0o600 on "
-                f"{tmp} failed: {exc}. The new token may be readable "
-                f"to other local users until you tighten the file "
-                f"permissions manually.",
-                file=sys.stderr,
-            )
-    tmp.replace(secret_env)
+        winner = update_secret_store(
+            secret_env,
+            {"Z4J_METRICS_AUTH_TOKEN": new_token},
+        )
+    except Exception as exc:
+        print(f"z4j metrics-token rotate: store update refused: {exc}", file=sys.stderr)  # noqa: T201
+        return 2
+    if winner.values.get("Z4J_METRICS_AUTH_TOKEN") != new_token:
+        print(  # noqa: T201
+            "z4j metrics-token rotate: persisted winner mismatch; the new token was not advertised",
+            file=sys.stderr,
+        )
+        return 2
 
     # Audit log (best-effort): log the rotation to structlog so the
     # operations team can correlate "Prometheus stopped scraping" with
@@ -1457,7 +1727,7 @@ def _run_backup(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_restore(args: argparse.Namespace) -> int:
+def _run_restore(args: argparse.Namespace) -> int:  # noqa: PLR0911
     """Restore the brain DB from a backup file. Brain MUST be stopped."""
     if not args.force:
         print(  # noqa: T201
@@ -1467,13 +1737,62 @@ def _run_restore(args: argparse.Namespace) -> int:
         )
         return 1
     _bootstrap_env_for_management_commands()
-    from z4j_brain.backup import restore
+    import json
+
+    from z4j_brain.backup import restore, rollback_restore
     from z4j_brain.settings import Settings
 
     settings = Settings()  # type: ignore[call-arg]
-    src = Path(args.source)
+    if args.rollback_operation and args.source is not None:
+        print(  # noqa: T201
+            "z4j: restore failed: rollback does not accept a source path",
+        )
+        return 1
+    if args.rollback_operation and args.known_head is not None:
+        print(  # noqa: T201
+            "z4j: restore failed: rollback does not accept --known-head",
+        )
+        return 1
+    if not args.rollback_operation and args.source is None:
+        print(  # noqa: T201
+            "z4j: restore failed: PATH or --rollback-operation UUID is required",
+        )
+        return 1
     try:
-        result = restore(settings.database_url, src)
+        if args.rollback_operation:
+            result = rollback_restore(
+                settings.database_url,
+                operation=args.rollback_operation,
+            )
+            print(  # noqa: T201
+                "z4j: restore rollback complete\n"
+                f"  backend:    {result['backend']}\n"
+                f"  operation:  {result['operation_id']}\n"
+                f"  marker:     {result.get('marker_id', 'n/a')}",
+            )
+            return 0
+        assert args.source is not None
+        src = Path(args.source)
+        if args.known_head is None:
+            known_head = None
+        else:
+            try:
+                decoded_known_head = json.loads(args.known_head)
+            except (TypeError, ValueError):
+                decoded_known_head = {"__invalid_json__": True}
+            known_head = (
+                decoded_known_head
+                if isinstance(decoded_known_head, dict)
+                else {"__invalid_json__": True}
+            )
+        result = restore(
+            settings.database_url,
+            src,
+            operation=args.operation,
+            expected_sha256=args.expected_sha256,
+            stopped_executor_attestation=(args.attest_stopped_executors),
+            known_head=known_head,
+        )
     except FileNotFoundError as exc:
         print(f"z4j: {exc}")  # noqa: T201
         return 1
@@ -1483,7 +1802,10 @@ def _run_restore(args: argparse.Namespace) -> int:
     print(  # noqa: T201
         f"z4j: restore complete\n"
         f"  backend:    {result['backend']}\n"
-        f"  source:     {result['source']}",
+        f"  source:     {result['source']}\n"
+        f"  operation:  {result.get('operation_id', 'n/a')}\n"
+        f"  digest:     {result.get('source_digest', 'n/a')}\n"
+        f"  rollback:   {result.get('known_head_result', 'n/a')}",
     )
     print(  # noqa: T201
         "z4j: start the brain (`systemctl start z4j` / `docker "
@@ -1551,88 +1873,6 @@ def _run_allowed_hosts(args: argparse.Namespace) -> int:
     return 2
 
 
-# ---------------------------------------------------------------------------
-# Secret-file mint helpers.
-# ---------------------------------------------------------------------------
-
-
-def _write_secret_env_atomic(path: Path, payload: bytes) -> None:
-    """Mint a fresh secret.env with mode 0o600 atomically.
-
-    A naive write with the process umask (typically 0o644) and
-    chmod afterward leaves a window where any local UID can read
-    the secrets on a multi-user host, and on Windows chmod is a
-    no-op so the file stays world-readable.
-
-    Strategy:
-
-    1. Write to ``path.tmp`` via ``O_CREAT | O_EXCL | O_WRONLY |
-       O_NOFOLLOW`` with mode 0o600, the kernel applies the mode
-       atomically and rejects any pre-existing symlink at the
-       filename. ``O_EXCL`` blocks a colocated user who pre-creates
-       the temp as a symlink to e.g. ``/etc/cron.d/x``.
-    2. ``os.replace`` is an atomic rename within the same FS, so
-       the final ``path`` exists with mode 0o600 from the moment
-       it appears, no chmod window.
-    3. On Windows ``O_NOFOLLOW`` doesn't exist (no symlinks in the
-       traditional sense); we drop the flag and rely on NTFS ACLs.
-       A best-effort ``unlink`` of the temp on failure prevents
-       a stray file blocking a re-run.
-    """
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    # Tear down a stale .tmp from a crashed prior run before O_EXCL
-    # would refuse it.
-    with contextlib.suppress(FileNotFoundError):
-        tmp_path.unlink()
-    fd = os.open(str(tmp_path), flags, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(payload)
-        tmp_path.replace(path)
-    except Exception:
-        with contextlib.suppress(OSError):
-            tmp_path.unlink()
-        raise
-
-
-def _append_secret_env_atomic(path: Path, payload: bytes) -> None:
-    """Append a single ``KEY=value\\n`` line to an existing secret.env.
-
-    A naive ``path.open("a")`` (a) follows symlinks, (b) is not
-    atomic, and (c) doesn't re-assert mode. A colocated user
-    who pre-created a symlink at ``secret.env`` after install
-    would see the freshly-minted token written through the
-    symlink to the attacker's path.
-
-    Strategy: read existing payload, mint a fresh file via
-    :func:`_write_secret_env_atomic` with the appended line, then
-    ``os.replace`` swaps it in. The brief read-then-write race
-    matters less than the symlink/mode hardening, an attacker
-    who could write into ``~/.z4j`` already has the box.
-    """
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    # File missing or symlink rejected, propagates to caller.
-    # Caller handles missing-file by minting fresh.
-    fd = os.open(str(path), flags)
-    try:
-        with os.fdopen(fd, "rb") as fh:
-            existing = fh.read()
-    except OSError:
-        os.close(fd)
-        raise
-    if existing and not existing.endswith(b"\n"):
-        existing += b"\n"
-    new_payload = existing + payload
-    # Write a fresh file (atomic) + replace, so mode is re-asserted.
-    path.unlink()
-    _write_secret_env_atomic(path, new_payload)
-
-
 def _setup_multiprocess_metrics_env(
     workers: int,
     *,
@@ -1640,7 +1880,7 @@ def _setup_multiprocess_metrics_env(
 ) -> str | None:
     """Point prometheus_client at a shared mmap dir for multi-worker serve.
 
-    R3-M8 (external audit, reproduced): the default ``z4j serve``
+    The default ``z4j serve``
     runs min(4, cpu) uvicorn worker PROCESSES, but the brain's
     Prometheus registry is in-process, so a load-balanced
     ``/metrics`` scrape lands on ONE worker and misses counters
@@ -1719,6 +1959,243 @@ def _setup_multiprocess_metrics_env(
     return multiproc_dir
 
 
+def resolve_serve_workers(
+    requested: int | None,
+    *,
+    local_registry: bool,
+    cpu_count: int,
+    embedded_scheduler: bool = False,
+) -> tuple[int, str | None]:
+    """Resolve the uvicorn worker count for ``z4j serve``.
+
+    Default is ``min(4, cpu_count)`` (a single worker could not dispatch
+    WebSocket PONGs within ping_timeout while ingesting event batches,
+    causing agent flap). BUT a LOCAL (in-memory) agent registry cannot be
+    shared across worker PROCESSES: each uvicorn worker keeps its own, so
+    an agent connected to worker A is invisible to the dashboard served by
+    worker B (split-brain), multiple workers on one SQLite file contend on
+    writes, and N workers race the first-boot bootstrap (N concurrent
+    _auto_bootstrap_admin -> UNIQUE-violation tracebacks + a misleading
+    setup-token banner on the flagship quickstart). The SQLite
+    auto-detection sets ``Z4J_REGISTRY_BACKEND=local``, so a SQLite
+    deployment is single-worker by construction; scaling out workers
+    requires Postgres (the shared postgres_notify registry).
+
+    Embedded scheduler supervision is also process-local.  More than one
+    uvicorn worker would start one scheduler child per worker, duplicating
+    fire loops and making every child contend for the same metrics socket.
+    That deployment is therefore single-worker even on PostgreSQL; operators
+    who need a multi-worker brain deploy the scheduler as its standalone
+    service instead.
+
+    Returns ``(workers, note)`` where ``note`` is an operator-facing line
+    to print (or None).
+    """
+    workers = max(1, min(4, cpu_count)) if requested is None else int(requested)
+    if local_registry and workers > 1:
+        note = (
+            f"z4j: SQLite / in-memory registry detected -- forcing "
+            f"--workers=1 (requested {workers}). A multi-worker in-memory "
+            f"registry splits agent visibility across processes and "
+            f"contends on the single SQLite file. Switch to Postgres "
+            f"(Z4J_DATABASE_URL=postgresql+asyncpg://...) to scale out "
+            f"workers."
+        )
+        return 1, note
+    if embedded_scheduler and workers > 1:
+        note = (
+            "z4j: embedded scheduler detected -- forcing --workers=1 "
+            f"(requested {workers}). Embedded supervision is process-local; "
+            "multiple brain workers would launch competing scheduler children. "
+            "Disable Z4J_EMBEDDED_SCHEDULER and deploy the standalone scheduler "
+            "to run a multi-worker PostgreSQL brain."
+        )
+        return 1, note
+    return workers, None
+
+
+def _sqlite_database_path(database_url: str) -> Path | None:
+    """Return the local path for a file-backed SQLite URL."""
+
+    from sqlalchemy.engine import make_url
+
+    try:
+        url = make_url(database_url)
+    except Exception:
+        return None
+    if not url.drivername.startswith("sqlite"):
+        return None
+    if not url.database or url.database == ":memory:":
+        return None
+    return Path(url.database).expanduser().resolve()
+
+
+def _sqlite_has_bound_audit_key_state(database_path: Path) -> bool:
+    """Refuse a replacement key once preparation or activation is durable."""
+
+    import sqlite3
+
+    if not database_path.exists():
+        return False
+    try:
+        connection = sqlite3.connect(
+            f"file:{database_path}?mode=ro",
+            uri=True,
+            timeout=2,
+        )
+        try:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('audit_chain_preparation','audit_chain_state')",
+                )
+            }
+            probes = {
+                "audit_chain_preparation": ("SELECT 1 FROM audit_chain_preparation LIMIT 1"),
+                "audit_chain_state": "SELECT 1 FROM audit_chain_state LIMIT 1",
+            }
+            for table, query in probes.items():
+                if table in tables and connection.execute(query).fetchone() is not None:
+                    return True
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            f"cannot safely inspect existing SQLite database {database_path}: {exc}",
+        ) from exc
+    return False
+
+
+async def _has_boundary_f_audit_authority(session: Any) -> bool:
+    """Return whether preparation or active chain authority is durable."""
+
+    from sqlalchemy import inspect, text
+
+    connection = await session.connection()
+    tables = await connection.run_sync(
+        lambda sync_connection: set(
+            inspect(sync_connection).get_table_names(),
+        ),
+    )
+    probes = {
+        "audit_chain_preparation": ("SELECT 1 FROM audit_chain_preparation LIMIT 1"),
+        "audit_chain_state": "SELECT 1 FROM audit_chain_state LIMIT 1",
+    }
+    for table, query in probes.items():
+        if table not in tables:
+            continue
+        if (await session.execute(text(query))).first() is not None:
+            return True
+    return False
+
+
+def _capture_serve_configuration(*, preliminary: Any | None = None) -> Any:
+    """Capture configuration and safely bootstrap packaged SQLite secrets."""
+
+    import secrets as _secrets
+
+    from z4j_brain.configuration import (
+        capture_configuration,
+        export_snapshot_environment,
+        merge_secret_store_snapshot,
+        overlay_runtime_environment,
+    )
+    from z4j_brain.secret_store import read_secret_store, update_secret_store
+
+    home = z4j_home()
+    preliminary = preliminary or capture_configuration(
+        home=home,
+        include_secret_store=False,
+    )
+    database_url = preliminary.values.get("Z4J_DATABASE_URL")
+    if not database_url:
+        data_dir = ensure_z4j_home()
+        database_path = data_dir / "z4j.db"
+        database_url = f"sqlite+aiosqlite:///{database_path}"
+        os.environ["Z4J_DATABASE_URL"] = database_url
+        os.environ.setdefault("Z4J_REGISTRY_BACKEND", "local")
+        print(  # noqa: T201
+            f"z4j: using SQLite at {database_path} (set Z4J_DATABASE_URL for Postgres)",
+        )
+    preliminary = overlay_runtime_environment(preliminary)
+
+    if not database_url.startswith("sqlite"):
+        store_values = read_secret_store(home / "secret.env").values if home.exists() else {}
+        snapshot = merge_secret_store_snapshot(preliminary, store_values)
+        audit_source = snapshot.source_for_env_key("Z4J_AUDIT_CHAIN_SECRET")
+        if snapshot.values.get("Z4J_ENVIRONMENT", "dev").lower() != "dev" and audit_source in {
+            "default",
+            "secret.env",
+        }:
+            raise RuntimeError(
+                "PostgreSQL production requires an explicitly configured "
+                "Z4J_AUDIT_CHAIN_SECRET; packaged secret.env bootstrap is "
+                "available only for self-contained SQLite",
+            )
+        export_snapshot_environment(snapshot)
+        return snapshot
+
+    data_dir = ensure_z4j_home()
+    secret_path = data_dir / "secret.env"
+    database_path = _sqlite_database_path(database_url)
+    if database_path is None and database_url != "sqlite+aiosqlite:///:memory:":
+        raise RuntimeError(
+            "cannot prove the packaged SQLite database path; provide all "
+            "secrets explicitly or use a normal file-backed SQLite URL",
+        )
+
+    store = read_secret_store(secret_path)
+    database_exists = database_path is not None and database_path.exists()
+    if database_exists and store.file_identity is None:
+        raise RuntimeError(
+            f"existing SQLite database {database_path} has no verified "
+            f"{secret_path}; refusing to mint replacement authentication "
+            "or audit keys",
+        )
+
+    snapshot = merge_secret_store_snapshot(preliminary, store.values)
+    required = {
+        "Z4J_SECRET": 48,
+        "Z4J_SESSION_SECRET": 48,
+        "Z4J_METRICS_AUTH_TOKEN": 32,
+        "Z4J_AUDIT_CHAIN_SECRET": 48,
+    }
+    missing = [key for key in required if not snapshot.values.get(key)]
+    if missing and database_exists:
+        non_audit = [key for key in missing if key != "Z4J_AUDIT_CHAIN_SECRET"]
+        if non_audit:
+            raise RuntimeError(
+                "existing SQLite installation is missing persisted authority "
+                f"for {', '.join(non_audit)}; refusing to invent replacements",
+            )
+        if database_path is None or _sqlite_has_bound_audit_key_state(database_path):
+            raise RuntimeError(
+                "audit preparation/state already exists but the configured "
+                "audit key is missing; restore the original key",
+            )
+
+    updates = {
+        key: _secrets.token_urlsafe(size) for key, size in required.items() if key in missing
+    }
+    if updates:
+        winner = update_secret_store(secret_path, updates)
+        snapshot = merge_secret_store_snapshot(preliminary, winner.values)
+        for key in updates:
+            if snapshot.source_for_env_key(key) == "secret.env" and snapshot.values.get(
+                key
+            ) != winner.values.get(key):
+                raise RuntimeError(
+                    f"persisted {key} winner did not become effective",
+                )
+        print(  # noqa: T201
+            "z4j: safely persisted independent packaged secrets: " + ", ".join(sorted(updates)),
+        )
+
+    export_snapshot_environment(snapshot)
+    return snapshot
+
+
 def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serve flag handling
     """Run uvicorn programmatically.
 
@@ -1776,172 +2253,50 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
     # the password in process memory only.
     if args.admin_email:
         os.environ["Z4J_BOOTSTRAP_ADMIN_EMAIL"] = args.admin_email
-    if args.admin_password:
-        # Refuse the
-        # ``--admin-password`` flag together with ``--workers > 1``.
-        # On POSIX uvicorn forks N workers from the parent process;
-        # the in-process ``_CLI_BOOTSTRAP_PASSWORD`` holder is
-        # copied into every child's memory via fork, surfacing the
-        # cleartext in /proc/<pid>/maps and via ptrace on every
-        # worker for the lifetime of first-boot. Restricting to a
-        # single worker keeps the holder in one address space; only
-        # the first-boot lifespan reads + clears it. Helm /
-        # systemd / compose deployments should use the env-var
-        # path which startup.py already pops eagerly.
-        workers_requested = getattr(args, "workers", None) or 1
-        if workers_requested > 1:
-            raise SystemExit(
-                "z4j: --admin-password is incompatible with "
-                f"--workers={workers_requested}. uvicorn fork would "
-                "copy the cleartext password into every worker's "
-                "memory (readable via /proc/<pid>/maps + ptrace). "
-                "Either drop --workers (default 1), set the password "
-                "via Z4J_BOOTSTRAP_ADMIN_PASSWORD env (eagerly popped "
-                "by startup.py), or run bootstrap-admin separately "
-                "before serving.",
-            )
-        from z4j_brain import startup as _startup
+    # NOTE (CX-M18): --admin-password handling -- the multi-worker/reload
+    # guard AND stashing the cleartext into the in-process holder -- is
+    # DEFERRED to after worker-topology resolution below. Guarding here
+    # on the raw flag was unsound: `getattr(args, "workers", None) or 1`
+    # treats an UNSET --workers as 1 and passes the guard, but Postgres
+    # then resolves the same unset value to min(4, cpu). uvicorn SPAWNS
+    # fresh worker interpreters for workers>1 (and for --reload), where
+    # the module-global holder is empty -- so the requested admin was
+    # never provisioned and a setup-token banner printed instead. The
+    # real resolved topology is only known after resolve_serve_workers().
 
-        _startup.set_cli_bootstrap_password(args.admin_password)
-
-    # Default to SQLite if no DATABASE_URL is set (bare-metal mode).
-    if not os.environ.get("Z4J_DATABASE_URL"):
-        # Force ~/.z4j to
-        # 0o700 on first creation. ensure_z4j_home() applies the mode
-        # whether the directory is being created or already exists,
-        # which is stricter than the pre-1.5 inline mkdir(mode=...)
-        # call (mkdir's mode arg only fires on creation).
-        data_dir = ensure_z4j_home()
-        db_path = data_dir / "z4j.db"
-        os.environ["Z4J_DATABASE_URL"] = f"sqlite+aiosqlite:///{db_path}"
-        os.environ.setdefault("Z4J_REGISTRY_BACKEND", "local")
-        print(  # noqa: T201
-            f"z4j: using SQLite at {db_path} (set Z4J_DATABASE_URL for Postgres)",
+    bootstrap_coordinator = contextlib.ExitStack()
+    try:
+        from z4j_brain.configuration import capture_configuration
+        from z4j_brain.management_retirement import (
+            assert_no_pending_installation_retirement,
+        )
+        from z4j_brain.secret_store import (
+            audit_bootstrap_coordinator,
+            ensure_secret_store_directory,
         )
 
-    # Auto-bootstrap HMAC secrets so ``pip install z4j && z4j
-    # serve`` works zero-config on a fresh machine. Mirrors the Docker
-    # image entrypoint behavior. Persisted to ``~/.z4j/secret.env`` so
-    # tokens, sessions, and the audit-log HMAC chain survive across
-    # restarts.
-    #
-    # Precedence:
-    #   1. explicit env (operator-provided) -> use as-is
-    #   2. ``~/.z4j/secret.env`` exists from a previous boot -> source
-    #   3. neither -> mint fresh + persist to ``~/.z4j/secret.env``
-    #
-    # In production the operator must set Z4J_SECRET + Z4J_SESSION_SECRET
-    # explicitly (case 1). Auto-mint is for dev / homelab / evaluation.
-    if not os.environ.get("Z4J_SECRET"):
-        data_dir = ensure_z4j_home()
-        secret_env = data_dir / "secret.env"
-        if secret_env.exists():
-            for line in secret_env.read_text(encoding="utf-8").splitlines():
-                line = line.strip()  # noqa: PLW2901  normalized in-loop
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
-            print(  # noqa: T201
-                f"z4j: loaded persisted Z4J_SECRET from {secret_env}",
+        ensure_secret_store_directory(z4j_home())
+        assert_no_pending_installation_retirement(z4j_home())
+        preliminary = capture_configuration(
+            home=z4j_home(),
+            include_secret_store=False,
+        )
+        preliminary_database_url = preliminary.values.get("Z4J_DATABASE_URL")
+        if not preliminary_database_url or preliminary_database_url.startswith(
+            "sqlite",
+        ):
+            bootstrap_coordinator.enter_context(
+                audit_bootstrap_coordinator(
+                    ensure_secret_store_directory(z4j_home()),
+                ),
             )
-            # Pre-1.0.13 secret.env files lack Z4J_METRICS_AUTH_TOKEN.
-            # Mint one now and append so in-place upgrades pick up the
-            # new fail-secure /metrics default without operator action.
-            # Done here (not at the callsite) so the appended token
-            # shows up in the same secret.env file the operator already
-            # knows about; no second location to discover.
-            if not os.environ.get("Z4J_METRICS_AUTH_TOKEN"):
-                import secrets as _secrets  # local alias, avoid shadow
-
-                new_metrics = _secrets.token_urlsafe(32)
-                # Symlink-safe atomic append via
-                # :func:`_append_secret_env_atomic` so we don't
-                # follow a planted symlink and we keep mode 0o600.
-                _append_secret_env_atomic(
-                    secret_env,
-                    f"Z4J_METRICS_AUTH_TOKEN={new_metrics}\n".encode(),
-                )
-                os.environ["Z4J_METRICS_AUTH_TOKEN"] = new_metrics
-                print(  # noqa: T201
-                    f"z4j: minted Z4J_METRICS_AUTH_TOKEN (in-place "
-                    f"upgrade from pre-1.0.13), appended to {secret_env}. "
-                    f"/metrics now requires Authorization: Bearer <token>. "
-                    f"Run `z4j metrics-token` to print it for Prometheus "
-                    f"scrape config, or set Z4J_METRICS_PUBLIC=1 to opt "
-                    f"back into unauthenticated scraping (not recommended).",
-                )
-        else:
-            import secrets as _secrets  # local alias to avoid shadowing
-
-            # Detect a stale DB from a prior install whose secret.env
-            # is gone. This happens when the operator did pip install
-            # of an older z4j-brain version that crashed mid-bootstrap
-            # (so the DB got created during alembic upgrade BUT the
-            # secret was never minted), then upgraded to a fixed
-            # version. Without this guard, we mint a fresh secret + a
-            # fresh first-boot token, but the DB already has the
-            # alembic schema PLUS audit-log rows signed under the old
-            # (lost) secret. Any future audit-log verification would
-            # fail, AND the operator gets confusing "invalid_token"
-            # errors because their browser may have a stale URL from
-            # the prior crashed run.
-            #
-            # When secret.env is brand new, the safe default is to
-            # also wipe z4j.db so we start truly fresh. The user
-            # already explicitly asked for fresh state by deleting
-            # (or never creating) secret.env. Backed up to .bak so
-            # they can recover if they did this by mistake.
-            stale_db = data_dir / "z4j.db"
-            if stale_db.exists():
-                backup = stale_db.with_suffix(".db.stale-bak")
-                # Replace any prior bak so we don't accumulate them
-                if backup.exists():
-                    backup.unlink()
-                stale_db.rename(backup)
-                # Also nuke SQLite's WAL + journal sidecars
-                for suffix in (".db-wal", ".db-shm", ".db-journal"):
-                    sidecar = data_dir / f"z4j{suffix}"
-                    if sidecar.exists():
-                        sidecar.unlink()
-                print(  # noqa: T201
-                    f"z4j: found stale {stale_db.name} from a prior "
-                    f"install but no secret.env - moved aside to "
-                    f"{backup.name} so this install starts fresh. "
-                    "Delete the .stale-bak when you no longer need it.",
-                )
-
-            new_secret = _secrets.token_urlsafe(48)
-            new_session = _secrets.token_urlsafe(48)
-            new_metrics = _secrets.token_urlsafe(32)
-            payload = (
-                f"Z4J_SECRET={new_secret}\n"
-                f"Z4J_SESSION_SECRET={new_session}\n"
-                f"Z4J_METRICS_AUTH_TOKEN={new_metrics}\n"
-            ).encode()
-            # Atomic mode-0o600 mint via
-            # O_CREAT|O_EXCL|O_NOFOLLOW. A naive write with the
-            # process umask (typically 0o644) and chmod afterward
-            # leaves a window where any local UID can read all
-            # three secrets on a multi-user host, and on Windows
-            # chmod is a no-op so the file stays world-readable.
-            # ``O_EXCL`` blocks a colocated user who pre-creates
-            # the file as a symlink to e.g. /etc/cron.d/.
-            # ``O_NOFOLLOW`` rejects an existing-symlink attack on
-            # the filename itself.
-            _write_secret_env_atomic(secret_env, payload)
-            os.environ["Z4J_SECRET"] = new_secret
-            os.environ["Z4J_SESSION_SECRET"] = new_session
-            os.environ["Z4J_METRICS_AUTH_TOKEN"] = new_metrics
-            print(  # noqa: T201
-                f"z4j: minted fresh Z4J_SECRET + Z4J_SESSION_SECRET + "
-                f"Z4J_METRICS_AUTH_TOKEN, persisted to {secret_env}",
-            )
-            print(  # noqa: T201
-                "z4j: WARNING - evaluation mode. For production, set "
-                "Z4J_SECRET + Z4J_SESSION_SECRET explicitly via env vars and "
-                "back up the secret store.",
-            )
+        configuration_snapshot = _capture_serve_configuration(
+            preliminary=preliminary,
+        )
+    except Exception as exc:
+        bootstrap_coordinator.close()
+        print(f"z4j: configuration bootstrap refused: {exc}", file=sys.stderr)  # noqa: T201
+        return 2
 
     # In dev mode the brain's settings validators expect localhost-friendly
     # values for allowed_hosts + a non-https public_url. Set sane defaults
@@ -2089,6 +2444,7 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
     # internal-hostname leakage on every crawler hit.
     if getattr(args, "debug_host_errors", False):
         if os.environ.get("Z4J_ENVIRONMENT", "").lower() != "dev":
+            bootstrap_coordinator.close()
             print(  # noqa: T201
                 "z4j: --debug-host-errors refused outside dev mode. "
                 "This flag enables verbose 400 responses that leak internal "
@@ -2125,6 +2481,14 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
                 merged.append(h)
         os.environ["Z4J_ALLOWED_HOSTS"] = _json.dumps(merged)
 
+    from z4j_brain.configuration import (
+        export_snapshot_environment,
+        overlay_runtime_environment,
+    )
+
+    configuration_snapshot = overlay_runtime_environment(configuration_snapshot)
+    export_snapshot_environment(configuration_snapshot)
+
     # Auto-migrate before serve. The bare-metal quickstart used to
     # leave migrations to a manual ``z4j migrate upgrade head``
     # step - easy to forget, and the first request would then blow
@@ -2134,50 +2498,53 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
     # the DB is unreachable. Can be disabled for managed-migration
     # deployments by setting ``Z4J_AUTO_MIGRATE=false`` (Helm /
     # GitOps workflows that want migrations as a separate Job).
-    if os.environ.get("Z4J_AUTO_MIGRATE", "true").lower() != "false":
-        try:
-            _auto_migrate()
-        except _UnknownDBRevisionError as exc:
-            # v1.0.19 compat-fix: the DB's ``alembic_version`` row
-            # references a revision file this code's package
-            # doesn't ship. That happens when an operator
-            # downgrades z4j-brain across a migration boundary
-            # (DB at head N, code at head N-2). Pre-1.0.19 this
-            # was a hard SystemExit which caused systemd flap
-            # loops. From 1.0.19 onward we WARN and continue
-            # boot - the brain serves the subset of features
-            # this code understands; newer migrations' tables
-            # are simply unused (workers + repos use the
-            # ``_has_table`` defensive pattern). See
-            # docs/MIGRATIONS.md for the bidirectional-compat
-            # contract. Operators who actually want to clean up
-            # the DB to match this code can run
-            # ``z4j migrate sync --allow-future-schema``.
-            print(  # noqa: T201
-                f"z4j: DB is at a NEWER alembic head "
-                f"({exc.db_head!r}) than this code knows about. "
-                "Continuing boot; this code will serve the subset "
-                "of features it understands. Run `z4j "
-                "migrate sync --allow-future-schema` to roll the "
-                "DB back to this code's head (DESTRUCTIVE - drops "
-                "tables the newer code added).",
-            )
-        except SystemExit as exc:
-            # alembic_main exits on other errors (e.g. DB
-            # unreachable, malformed revision file). Translate to
-            # a clear message + non-zero return so the operator
-            # doesn't have to read a cryptic argparse trace.
-            print(  # noqa: T201
-                f"z4j: auto-migrate failed (code {exc.code}). "
-                "Set Z4J_AUTO_MIGRATE=false and run `z4j "
-                "migrate upgrade head` manually if you are managing "
-                "migrations separately.",
-            )
-            return 1
+    try:
+        if os.environ.get("Z4J_AUTO_MIGRATE", "true").lower() != "false":
+            try:
+                _auto_migrate()
+            except _UnknownDBRevisionError as exc:
+                # v1.0.19 compat-fix: the DB's ``alembic_version`` row
+                # references a revision file this code's package
+                # doesn't ship. That happens when an operator
+                # downgrades z4j-brain across a migration boundary
+                # (DB at head N, code at head N-2). Pre-1.0.19 this
+                # was a hard SystemExit which caused systemd flap
+                # loops. From 1.0.19 onward we WARN and continue
+                # boot - the brain serves the subset of features
+                # this code understands; newer migrations' tables
+                # are simply unused (workers + repos use the
+                # ``_has_table`` defensive pattern). See
+                # docs/MIGRATIONS.md for the bidirectional-compat
+                # contract. Operators who actually want to clean up
+                # the DB to match this code can run
+                # ``z4j migrate sync --allow-future-schema``.
+                print(  # noqa: T201
+                    f"z4j: DB is at a NEWER alembic head "
+                    f"({exc.db_head!r}) than this code knows about. "
+                    "Continuing boot; this code will serve the subset "
+                    "of features it understands. Run `z4j "
+                    "migrate sync --allow-future-schema` to roll the "
+                    "DB back to this code's head (DESTRUCTIVE - drops "
+                    "tables the newer code added).",
+                )
+            except SystemExit as exc:
+                # alembic_main exits on other errors (e.g. DB
+                # unreachable, malformed revision file). Translate to
+                # a clear message + non-zero return so the operator
+                # doesn't have to read a cryptic argparse trace.
+                print(  # noqa: T201
+                    f"z4j: auto-migrate failed (code {exc.code}). "
+                    "Set Z4J_AUTO_MIGRATE=false and run `z4j "
+                    "migrate upgrade head` manually if you are managing "
+                    "migrations separately.",
+                )
+                return 1
+    finally:
+        bootstrap_coordinator.close()
 
-    from z4j_brain.settings import Settings
+    from z4j_brain.configuration import settings_from_snapshot
 
-    settings = Settings()  # type: ignore[call-arg]
+    settings = settings_from_snapshot(configuration_snapshot)
 
     # FAIL-CLOSED dev+public-bind gate (added v1.0.14, breaking from
     # 1.0.13). Refuse to start when the brain is in dev mode AND
@@ -2268,19 +2635,64 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
     # mirrors the gunicorn convention (2 * cpu + 1 is the canonical
     # web-tier shape; 4 is sufficient for the brain's mostly-async
     # workload without needing per-worker DB pool tuning).
-    if args.workers is None:
-        try:
-            cpu = os.cpu_count() or 2
-        except Exception:
-            cpu = 2
-        workers_resolved = max(1, min(4, cpu))
-    else:
-        workers_resolved = int(args.workers)
-    if workers_resolved == 1:
+    try:
+        cpu = os.cpu_count() or 2
+    except Exception:
+        cpu = 2
+    # H2: detect the local (in-process) agent registry from the RESOLVED
+    # settings, not the raw env var. os.environ["Z4J_REGISTRY_BACKEND"]
+    # is only set on the auto-SQLite path (when Z4J_DATABASE_URL was
+    # unset); an operator who points Z4J_DATABASE_URL at an explicit
+    # sqlite:// URL -- or sets registry_backend via ~/.z4j/config.env or
+    # ./.env, which Settings reads but os.environ never sees -- still
+    # gets registry_backend coerced to "local" by Settings, yet the
+    # env-var check missed it and spawned min(4, cpu) workers over one
+    # in-memory registry + one SQLite file (the split-brain/contention/
+    # bootstrap-race the single-worker guard exists to prevent).
+    local_registry = str(settings.registry_backend).lower() == "local"
+    workers_resolved, worker_note = resolve_serve_workers(
+        args.workers,
+        local_registry=local_registry,
+        cpu_count=cpu,
+        embedded_scheduler=bool(settings.embedded_scheduler),
+    )
+    if worker_note:
+        print(worker_note)  # noqa: T201
+
+    # CX-M18: gate --admin-password now that the REAL worker topology is
+    # known. uvicorn spawns fresh worker interpreters for workers>1 and
+    # for --reload, where the in-process bootstrap-password holder is not
+    # inherited (the admin is never provisioned and a setup-token banner
+    # prints instead); a forked child would also expose the cleartext in
+    # its memory. Only a single, non-reload, in-process worker can carry
+    # it safely.
+    if args.admin_password:
+        if workers_resolved > 1 or args.reload:
+            raise SystemExit(
+                "z4j: --admin-password requires a single non-reload "
+                f"worker, but the resolved topology is workers="
+                f"{workers_resolved}"
+                f"{', reload=on' if args.reload else ''}. uvicorn spawns "
+                "fresh worker interpreters that never receive the "
+                "in-process password, so the admin would not be "
+                "provisioned (a setup-token banner would print instead), "
+                "and a forked child would expose the cleartext in memory. "
+                "Pass --workers=1 without --reload, set the password via "
+                "the Z4J_BOOTSTRAP_ADMIN_PASSWORD env var (eagerly popped "
+                "by startup.py and inherited safely), or run "
+                "bootstrap-admin separately before serving.",
+            )
+        from z4j_brain import startup as _startup
+
+        _startup.set_cli_bootstrap_password(args.admin_password)
+
+    if workers_resolved == 1 and not local_registry:
         # Operator explicitly chose --workers=1, OR the host has only
         # 1 CPU. Either way emit an INFO so the trade-off is visible
         # in startup logs - operators investigating agent flap can
-        # then connect the dots without grepping the source.
+        # then connect the dots without grepping the source. (Skipped
+        # for the SQLite/local-registry case above, which prints its
+        # own reason and where --workers>1 is simply not an option.)
         print(  # noqa: T201
             "z4j: starting with --workers=1. This works fine for "
             "<=5 agents but agent disconnects can be triggered by "
@@ -2288,7 +2700,7 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
             "--workers=4 (or --workers=$(nproc)) for production.",
         )
 
-    # R3-M8: with multiple worker processes, per-process Prometheus
+    # With multiple worker processes, per-process Prometheus
     # registries shard the operational counters (a load-balanced
     # scrape sees one worker's view). Flip on prometheus_client
     # multiprocess mode BEFORE uvicorn spawns the workers so the env
@@ -2330,6 +2742,21 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
     return 0
 
 
+def _find_alembic_config_path() -> Path | None:
+    """Resolve the one bundled/source Alembic configuration."""
+
+    candidates: list[Path] = []
+    env_path = os.environ.get("Z4J_ALEMBIC_INI")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path.cwd() / "alembic.ini")
+    candidates.append(Path(__file__).resolve().parent / "alembic.ini")
+    candidates.append(
+        Path(__file__).resolve().parent.parent.parent / "alembic.ini",
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
 def _run_migrate(args: argparse.Namespace) -> int:
     """Delegate to alembic with the brain's bundled config.
 
@@ -2342,34 +2769,17 @@ def _run_migrate(args: argparse.Namespace) -> int:
     3. The source-tree location next to ``backend/src/`` (legacy
        fallback for editable installs).
     """
-    import os
-
     from alembic.config import main as alembic_main
 
     # Bootstrap env (DB URL + secrets) so alembic's env.py can
     # instantiate Settings(). Fresh installs don't have these yet.
     _bootstrap_env_for_management_commands()
 
-    candidates: list[Path] = []
-    env_path = os.environ.get("Z4J_ALEMBIC_INI")
-    if env_path:
-        candidates.append(Path(env_path))
-    candidates.append(Path.cwd() / "alembic.ini")
-    # pip-install path: alembic.ini is bundled inside the installed
-    # package right next to cli.py. This is THE case we care about
-    # for ``pip install z4j && z4j serve``.
-    candidates.append(Path(__file__).resolve().parent / "alembic.ini")
-    # Editable / source-tree fallback: when developing inside the
-    # monorepo the ini lives at packages/z4j-brain/backend/alembic.ini
-    # i.e. three parents up from this file.
-    candidates.append(
-        Path(__file__).resolve().parent.parent.parent / "alembic.ini",
-    )
-
-    config_path = next((p for p in candidates if p.exists()), None)
+    config_path = _find_alembic_config_path()
     if config_path is None:
         print(  # noqa: T201
-            "z4j: alembic.ini not found in any of: " + ", ".join(str(p) for p in candidates),
+            "z4j: alembic.ini not found; set Z4J_ALEMBIC_INI or install "
+            "the bundled migration package",
             file=sys.stderr,
         )
         return 2
@@ -2390,7 +2800,7 @@ def _run_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_migrate_sync(
+def _run_migrate_sync(  # noqa: PLR0915  one destructive command boundary
     config_path: Path,
     *,
     allow_future: bool,
@@ -2455,6 +2865,26 @@ def _run_migrate_sync(
         )
         return 1
 
+    try:
+        protected_tables = _destructive_sync_protected_tables()
+    except Exception as exc:
+        print(  # noqa: T201
+            "z4j migrate sync: refusing destructive sync because the "
+            f"authenticated-transition fence could not be proved: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if protected_tables:
+        print(  # noqa: T201
+            "z4j migrate sync: refusing destructive sync because the "
+            "authenticated 1.8 transition exists "
+            f"({', '.join(protected_tables)}). Provision a matching/new "
+            "database or use an authorized restore; do not stamp or drop "
+            "this installation.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Operator confirmed: stamp + drop unknown tables.
     print(  # noqa: T201
         f"z4j migrate sync: STAMPING DB back to {code_head!r} "
@@ -2474,6 +2904,7 @@ def _run_migrate_sync(
 
     from z4j_brain.persistence import models  # noqa: F401
     from z4j_brain.persistence.base import Base
+    from z4j_brain.schema_transition import SCHEMA_TRANSITION_ADVISORY_LOCK_KEY
 
     db_url = os.environ.get("Z4J_DATABASE_URL")
     if db_url:
@@ -2481,6 +2912,13 @@ def _run_migrate_sync(
         engine = create_engine(sync_url, future=True)
         try:
             with engine.connect() as conn:
+                if conn.dialect.name == "sqlite":
+                    conn.exec_driver_sql("BEGIN EXCLUSIVE")
+                elif conn.dialect.name == "postgresql":
+                    conn.execute(
+                        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+                        {"lock_id": SCHEMA_TRANSITION_ADVISORY_LOCK_KEY},
+                    )
                 inspector = inspect(conn)
                 db_tables = set(inspector.get_table_names())
                 known_tables = set(Base.metadata.tables.keys()) | {
@@ -2507,7 +2945,11 @@ def _run_migrate_sync(
                     )
                     # Use IF EXISTS for safety. SQLite + Postgres
                     # both support this.
-                    conn.execute(text(f'DROP TABLE IF EXISTS "{tbl}"'))
+                    conn.execute(
+                        text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                            f'DROP TABLE IF EXISTS "{tbl}"',
+                        ),
+                    )
                 conn.commit()
         finally:
             engine.dispose()
@@ -2515,6 +2957,41 @@ def _run_migrate_sync(
         "z4j migrate sync: done. Restart the brain.",
     )
     return 0
+
+
+def _destructive_sync_protected_tables() -> tuple[str, ...]:
+    """Fence authenticated/prepared 1.8 databases before any destructive sync."""
+
+    from sqlalchemy import create_engine, inspect, text
+
+    from z4j_brain.schema_transition import SCHEMA_TRANSITION_ADVISORY_LOCK_KEY
+
+    db_url = os.environ.get("Z4J_DATABASE_URL")
+    if not db_url:
+        raise RuntimeError("Z4J_DATABASE_URL is not configured")
+    sync_url = db_url.replace("+asyncpg", "").replace("+aiosqlite", "")
+    engine = create_engine(sync_url, future=True)
+    try:
+        with engine.connect() as connection:
+            if connection.dialect.name == "sqlite":
+                connection.exec_driver_sql("BEGIN EXCLUSIVE")
+            elif connection.dialect.name == "postgresql":
+                connection.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_id)"),
+                    {"lock_id": SCHEMA_TRANSITION_ADVISORY_LOCK_KEY},
+                )
+            tables = set(inspect(connection).get_table_names())
+            return tuple(
+                sorted(
+                    tables
+                    & {
+                        "audit_chain_preparation",
+                        "audit_chain_state",
+                    },
+                ),
+            )
+    finally:
+        engine.dispose()
 
 
 class _UnknownDBRevisionError(RuntimeError):
@@ -2535,7 +3012,10 @@ class _UnknownDBRevisionError(RuntimeError):
         self.db_head = db_head
 
 
-def _auto_migrate() -> None:
+def _auto_migrate(
+    *,
+    retirement_context: dict[str, Any] | None = None,
+) -> None:
     """Run ``alembic upgrade head`` against the configured DB.
 
     Called by :func:`_run_serve` on bare-metal starts so the
@@ -2549,6 +3029,8 @@ def _auto_migrate() -> None:
     """
     import os
 
+    from alembic import command as alembic_command
+    from alembic.config import Config
     from alembic.config import main as alembic_main
 
     candidates: list[Path] = []
@@ -2589,10 +3071,26 @@ def _auto_migrate() -> None:
         unknown = None
     if unknown is not None:
         raise _UnknownDBRevisionError(unknown)
-    alembic_main(
-        argv=["-c", str(config_path), "upgrade", "head"],
-        prog="z4j migrate (auto)",
-    )
+    if retirement_context is None:
+        alembic_main(
+            argv=["-c", str(config_path), "upgrade", "head"],
+            prog="z4j migrate (auto)",
+        )
+    else:
+        config = Config(str(config_path))
+        config.attributes["z4j_installation_retirement"] = dict(
+            retirement_context,
+        )
+        alembic_command.upgrade(config, "head")
+    database_url = os.environ.get("Z4J_DATABASE_URL", "")
+    database_path = _sqlite_database_path(database_url)
+    if (
+        os.name == "posix"
+        and database_path is not None
+        and database_path == z4j_home() / "z4j.db"
+        and database_path.exists()
+    ):
+        database_path.chmod(0o600)
 
 
 def _detect_unknown_db_head(config_path: Path) -> str | None:
@@ -2623,6 +3121,8 @@ def _detect_unknown_db_head(config_path: Path) -> str | None:
     from alembic.script import ScriptDirectory
     from sqlalchemy import create_engine, text
 
+    from z4j_brain.schema_transition import SCHEMA_TRANSITION_ADVISORY_LOCK_KEY
+
     cfg = Config(str(config_path))
     script = ScriptDirectory.from_config(cfg)
     known_revisions = {rev.revision for rev in script.walk_revisions()}
@@ -2633,6 +3133,13 @@ def _detect_unknown_db_head(config_path: Path) -> str | None:
     engine = create_engine(sync_url, future=True)
     try:
         with engine.connect() as conn:
+            if conn.dialect.name == "sqlite":
+                conn.exec_driver_sql("BEGIN EXCLUSIVE")
+            elif conn.dialect.name == "postgresql":
+                conn.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_id)"),
+                    {"lock_id": SCHEMA_TRANSITION_ADVISORY_LOCK_KEY},
+                )
             result = conn.execute(
                 text("SELECT version_num FROM alembic_version LIMIT 1"),
             )
@@ -2649,12 +3156,22 @@ def _detect_unknown_db_head(config_path: Path) -> str | None:
     return db_head
 
 
-def _run_audit(args: argparse.Namespace) -> int:
+def _run_audit(args: argparse.Namespace) -> int:  # noqa: PLR0911  flat subcommand dispatch
     """Dispatch ``z4j audit <subcommand>``."""
     if args.audit_command == "verify":
         return _run_audit_verify(args)
+    if args.audit_command == "rotate-chain-key":
+        return _run_audit_rotate_chain_key(args)
+    if args.audit_command == "retire-chain-key":
+        return _run_audit_retire_chain_key(args)
+    if args.audit_command == "activate-chain-state":
+        return _run_audit_activate_chain_state(args)
+    if args.audit_command == "export-and-delete-frozen":
+        return _run_audit_export_and_delete_frozen(args)
     if args.audit_command == "fork-cleanup":
         return _run_audit_fork_cleanup(args)
+    if args.audit_command == "reseal-watermark":
+        return _run_audit_reseal_watermark(args)
     print(  # noqa: T201
         f"z4j audit: unknown subcommand {args.audit_command!r}",
         file=sys.stderr,
@@ -2673,29 +3190,22 @@ def _run_projects(args: argparse.Namespace) -> int:
     return 2
 
 
-def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
-    """Rewrite ``Schedule.scheduler`` from one value to another for a project.
-
-    Operator-initiated explicit migration. Use this AFTER flipping
-    ``default_scheduler_owner`` if you want existing reconciler-managed
-    rows to retroactively move to the new owner; otherwise the next
-    reconcile will treat them as absent and (under
-    ``replace_for_source``) delete them.
-
-    Targets only ``declarative*`` and ``imported_*`` source rows by
-    default; pass ``--all-sources`` to widen.
-
-    Audit-logged with the rewrite count + from/to + scope so the
-    forensic trail is preserved.
-
-    Exit codes:
-        0 - success (or 0 rows in dry-run)
-        2 - misconfiguration (bad slug, can't connect to DB)
-    """
+def _run_projects_rewrite_scheduler(  # noqa: PLR0915 - explicit fail-closed CLI
+    args: argparse.Namespace,
+) -> int:
+    """Preview or finalize one manifest-bound scheduler-owner cutover."""
     import asyncio
+    import json
+    import uuid
+    from datetime import UTC, datetime
 
     _bootstrap_env_for_management_commands()
 
+    from z4j_brain.configuration import (
+        capture_configuration,
+        export_snapshot_environment,
+        settings_from_snapshot,
+    )
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.persistence.database import (
         DatabaseManager,
@@ -2705,10 +3215,14 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
         AuditLogRepository,
         ProjectRepository,
     )
-    from z4j_brain.settings import Settings
+    from z4j_brain.persistence.repositories.schedule_external import (
+        ScheduleExternalRepository,
+    )
 
     try:
-        settings = Settings()  # type: ignore[call-arg]
+        snapshot = capture_configuration()
+        export_snapshot_environment(snapshot)
+        settings = settings_from_snapshot(snapshot)
     except Exception as exc:
         print(  # noqa: T201
             f"z4j projects rewrite-scheduler: failed to load settings: {type(exc).__name__}",
@@ -2718,15 +3232,11 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
 
     audit_service = AuditService(settings)
 
-    async def _run() -> int:
-        from sqlalchemy import func, or_, update
-
-        from z4j_brain.persistence.models import Schedule
-
+    async def _run() -> int:  # noqa: PLR0911, PLR0912, PLR0915
         engine = create_engine_from_settings(settings)
         db = DatabaseManager(engine)
         try:
-            async with db.session() as session:
+            async with db.session(write=True) as session:
                 projects_repo = ProjectRepository(session)
                 project = await projects_repo.get_by_slug(args.slug)
                 if project is None:
@@ -2736,91 +3246,268 @@ def _run_projects_rewrite_scheduler(args: argparse.Namespace) -> int:
                     )
                     return 2
 
-                # Build the WHERE predicate. ``LOWER(source)`` for
-                # parity between SQLite (case-insensitive LIKE) and
-                # Postgres (case-sensitive LIKE). ``ESCAPE '\\'`` so
-                # the literal underscore in ``declarative_django``
-                # matches a literal ``_`` only.
-                where_clauses = [
-                    Schedule.project_id == project.id,
-                    Schedule.scheduler == args.from_scheduler,
-                ]
-                if not args.all_sources:
-                    source_lower = func.lower(Schedule.source)
-                    where_clauses.append(
-                        or_(
-                            source_lower == "declarative",
-                            source_lower == "imported",
-                            source_lower.like(
-                                "declarative:%",
-                                escape="\\",
+                if args.from_scheduler == args.to_scheduler:
+                    print(  # noqa: T201
+                        "z4j projects rewrite-scheduler: --from and --to must name distinct owners",
+                        file=sys.stderr,
+                    )
+                    return 2
+                if args.all_sources:
+                    print(  # noqa: T201
+                        "z4j projects rewrite-scheduler: --all-sources is "
+                        "unsafe and no longer supported; use a complete external "
+                        "stream or explicit --schedule-id values",
+                        file=sys.stderr,
+                    )
+                    return 2
+                try:
+                    schedule_ids = tuple(uuid.UUID(value) for value in args.schedule_id)
+                except ValueError:
+                    print(  # noqa: T201
+                        "z4j projects rewrite-scheduler: every --schedule-id must be a UUID",
+                        file=sys.stderr,
+                    )
+                    return 2
+                repository = ScheduleExternalRepository(session)
+                to_reserved = args.to_scheduler == "z4j-scheduler"
+                if to_reserved:
+                    if args.from_scheduler == "z4j-scheduler":
+                        print(  # noqa: T201
+                            "z4j projects rewrite-scheduler: reserved-to-reserved "
+                            "is not an owner cutover",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    if schedule_ids:
+                        print(  # noqa: T201
+                            "z4j projects rewrite-scheduler: external-source "
+                            "cutovers always select the complete sealed stream",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    preview = await repository.preview_external_to_reserved_cutover(
+                        project_id=project.id,
+                        from_owner=args.from_scheduler,
+                        source_scope=args.source_scope,
+                        cursor_policy=args.cursor_policy,
+                    )
+                else:
+                    missing_target = [
+                        name
+                        for name, value in (
+                            ("--target-source-scope", args.target_source_scope),
+                            (
+                                "--target-adapter-instance-id",
+                                args.target_adapter_instance_id,
                             ),
-                            source_lower.like(
-                                "declarative\\_%",
-                                escape="\\",
+                            ("--target-agent-id", args.target_agent_id),
+                            (
+                                "--target-registry-owner-id",
+                                args.target_registry_owner_id,
                             ),
-                            source_lower.like(
-                                "imported\\_%",
-                                escape="\\",
+                            (
+                                "--target-session-generation",
+                                args.target_session_generation,
                             ),
+                        )
+                        if not value
+                    ]
+                    if missing_target:
+                        print(  # noqa: T201
+                            "z4j projects rewrite-scheduler: external target "
+                            f"requires {', '.join(missing_target)}",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    if args.from_scheduler == "z4j-scheduler" and not schedule_ids:
+                        print(  # noqa: T201
+                            "z4j projects rewrite-scheduler: reserved-source "
+                            "cutover requires explicit --schedule-id values",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    if args.from_scheduler != "z4j-scheduler" and schedule_ids:
+                        print(  # noqa: T201
+                            "z4j projects rewrite-scheduler: external-source "
+                            "cutovers always select the complete sealed stream",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    try:
+                        target_agent_id = uuid.UUID(args.target_agent_id)
+                        target_registry_owner_id = uuid.UUID(
+                            args.target_registry_owner_id,
+                        )
+                    except ValueError:
+                        print(  # noqa: T201
+                            "z4j projects rewrite-scheduler: target agent and "
+                            "registry-owner ids must be UUIDs",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    preview = await repository.preview_to_external_cutover(
+                        project_id=project.id,
+                        from_owner=args.from_scheduler,
+                        source_scope=args.source_scope,
+                        to_owner=args.to_scheduler,
+                        target_source_scope=args.target_source_scope,
+                        schedule_ids=schedule_ids,
+                        cursor_policy=args.cursor_policy,
+                        target_adapter_instance_id=(args.target_adapter_instance_id),
+                        target_executor_agent_id=target_agent_id,
+                        target_executor_registry_owner_id=(target_registry_owner_id),
+                        target_executor_session_generation=(args.target_session_generation),
+                        target_executor_worker_id=args.target_worker_id,
+                    )
+
+                preview_output = {
+                    "manifest_digest": preview.manifest_digest,
+                    "manifest": preview.manifest,
+                }
+                if args.dry_run:
+                    print(  # noqa: T201
+                        json.dumps(
+                            preview_output,
+                            indent=2,
+                            sort_keys=True,
                         ),
                     )
-
-                if args.dry_run:
-                    from sqlalchemy import select
-
-                    count_q = (
-                        select(func.count())
-                        .select_from(
-                            Schedule,
-                        )
-                        .where(*where_clauses)
-                    )
-                    n_rows = (await session.execute(count_q)).scalar() or 0
-                    scope = "all sources" if args.all_sources else "declarative/imported sources"
-                    print(  # noqa: T201
-                        f"z4j projects rewrite-scheduler "
-                        f"(dry-run): would rewrite {n_rows} schedule(s) "
-                        f"in project {args.slug!r} from "
-                        f"{args.from_scheduler!r} → "
-                        f"{args.to_scheduler!r} (scope: {scope})",
-                    )
                     return 0
+                if (
+                    not args.operation_id
+                    or not args.preview_manifest_digest
+                    or not args.attest_all_schedulers_quiesced
+                ):
+                    print(  # noqa: T201
+                        "z4j projects rewrite-scheduler: finalization requires "
+                        "--operation-id, --preview-manifest-digest, and "
+                        "--attest-all-schedulers-quiesced",
+                        file=sys.stderr,
+                    )
+                    return 2
+                try:
+                    operation_id = uuid.UUID(args.operation_id)
+                except ValueError:
+                    print(  # noqa: T201
+                        "z4j projects rewrite-scheduler: --operation-id must be a UUID",
+                        file=sys.stderr,
+                    )
+                    return 2
+                if args.preview_manifest_digest != preview.manifest_digest:
+                    print(  # noqa: T201
+                        "z4j projects rewrite-scheduler: preview changed; rerun "
+                        "--dry-run and re-attest the new manifest",
+                        file=sys.stderr,
+                    )
+                    return 2
 
-                result = await session.execute(
-                    update(Schedule).where(*where_clauses).values(scheduler=args.to_scheduler),
-                )
-                rewrote_n = result.rowcount or 0
+                if to_reserved:
+                    stream = preview.manifest["stream"]
+                    attestation = {
+                        "all_old_and_new_scheduler_replicas_quiesced": True,
+                        "preview_manifest_digest": preview.manifest_digest,
+                        "stream_id": stream["stream_id"] if stream else None,
+                        "epoch_uuid": stream["epoch_uuid"] if stream else None,
+                        "sealed_sequence": (stream["sealed_sequence"] if stream else None),
+                        "final_snapshot_digest": (
+                            stream["last_snapshot_digest"] if stream else None
+                        ),
+                    }
+                    transition = await repository.finalize_external_to_reserved_cutover(
+                        operation_id=operation_id,
+                        project_id=project.id,
+                        from_owner=args.from_scheduler,
+                        source_scope=args.source_scope,
+                        preview_manifest_digest=preview.manifest_digest,
+                        cursor_policy=args.cursor_policy,
+                        quiescence_attestation=attestation,
+                        occurred_at=datetime.now(UTC),
+                    )
+                else:
+                    source_stream = preview.manifest["source_stream"]
+                    attestation = {
+                        "all_old_and_new_scheduler_replicas_quiesced": True,
+                        "preview_manifest_digest": preview.manifest_digest,
+                        "source_stream_id": (source_stream["stream_id"] if source_stream else None),
+                        "source_epoch_uuid": (
+                            source_stream["epoch_uuid"] if source_stream else None
+                        ),
+                        "source_sealed_sequence": (
+                            source_stream["sealed_sequence"] if source_stream else None
+                        ),
+                        "source_final_snapshot_digest": (
+                            source_stream["last_snapshot_digest"] if source_stream else None
+                        ),
+                    }
+                    transition = await repository.finalize_to_external_cutover(
+                        operation_id=operation_id,
+                        project_id=project.id,
+                        from_owner=args.from_scheduler,
+                        source_scope=args.source_scope,
+                        to_owner=args.to_scheduler,
+                        target_source_scope=args.target_source_scope,
+                        schedule_ids=schedule_ids,
+                        preview_manifest_digest=preview.manifest_digest,
+                        cursor_policy=args.cursor_policy,
+                        quiescence_attestation=attestation,
+                        target_adapter_instance_id=(args.target_adapter_instance_id),
+                        target_executor_agent_id=target_agent_id,
+                        target_executor_registry_owner_id=(target_registry_owner_id),
+                        target_executor_session_generation=(args.target_session_generation),
+                        target_executor_worker_id=args.target_worker_id,
+                        occurred_at=datetime.now(UTC),
+                    )
+                if transition.disposition not in {
+                    "completed",
+                    "exact_replay",
+                }:
+                    print(  # noqa: T201
+                        "z4j projects rewrite-scheduler: cutover refused: "
+                        f"{transition.disposition}",
+                        file=sys.stderr,
+                    )
+                    return 2
 
-                # Audit-log the explicit migration. ``api_key_id``
-                # is None (CLI invocation, no bearer token);
-                # ``user_id`` is None too (CLI doesn't carry a
-                # user context). The metadata identifies the
-                # operator-initiated nature and records scope.
-                audit_repo = AuditLogRepository(session)
-                await audit_service.record(
-                    audit_repo,
-                    action="project.rewrite_scheduler",
-                    target_type="project",
-                    target_id=str(project.id),
-                    result="success",
-                    outcome="allow",
-                    project_id=project.id,
-                    metadata={
-                        "from": args.from_scheduler,
-                        "to": args.to_scheduler,
-                        "all_sources": bool(args.all_sources),
-                        "rewrote_n": rewrote_n,
-                        "invoked_via": "cli",
-                    },
-                )
-                await session.commit()
-                scope = "all sources" if args.all_sources else "declarative/imported sources"
+                cutover = transition.cutover
+                if cutover is None:
+                    print(  # noqa: T201
+                        "z4j projects rewrite-scheduler: cutover evidence is missing",
+                        file=sys.stderr,
+                    )
+                    return 2
+                if transition.disposition == "completed":
+                    await audit_service.record(
+                        AuditLogRepository(session),
+                        action="schedule.owner_cutover",
+                        target_type="schedule_owner_cutover",
+                        target_id=str(operation_id),
+                        result="success",
+                        outcome="allow",
+                        project_id=project.id,
+                        metadata={
+                            "from_owner": args.from_scheduler,
+                            "to_owner": args.to_scheduler,
+                            "source_scope": args.source_scope,
+                            "cursor_policy": args.cursor_policy,
+                            "preview_manifest_digest": (preview.manifest_digest),
+                            "result_manifest_digest": (cutover.result_manifest_digest),
+                            "schedule_count": len(transition.schedules),
+                            "invoked_via": "cli",
+                        },
+                    )
+                    await session.commit()
                 print(  # noqa: T201
-                    f"z4j projects rewrite-scheduler: "
-                    f"rewrote {rewrote_n} schedule(s) in project "
-                    f"{args.slug!r} from {args.from_scheduler!r} "
-                    f"→ {args.to_scheduler!r} (scope: {scope})",
+                    json.dumps(
+                        {
+                            "disposition": transition.disposition,
+                            "operation_id": str(operation_id),
+                            "preview_manifest_digest": (preview.manifest_digest),
+                            "result_manifest_digest": (cutover.result_manifest_digest),
+                            "result_manifest": cutover.result_manifest,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ),
                 )
                 return 0
         finally:
@@ -2948,7 +3635,11 @@ def _run_misfires(args: argparse.Namespace) -> int:
                 # not touch a closed/expired session after dispose.
                 records = [_misfire_cli_record(r) for r in rows]
         finally:
-            await db.dispose()
+            # ``--json`` is a strict stdout protocol.  The shared manager's
+            # informational dispose log may use structlog's pre-configuration
+            # stdout fallback in a short-lived CLI process, corrupting that
+            # protocol.  Dispose the same engine directly and silently here.
+            await engine.dispose()
 
         if args.json:
             import json as _json
@@ -2964,6 +3655,772 @@ def _run_misfires(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def _run_audit_reseal_watermark(args: argparse.Namespace) -> int:
+    """Re-sign a legacy, unauthenticated prune watermark under the current
+    secret (H1). Operator ceremony -- never automatic.
+
+    Returns 0 on success / already-sealed / dry-run, 1 on a refusal the
+    operator must resolve, 2 on config / connection failure.
+    """
+    import asyncio
+
+    _bootstrap_env_for_management_commands()
+
+    from z4j_brain.persistence.database import (
+        DatabaseManager,
+        create_engine_from_settings,
+    )
+    from z4j_brain.persistence.repositories import AuditLogRepository
+    from z4j_brain.persistence.repositories.audit_log import (
+        authenticate_prune_watermark,
+    )
+    from z4j_brain.settings import Settings
+
+    try:
+        settings = Settings()  # type: ignore[call-arg]
+    except Exception as exc:
+        print(  # noqa: T201
+            f"z4j audit reseal-watermark: failed to load settings: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return 2
+
+    async def _run() -> int:  # noqa: PLR0911  explicit refusal outcomes
+        engine = create_engine_from_settings(settings)
+        db = DatabaseManager(engine)
+        try:
+            async with db.session() as session:
+                if await _has_boundary_f_audit_authority(session):
+                    print(  # noqa: T201
+                        "z4j audit reseal-watermark: refusing after "
+                        "Boundary-F preparation or activation; the legacy "
+                        "watermark is no longer mutable authority.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                repo = AuditLogRepository(session)
+                raw = await repo.get_raw_prune_watermark()
+                if raw is None:
+                    print(  # noqa: T201
+                        "z4j audit reseal-watermark: no prune watermark stored; nothing to reseal.",
+                    )
+                    return 0
+                secrets = settings.all_secrets_for_verification()
+                if authenticate_prune_watermark(secrets, raw) is not None:
+                    print(  # noqa: T201
+                        "z4j audit reseal-watermark: the watermark already "
+                        "authenticates under the current secret window; nothing "
+                        "to do.",
+                    )
+                    return 0
+
+                # Unauthenticated. Distinguish a legacy BARE value (no MAC,
+                # the 1.7.0->1.7.1 upgrade case) from a TAGGED value that
+                # fails to verify (forged, or signed under a fully rotated-out
+                # secret -- do NOT bless it without --force-bare).
+                row_part, _, mac_part = raw.rpartition(":")
+                is_tagged = ":" in raw and bool(row_part) and bool(mac_part)
+                if is_tagged and not args.force_bare:
+                    print(  # noqa: T201
+                        "z4j audit reseal-watermark: REFUSING. The stored "
+                        "watermark is tagged but verifies under no current or "
+                        "previous secret. That usually means the signing secret "
+                        "was rotated fully out of the window -- restore it to "
+                        "Z4J_SECRETS_PREVIOUS and re-run `z4j audit verify` -- OR "
+                        "the value was forged. Only if you are certain the "
+                        "embedded anchor is genuine, re-run with --force-bare "
+                        "--i-have-verified-the-chain.",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+                row_hmac = row_part if is_tagged else raw
+                if not row_hmac:
+                    print(  # noqa: T201
+                        "z4j audit reseal-watermark: the stored watermark is "
+                        "empty or malformed; refusing to reseal.",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+                shape = "tagged-but-unverifiable" if is_tagged else "legacy bare"
+                if not args.chain_verified:
+                    print(  # noqa: T201
+                        "z4j audit reseal-watermark: DRY RUN (pass "
+                        "--i-have-verified-the-chain to write).\n"
+                        f"  stored watermark : {shape}\n"
+                        f"  would reseal anchor row_hmac: {row_hmac[:16]}...\n"
+                        "  under the current Z4J_SECRET.\n\n"
+                        "Resealing tells `z4j audit verify` to trust this row as "
+                        "the genuine prune anchor. Run `z4j audit verify` first; "
+                        "if the chain is intact apart from this watermark, re-run "
+                        "with --i-have-verified-the-chain.",
+                    )
+                    return 0
+
+                current_secret = settings.secret.get_secret_value().encode("utf-8")
+                await repo.set_prune_watermark(row_hmac, secret=current_secret)
+                await session.commit()
+                print(  # noqa: T201
+                    "z4j audit reseal-watermark: resealed the prune watermark "
+                    "under the current secret. `z4j audit verify` should now "
+                    "pass (assuming the rest of the chain is intact).",
+                )
+                return 0
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_run())
+
+
+def _run_audit_activate_chain_state(  # noqa: PLR0912, PLR0915  offline ceremony
+    args: argparse.Namespace,
+) -> int:
+    """Finalize or apply one manifest-bound Boundary-F activation."""
+
+    import asyncio
+    import json
+
+    from alembic import command
+    from alembic.config import Config
+    from alembic.util import CommandError
+    from sqlalchemy import text
+
+    from z4j_brain.configuration import (
+        capture_configuration,
+        settings_from_snapshot,
+    )
+    from z4j_brain.domain.audit_activation import (
+        build_activation_manifest,
+        read_activation_manifest,
+        write_activation_manifest,
+    )
+    from z4j_brain.domain.audit_chain import AuditChainIntegrityError
+    from z4j_brain.domain.audit_verifier import verify_active_audit_generation
+    from z4j_brain.persistence.database import (
+        DatabaseManager,
+        create_engine_from_settings,
+    )
+    from z4j_brain.persistence.repositories.audit_log import (
+        AUDIT_CHAIN_ADVISORY_LOCK_KEY,
+    )
+    from z4j_brain.secret_store import audit_bootstrap_coordinator
+
+    manifest_path = Path(args.manifest).expanduser().resolve()
+    if args.known_head is None:
+        known_head: dict[str, Any] | None = None
+    else:
+        try:
+            decoded_known_head = json.loads(args.known_head)
+        except (TypeError, ValueError):
+            decoded_known_head = {"__invalid_json__": True}
+        known_head = (
+            decoded_known_head
+            if isinstance(decoded_known_head, dict)
+            else {"__invalid_json__": True}
+        )
+    preliminary = capture_configuration(include_secret_store=False)
+    database_hint = preliminary.values.get("Z4J_DATABASE_URL", "")
+    sqlite_shape = not database_hint or database_hint.startswith("sqlite")
+    coordinator = (
+        audit_bootstrap_coordinator(z4j_home())
+        if sqlite_shape and args.restore_operation is None
+        else contextlib.nullcontext()
+    )
+
+    try:
+        with coordinator:
+            snapshot = _bootstrap_env_for_management_commands()
+            settings = settings_from_snapshot(snapshot)
+
+            async def _build_manifest() -> dict[str, Any]:
+                if args.restore_operation is not None:
+                    if settings.database_url.startswith("sqlite"):
+                        from z4j_brain.management_restore import (
+                            build_restore_activation_manifest,
+                        )
+                    else:
+                        from z4j_brain.management_restore_postgres import (
+                            build_restore_activation_manifest,
+                        )
+
+                    return await asyncio.to_thread(
+                        build_restore_activation_manifest,
+                        settings.database_url,
+                        operation=args.restore_operation,
+                        settings=settings,
+                        legacy_key_window_complete=bool(
+                            args.legacy_key_window_complete,
+                        ),
+                        known_head=known_head,
+                    )
+                engine = create_engine_from_settings(settings)
+                try:
+                    async with engine.connect() as connection:
+                        if connection.dialect.name == "sqlite":
+                            await connection.exec_driver_sql("BEGIN EXCLUSIVE")
+                        else:
+                            await connection.execution_options(
+                                isolation_level="REPEATABLE READ",
+                            )
+                            await connection.begin()
+                            await connection.execute(
+                                text(
+                                    "SELECT pg_advisory_xact_lock(:lock_id)",
+                                ),
+                                {"lock_id": AUDIT_CHAIN_ADVISORY_LOCK_KEY},
+                            )
+                            await connection.execute(
+                                text(
+                                    "LOCK TABLE audit_log IN SHARE ROW EXCLUSIVE MODE",
+                                ),
+                            )
+                            await connection.execute(
+                                text(
+                                    "LOCK TABLE audit_chain_preparation "
+                                    "IN SHARE ROW EXCLUSIVE MODE",
+                                ),
+                            )
+                        try:
+                            return await connection.run_sync(
+                                lambda sync_connection: build_activation_manifest(
+                                    sync_connection,
+                                    settings,
+                                    legacy_key_window_complete=bool(
+                                        args.legacy_key_window_complete,
+                                    ),
+                                    known_head=known_head,
+                                ),
+                            )
+                        finally:
+                            await connection.rollback()
+                finally:
+                    await engine.dispose()
+
+            if not args.apply:
+                if args.attest_manifest_digest is not None:
+                    raise RuntimeError(  # noqa: TRY301
+                        "--attest-manifest-digest is valid only with --apply",
+                    )
+                manifest = asyncio.run(_build_manifest())
+                write_activation_manifest(manifest_path, manifest)
+                print(  # noqa: T201
+                    "z4j audit activate-chain-state: finalized "
+                    f"{manifest_path} (digest={manifest['manifest_digest']}, "
+                    f"frozen_rows={manifest['frozen_row_count']}).",
+                )
+                if manifest["requires_ambiguity_attestation"]:
+                    print(  # noqa: T201
+                        "z4j audit activate-chain-state: activation is "
+                        "ambiguous; inspect classification_failures and apply "
+                        "only with --attest-manifest-digest="
+                        f"{manifest['manifest_digest']}.",
+                    )
+                return 0
+
+            manifest = read_activation_manifest(manifest_path)
+            if args.known_head is not None:
+                raise RuntimeError(  # noqa: TRY301
+                    "--known-head is bound while finalizing; omit it when "
+                    "applying the finalized manifest",
+                )
+            requested_complete = args.legacy_key_window_complete
+            if (
+                requested_complete is not None
+                and bool(
+                    manifest["legacy_key_window_complete"],
+                )
+                != requested_complete
+            ):
+                raise RuntimeError(  # noqa: TRY301
+                    "--legacy-key-window-complete differs from the finalized manifest",
+                )
+            expected_digest = str(manifest["manifest_digest"])
+            attestation = args.attest_manifest_digest
+            if manifest["requires_ambiguity_attestation"]:
+                if attestation != expected_digest:
+                    raise RuntimeError(  # noqa: TRY301
+                        f"ambiguous activation requires --attest-manifest-digest={expected_digest}",
+                    )
+            elif attestation is not None and attestation != expected_digest:
+                raise RuntimeError(  # noqa: TRY301
+                    "supplied attestation does not equal the finalized manifest digest",
+                )
+
+            if args.restore_operation is not None:
+                from z4j_brain.backup import restore
+
+                if settings.database_url.startswith("sqlite"):
+                    from z4j_brain.management_restore import (
+                        apply_restore_activation_manifest,
+                    )
+                else:
+                    from z4j_brain.management_restore_postgres import (
+                        apply_restore_activation_manifest,
+                    )
+
+                activated_phase = apply_restore_activation_manifest(
+                    settings.database_url,
+                    operation=args.restore_operation,
+                    settings=settings,
+                    manifest=manifest,
+                    attestation=attestation,
+                )
+                restore_result = restore(
+                    settings.database_url,
+                    Path(
+                        activated_phase["source_provenance"]["supplied_path"],
+                    ),
+                    operation=args.restore_operation,
+                )
+                print(  # noqa: T201
+                    "z4j audit activate-chain-state: restore-bound "
+                    "activation committed, restore verified, and fences "
+                    f"cleared (operation={restore_result['operation_id']}).",
+                )
+                return 0
+
+            config_path = _find_alembic_config_path()
+            if config_path is None:
+                raise RuntimeError(  # noqa: TRY301
+                    "alembic.ini was not found",
+                )
+            config = Config(str(config_path))
+            config.attributes["z4j_configuration_snapshot"] = snapshot
+            config.attributes["z4j_audit_activation_manifest"] = manifest
+            config.attributes["z4j_audit_activation_attestation"] = attestation
+            command.upgrade(config, "head")
+
+            async def _verify_committed_activation() -> tuple[int, int]:
+                engine = create_engine_from_settings(settings)
+                db = DatabaseManager(engine)
+                try:
+                    async with db.session(write=True) as session:
+                        report = await verify_active_audit_generation(
+                            session,
+                            settings,
+                            page_size=1000,
+                        )
+                        if not report.clean:
+                            raise AuditChainIntegrityError(
+                                "post-activation verification is not clean: "
+                                + "; ".join(report.mismatches),
+                            )
+                        await session.rollback()
+                        return (
+                            report.verified_active_rows,
+                            report.verified_frozen_rows,
+                        )
+                finally:
+                    await db.dispose()
+
+            active_rows, frozen_rows = asyncio.run(
+                _verify_committed_activation(),
+            )
+            print(  # noqa: T201
+                "z4j audit activate-chain-state: activation committed and "
+                f"fully verified ({active_rows} active, {frozen_rows} frozen).",
+            )
+            return 0
+    except (
+        AuditChainIntegrityError,
+        CommandError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        print(  # noqa: T201
+            f"z4j audit activate-chain-state: refused: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _run_audit_export_and_delete_frozen(args: argparse.Namespace) -> int:
+    """Run/resume the offline frozen-history export/delete ceremony."""
+
+    import asyncio
+    import contextlib
+    import uuid
+
+    from z4j_core.paths import z4j_home
+
+    from z4j_brain.configuration import (
+        capture_configuration,
+        settings_from_snapshot,
+    )
+    from z4j_brain.domain.audit_chain import AuditChainIntegrityError
+    from z4j_brain.domain.audit_frozen_export import export_and_delete_frozen
+    from z4j_brain.persistence.database import create_engine_from_settings
+    from z4j_brain.secret_store import audit_bootstrap_coordinator
+
+    try:
+        operation_id = uuid.UUID(args.operation)
+        if str(operation_id) != args.operation.lower():
+            raise ValueError(  # noqa: TRY301
+                "--operation must be a canonical lowercase UUID",
+            )
+        destination = Path(args.destination).expanduser().resolve()
+        preliminary = capture_configuration(include_secret_store=False)
+        database_hint = preliminary.values.get("Z4J_DATABASE_URL", "")
+        sqlite_shape = not database_hint or database_hint.startswith("sqlite")
+        coordinator = (
+            audit_bootstrap_coordinator(z4j_home()) if sqlite_shape else contextlib.nullcontext()
+        )
+        with coordinator:
+            snapshot = _bootstrap_env_for_management_commands()
+            settings = settings_from_snapshot(snapshot)
+            engine = create_engine_from_settings(settings)
+
+            async def _run() -> dict[str, Any]:
+                try:
+                    return await export_and_delete_frozen(
+                        engine=engine,
+                        settings=settings,
+                        private_root=z4j_home() / "audit-frozen-exports",
+                        operation_id=operation_id,
+                        destination=destination,
+                        acknowledge_destination_digest=(args.acknowledge_destination_digest),
+                        cleanup=bool(args.cleanup),
+                    )
+                finally:
+                    await engine.dispose()
+
+            result = asyncio.run(_run())
+        print(  # noqa: T201
+            "z4j audit export-and-delete-frozen: "
+            f"{result['phase']} operation={result['operation_id']} "
+            f"digest={result['export_sha256']} "
+            f"destination={result['destination']}",
+        )
+        if result["phase"] == "DATABASE_COMMITTED":
+            print(  # noqa: T201
+                "z4j audit export-and-delete-frozen: the signed database "
+                "transition committed; retain the private spool until "
+                "--acknowledge-destination-digest matches the digest above.",
+            )
+        return 0
+    except (
+        AuditChainIntegrityError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        print(  # noqa: T201
+            f"z4j audit export-and-delete-frozen: refused: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _run_audit_rotate_chain_key(  # noqa: PLR0915  two-resource ceremony
+    args: argparse.Namespace,
+) -> int:
+    """Begin/resume the explicit Boundary-F audit-key transition."""
+
+    import asyncio
+    import secrets
+
+    from z4j_brain.configuration import (
+        apply_secret_store_winner,
+        capture_configuration,
+        settings_from_snapshot,
+    )
+    from z4j_brain.domain.audit_chain import (
+        AuditChainIntegrityError,
+        build_audit_keyring,
+    )
+    from z4j_brain.domain.audit_service import AuditService
+    from z4j_brain.domain.audit_verifier import verify_active_audit_generation
+    from z4j_brain.persistence.database import (
+        DatabaseManager,
+        create_engine_from_settings,
+    )
+    from z4j_brain.persistence.repositories import AuditLogRepository
+    from z4j_brain.secret_store import (
+        audit_bootstrap_coordinator,
+        update_secret_store,
+    )
+
+    preliminary = capture_configuration(include_secret_store=False)
+    database_hint = preliminary.values.get("Z4J_DATABASE_URL", "")
+    sqlite_shape = not database_hint or database_hint.startswith("sqlite")
+    coordinator = (
+        audit_bootstrap_coordinator(z4j_home()) if sqlite_shape else contextlib.nullcontext()
+    )
+
+    try:
+        with coordinator:
+            snapshot = _bootstrap_env_for_management_commands()
+            settings = settings_from_snapshot(snapshot)
+            managed = snapshot.source_for_env_key("Z4J_AUDIT_CHAIN_SECRET") == "secret.env"
+            if args.begin_managed and not managed:
+                raise RuntimeError(  # noqa: TRY301
+                    "--begin-managed is valid only when the effective audit key "
+                    "is safe-store-managed",
+                )
+            if managed and not settings.database_url.startswith("sqlite"):
+                raise RuntimeError(  # noqa: TRY301
+                    "safe-store-managed audit-key rotation is supported only for packaged SQLite",
+                )
+
+            async def _preflight() -> tuple[str, dict[str, int]]:
+                engine = create_engine_from_settings(settings)
+                db = DatabaseManager(engine)
+                try:
+                    async with db.session(write=True) as session:
+                        report = await verify_active_audit_generation(
+                            session,
+                            settings,
+                            page_size=1000,
+                        )
+                        if not report.clean:
+                            raise AuditChainIntegrityError(
+                                "audit verification is not clean before rotation",
+                            )
+                        state = await AuditLogRepository(
+                            session,
+                        ).get_chain_state_for_update()
+                        return state.state_key_id, dict(state.active_key_counts)
+                finally:
+                    await db.dispose()
+
+            state_key_id, active_counts = asyncio.run(_preflight())
+            audit_secrets = settings.all_audit_chain_secrets_for_verification()
+            if not audit_secrets:
+                raise RuntimeError(  # noqa: TRY301
+                    "the dedicated audit-key window is empty",
+                )
+            current_key_id, keyring = build_audit_keyring(
+                audit_secrets[0],
+                audit_secrets[1:],
+            )
+            if state_key_id not in keyring:
+                raise AuditChainIntegrityError(  # noqa: TRY301
+                    "the configured audit-key window does not contain the authenticated state key",
+                )
+
+            if managed and state_key_id == current_key_id:
+                if not args.begin_managed:
+                    print(  # noqa: T201
+                        "z4j audit rotate-chain-key: no pending managed "
+                        "rotation; pass --begin-managed to mint a new key.",
+                    )
+                    return 0
+                if len(active_counts) >= 32:
+                    raise RuntimeError(  # noqa: TRY301
+                        "the active 32-key audit window is full; prune and "
+                        "retire an old key before rotating",
+                    )
+                old_current = (
+                    settings.audit_chain_secret.get_secret_value()
+                    if settings.audit_chain_secret is not None
+                    else ""
+                )
+                if "," in old_current:
+                    raise RuntimeError(  # noqa: TRY301
+                        "the managed current audit key cannot be encoded in "
+                        "the previous-key window",
+                    )
+                prior_text = (
+                    settings.audit_chain_previous_secrets.get_secret_value()
+                    if settings.audit_chain_previous_secrets is not None
+                    else ""
+                )
+                prior = [item.strip() for item in prior_text.split(",") if item.strip()]
+                previous = list(dict.fromkeys([old_current, *prior]))
+                winner = update_secret_store(
+                    z4j_home() / "secret.env",
+                    {
+                        "Z4J_AUDIT_CHAIN_SECRET": secrets.token_urlsafe(48),
+                        "Z4J_AUDIT_CHAIN_PREVIOUS_SECRETS": ",".join(previous),
+                    },
+                )
+                snapshot = apply_secret_store_winner(snapshot, winner.values)
+                settings = settings_from_snapshot(snapshot)
+            elif not managed and state_key_id == current_key_id:
+                print(  # noqa: T201
+                    "z4j audit rotate-chain-key: authenticated state already "
+                    "uses the configured current key; install a new current "
+                    "key plus the old key in the explicit previous window first.",
+                )
+                return 0
+
+            async def _rotate() -> bool:
+                engine = create_engine_from_settings(settings)
+                db = DatabaseManager(engine)
+                try:
+                    async with db.session(write=True) as session:
+                        marker = await AuditService(settings).rotate_chain_key(
+                            AuditLogRepository(session),
+                        )
+                        await session.commit()
+                        return marker is not None
+                finally:
+                    await db.dispose()
+
+            changed = asyncio.run(_rotate())
+            print(  # noqa: T201
+                "z4j audit rotate-chain-key: "
+                + (
+                    "rotation committed and authenticated state re-signed."
+                    if changed
+                    else "rotation was already committed; resume is complete."
+                ),
+            )
+            return 0
+    except (AuditChainIntegrityError, RuntimeError, ValueError) as exc:
+        print(  # noqa: T201
+            f"z4j audit rotate-chain-key: refused: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _run_audit_retire_chain_key(  # noqa: PLR0915  state/file retirement
+    args: argparse.Namespace,
+) -> int:
+    """Retire one zero-live-count previous audit key."""
+
+    import asyncio
+
+    from z4j_brain.configuration import (
+        capture_configuration,
+        settings_from_snapshot,
+    )
+    from z4j_brain.domain.audit_chain import (
+        AuditChainIntegrityError,
+        build_audit_keyring,
+        canonical_audit_key_id,
+        normalize_hmac,
+    )
+    from z4j_brain.domain.audit_verifier import verify_active_audit_generation
+    from z4j_brain.persistence.database import (
+        DatabaseManager,
+        create_engine_from_settings,
+    )
+    from z4j_brain.persistence.repositories import AuditLogRepository
+    from z4j_brain.secret_store import (
+        audit_bootstrap_coordinator,
+        update_secret_store,
+    )
+
+    try:
+        target_key_id = normalize_hmac(args.key_id, field="key_id")
+        assert target_key_id is not None
+        preliminary = capture_configuration(include_secret_store=False)
+        database_hint = preliminary.values.get("Z4J_DATABASE_URL", "")
+        coordinator = (
+            audit_bootstrap_coordinator(z4j_home())
+            if not database_hint or database_hint.startswith("sqlite")
+            else contextlib.nullcontext()
+        )
+        with coordinator:
+            snapshot = _bootstrap_env_for_management_commands()
+            settings = settings_from_snapshot(snapshot)
+
+            async def _preflight() -> tuple[str, dict[str, int]]:
+                engine = create_engine_from_settings(settings)
+                db = DatabaseManager(engine)
+                try:
+                    async with db.session(write=True) as session:
+                        report = await verify_active_audit_generation(
+                            session,
+                            settings,
+                            page_size=1000,
+                        )
+                        if not report.clean:
+                            raise AuditChainIntegrityError(
+                                "audit verification is not clean before retirement",
+                            )
+                        state = await AuditLogRepository(
+                            session,
+                        ).get_chain_state_for_update()
+                        return state.state_key_id, dict(state.active_key_counts)
+                finally:
+                    await db.dispose()
+
+            state_key_id, active_counts = asyncio.run(_preflight())
+            audit_secrets = settings.all_audit_chain_secrets_for_verification()
+            if not audit_secrets:
+                raise RuntimeError(  # noqa: TRY301
+                    "the dedicated audit-key window is empty",
+                )
+            current_key_id, _keyring = build_audit_keyring(
+                audit_secrets[0],
+                audit_secrets[1:],
+            )
+            if state_key_id != current_key_id:
+                raise AuditChainIntegrityError(  # noqa: TRY301
+                    "audit-key rotation is pending; complete it before retirement",
+                )
+            if target_key_id == current_key_id:
+                raise RuntimeError(  # noqa: TRY301
+                    "the authenticated current audit key cannot be retired",
+                )
+            live_count = active_counts.get(target_key_id, 0)
+            if live_count:
+                raise RuntimeError(  # noqa: TRY301
+                    f"key {target_key_id} still authenticates {live_count} live "
+                    "active audit row(s)",
+                )
+
+            managed = snapshot.source_for_env_key("Z4J_AUDIT_CHAIN_SECRET") == "secret.env"
+            if not managed:
+                print(  # noqa: T201
+                    "z4j audit retire-chain-key: authenticated live count is "
+                    "zero. Remove this key from the explicit "
+                    "Z4J_AUDIT_CHAIN_PREVIOUS_SECRETS source.",
+                )
+                return 0
+            if not settings.database_url.startswith("sqlite"):
+                raise RuntimeError(  # noqa: TRY301
+                    "safe-store-managed key retirement is supported only for packaged SQLite",
+                )
+
+            previous_text = (
+                settings.audit_chain_previous_secrets.get_secret_value()
+                if settings.audit_chain_previous_secrets is not None
+                else ""
+            )
+            previous = [item.strip() for item in previous_text.split(",") if item.strip()]
+            retained = [
+                secret
+                for secret in previous
+                if canonical_audit_key_id(secret.encode()) != target_key_id
+            ]
+            if len(retained) == len(previous):
+                print(  # noqa: T201
+                    "z4j audit retire-chain-key: key is already absent from "
+                    "the managed previous-key window.",
+                )
+                return 0
+            if retained:
+                update_secret_store(
+                    z4j_home() / "secret.env",
+                    {
+                        "Z4J_AUDIT_CHAIN_PREVIOUS_SECRETS": ",".join(retained),
+                    },
+                )
+            else:
+                update_secret_store(
+                    z4j_home() / "secret.env",
+                    {},
+                    remove=("Z4J_AUDIT_CHAIN_PREVIOUS_SECRETS",),
+                )
+            print(  # noqa: T201
+                "z4j audit retire-chain-key: removed the zero-live-count key "
+                "from the managed previous-key window.",
+            )
+            return 0
+    except (AuditChainIntegrityError, RuntimeError, ValueError) as exc:
+        print(  # noqa: T201
+            f"z4j audit retire-chain-key: refused: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+
 def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit chain verification
     """Stream the audit log and report any HMAC mismatches.
 
@@ -2972,6 +4429,7 @@ def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit 
     into a nightly check and page on non-zero exit.
     """
     import asyncio
+    import json
 
     # Bootstrap env so fresh / bare-metal installs don't crash with
     # a Settings ValidationError before we even open the DB.
@@ -2995,8 +4453,15 @@ def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit 
         return 2
 
     audit = AuditService(settings)
+    known_head: dict[str, Any] | None = None
+    if args.known_head is not None:
+        try:
+            decoded = json.loads(args.known_head)
+        except (TypeError, ValueError):
+            decoded = {"__invalid_json__": True}
+        known_head = decoded if isinstance(decoded, dict) else {"__invalid_json__": True}
 
-    async def _run() -> int:  # noqa: PLR0912  chain verification branches
+    async def _run() -> int:  # noqa: PLR0912, PLR0915  chain verification branches
         engine = create_engine_from_settings(settings)
         db = DatabaseManager(engine)
         verified = 0
@@ -3026,6 +4491,37 @@ def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit 
                 file=sys.stderr,
             )
             return 2
+        if settings.audit_chain_secret is not None:
+            from z4j_brain.domain.audit_verifier import (
+                verify_active_audit_generation,
+            )
+
+            try:
+                async with db.session() as session:
+                    report = await verify_active_audit_generation(
+                        session,
+                        settings,
+                        page_size=page_size,
+                        known_head=known_head,
+                    )
+            except Exception as exc:
+                print(  # noqa: T201
+                    "z4j audit verify: Boundary-F integrity verification "
+                    f"refused: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                await db.dispose()
+                return 1
+            await db.dispose()
+            print(f"verified active: {report.verified_active_rows}")  # noqa: T201
+            print(f"verified frozen: {report.verified_frozen_rows}")  # noqa: T201
+            if report.known_head_result is not None:
+                print(f"known-head: {report.known_head_result}")  # noqa: T201
+            if report.mismatches:
+                print(f"MISMATCHES ({len(report.mismatches)}):")  # noqa: T201
+                for mismatch in report.mismatches:
+                    print(f"  {mismatch}")  # noqa: T201
+            return 0 if report.clean else 1
         try:
             async with db.session() as session:
                 repo = AuditLogRepository(session)
@@ -3034,8 +4530,15 @@ def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit 
                 # anchors on this stored watermark rather than a NULL
                 # prev_row_hmac. Absent a prune it is None and the
                 # NULL-genesis anchor is required exactly as before.
-                # (1.7 audit R2.)
-                prune_watermark = await repo.get_prune_watermark()
+                # (1.7 audit.)
+                # M1: authenticate the watermark against the whole rotation
+                # window (current + previous secrets), mirroring how row
+                # HMACs verify -- so a watermark minted before a Z4J_SECRET
+                # rotation still authenticates instead of false-alarming
+                # "chain truncation".
+                prune_watermark = await repo.get_prune_watermark(
+                    secrets=settings.all_secrets_for_verification(),
+                )
                 while True:
                     rows = await repo.stream_for_verify(
                         chunk=page_size,
@@ -3084,7 +4587,75 @@ def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit 
     return asyncio.run(_run())
 
 
-def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:  # noqa: PLR0915  fork quarantine dispatch
+def _verify_fork_cleanup_backup(
+    path: Path,
+    expected_duplicates: Sequence[tuple[str, int]],
+) -> None:
+    """Fsync and prove the standalone SQLite recovery contains the forks."""
+
+    import sqlite3
+    import stat
+    from urllib.parse import quote
+
+    before = path.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise RuntimeError("fork-cleanup backup is not a regular file")
+    flags = os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError("fork-cleanup backup identity changed")
+        if os.name == "posix":
+            if opened.st_uid != os.getuid():
+                raise RuntimeError("fork-cleanup backup is not owner-owned")
+            os.fchmod(fd, 0o600)
+        os.fsync(fd)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    final_path = path.lstat()
+    if (after.st_dev, after.st_ino, after.st_size) != (
+        final_path.st_dev,
+        final_path.st_ino,
+        final_path.st_size,
+    ):
+        raise RuntimeError("fork-cleanup backup pathname changed")
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+    uri = f"file:{quote(str(path))}?mode=ro&immutable=1"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if integrity != ("ok",):
+            raise RuntimeError(
+                f"fork-cleanup backup integrity_check failed: {integrity!r}",
+            )
+        observed = [
+            (str(row[0]), int(row[1]))
+            for row in connection.execute(
+                "SELECT prev_row_hmac, COUNT(*) FROM audit_log "
+                "WHERE prev_row_hmac IS NOT NULL "
+                "GROUP BY prev_row_hmac HAVING COUNT(*) > 1",
+            )
+        ]
+    finally:
+        connection.close()
+    if sorted(observed) != sorted(expected_duplicates):
+        raise RuntimeError(
+            "fork-cleanup backup does not contain the scanned duplicate set",
+        )
+
+
+def _run_audit_fork_cleanup(  # noqa: PLR0911, PLR0915  quarantine dispatch
+    args: argparse.Namespace,
+) -> int:
     """Quarantine duplicate ``prev_row_hmac`` rows so the v1.1.0
     UNIQUE chain index can apply.
 
@@ -3115,7 +4686,6 @@ def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:  # noqa: PLR0915  
        z4j serve         # migration applies cleanly, brain boots
     """
     import asyncio
-    import shutil
     import sys
     import time
 
@@ -3141,11 +4711,19 @@ def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:  # noqa: PLR0915  
     db_url = settings.database_url
     is_sqlite = "sqlite" in db_url
 
-    async def _scan() -> list[tuple[str, int]]:
+    async def _scan() -> list[tuple[str, int]] | None:
         engine = create_engine_from_settings(settings)
         db = DatabaseManager(engine)
         try:
             async with db.session() as session:
+                if await _has_boundary_f_audit_authority(session):
+                    print(  # noqa: T201
+                        "z4j audit fork-cleanup: refusing after Boundary-F "
+                        "preparation or activation; use the manifest-bound "
+                        "activation/export ceremonies instead.",
+                        file=sys.stderr,
+                    )
+                    return None
                 result = await session.execute(
                     text(
                         "SELECT prev_row_hmac, COUNT(*) AS cnt "
@@ -3160,6 +4738,8 @@ def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:  # noqa: PLR0915  
             await db.dispose()
 
     dups = asyncio.run(_scan())
+    if dups is None:
+        return 1
     if not dups:
         print(  # noqa: T201
             "z4j audit fork-cleanup: no duplicate prev_row_hmac "
@@ -3201,42 +4781,54 @@ def _run_audit_fork_cleanup(args: argparse.Namespace) -> int:  # noqa: PLR0915  
             return 0
 
     # Backup before any write.
-    if not args.no_backup:
-        if is_sqlite:
-            sqlite_path = db_url.split("///", 1)[-1]
-            # A three-slash sqlite URL carries a CWD-relative path;
-            # resolve it so the copy below and the printed backup
-            # location are unambiguous regardless of where the
-            # operator ran the command from.
-            src_path = str(Path(sqlite_path).resolve())
-            backup_path = f"{src_path}.pre-fork-cleanup.{int(time.time())}"
-            try:
-                shutil.copy2(src_path, backup_path)
-                print(f"Backup written: {backup_path}")  # noqa: T201
-            except OSError as exc:
-                print(  # noqa: T201
-                    f"Backup failed: {exc}. Re-run with --no-backup if "
-                    "you have your own backup strategy.",
-                    file=sys.stderr,
-                )
-                return 2
-        else:
+    if is_sqlite:
+        from z4j_brain.backup import backup_sqlite
+
+        sqlite_path = _sqlite_database_path(db_url)
+        if sqlite_path is None:
             print(  # noqa: T201
-                "Postgres detected: this command does not run pg_dump "
-                "for you. Take a backup with `pg_dump` BEFORE re-running, "
-                "or pass --no-backup if you already have one.",
+                "z4j audit fork-cleanup: cannot prove the SQLite path; refusing before mutation.",
                 file=sys.stderr,
             )
-            if not args.apply:
-                # Interactive: refuse without explicit confirmation
-                # of the backup path.
-                return 2
+            return 2
+        backup_path = sqlite_path.with_name(
+            f"{sqlite_path.name}.pre-fork-cleanup.{int(time.time())}",
+        )
+        try:
+            backup_sqlite(db_url, backup_path)
+            _verify_fork_cleanup_backup(backup_path, dups)
+            print(f"Backup written and verified: {backup_path}")  # noqa: T201
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(  # noqa: T201
+                f"Backup failed verification: {exc}. SQLite fork cleanup "
+                "requires a coherent verified backup; --no-backup cannot "
+                "bypass this fence.",
+                file=sys.stderr,
+            )
+            return 2
+    elif not args.no_backup:
+        print(  # noqa: T201
+            "Postgres detected: this command does not run pg_dump "
+            "for you. Take a backup with `pg_dump` BEFORE re-running, "
+            "or pass --no-backup if you already have one.",
+            file=sys.stderr,
+        )
+        if not args.apply:
+            return 2
 
     async def _cleanup() -> int:
         engine = create_engine_from_settings(settings)
         db = DatabaseManager(engine)
         try:
-            async with db.session() as session:
+            async with db.session(write=True) as session:
+                if await _has_boundary_f_audit_authority(session):
+                    print(  # noqa: T201
+                        "z4j audit fork-cleanup: Boundary-F authority "
+                        "appeared before mutation; refusing.",
+                        file=sys.stderr,
+                    )
+                    await session.rollback()
+                    return 1
                 # Create legacy table (CREATE TABLE AS / WHERE 0
                 # copies the schema without rows on both engines).
                 await session.execute(
@@ -3341,8 +4933,9 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
 
     _bootstrap_env_for_management_commands()
 
-    from sqlalchemy import delete, select
+    from sqlalchemy import delete, func, select
 
+    from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.persistence.database import (
         DatabaseManager,
         create_engine_from_settings,
@@ -3352,6 +4945,7 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
         FirstBootToken,
         User,
     )
+    from z4j_brain.persistence.repositories import AuditLogRepository
     from z4j_brain.settings import Settings
 
     settings = Settings()  # type: ignore[call-arg]
@@ -3360,7 +4954,7 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
 
     async def _run() -> int:
         try:
-            async with db.session() as session:
+            async with db.session(write=True) as session:
                 first_admin = (await session.execute(select(User).limit(1))).scalars().first()
                 if first_admin is not None:
                     print(  # noqa: T201
@@ -3377,7 +4971,8 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
                     print(  # noqa: T201
                         "About to wipe:\n"
                         "  - all pending first-boot tokens\n"
-                        "  - audit-log rows where action like 'setup.%'\n"
+                        "  - no audit evidence (a signed reset record is "
+                        "appended)\n"
                         "Pass --force to proceed without this prompt. "
                         "Cancelled (no --force).",
                         file=sys.stderr,
@@ -3385,20 +4980,33 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
                     return 1
 
                 tokens_deleted = (await session.execute(delete(FirstBootToken))).rowcount
-                audit_deleted = (
-                    await session.execute(
-                        delete(AuditLog).where(
-                            AuditLog.action.like("setup.%"),
-                        ),
-                    )
-                ).rowcount
+                setup_evidence = int(
+                    (
+                        await session.execute(
+                            select(func.count(AuditLog.id)).where(
+                                AuditLog.action.like("setup.%"),
+                            ),
+                        )
+                    ).scalar_one(),
+                )
+                await AuditService(settings).record(
+                    AuditLogRepository(session),
+                    action="setup.tokens_reset",
+                    target_type="first_boot",
+                    result="success",
+                    outcome="allow",
+                    metadata={
+                        "tokens_deleted": int(tokens_deleted or 0),
+                        "prior_setup_evidence_preserved": setup_evidence,
+                    },
+                )
                 await session.commit()
 
                 print(  # noqa: T201
                     f"z4j reset-setup: wiped {tokens_deleted} "
-                    f"pending token(s) and {audit_deleted} audit-log "
-                    "row(s). Run `z4j serve` to mint a fresh "
-                    "setup URL.",
+                    "pending token(s), preserved all prior audit evidence, "
+                    "and appended setup.tokens_reset. Run `z4j serve` to "
+                    "mint a fresh setup URL.",
                 )
                 return 0
         finally:
@@ -3448,7 +5056,7 @@ _TABLES_TO_WIPE_ORDER: tuple[str, ...] = (
 )
 
 
-def _bootstrap_env_for_management_commands() -> None:
+def _bootstrap_env_for_management_commands() -> Any:
     """Set Z4J_* env vars so Settings() and alembic's env.py can
     construct. Mirrors the early part of ``_run_serve`` but stops
     before instantiating anything - callers that need Settings +
@@ -3457,47 +5065,78 @@ def _bootstrap_env_for_management_commands() -> None:
     Idempotent: safe to call multiple times.
 
     Management commands READ an existing secret.env if present,
-    but REFUSE to mint when missing - they exit with a clear
-    error pointing the operator at ``z4j serve`` (which mints +
-    prints the visible setup banner). Silently minting here
-    would be a footgun: any management command run BEFORE the
-    first ``serve`` (e.g. ``z4j status``, ``z4j check``,
-    ``z4j audit verify``) would bake in a secret the operator
-    never saw a banner for, leading to silent verification
-    mismatches against audit rows signed under a different
-    secret.
+    but REFUSE to mint the installation/session authority when
+    missing - they exit with a clear error pointing the operator
+    at ``z4j serve`` (which mints + prints the visible setup
+    banner).  The sole compatibility exception is an existing
+    packaged SQLite installation whose verified pre-1.8 store has
+    every legacy secret but no audit-chain key.  The documented
+    offline activation ceremony persists that one new independent
+    key under the same bootstrap coordinator used by ``serve``.
     """
-    import os
+    from z4j_brain.configuration import (
+        capture_configuration,
+        export_snapshot_environment,
+        overlay_runtime_environment,
+    )
+    from z4j_brain.management_retirement import (
+        assert_no_pending_installation_retirement,
+    )
+    from z4j_brain.secret_store import (
+        audit_bootstrap_coordinator,
+        ensure_secret_store_directory,
+    )
 
-    if not os.environ.get("Z4J_DATABASE_URL"):
-        data_dir = ensure_z4j_home()
-        db_path = data_dir / "z4j.db"
+    # A fresh packaged management entry (notably the Compose migration
+    # command) can legitimately run before Z4J_HOME exists.  Establish only
+    # the empty owner-private directory so the retirement fence can inspect
+    # its stable journal location.  No secret, database, or metadata is
+    # created before the fence.
+    home = ensure_secret_store_directory(z4j_home())
+    assert_no_pending_installation_retirement(home)
+
+    snapshot = capture_configuration()
+    if not snapshot.values.get("Z4J_DATABASE_URL"):
+        db_path = home / "z4j.db"
         os.environ["Z4J_DATABASE_URL"] = f"sqlite+aiosqlite:///{db_path}"
         os.environ.setdefault("Z4J_REGISTRY_BACKEND", "local")
+        snapshot = overlay_runtime_environment(snapshot)
 
-    if not os.environ.get("Z4J_SECRET"):
-        secret_env = z4j_home() / "secret.env"
-        if secret_env.exists():
-            for line in secret_env.read_text(encoding="utf-8").splitlines():
-                line = line.strip()  # noqa: PLW2901  normalized in-loop
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
-        else:
-            raise SystemExit(
-                "z4j: refusing to mint Z4J_SECRET from a management "
-                "command, secret minting must happen via `z4j serve`"
-                " so the operator sees the persisted-secret banner. Run "
-                "`z4j serve` once first (or set Z4J_SECRET + "
-                "Z4J_SESSION_SECRET explicitly via env vars).",
+    database_url = str(snapshot.values.get("Z4J_DATABASE_URL", ""))
+    legacy_secret_keys = (
+        "Z4J_SECRET",
+        "Z4J_SESSION_SECRET",
+        "Z4J_METRICS_AUTH_TOKEN",
+    )
+    if (
+        database_url.startswith("sqlite")
+        and all(snapshot.values.get(key) for key in legacy_secret_keys)
+        and not snapshot.values.get("Z4J_AUDIT_CHAIN_SECRET")
+    ):
+        preliminary = capture_configuration(
+            home=home,
+            include_secret_store=False,
+        )
+        with audit_bootstrap_coordinator(home):
+            snapshot = _capture_serve_configuration(
+                preliminary=preliminary,
             )
+
+    if not snapshot.values.get("Z4J_SECRET"):
+        raise SystemExit(
+            "z4j: refusing to mint Z4J_SECRET from a management "
+            "command; run `z4j serve` once first or configure the "
+            "existing installation secrets explicitly",
+        )
 
     os.environ.setdefault("Z4J_ENVIRONMENT", "dev")
     os.environ.setdefault(
         "Z4J_ALLOWED_HOSTS",
         '["localhost","127.0.0.1"]',
     )
+    snapshot = overlay_runtime_environment(snapshot)
+    export_snapshot_environment(snapshot)
+    return snapshot
 
 
 def _build_settings_from_env() -> tuple[Any, Any]:
@@ -3506,12 +5145,12 @@ def _build_settings_from_env() -> tuple[Any, Any]:
     Calls :func:`_bootstrap_env_for_management_commands` then
     constructs ``Settings`` + an ``AsyncEngine``.
     """
-    _bootstrap_env_for_management_commands()
+    snapshot = _bootstrap_env_for_management_commands()
 
+    from z4j_brain.configuration import settings_from_snapshot
     from z4j_brain.persistence.database import create_engine_from_settings
-    from z4j_brain.settings import Settings
 
-    settings = Settings()  # type: ignore[call-arg]
+    settings = settings_from_snapshot(snapshot)
     engine = create_engine_from_settings(settings)
     return settings, engine
 
@@ -3539,7 +5178,6 @@ def _run_reset(args: argparse.Namespace) -> int:
     import sys
 
     import structlog
-    from sqlalchemy import text
 
     if not args.force:
         print(  # noqa: T201
@@ -3556,44 +5194,102 @@ def _run_reset(args: argparse.Namespace) -> int:
         )
         return 1
 
-    _settings, engine = _build_settings_from_env()
+    if args.nuke_secrets:
+        from z4j_brain.configuration import settings_from_snapshot
+        from z4j_brain.management_retirement import (
+            InstallationRetirementRefused,
+            retire_packaged_sqlite_installation,
+        )
+
+        def _bootstrap_replacement(
+            retirement_context: dict[str, Any],
+        ) -> Any:
+            snapshot = _capture_serve_configuration()
+            _auto_migrate(retirement_context=retirement_context)
+            return settings_from_snapshot(snapshot)
+
+        try:
+            result = retire_packaged_sqlite_installation(
+                z4j_home(),
+                bootstrap=_bootstrap_replacement,
+            )
+        except Exception as exc:
+            label = "refused" if isinstance(exc, InstallationRetirementRefused) else "failed"
+            print(  # noqa: T201
+                f"z4j reset: packaged installation retirement {label}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        print(  # noqa: T201
+            "z4j reset: complete fresh installation created; the old "
+            "database/key pair remains in a recoverable retirement bundle.\n"
+            f"  operation:       {result['operation_id']}\n"
+            f"  bundle:          {result['bundle']}\n"
+            f"  manifest digest: {result['manifest_digest']}\n"
+            "Destroy it later only with `z4j recovery "
+            "destroy-retired-installation` and the exact digest above.",
+        )
+        return 0
+
+    settings, engine = _build_settings_from_env()
 
     async def _wipe() -> int:
+        from z4j_brain.domain.audit_activation import (
+            write_activation_manifest,
+        )
+        from z4j_brain.domain.audit_chain import AuditChainIntegrityError
+        from z4j_brain.management_reset import (
+            GenerationResetRefused,
+            build_generation_reset_preview,
+            perform_generation_reset,
+        )
         from z4j_brain.persistence.database import DatabaseManager
 
         db = DatabaseManager(engine)
         try:
-            async with db.session() as session:
-                wiped_total = 0
-                for table in _TABLES_TO_WIPE_ORDER:
-                    try:
-                        result = await session.execute(
-                            text(f"DELETE FROM {table}"),  # noqa: S608  internal table name, not user input
+            try:
+                async with db.session(write=True) as session:
+                    if args.preview_manifest:
+                        preview = await build_generation_reset_preview(
+                            session,
+                            settings,
                         )
-                        wiped_total += result.rowcount or 0
-                    except Exception as exc:
-                        # Table might not exist in older schemas.
-                        # Log and continue - other tables still need
-                        # to be wiped.
+                        await session.rollback()
+                        write_activation_manifest(
+                            Path(args.preview_manifest),
+                            preview,
+                        )
                         print(  # noqa: T201
-                            f"  warning: skipping {table}: {type(exc).__name__}: {exc}",
-                            file=sys.stderr,
+                            "z4j reset: finalized non-mutating preview "
+                            f"{args.preview_manifest} "
+                            "(stopped-executor challenge="
+                            f"{preview['stopped_executor_attestation_challenge']}, "
+                            "required="
+                            f"{preview['requires_stopped_executor_attestation']}).",
                         )
-                await session.commit()
+                        return 0
+                    result = await perform_generation_reset(
+                        session,
+                        settings,
+                        stopped_executor_attestation=(args.attest_stopped_executors),
+                    )
+                    await session.commit()
+            except (AuditChainIntegrityError, GenerationResetRefused) as exc:
                 print(  # noqa: T201
-                    f"z4j reset: wiped {wiped_total:,} rows "
-                    f"across {len(_TABLES_TO_WIPE_ORDER)} tables.",
+                    f"z4j reset: REFUSED before commit - {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            else:
+                print(  # noqa: T201
+                    "z4j reset: authenticated generation reset committed "
+                    f"(domain rows={result['wiped_domain_rows']:,}, "
+                    f"revision={result['new_revision']}, "
+                    f"external epoch={result['new_epoch']}, "
+                    f"manifest={result['manifest_digest']}).",
                 )
         finally:
             await db.dispose()
-
-        if args.nuke_secrets:
-            secret_env = z4j_home() / "secret.env"
-            if secret_env.exists():
-                secret_env.unlink()
-                print(  # noqa: T201
-                    f"z4j reset: deleted {secret_env} (next serve will mint fresh HMAC keys)",
-                )
 
         print(  # noqa: T201
             "z4j reset: done. Run `z4j serve` to see the new first-boot setup URL.",
@@ -3603,6 +5299,45 @@ def _run_reset(args: argparse.Namespace) -> int:
     # Silence structlog's boot-time warnings during reset.
     structlog.reset_defaults()
     return asyncio.run(_wipe())
+
+
+def _run_recovery(args: argparse.Namespace) -> int:
+    """Dispatch explicit packaged-installation recovery actions."""
+
+    import sys
+
+    if args.recovery_action != "destroy-retired-installation":
+        print(  # noqa: T201
+            "z4j recovery: an action is required",
+            file=sys.stderr,
+        )
+        return 1
+    from z4j_brain.management_retirement import (
+        InstallationRetirementRefused,
+        destroy_retired_installation,
+    )
+
+    try:
+        result = destroy_retired_installation(
+            z4j_home(),
+            operation=args.operation,
+            confirm_manifest_digest=args.confirm_manifest_digest,
+        )
+    except Exception as exc:
+        label = "refused" if isinstance(exc, InstallationRetirementRefused) else "failed"
+        print(  # noqa: T201
+            f"z4j recovery: destroy-retired-installation {label}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    print(  # noqa: T201
+        "z4j recovery: logical removal complete\n"
+        f"  operation: {result['operation_id']}\n"
+        f"  manifest:  {result['manifest_digest']}\n"
+        "  note: unlink does not guarantee physical secure erasure on "
+        "snapshots, copy-on-write filesystems, SSDs, or external backups.",
+    )
+    return 0
 
 
 def _run_changepassword(args: argparse.Namespace) -> int:
@@ -3626,8 +5361,10 @@ def _run_changepassword(args: argparse.Namespace) -> int:
 
     async def _run() -> int:
         from z4j_brain.auth.passwords import PasswordHasher
+        from z4j_brain.domain.audit_service import AuditService
         from z4j_brain.persistence.database import DatabaseManager
         from z4j_brain.persistence.models import User
+        from z4j_brain.persistence.repositories import AuditLogRepository
 
         hasher = PasswordHasher(settings)
         try:
@@ -3641,7 +5378,7 @@ def _run_changepassword(args: argparse.Namespace) -> int:
 
         db = DatabaseManager(engine)
         try:
-            async with db.session() as session:
+            async with db.session(write=True) as session:
                 user = (
                     (
                         await session.execute(
@@ -3661,6 +5398,17 @@ def _run_changepassword(args: argparse.Namespace) -> int:
                 user.password_changed_at = datetime.now(UTC)
                 user.failed_login_count = 0
                 user.locked_until = None
+                await AuditService(settings).record(
+                    AuditLogRepository(session),
+                    action="user.password.changed_by_cli",
+                    target_type="user",
+                    target_id=str(user.id),
+                    result="success",
+                    outcome="allow",
+                    metadata={
+                        "operator_uid": (os.getuid() if hasattr(os, "getuid") else None),
+                    },
+                )
                 await session.commit()
                 print(  # noqa: T201
                     f"z4j changepassword: password updated for "
@@ -3737,7 +5485,7 @@ def _run_reset_mfa(args: argparse.Namespace) -> int:
 
         db = DatabaseManager(engine)
         try:
-            async with db.session() as db_session:
+            async with db.session(write=True) as db_session:
                 user = (
                     (
                         await db_session.execute(
@@ -4025,6 +5773,42 @@ def _run_status(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def _canonical_admin_lookup(raw: str) -> str:
+    """RM13: the canonical email the bootstrap store used, for the post-provision
+    re-check lookup. Mirrors startup.py's validate_admin_email(); falls back to
+    the raw value if the address no longer validates, so the re-check never
+    crashes on an odd input."""
+    from z4j_brain.domain.auth_service import validate_admin_email
+
+    try:
+        return validate_admin_email(raw)
+    except Exception:
+        return raw
+
+
+async def _requested_admin_exists(users: Any, email: str) -> bool:
+    """RM13 + cli:4265: does the SPECIFIC requested admin exist after bootstrap,
+    as an ACTIVE ADMIN?
+
+    The admin row is stored under validate_admin_email(email) (NFKC + casefold +
+    IDNA punycode; see startup.py). get_by_email only strip()+casefold()s its
+    argument, so looking up the RAW email would MISS a just-created non-ASCII /
+    IDN-domain admin and the CLI would falsely report "not created" despite a
+    successful provision. Look up the same canonical form the store used.
+
+    cli:4265: an existence-only check reports success for a row that is not the
+    provisioned admin -- an INACTIVE row, or a pre-existing NON-admin row under
+    that email. Require ``is_admin`` AND ``is_active`` so only a real, usable
+    admin counts. (The residual case a concurrent bootstrap picked a DIFFERENT
+    password cannot be distinguished here without the password; the error message
+    calls it out and the operator re-runs.)
+    """
+    user = await users.get_by_email(_canonical_admin_lookup(email))
+    if user is None:
+        return False
+    return bool(getattr(user, "is_admin", False)) and bool(getattr(user, "is_active", False))
+
+
 def _run_bootstrap_admin(args: argparse.Namespace) -> int:
     """Imperatively create the first admin user + default project.
 
@@ -4133,6 +5917,26 @@ def _run_bootstrap_admin(args: argparse.Namespace) -> int:
             setup_service=setup_service,
             settings=settings,
         )
+        # M13: run_first_boot_check swallows validate-policy / DB errors (weak
+        # password, connectivity) and may create NO admin. Re-check that an
+        # admin now exists before reporting success, so a failed provision
+        # does not exit 0 with a misleading "provisioned" line.
+        async with db.session() as session:
+            users = UserRepository(session)
+            # RM13: confirm the SPECIFIC requested admin exists, not merely that
+            # some user does. is_first_boot counts ANY user, so a concurrent
+            # bootstrap that created a DIFFERENT admin would let this process
+            # falsely report the requested one as provisioned.
+            #
+            if not await _requested_admin_exists(users, args.email):
+                print(  # noqa: T201
+                    f"error: admin {args.email} was not created (check the log "
+                    "above for a weak-password or database error, or a "
+                    "concurrent bootstrap that created a different admin), "
+                    "then retry.",
+                    file=sys.stderr,
+                )
+                return 1
         print(f"z4j: admin {args.email} provisioned")  # noqa: T201
         return 0
 
@@ -4256,10 +6060,16 @@ def _run_config_show(args: argparse.Namespace) -> int:
 
     from pydantic import SecretStr
 
-    from z4j_brain.settings import Settings
+    from z4j_brain.configuration import (
+        capture_configuration,
+        export_snapshot_environment,
+        settings_from_snapshot,
+    )
 
     try:
-        settings = Settings()  # type: ignore[call-arg]
+        snapshot = capture_configuration()
+        export_snapshot_environment(snapshot)
+        settings = settings_from_snapshot(snapshot)
     except Exception as exc:
         print(  # noqa: T201
             f"z4j config show: failed to load Settings: {exc}",
@@ -4296,56 +6106,32 @@ def _run_config_show(args: argparse.Namespace) -> int:
 def _run_config_validate(args: argparse.Namespace) -> int:
     """Pre-flight a candidate config file before deploying it.
 
-    Reads the file, populates a temporary environment with its
-    contents, attempts to construct :class:`Settings`. Reports parse
-    errors with line numbers and validation errors with field
-    locations. Exits 0 if the file would build a valid Settings.
+    Captures the file through the same identity-stable reader used at
+    startup, then attempts to construct :class:`Settings`. Exits 0 if
+    the captured document would build a valid Settings.
     """
 
     candidate = Path(args.path) if args.path else (z4j_home() / "config.env")
-    if not candidate.exists():
-        print(  # noqa: T201
-            f"z4j config validate: {candidate} does not exist. Run `z4j init` to scaffold it.",
-            file=sys.stderr,
-        )
-        return 2
+    from z4j_brain.configuration import (
+        ConfigurationCaptureError,
+        capture_explicit_configuration_file,
+    )
 
     try:
-        text = candidate.read_text(encoding="utf-8")
-    except OSError as exc:
+        parsed = capture_explicit_configuration_file(candidate)
+    except ConfigurationCaptureError as exc:
         print(  # noqa: T201
-            f"z4j config validate: cannot read {candidate}: {exc}",
+            f"z4j config validate: cannot safely capture {candidate}: {exc}",
             file=sys.stderr,
         )
         return 2
 
-    parsed: dict[str, str] = {}
-    parse_errors: list[str] = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            parse_errors.append(
-                f"line {lineno}: missing '=' (got {raw!r})",
-            )
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if not key.startswith("Z4J_"):
-            parse_errors.append(
-                f"line {lineno}: key {key!r} does not start with Z4J_",
-            )
-            continue
-        parsed[key] = value.strip().strip('"').strip("'")
-
-    if parse_errors:
+    unsupported = sorted(key for key in parsed if not key.startswith("Z4J_"))
+    if unsupported:
         print(  # noqa: T201
-            f"z4j config validate: {len(parse_errors)} parse error(s) in {candidate}:",
+            f"z4j config validate: unsupported non-Z4J key(s): {unsupported!r}",
             file=sys.stderr,
         )
-        for err in parse_errors:
-            print(f"  {err}", file=sys.stderr)  # noqa: T201
         return 1
 
     # Build a Settings instance from this file's contents alone. We

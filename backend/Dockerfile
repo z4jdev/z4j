@@ -33,9 +33,9 @@ ARG NODE_VERSION=24
 # ---------------------------------------------------------------------------
 FROM node:${NODE_VERSION}-bookworm-slim AS dashboard-builder
 
-ENV CI=true \
-    PNPM_HOME=/root/.local/share/pnpm \
-    PATH=/root/.local/share/pnpm:$PATH
+ENV CI=true
+ENV PNPM_HOME=/root/.local/share/pnpm
+ENV PATH=/root/.local/share/pnpm:$PATH
 
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
@@ -179,8 +179,8 @@ ARG Z4J_VERSION=dev
 LABEL org.opencontainers.image.title="z4j" \
       org.opencontainers.image.description="z4j: open-source control plane for Python task infrastructure" \
       org.opencontainers.image.version="${Z4J_VERSION}" \
-      org.opencontainers.image.source="https://github.com/z4jdev/z4j-brain" \
-      org.opencontainers.image.url="https://pypi.org/project/z4j-brain/" \
+      org.opencontainers.image.source="https://github.com/z4jdev/z4j" \
+      org.opencontainers.image.url="https://pypi.org/project/z4j/" \
       org.opencontainers.image.documentation="https://z4j.dev" \
       org.opencontainers.image.vendor="z4j contributors" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
@@ -191,6 +191,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     Z4J_LOG_JSON=true \
     Z4J_BIND_HOST=0.0.0.0 \
     Z4J_BIND_PORT=7700 \
+    Z4J_ENVIRONMENT=production \
+    Z4J_PUBLIC_URL=http://localhost:7700 \
+    Z4J_ALLOWED_HOSTS='["localhost","127.0.0.1"]' \
+    Z4J_ALLOW_HTTP_PUBLIC_URL=true \
     Z4J_DASHBOARD_DIST=/app/dashboard/dist \
     Z4J_ALEMBIC_INI=/app/alembic.ini
 
@@ -301,8 +305,10 @@ RUN printf '%s\n' \
 # to a single Python code path.
 ENV Z4J_HOME=/data
 
-# Create /data for SQLite mode. Volume-mount this for persistence.
-RUN mkdir -p /data && chown z4j:z4j /data
+# Create /data for SQLite mode. Volume-mount this for persistence. Docker
+# initializes a fresh named volume from this directory's ownership and mode;
+# keep it owner-private so secret-store bootstrap can run on the first boot.
+RUN mkdir -p /data && chown z4j:z4j /data && chmod 0700 /data
 VOLUME /data
 
 # Make sure z4j owns its writable surfaces.

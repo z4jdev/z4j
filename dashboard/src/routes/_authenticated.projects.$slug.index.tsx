@@ -9,7 +9,6 @@ import {
   Cpu,
   LayoutDashboard,
   Network,
-  RefreshCw,
   Terminal,
 } from "lucide-react";
 import { PageHeader } from "@/components/domain/page-header";
@@ -19,7 +18,6 @@ import { QueryError } from "@/components/domain/query-error";
 import { StatCard } from "@/components/domain/stat-card";
 import { TaskStateBadge } from "@/components/domain/state-badges";
 import { TimeRangeSelect } from "@/components/domain/time-range-select";
-import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,

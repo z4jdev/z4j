@@ -1,9 +1,8 @@
-"""Automation executor governance: dry-run / failsafe / fault-isolation (R2).
+"""Automation executor governance: dry-run / failsafe / fault-isolation.
 
 Unit-tests the orchestration + audit logic with a fake ActionRunner and a
 recording fake audit service, so it exercises the decision matrix without
-a DB or the real notification/command machinery.
-"""
+a DB or the real notification/command machinery."""
 
 from __future__ import annotations
 

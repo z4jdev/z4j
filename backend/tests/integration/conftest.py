@@ -172,6 +172,7 @@ def integration_settings(fresh_database_async_url: str) -> Settings:
         database_url=fresh_database_async_url,
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        audit_chain_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         environment="dev",
         log_json=False,
         require_db_ssl=False,
@@ -194,16 +195,11 @@ async def integration_engine(
     await engine.dispose()
 
 
-@pytest.fixture
-async def migrated_engine(
-    integration_engine: AsyncEngine,
+async def _upgrade_integration_database(
     integration_settings: Settings,
-) -> AsyncEngine:
-    """Run alembic upgrade head against the per-test database.
-
-    Returns the same engine, but the schema is now in place. Most
-    integration tests want this fixture, not the bare engine.
-    """
+    target: str,
+) -> None:
+    """Run Alembic to ``target`` against the per-test database."""
     from pathlib import Path
 
     from alembic import command
@@ -223,6 +219,7 @@ async def migrated_engine(
         "Z4J_DATABASE_URL": os.environ.get("Z4J_DATABASE_URL"),
         "Z4J_SECRET": os.environ.get("Z4J_SECRET"),
         "Z4J_SESSION_SECRET": os.environ.get("Z4J_SESSION_SECRET"),
+        "Z4J_AUDIT_CHAIN_SECRET": os.environ.get("Z4J_AUDIT_CHAIN_SECRET"),
         "Z4J_ENVIRONMENT": os.environ.get("Z4J_ENVIRONMENT"),
         "Z4J_REQUIRE_DB_SSL": os.environ.get("Z4J_REQUIRE_DB_SSL"),
     }
@@ -230,13 +227,17 @@ async def migrated_engine(
         os.environ["Z4J_DATABASE_URL"] = integration_settings.database_url
         os.environ["Z4J_SECRET"] = integration_settings.secret.get_secret_value()
         os.environ["Z4J_SESSION_SECRET"] = integration_settings.session_secret.get_secret_value()
+        assert integration_settings.audit_chain_secret is not None
+        os.environ["Z4J_AUDIT_CHAIN_SECRET"] = (
+            integration_settings.audit_chain_secret.get_secret_value()
+        )
         os.environ["Z4J_ENVIRONMENT"] = "dev"
         os.environ["Z4J_REQUIRE_DB_SSL"] = "false"
         # alembic.command.upgrade is sync - run it in an executor so
         # we don't block the asyncio loop.
         await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: command.upgrade(cfg, "head"),
+            lambda: command.upgrade(cfg, target),
         )
     finally:
         for k, v in saved.items():
@@ -244,6 +245,36 @@ async def migrated_engine(
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+@pytest.fixture
+async def migrated_engine(
+    integration_engine: AsyncEngine,
+    integration_settings: Settings,
+) -> AsyncEngine:
+    """Run alembic upgrade head against the per-test database.
+
+    Returns the same engine, but the schema is now in place. Most
+    integration tests want this fixture, not the bare engine.
+    """
+    await _upgrade_integration_database(integration_settings, "head")
+    return integration_engine
+
+
+@pytest.fixture
+async def pre_boundary_f_engine(
+    integration_engine: AsyncEngine,
+    integration_settings: Settings,
+) -> AsyncEngine:
+    """Install the last schema revision before Boundary-F preparation.
+
+    Legacy bidirectional-migration tests deliberately operate below the
+    authenticated audit-chain activation fence.
+    """
+    await _upgrade_integration_database(
+        integration_settings,
+        "v1_8_bulk_retry_requests",
+    )
     return integration_engine
 
 

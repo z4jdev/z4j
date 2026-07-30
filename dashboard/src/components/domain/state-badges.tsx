@@ -5,12 +5,7 @@
  * of truth - every page that renders a task / agent / worker /
  * command state goes through these helpers.
  */
-import {
-  AlertTriangle,
-  ArrowDown,
-  ArrowUp,
-  Flame,
-} from "lucide-react";
+import { ArrowDown, ArrowUp, Flame } from "lucide-react";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import type {
   AgentState,
@@ -93,20 +88,19 @@ const PRIORITY_CONFIG: Record<
   low: { variant: "outline", icon: ArrowDown, label: "low" },
 };
 
-export function TaskPriorityBadge({
-  priority,
-  compact = false,
-}: {
-  priority: TaskPriority;
-  compact?: boolean;
-}) {
+export function TaskPriorityBadge({ priority }: { priority: TaskPriority }) {
   const config = PRIORITY_CONFIG[priority] ?? PRIORITY_CONFIG.normal;
   const Icon = config.icon;
-  if (priority === "normal" && compact) return null;
+  // Every task has a priority, so the cell must always carry a value.
+  // Compact mode used to return null for "normal" and drop the label
+  // for everything else, which left the Tasks table showing a column
+  // of undecodable coloured icons interleaved with blank cells - a
+  // reader could not tell "normal" from "data missing", and there is
+  // no legend anywhere in the product.
   return (
-    <Badge variant={config.variant} className="gap-1">
+    <Badge variant={config.variant} className="gap-1" title={config.label}>
       <Icon className="size-3" />
-      {!compact && <span>{config.label}</span>}
+      <span>{config.label}</span>
     </Badge>
   );
 }

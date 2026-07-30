@@ -13,16 +13,23 @@ Postgres-specific behaviour is exercised by the integration suite
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.util import CommandError
 from sqlalchemy import create_engine, inspect
 
 
 @pytest.fixture
-def alembic_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+def alembic_cfg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[Config]:
     db_path = tmp_path / "brain.sqlite"
     sync_url = f"sqlite:///{db_path}"
 
@@ -32,7 +39,12 @@ def alembic_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     monkeypatch.setenv("Z4J_DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("Z4J_SECRET", "x" * 64)
     monkeypatch.setenv("Z4J_SESSION_SECRET", "y" * 64)
+    monkeypatch.setenv("Z4J_AUDIT_CHAIN_SECRET", "a" * 64)
     monkeypatch.setenv("Z4J_ENVIRONMENT", "dev")
+    private_home = Path(tempfile.mkdtemp(prefix="z4j-migration-", dir="/tmp"))
+    private_home.chmod(0o700)
+    monkeypatch.setenv("Z4J_HOME", str(private_home))
+    monkeypatch.chdir(tmp_path)
 
     backend_root = Path(__file__).resolve().parents[2]
     cfg = Config(str(backend_root / "alembic.ini"))
@@ -43,7 +55,10 @@ def alembic_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     # We expose the sync URL for the test only - env.py normally
     # uses the async one.
     cfg.attributes["test_sync_url"] = sync_url
-    return cfg
+    try:
+        yield cfg
+    finally:
+        shutil.rmtree(private_home, ignore_errors=True)
 
 
 def test_migration_runs_on_sqlite(alembic_cfg: Config) -> None:
@@ -77,8 +92,8 @@ def test_migration_runs_on_sqlite(alembic_cfg: Config) -> None:
 
 
 def test_migration_downgrade_runs(alembic_cfg: Config) -> None:
-    """upgrade → downgrade is a clean round-trip on SQLite."""
-    command.upgrade(alembic_cfg, "head")
+    """The pre-F additive line still has its historical empty round-trip."""
+    command.upgrade(alembic_cfg, "v1_8_bulk_retry_requests")
     command.downgrade(alembic_cfg, "base")
 
     sync_url = alembic_cfg.attributes["test_sync_url"]
@@ -93,10 +108,52 @@ def test_migration_downgrade_runs(alembic_cfg: Config) -> None:
     assert tables <= {"alembic_version"}
 
 
+def test_boundary_f_activation_refuses_downgrade(alembic_cfg: Config) -> None:
+    command.upgrade(alembic_cfg, "head")
+    with pytest.raises(CommandError, match="refusing downgrade"):
+        command.downgrade(alembic_cfg, "v1_8_audit_chain_prepare")
+
+
+def test_boundary_f_sqlite_activation_is_atomic(
+    alembic_cfg: Config,
+) -> None:
+    alembic_cfg.attributes["z4j_test_fail_audit_activation_after_state"] = True
+    with pytest.raises(
+        RuntimeError,
+        match="injected Boundary-F activation failure",
+    ):
+        command.upgrade(alembic_cfg, "head")
+
+    sync_url = alembic_cfg.attributes["test_sync_url"]
+    engine = create_engine(sync_url)
+    try:
+        with engine.connect() as connection:
+            version = connection.exec_driver_sql(
+                "SELECT version_num FROM alembic_version",
+            ).scalar_one()
+            preparation_count = connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM audit_chain_preparation",
+            ).scalar_one()
+            state_table = connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='audit_chain_state'",
+            ).scalar_one()
+            activation_rows = connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM audit_log WHERE action='audit.chain_generation_started'",
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert version == "v1_8_audit_chain_prepare"
+    assert preparation_count == 1
+    assert state_table == 0
+    assert activation_rows == 0
+
+
 def test_v1_6_6_scrub_worker_conf_strips_existing_rows_r7_h1(
     alembic_cfg: Config,
 ) -> None:
-    """R7-H1: pre-1.6.6 worker rows carrying credentialed Celery conf
+    """Pre-1.6.6 worker rows carrying credentialed Celery conf
     must be scrubbed when ``alembic upgrade head`` runs.
 
     The migration is dialect-aware; this test covers the SQLite branch
@@ -157,7 +214,7 @@ def test_v1_6_6_scrub_worker_conf_strips_existing_rows_r7_h1(
             )
 
         # Now run the new migration.
-        command.upgrade(alembic_cfg, "head")
+        command.upgrade(alembic_cfg, "v1_8_bulk_retry_requests")
 
         with engine.connect() as conn:
             row = conn.execute(
@@ -175,6 +232,6 @@ def test_v1_6_6_scrub_worker_conf_strips_existing_rows_r7_h1(
             # And the raw secret values must not be anywhere in the JSON.
             blob = json.dumps(md)
             for needle in ("LEAKED_CRED", "LEAKED_PG", "LEAKED_AWS"):
-                assert needle not in blob, f"R7-H1 migration left {needle!r} in workers.metadata"
+                assert needle not in blob, f" migration left {needle!r} in workers.metadata"
     finally:
         engine.dispose()

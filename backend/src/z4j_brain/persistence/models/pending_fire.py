@@ -19,12 +19,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
 from z4j_brain.persistence.base import Base
-from z4j_brain.persistence.types import jsonb
+from z4j_brain.persistence.types import big_integer, jsonb
 
 #: Default TTL for buffered fires when the application path forgets
 #: to set ``expires_at`` explicitly. Matches the operator-tunable
@@ -104,9 +104,64 @@ class PendingFire(Base):
         nullable=False,
         default=_default_expires_at,
     )
+    # Immutable Boundary-D acceptance tuple.  A replay worker must copy this
+    # evidence into command creation and may not reconstruct it from the live
+    # schedule row.
+    protocol_marker: Mapped[int | None] = mapped_column(nullable=True)
+    state_write_nonce: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    observed_control_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    receipt_control_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    definition_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    expected_schedule_revision: Mapped[int | None] = mapped_column(
+        big_integer(),
+        nullable=True,
+    )
+    expected_last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    expected_next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    prepared_next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    acceptance_revision: Mapped[int | None] = mapped_column(
+        big_integer(),
+        nullable=True,
+    )
+    execution_fire_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
 
     __table_args__ = (
-        UniqueConstraint("fire_id", name="uq_pending_fires_fire_id"),
+        UniqueConstraint(
+            "fire_id",
+            "receipt_control_token",
+            name="uq_pending_fires_fire_receipt",
+        ),
+        Index(
+            "uq_pending_fires_legacy_fire",
+            "fire_id",
+            unique=True,
+            sqlite_where=text("receipt_control_token IS NULL"),
+            postgresql_where=text("receipt_control_token IS NULL"),
+        ),
         Index(
             "ix_pending_fires_replay",
             "project_id",

@@ -94,9 +94,19 @@ export function formatAbsolute(
 export function formatDuration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "-";
   if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
-  return `${Math.floor(ms / 3_600_000)}h ${Math.round((ms % 3_600_000) / 60_000)}m`;
+
+  // Round to the smallest unit we are about to display FIRST, then
+  // decompose. The previous implementation floored the large unit and
+  // independently rounded the remainder, so a value that rounded up
+  // through the unit boundary printed an impossible duration:
+  // 119_600ms rendered "1m 60s" and 3_599_700ms rendered "59m 60s".
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${(ms / 1000).toFixed(1)}s`;
+  if (totalSeconds < 3600) {
+    return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+  }
+  const totalMinutes = Math.round(totalSeconds / 60);
+  return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
 }
 
 /** Compact integer rendering: 1234 → "1.2k". */
@@ -114,7 +124,18 @@ export function formatPercent(
   fractionDigits = 1,
 ): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "0%";
-  return `${(value * 100).toFixed(fractionDigits)}%`;
+  const percent = value * 100;
+  // A rate that is small but NOT zero must never render as "0.0%".
+  // At 124 failures out of 482,200 the old output put "0.0%" directly
+  // beside a red "124 failed" on the project overview, which reads as
+  // a contradiction and undermines every other number on the page.
+  // Clamp to the smallest value this precision can represent instead.
+  const smallest = 10 ** -fractionDigits;
+  if (percent > 0 && percent < smallest) return `<${smallest.toFixed(fractionDigits)}%`;
+  if (percent < 100 && percent > 100 - smallest) {
+    return `>${(100 - smallest).toFixed(fractionDigits)}%`;
+  }
+  return `${percent.toFixed(fractionDigits)}%`;
 }
 
 /** Truncate a long string with an ellipsis. */

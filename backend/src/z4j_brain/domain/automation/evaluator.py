@@ -61,7 +61,7 @@ TRIGGER_TYPES: tuple[str, ...] = (
     "schedule.misfired",
 )
 
-#: Direct EventKind-value -> trigger mappings. R2 uses this to decide
+#: Direct EventKind-value -> trigger mappings. uses this to decide
 #: which rules an inbound event invokes. ``worker.offline`` is
 #: intentionally NOT here: the agent-emitted ``worker.offline`` EVENT
 #: (an engine worker announcing its own restart) is a different signal

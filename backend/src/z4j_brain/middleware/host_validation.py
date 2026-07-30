@@ -37,6 +37,32 @@ _DEV_DEFAULTS: frozenset[str] = frozenset(
     {"localhost", "127.0.0.1", "[::1]", "testserver"},
 )
 
+#: EXACT paths exempt from the Host allow-list regardless of environment.
+#: The container HEALTHCHECK probes ``http://127.0.0.1:7700/api/v1/health``,
+#: sending ``Host: 127.0.0.1`` -- which is NOT in a production allow-list
+#: pinned to the operator's public domain (e.g. the postgres+Caddy stack
+#: sets ``Z4J_ALLOWED_HOSTS=["z4j.example.com"]``). Without this exemption
+#: the probe is 400-rejected, the container is marked unhealthy forever,
+#: and any overlay gated on ``service_healthy`` (Caddy TLS) never starts.
+#:
+#: 1.7.1: this was a PREFIX (``/api/v1/health``), which also exempted the
+#: AUTH-gated ``/api/v1/health/system`` (it returns version / OS / DB
+#: metadata) and would silently exempt any future route added under the
+#: subtree, and it left the unauthenticated ``/health/ready`` (which runs a
+#: DB probe) reachable under an arbitrary Host -- a small DNS-rebinding
+#: fingerprinting surface. Narrowed to an EXACT set of exactly the two
+#: unauthenticated liveness/readiness probes orchestrators use. These build
+#: no absolute URLs from the request Host, so the cache-poisoning threat
+#: this middleware defends against does not apply; ``/health/system`` is no
+#: longer exempt (its own auth gate protects it and legitimate calls carry
+#: a valid Host).
+_HOST_VALIDATION_EXEMPT_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/v1/health",  # container/orchestrator LIVENESS probe
+        "/api/v1/health/ready",  # orchestrator READINESS probe
+    }
+)
+
 
 class HostValidationMiddleware(BaseHTTPMiddleware):
     """Reject requests with an unrecognised Host header.
@@ -78,8 +104,30 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         host_header = request.headers.get("host", "")
         host = self._strip_port(host_header).lower()
-        # 1.6.5 (audit R5-M1): a present-but-malformed Host header
-        # used to fall through the allow-list. R4-M1 added the
+        # The two unauthenticated liveness/readiness probes are exempt from
+        # the ALLOW-LIST check only (EXACT match, see the exempt-paths
+        # constant): the container healthcheck hits them on loopback with a
+        # Host the production allow-list does not carry. A MALFORMED Host is
+        # still rejected here -- the CVE-class hardening below applies on
+        # every path, health included -- and the auth-gated /health/system
+        # is NOT exempt.
+        # Read the path from the ASGI scope, NOT from ``request.url``.
+        #
+        # ``request.url`` reconstructs a full URL from the scope, which
+        # includes the client-supplied Host header, and parses it lazily with
+        # ``urlsplit``. Python 3.14 made ``urlsplit`` raise ``ValueError:
+        # Invalid IPv6 URL`` on hosts this middleware exists to reject, so the
+        # parse blew up HERE, three lines before the malformed-Host check that
+        # would have answered 400. An attacker-controlled header therefore
+        # produced an unhandled exception instead of the intended clean
+        # rejection, on a Python version this package declares support for.
+        #
+        # The exempt-path test never needed the host: the raw scope path is
+        # the authority for which route was requested, and it cannot be
+        # poisoned by a header.
+        is_health = request.scope.get("path", "").rstrip("/") in _HOST_VALIDATION_EXEMPT_PATHS
+        # 1.6.5: a present-but-malformed Host header
+        # used to fall through the allow-list. added the
         # _strip_port hardening that collapses malformed values to
         # "", but the dispatcher's `if host and host not in allowed`
         # check skipped rejection on the empty side, meaning
@@ -88,7 +136,9 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
         # _strip_port intact (well-formed AND in the allow-list) is
         # rejected. A truly absent Host header still passes through
         # (HTTP/1.0 compatibility and the dev-mode default-allow path).
-        if host_header and (not host or host not in self._allowed):
+        malformed = bool(host_header) and not host
+        unknown = bool(host_header) and bool(host) and host not in self._allowed and not is_health
+        if malformed or unknown:
             # Operator-facing log: ALWAYS verbose. The operator runs
             # `z4j serve` (and watches stderr / journalctl / docker
             # logs); leaking detail to that surface is fine because it
@@ -177,7 +227,7 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
         plain ``host:port`` form. Returns the host unchanged if no
         port is present.
 
-        z4j 1.6.5 (audit R4-M1 defense-in-depth): a malformed Host
+        z4j 1.6.5: a malformed Host
         header that contains a path separator, whitespace, control
         character, or a nonnumeric port suffix is collapsed to the
         empty string. Pre-1.6.5 the parser was permissive enough that

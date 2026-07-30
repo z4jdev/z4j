@@ -1,0 +1,35 @@
+{
+  "items": [
+    {
+      "fingerprint": "a2b3c4d5e6f7081930a4b5c6d7e8f9a0",
+      "status": "ongoing",
+      "occurrences": 9,
+      "open_count": 4,
+      "recovered_count": 5,
+      "first_seen_offset_s": -25200,
+      "last_seen_offset_s": -960,
+      "engine_count": 1,
+      "engines": [
+        "rq"
+      ],
+      "sample_exception": "OSError: [Errno 28] No space left on device",
+      "sample_task_name": "media.transcode_upload"
+    },
+    {
+      "fingerprint": "b3c4d5e6f7081930a4b5c6d7e8f9a0b1",
+      "status": "recovered",
+      "occurrences": 4,
+      "open_count": 0,
+      "recovered_count": 4,
+      "first_seen_offset_s": -72000,
+      "last_seen_offset_s": -18000,
+      "engine_count": 1,
+      "engines": [
+        "celery"
+      ],
+      "sample_exception": "smtplib.SMTPServerDisconnected: Connection unexpectedly closed",
+      "sample_task_name": "notifications.send_digest"
+    }
+  ],
+  "next_cursor": null
+}

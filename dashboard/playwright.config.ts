@@ -15,6 +15,10 @@ import { defineConfig, devices } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./tests/e2e",
+  // Warm the dev server before the first navigation. The visual project
+  // runs first and sets `retries: 0` deliberately, so a cold-start timeout
+  // reads as a visual regression in CI. See tests/e2e/global-setup.ts.
+  globalSetup: "./tests/e2e/global-setup.ts",
   // Sequential on purpose. These tests mutate shared state
   // (projects, users, API keys). Parallelism would require
   // per-worker isolation which isn't worth the bookkeeping cost
@@ -36,7 +40,20 @@ export default defineConfig({
 
   projects: [
     {
+      // Visual baselines must observe the freshly bootstrapped database,
+      // before the functional spine creates projects, users, rules, and
+      // audit rows with intentionally random identifiers.  A dependency
+      // is the Playwright-supported ordering contract; relying on file
+      // discovery order made the old baselines capture reused local data.
+      name: "visual-chromium",
+      testMatch: /visual-regression\.spec\.ts/,
+      retries: 0,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
       name: "chromium",
+      testIgnore: /visual-regression\.spec\.ts/,
+      dependencies: ["visual-chromium"],
       use: { ...devices["Desktop Chrome"] },
     },
   ],
@@ -45,12 +62,12 @@ export default defineConfig({
   // host runners and CI render the same pixel slightly differently
   // depending on font hinting; ``maxDiffPixelRatio`` lets a few-pixel
   // edge band slip through without flagging a real regression.
-  // The threshold is intentionally tight (0.5%): bigger drift
+  // The threshold is intentionally tight (0.01%): bigger drift
   // typically means a real layout / palette change that should be
   // reviewed.
   expect: {
     toHaveScreenshot: {
-      maxDiffPixelRatio: 0.005,
+      maxDiffPixelRatio: 0.0001,
       animations: "disabled",
       caret: "hide",
     },

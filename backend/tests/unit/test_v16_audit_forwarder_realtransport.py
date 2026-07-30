@@ -3,20 +3,19 @@
 Every prior audit-forwarder test monkeypatches ``_post``, so the
 production call chain (``_send_one`` -> ``_post`` -> ``client.send``
 -> transport) never actually ran end-to-end. That is exactly how the
-R2 ship-stopper landed: ``_post`` shipped with a broken ``timeout``
+Ship-stopper landed: ``_post`` shipped with a broken ``timeout``
 kwarg shape, and the unit suite passed.
 
 These tests pin the contract through ``httpx.MockTransport`` so a
 regression in ANY of these classes would fail here:
 
-- timeout-kwarg-not-applied (R2 ship-stopper class)
+timeout-kwarg-not-applied
 - HMAC body mismatch (signature drift)
 - timestamp header shape drift
 - response-body cap removal (``_MAX_RESPONSE_BYTES`` machinery)
 - non-2xx accounting + ``record_swallowed`` plumbing
 - full enqueue -> drain-loop -> transport delivery
-- cancel-during-in-flight against a blocking real transport
-"""
+- cancel-during-in-flight against a blocking real transport"""
 
 from __future__ import annotations
 
@@ -167,7 +166,7 @@ class TestSendOneAgainstRealTransport:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """R2 ship-stopper regression guard. The forwarder's
+        """Ship-stopper regression guard. The forwarder's
         ``_timeout`` must arrive in the transport-side request
         extension as an httpx.Timeout-derived shape, NOT the client
         default (60s) and NOT a stale dict that httpx silently
@@ -291,7 +290,7 @@ class TestNon2xxAgainstRealTransport:
 class TestCancelDuringInFlight:
     """``stop()`` mid-POST against a real (blocking) transport.
 
-    Pre-R2-H10 a row pulled off the queue but parked on _send_one
+    Pre- a row pulled off the queue but parked on _send_one
     vanished from ``qsize()``. The fix tracks ``_in_flight`` and
     accounts for it in ``_shutdown_lost``."""
 

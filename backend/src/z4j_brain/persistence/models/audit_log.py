@@ -26,7 +26,6 @@ from typing import Any
 
 from sqlalchemy import (
     DateTime,
-    ForeignKey,
     Index,
     String,
     Text,
@@ -64,12 +63,10 @@ class AuditLog(PKMixin, Base):
 
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("projects.id", ondelete="SET NULL"),
         nullable=True,
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
     #: Acting API key, if the action was triggered via a bearer
@@ -140,6 +137,23 @@ class AuditLog(PKMixin, Base):
         String(64),
         nullable=True,
     )
+    #: Boundary-F marker columns.  They remain nullable only at the
+    #: preparation revision while pre-1.8 rows are classified offline.
+    #: Activation removes server defaults and installs the conditional
+    #: constraints that distinguish frozen legacy evidence from active v2
+    #: generation members.
+    legacy_frozen: Mapped[bool | None] = mapped_column(nullable=True)
+    hmac_version: Mapped[int | None] = mapped_column(nullable=True)
+    hmac_key_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    legacy_integrity_class: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    legacy_origin: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    chain_generation: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index(
@@ -174,8 +188,8 @@ class AuditLog(PKMixin, Base):
             "ux_audit_log_prev_row_hmac",
             "prev_row_hmac",
             unique=True,
-            postgresql_where=text("prev_row_hmac IS NOT NULL"),
-            sqlite_where=text("prev_row_hmac IS NOT NULL"),
+            postgresql_where=text("prev_row_hmac IS NOT NULL AND legacy_frozen = false"),
+            sqlite_where=text("prev_row_hmac IS NOT NULL AND legacy_frozen = 0"),
         ),
         # Partial index on api_key_id, supports the dashboard's
         # "filter audit log by API key" view without a sequential

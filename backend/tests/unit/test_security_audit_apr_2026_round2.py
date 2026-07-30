@@ -14,6 +14,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+
+def _cadence_fire_id() -> uuid.UUID:
+    """A version-5 (uuid5) fire id, matching a real CADENCE fire (derive_fire_id).
+    Detects a manual trigger by the uuid4 (version-4) shape, so cadence
+    tests must use a version-5 id to exercise the anchor-advancing path."""
+    return uuid.uuid5(uuid.NAMESPACE_OID, str(uuid.uuid4()))
+
+
 # =====================================================================
 # I-1: AcknowledgeFireResult correlation goes through schedule_fires
 # =====================================================================
@@ -66,8 +74,8 @@ class TestI1AckCorrelationByScheduleFires:
             project_id = uuid.uuid4()
             schedule_id_a = uuid.uuid4()
             schedule_id_b = uuid.uuid4()
-            fire_id_a = uuid.uuid4()
-            fire_id_b = uuid.uuid4()
+            fire_id_a = _cadence_fire_id()
+            fire_id_b = _cadence_fire_id()
 
             async with db.session() as s:
                 s.add(Project(id=project_id, slug="proj", name="Proj"))
@@ -194,6 +202,473 @@ class TestI1AckCorrelationByScheduleFires:
 
 
 # =====================================================================
+# A FAILED ack must not advance last_run_at (retry re-fires slot)
+# =====================================================================
+
+
+class TestFailedAckDoesNotAdvanceLastRun:
+    """A failed fire (no task delivered) is retried by the
+    scheduler on the SAME slot after its dispatch back-off; next_fire_at is
+    deliberately left unchanged there. If the failed ack advanced
+    ``last_run_at`` to the failure wall-time, the schedules_notify trigger
+    echoes it back as the schedule's anchor (WatchSchedules UPDATED), moving
+    the anchor PAST the slot the scheduler is about to re-fire, so the retry's
+    catch-up drain skips the slot as already-run and the failed fire is never
+    dispatched again.
+
+    Post-fix: last_run_at + total_runs advance ONLY on ``status="success"``.
+    The failure is still recorded on the schedule_fires row (acked_failed),
+    the audit trail, and the fire.failed notification.
+    """
+
+    @pytest.mark.asyncio
+    async def test_failed_ack_leaves_last_run_and_total_runs_untouched(self) -> None:
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import StaticPool
+        from z4j_brain.persistence.base import Base
+        from z4j_brain.persistence.database import DatabaseManager
+        from z4j_brain.persistence.enums import ScheduleKind
+        from z4j_brain.persistence.models import (
+            Project,
+            Schedule,
+            ScheduleFire,
+        )
+        from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
+        from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
+        from z4j_brain.settings import Settings
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        try:
+            db = DatabaseManager(engine)
+            settings = Settings(
+                database_url="sqlite+aiosqlite:///:memory:",
+                secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+                session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+                environment="dev",
+                log_json=False,
+            )
+
+            project_id = uuid.uuid4()
+            schedule_id = uuid.uuid4()
+            fire_id = _cadence_fire_id()
+
+            async with db.session() as s:
+                s.add(Project(id=project_id, slug="proj", name="Proj"))
+                s.add(
+                    Schedule(
+                        id=schedule_id,
+                        project_id=project_id,
+                        engine="celery",
+                        scheduler="z4j-scheduler",
+                        name="A",
+                        task_name="t.t",
+                        kind=ScheduleKind.CRON,
+                        expression="0 * * * *",
+                        timezone="UTC",
+                        args=[],
+                        kwargs={},
+                        is_enabled=True,
+                        last_fire_id=fire_id,
+                        last_run_at=None,
+                        total_runs=0,
+                    )
+                )
+                now = datetime.now(UTC)
+                s.add(
+                    ScheduleFire(
+                        fire_id=fire_id,
+                        schedule_id=schedule_id,
+                        project_id=project_id,
+                        command_id=None,
+                        status="delivered",
+                        scheduled_for=now,
+                        fired_at=now,
+                    )
+                )
+                await s.commit()
+
+            # Capture the seeded updated_at so H7 can assert the failed ack does
+            # not touch the schedules row (which would fire the notify echo).
+            async with db.session() as s:
+                seed_updated_at = (
+                    (await s.execute(select(Schedule).where(Schedule.id == schedule_id)))
+                    .scalar_one()
+                    .updated_at
+                )
+
+            servicer = SchedulerServiceImpl(
+                settings=settings,
+                db=db,
+                command_dispatcher=None,  # type: ignore[arg-type]
+                audit_service=None,  # type: ignore[arg-type]
+            )
+            ctx = MagicMock()
+            ctx.auth_context.return_value = {}
+
+            request = pb.AcknowledgeFireResultRequest(
+                fire_id=str(fire_id),
+                status="failed",
+                error="agent unreachable",
+            )
+            await servicer.AcknowledgeFireResult(request, ctx)
+
+            async with db.session() as s:
+                sched = (
+                    await s.execute(select(Schedule).where(Schedule.id == schedule_id))
+                ).scalar_one()
+                fire = (
+                    await s.execute(select(ScheduleFire).where(ScheduleFire.fire_id == fire_id))
+                ).scalar_one()
+
+            # The slot's anchor must not move: the scheduler will re-fire it.
+            assert sched.last_run_at is None, (
+                "a FAILED ack must NOT advance last_run_at -- the scheduler "
+                "retries the same slot and the advanced anchor would skip it"
+            )
+            assert sched.total_runs == 0, "a FAILED fire is not a completed run"
+            # But the failure IS recorded on the per-fire row.
+            assert fire.status == "acked_failed"
+            # A failed ack must NOT touch the schedules row at all -- not
+            # even updated_at -- so the schedules_notify trigger emits no echo
+            # that would re-anchor the slot the scheduler is about to retry.
+            assert sched.updated_at == seed_updated_at
+        finally:
+            await engine.dispose()
+
+    async def test_failed_then_success_ack_advances_exactly_once_r5_h5(self) -> None:
+        # A fire that is acked FAILED (dispatch-failure) and later acked
+        # SUCCESS on its RETRY (same fire_id) must advance last_run_at +
+        # total_runs -- exactly once. The old was_first_ack gate dropped it (the
+        # failed ack consumed the first-ack). A duplicate success ack must not
+        # double-count.
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import StaticPool
+        from z4j_brain.persistence.base import Base
+        from z4j_brain.persistence.database import DatabaseManager
+        from z4j_brain.persistence.enums import ScheduleKind
+        from z4j_brain.persistence.models import Project, Schedule, ScheduleFire
+        from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
+        from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
+        from z4j_brain.settings import Settings
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        try:
+            db = DatabaseManager(engine)
+            settings = Settings(
+                database_url="sqlite+aiosqlite:///:memory:",
+                secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+                session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+                environment="dev",
+                log_json=False,
+            )
+            project_id = uuid.uuid4()
+            schedule_id = uuid.uuid4()
+            fire_id = _cadence_fire_id()
+            async with db.session() as s:
+                s.add(Project(id=project_id, slug="proj", name="Proj"))
+                s.add(
+                    Schedule(
+                        id=schedule_id,
+                        project_id=project_id,
+                        engine="celery",
+                        scheduler="z4j-scheduler",
+                        name="A",
+                        task_name="t.t",
+                        kind=ScheduleKind.CRON,
+                        expression="0 * * * *",
+                        timezone="UTC",
+                        args=[],
+                        kwargs={},
+                        is_enabled=True,
+                        last_fire_id=fire_id,
+                        last_run_at=None,
+                        total_runs=0,
+                    )
+                )
+                now = datetime.now(UTC)
+                s.add(
+                    ScheduleFire(
+                        fire_id=fire_id,
+                        schedule_id=schedule_id,
+                        project_id=project_id,
+                        command_id=None,
+                        status="delivered",
+                        scheduled_for=now,
+                        fired_at=now,
+                    )
+                )
+                await s.commit()
+
+            servicer = SchedulerServiceImpl(
+                settings=settings,
+                db=db,
+                command_dispatcher=None,  # type: ignore[arg-type]
+                audit_service=None,  # type: ignore[arg-type]
+            )
+            ctx = MagicMock()
+            ctx.auth_context.return_value = {}
+
+            async def _ack(status: str) -> None:
+                await servicer.AcknowledgeFireResult(
+                    pb.AcknowledgeFireResultRequest(fire_id=str(fire_id), status=status),
+                    ctx,
+                )
+
+            await _ack("failed")  # first attempt fails
+            await _ack("success")  # retry of the SAME fire succeeds
+            await _ack("success")  # duplicate success ack
+
+            async with db.session() as s:
+                sched = (
+                    await s.execute(select(Schedule).where(Schedule.id == schedule_id))
+                ).scalar_one()
+                fire = (
+                    await s.execute(select(ScheduleFire).where(ScheduleFire.fire_id == fire_id))
+                ).scalar_one()
+            assert sched.last_run_at is not None, (
+                "the success retry must advance last_run_at even though a failed "
+                "ack already consumed the first-ack"
+            )
+            assert sched.total_runs == 1, "advanced exactly once (no double-count)"
+            assert fire.status == "acked_success"
+        finally:
+            await engine.dispose()
+
+
+class TestAckStateMachineR6:
+    """/RM3/RL1: the ack state machine. last_run_at anchors on the
+    fire's logical scheduled_for (not the ack wall-time); a manual trigger does
+    not advance the cadence anchor; status is terminal-preferring toward success;
+    a success transition clears the stale failure detail."""
+
+    async def _bootstrap(self, *, scheduled_for, triggered_by=None, fire_id=None):
+        import secrets as _secrets
+
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import StaticPool
+        from z4j_brain.persistence.base import Base
+        from z4j_brain.persistence.database import DatabaseManager
+        from z4j_brain.persistence.enums import ScheduleKind
+        from z4j_brain.persistence.models import Project, Schedule, ScheduleFire
+        from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
+        from z4j_brain.settings import Settings
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        db = DatabaseManager(engine)
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            secret=_secrets.token_urlsafe(48),  # type: ignore[arg-type]
+            session_secret=_secrets.token_urlsafe(48),  # type: ignore[arg-type]
+            environment="dev",
+            log_json=False,
+        )
+        project_id, schedule_id = uuid.uuid4(), uuid.uuid4()
+        fire_id = fire_id if fire_id is not None else _cadence_fire_id()
+        async with db.session() as s:
+            s.add(Project(id=project_id, slug="proj", name="Proj"))
+            s.add(
+                Schedule(
+                    id=schedule_id,
+                    project_id=project_id,
+                    engine="celery",
+                    scheduler="z4j-scheduler",
+                    name="A",
+                    task_name="t.t",
+                    kind=ScheduleKind.CRON,
+                    expression="0 * * * *",
+                    timezone="UTC",
+                    args=[],
+                    kwargs={},
+                    is_enabled=True,
+                    last_fire_id=fire_id,
+                    last_run_at=None,
+                    total_runs=0,
+                )
+            )
+            s.add(
+                ScheduleFire(
+                    fire_id=fire_id,
+                    schedule_id=schedule_id,
+                    project_id=project_id,
+                    command_id=None,
+                    status="delivered",
+                    scheduled_for=scheduled_for,
+                    fired_at=scheduled_for,
+                    triggered_by_user_id=triggered_by,
+                )
+            )
+            await s.commit()
+        servicer = SchedulerServiceImpl(
+            settings=settings,
+            db=db,
+            command_dispatcher=None,  # type: ignore[arg-type]
+            audit_service=None,  # type: ignore[arg-type]
+        )
+        ctx = MagicMock()
+        ctx.auth_context.return_value = {}
+        return engine, db, servicer, ctx, schedule_id, fire_id
+
+    async def _ack(self, servicer, ctx, fire_id, status, error=""):
+        from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
+
+        await servicer.AcknowledgeFireResult(
+            pb.AcknowledgeFireResultRequest(fire_id=str(fire_id), status=status, error=error),
+            ctx,
+        )
+
+    async def _get(self, db, model, **where):
+        from sqlalchemy import select
+
+        col, val = next(iter(where.items()))
+        async with db.session() as s:
+            return (await s.execute(select(model).where(getattr(model, col) == val))).scalar_one()
+
+    async def test_success_anchors_on_scheduled_for_not_wall_time_r6_h5(self) -> None:
+        from z4j_brain.persistence.models import Schedule
+
+        slot = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)  # the logical fire slot
+        engine, db, servicer, ctx, sid, fid = await self._bootstrap(scheduled_for=slot)
+        try:
+            await self._ack(servicer, ctx, fid, "success")
+            sched = await self._get(db, Schedule, id=sid)
+            # RH5: last_run_at is the LOGICAL slot, not now() -- so a cold restart
+            # re-anchors drift-free.
+            assert sched.last_run_at is not None
+            assert sched.last_run_at.replace(tzinfo=None) == slot.replace(tzinfo=None)
+            assert sched.total_runs == 1
+        finally:
+            await engine.dispose()
+
+    async def test_manual_trigger_does_not_advance_cadence_r6_h6(self) -> None:
+        from z4j_brain.persistence.models import Schedule
+
+        slot = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        engine, db, servicer, ctx, sid, fid = await self._bootstrap(
+            scheduled_for=slot,
+            triggered_by=uuid.uuid4(),  # a manual "Trigger Now"
+        )
+        try:
+            await self._ack(servicer, ctx, fid, "success")
+            sched = await self._get(db, Schedule, id=sid)
+            # RH6: a manual trigger must NOT advance the cadence anchor (else a
+            # future one_shot/clocked looks completed and never fires) ...
+            assert sched.last_run_at is None
+            # but: it IS a real run, so total_runs still counts it.
+            assert sched.total_runs == 1
+        finally:
+            await engine.dispose()
+
+    async def test_manual_detected_by_fire_id_version_when_attribution_nulled_r7_p1_8(
+        self,
+    ) -> None:
+        from z4j_brain.persistence.models import Schedule
+
+        slot = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        # A manual trigger whose user attribution was NULLED (a global-admin /
+        # non-member trigger). fire_id is uuid4 (version 4, the manual shape);
+        # triggered_by is None. must still detect it as manual.
+        engine, db, servicer, ctx, sid, _fid = await self._bootstrap(
+            scheduled_for=slot, triggered_by=None, fire_id=uuid.uuid4()
+        )
+        try:
+            await self._ack(servicer, ctx, _fid, "success")
+            sched = await self._get(db, Schedule, id=sid)
+            assert sched.last_run_at is None  # cadence anchor NOT advanced
+            assert sched.total_runs == 1  # but the run is counted
+        finally:
+            await engine.dispose()
+
+    async def test_late_earlier_slot_ack_does_not_regress_last_run_r7_p2_2(self) -> None:
+        from sqlalchemy import select
+        from z4j_brain.persistence.models import Schedule, ScheduleFire
+
+        # Two cadence fires: a LATER slot acked first, then an EARLIER slot's ack
+        # arrives late. last_run_at must be monotonic (not regress to the earlier
+        # slot), while total_runs counts both.
+        early = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        late = datetime(2026, 5, 1, 13, 0, tzinfo=UTC)
+        engine, db, servicer, ctx, sid, fid_late = await self._bootstrap(scheduled_for=late)
+        try:
+            fid_early = _cadence_fire_id()
+            async with db.session() as s:
+                sched = (await s.execute(select(Schedule).where(Schedule.id == sid))).scalar_one()
+                s.add(
+                    ScheduleFire(
+                        fire_id=fid_early,
+                        schedule_id=sid,
+                        project_id=sched.project_id,
+                        command_id=None,
+                        status="delivered",
+                        scheduled_for=early,
+                        fired_at=early,
+                    )
+                )
+                await s.commit()
+            await self._ack(servicer, ctx, fid_late, "success")  # later slot first
+            await self._ack(servicer, ctx, fid_early, "success")  # earlier, late
+            sched = await self._get(db, Schedule, id=sid)
+            assert sched.last_run_at.replace(tzinfo=None) == late.replace(tzinfo=None)
+            assert sched.total_runs == 2  # both counted, anchor did not regress
+        finally:
+            await engine.dispose()
+
+    async def test_late_failed_ack_does_not_downgrade_success_r6_m3(self) -> None:
+        from z4j_brain.persistence.models import Schedule, ScheduleFire
+
+        slot = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        engine, db, servicer, ctx, sid, fid = await self._bootstrap(scheduled_for=slot)
+        try:
+            await self._ack(servicer, ctx, fid, "success")
+            await self._ack(servicer, ctx, fid, "failed", error="late straggler")
+            fire = await self._get(db, ScheduleFire, fire_id=fid)
+            sched = await self._get(db, Schedule, id=sid)
+            # RM3: never downgrade acked_success; total_runs stays 1.
+            assert fire.status == "acked_success"
+            assert fire.error_message is None  # RL1: cleared on the success
+            assert sched.total_runs == 1
+        finally:
+            await engine.dispose()
+
+    async def test_failed_then_success_clears_error_r6_l1(self) -> None:
+        from z4j_brain.persistence.models import ScheduleFire
+
+        slot = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        engine, db, servicer, ctx, _sid, fid = await self._bootstrap(scheduled_for=slot)
+        try:
+            await self._ack(servicer, ctx, fid, "failed", error="agent offline")
+            fire1 = await self._get(db, ScheduleFire, fire_id=fid)
+            assert fire1.status == "acked_failed" and fire1.error_message
+            await self._ack(servicer, ctx, fid, "success")
+            fire2 = await self._get(db, ScheduleFire, fire_id=fid)
+            # RL1: the recovery clears the stale failure detail.
+            assert fire2.status == "acked_success"
+            assert fire2.error_message is None
+            assert fire2.error_code is None
+        finally:
+            await engine.dispose()
+
+
+# =====================================================================
 # WatchSchedules concurrency cap
 # =====================================================================
 
@@ -238,14 +713,14 @@ class TestWatchSchedulesConcurrencyCap:
 
 
 # =====================================================================
-# R10-Sched-H1: WatchSchedules counter-under-lock (no semaphore leak)
+# Sched-H1: WatchSchedules counter-under-lock (no semaphore leak)
 # =====================================================================
 
 
 class TestWatchSchedulesCounterUnderLock:
-    """Round-10 audit fix R10-Sched-H1 (Apr 2026).
+    """Round-10 audit fix -Sched-H1 (Apr 2026).
 
-    The R7-MED-2 / R8 fix replaced a racy ``locked()`` + ``acquire()``
+    The fix replaced a racy ``locked()`` + ``acquire()``
     with ``asyncio.wait_for(sem.acquire(), 0)``, but
     ``wait_for(coro, 0)`` is documented as racy when ``coro``
     completes synchronously: the timer fires in the same tick, the
@@ -265,7 +740,7 @@ class TestWatchSchedulesCounterUnderLock:
         """The racy ``wait_for(sem.acquire(), 0)`` pattern is gone.
 
         Strips comment + docstring lines before the substring check
-        so the explanatory R10 comment block (which intentionally
+        so the explanatory comment block (which intentionally
         names the pre-fix expression) doesn't trip the assertion.
         """
         from pathlib import Path
@@ -551,7 +1026,16 @@ class TestAuditMiddlewareDenialRows:
             request.app.state.db = db
             request.app.state.settings = settings
             request.app.state.audit_queue = audit_queue
-            request.state.real_client_ip = "127.0.0.1"
+            # B17: the real-client-IP middleware sets ``client_ip`` (not
+            # ``real_client_ip``); the denial-audit now reads that name so
+            # the forensic IP is actually captured.
+            request.state.client_ip = "127.0.0.1"
+            # B17: get_current_user stashes the resolved user here; the
+            # denial-audit reads it so a 403 is attributed to the actor.
+            import uuid as _uuid
+
+            actor_id = _uuid.uuid4()
+            request.state.current_user = MagicMock(id=actor_id)
 
             await _record_denial_if_relevant(
                 request,
@@ -571,6 +1055,7 @@ class TestAuditMiddlewareDenialRows:
             assert len(rows) == 1, "denial on a /schedules path must leave one audit row"
             assert rows[0].outcome == "deny"
             assert rows[0].source_ip == "127.0.0.1"
+            assert rows[0].user_id == actor_id, "B17: 403 must be attributed to the actor"
         finally:
             await engine.dispose()
 

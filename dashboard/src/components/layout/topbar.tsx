@@ -17,8 +17,6 @@
  * (``_authenticated.tsx``) - pages no longer instantiate it.
  */
 import {
-  Activity,
-  AlertCircle,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,

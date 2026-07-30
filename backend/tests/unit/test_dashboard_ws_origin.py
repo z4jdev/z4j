@@ -13,6 +13,7 @@ def _settings(**overrides) -> Settings:  # type: ignore[no-untyped-def]
         "database_url": "sqlite+aiosqlite:///:memory:",
         "secret": secrets.token_urlsafe(48),
         "session_secret": secrets.token_urlsafe(48),
+        "audit_chain_secret": secrets.token_urlsafe(48),
         "environment": "production",
         "allowed_hosts": ["z4j.example.com"],
         "public_url": "https://z4j.example.com",

@@ -31,6 +31,7 @@ from z4j_brain.persistence import models  # noqa: F401  registers metadata
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import Project
 from z4j_brain.persistence.repositories import AuditLogRepository
+from z4j_brain.secret_store import protect_secret_store_directory
 from z4j_brain.settings import Settings
 
 
@@ -48,6 +49,11 @@ def cli_settings(
     monkeypatch.setenv("Z4J_ENVIRONMENT", "dev")
     monkeypatch.delenv("Z4J_SECRETS_PREVIOUS", raising=False)
     monkeypatch.setenv("Z4J_ALLOWED_HOSTS", '["localhost","127.0.0.1"]')
+    private_home = tmp_path / "z4j-home"
+    private_home.mkdir(mode=0o700)
+    protect_secret_store_directory(private_home)
+    monkeypatch.setenv("Z4J_HOME", str(private_home))
+    monkeypatch.chdir(tmp_path)
     return Settings(
         database_url=db_url,
         secret=secret,  # type: ignore[arg-type]

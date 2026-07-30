@@ -23,8 +23,7 @@ channel dispatcher that returns an error string containing the
 secret URL, and asserts the URL is masked in the persisted
 ``notification_deliveries.error`` row.
 
-Structural identifier: R7-M1.
-"""
+Structural identifier:."""
 
 from __future__ import annotations
 
@@ -242,15 +241,15 @@ async def test_real_delivery_error_masks_webhook_url_r7_m1(
     assert row.status == "failed"
     # The URL substring MUST be redacted in the error.
     assert SECRET_WEBHOOK_URL not in (row.error or ""), (
-        "R7-M1 regression: webhook URL leaked unmasked into "
+        " regression: webhook URL leaked unmasked into "
         f"notification_deliveries.error: {row.error!r}"
     )
     # The URL substring MUST be redacted in the response_body too.
     assert SECRET_WEBHOOK_URL not in (row.response_body or ""), (
-        "R7-M1 regression: webhook URL leaked unmasked into "
+        " regression: webhook URL leaked unmasked into "
         f"notification_deliveries.response_body: {row.response_body!r}"
     )
-    # R7-M1 TWIN (pre-ship audit follow-up): channel_name was a
+    # TWIN (pre-ship audit follow-up): channel_name was a
     # getattr against a slots dataclass field that never existed,
     # so it silently wrote NULL on every row. After the 1.6.6
     # fix, _PendingDelivery has a channel_name field populated
@@ -259,7 +258,7 @@ async def test_real_delivery_error_masks_webhook_url_r7_m1(
     # actual channel name (forensic UX gap that was hiding the
     # destination on every delivery audit row pre-fix).
     assert row.channel_name == "slack-ops", (
-        "R7-M1 twin regression: channel_name was NULL on the "
+        " twin regression: channel_name was NULL on the "
         "persisted delivery row, breaking the Audit L-2 "
         "channel-rename snapshot. Expected 'slack-ops', got "
         f"{row.channel_name!r}."

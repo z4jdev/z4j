@@ -25,16 +25,33 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
+from z4j_brain.domain.audit_service import AuditService
+from z4j_brain.domain.schedule_fire_authority import (
+    derive_scheduler_fire_id,
+)
 from z4j_brain.main import create_app
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
-from z4j_brain.persistence.enums import ProjectRole, ScheduleKind
+from z4j_brain.persistence.enums import (
+    CommandStatus,
+    ProjectRole,
+    ScheduleKind,
+)
 from z4j_brain.persistence.models import (
+    Command,
     Membership,
+    PendingFire,
     Project,
     Schedule,
+    ScheduleChangeLog,
+    ScheduleFire,
+    ScheduleOccurrenceResolution,
+    ScheduleRevisionState,
     Session,
     User,
+)
+from z4j_brain.persistence.models.schedule_control import (
+    SCHEDULE_REVISION_SINGLETON_ID,
 )
 from z4j_brain.settings import Settings
 
@@ -168,12 +185,71 @@ def _create_body(name: str = "every-hour", **overrides) -> dict:
     return base
 
 
+async def _activate_current_control(brain_app) -> None:
+    async with brain_app.state.db.session() as session:
+        session.add(
+            ScheduleRevisionState(
+                singleton_id=SCHEDULE_REVISION_SINGLETON_ID,
+                current_revision=0,
+                change_log_pruned_through=0,
+            ),
+        )
+        await session.commit()
+
+
 # =====================================================================
 # CREATE
 # =====================================================================
 
 
 class TestCreateSchedule:
+    @pytest.mark.asyncio
+    async def test_active_current_create_has_complete_identity_and_envelope(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        await _activate_current_control(brain_app)
+
+        async with _make_client(brain_app, settings, seed) as client:
+            response = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=_create_body("current-hourly"),
+            )
+        assert response.status_code == 201, response.text
+
+        async with brain_app.state.db.session() as session:
+            row = (
+                await session.execute(
+                    select(Schedule).where(Schedule.name == "current-hourly"),
+                )
+            ).scalar_one()
+            change = (
+                await session.execute(
+                    select(ScheduleChangeLog).where(
+                        ScheduleChangeLog.schedule_id == row.id,
+                    ),
+                )
+            ).scalar_one()
+            state = await session.get(
+                ScheduleRevisionState,
+                SCHEDULE_REVISION_SINGLETON_ID,
+            )
+            assert state is not None
+            assert row.control_token is not None
+            assert row.schedule_revision == state.current_revision == 1
+            assert row.definition_digest
+            assert row.next_run_at is not None
+            assert change.revision == 1
+            assert change.snapshot["schedule"]["control_token"] == str(
+                row.control_token,
+            )
+
     @pytest.mark.asyncio
     async def test_create_returns_201_and_row(
         self,
@@ -255,6 +331,357 @@ class TestCreateSchedule:
             )
         assert r.status_code == 422
         assert "kind" in r.text.lower() or "schedulekind" in r.text.lower()
+
+
+class TestLegacyFireGrant:
+    @pytest.mark.asyncio
+    async def test_grant_requires_attestation_and_returns_current_identity(
+        self,
+        settings: Settings,
+        brain_app,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        await _activate_current_control(brain_app)
+        async with _make_client(brain_app, settings, seed) as client:
+            created = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=_create_body("legacy-grant"),
+            )
+            assert created.status_code == 201, created.text
+            schedule_id = created.json()["id"]
+            token = created.json()["control_token"]
+
+            denied = await client.post(
+                (f"/api/v1/projects/default/schedules/{schedule_id}/legacy-fire-grant"),
+                json={
+                    "observed_control_token": token,
+                    "allow": True,
+                    "all_replicas_quiesced_and_resynced": False,
+                },
+            )
+            assert denied.status_code == 422, denied.text
+
+            async def _fail_audit(*args: object, **kwargs: object) -> None:
+                raise RuntimeError("injected grant audit failure")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    AuditService,
+                    "record",
+                    _fail_audit,
+                )
+                audit_failed = await client.post(
+                    (f"/api/v1/projects/default/schedules/{schedule_id}/legacy-fire-grant"),
+                    json={
+                        "observed_control_token": token,
+                        "allow": True,
+                        "all_replicas_quiesced_and_resynced": True,
+                    },
+                )
+                assert audit_failed.status_code == 500
+
+            async with brain_app.state.db.session() as session:
+                rolled_back = await session.get(
+                    Schedule,
+                    uuid.UUID(schedule_id),
+                )
+                assert rolled_back is not None
+                assert rolled_back.legacy_fire_control_token is None
+                assert rolled_back.schedule_revision == 1
+                assert (await session.get(ScheduleChangeLog, 2)) is None
+
+            granted = await client.post(
+                (f"/api/v1/projects/default/schedules/{schedule_id}/legacy-fire-grant"),
+                json={
+                    "observed_control_token": token,
+                    "allow": True,
+                    "all_replicas_quiesced_and_resynced": True,
+                },
+            )
+        assert granted.status_code == 200, granted.text
+        assert granted.json()["control_token"] == token
+        assert granted.json()["legacy_fire_control_token"] == token
+        assert granted.json()["schedule_revision"] == 2
+
+        async with brain_app.state.db.session() as session:
+            row = await session.get(Schedule, uuid.UUID(schedule_id))
+            assert row is not None
+            assert row.control_token == row.legacy_fire_control_token
+            assert row.schedule_revision == 2
+
+
+class TestOccurrenceResolution:
+    @pytest.mark.asyncio
+    async def test_receipt_null_resolution_is_idempotent_product_action(
+        self,
+        settings: Settings,
+        brain_app,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        await _activate_current_control(brain_app)
+        async with _make_client(brain_app, settings, seed) as client:
+            created = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=_create_body(
+                    "legacy-resolution",
+                    kind="interval",
+                    expression="5m",
+                ),
+            )
+            assert created.status_code == 201, created.text
+            schedule_id = uuid.UUID(created.json()["id"])
+            token = created.json()["control_token"]
+
+            async with brain_app.state.db.session() as session:
+                schedule = await session.get(Schedule, schedule_id)
+                assert schedule is not None
+                slot = schedule.next_run_at
+                assert slot is not None
+                fire_id = derive_scheduler_fire_id(
+                    schedule_id,
+                    slot.replace(tzinfo=UTC),
+                )
+                command = Command(
+                    project_id=seed["project_id"],
+                    agent_id=None,
+                    issued_by=None,
+                    action="schedule.fire",
+                    target_type="schedule",
+                    target_id=str(schedule_id),
+                    payload={},
+                    idempotency_key=f"legacy:{fire_id}",
+                    status=CommandStatus.FAILED,
+                    timeout_at=slot + timedelta(minutes=1),
+                    source_ip=None,
+                    schedule_protocol_marker=1,
+                    schedule_state_nonce=uuid.uuid4(),
+                    schedule_id=schedule_id,
+                    schedule_fire_id=fire_id,
+                    schedule_scheduled_for=slot,
+                    schedule_observed_control_token=None,
+                    schedule_receipt_control_token=None,
+                )
+                session.add(command)
+                await session.commit()
+                command_id = command.id
+
+            payload = {
+                "fire_id": str(fire_id),
+                "command_id": str(command_id),
+                "expected_status": "failed",
+                "observed_control_token": token,
+                "work_may_have_executed": True,
+                "enabled_after_resolution": True,
+            }
+
+            async def _fail_audit(*args: object, **kwargs: object) -> None:
+                raise RuntimeError("injected resolution audit failure")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    AuditService,
+                    "record",
+                    _fail_audit,
+                )
+                audit_failed = await client.post(
+                    (f"/api/v1/projects/default/schedules/{schedule_id}/resolve-terminal-fire"),
+                    json=payload,
+                )
+                assert audit_failed.status_code == 500
+
+            async with brain_app.state.db.session() as session:
+                rolled_back = await session.get(Schedule, schedule_id)
+                assert rolled_back is not None
+                assert str(rolled_back.control_token) == token
+                assert rolled_back.schedule_revision == 1
+                assert (
+                    await session.execute(
+                        select(ScheduleOccurrenceResolution),
+                    )
+                ).scalars().all() == []
+
+            resolved = await client.post(
+                (f"/api/v1/projects/default/schedules/{schedule_id}/resolve-terminal-fire"),
+                json=payload,
+            )
+            replay = await client.post(
+                (f"/api/v1/projects/default/schedules/{schedule_id}/resolve-terminal-fire"),
+                json=payload,
+            )
+
+        assert resolved.status_code == 200, resolved.text
+        assert resolved.json()["disposition"] == "resolved"
+        assert resolved.json()["resolution_control_token"] != token
+        assert resolved.json()["grant_carried"] is False
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["disposition"] == "already_resolved"
+        assert (
+            replay.json()["resolution_control_token"] == resolved.json()["resolution_control_token"]
+        )
+
+        async with brain_app.state.db.session() as session:
+            schedule = await session.get(Schedule, schedule_id)
+            resolution = (
+                await session.execute(
+                    select(ScheduleOccurrenceResolution),
+                )
+            ).scalar_one()
+            assert schedule is not None
+            assert schedule.control_token == resolution.resolution_control_token
+            assert schedule.total_runs == 0
+            assert resolution.command_id == command_id
+            assert resolution.command_status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_receipt_null_pending_has_product_resolution_route(
+        self,
+        settings: Settings,
+        brain_app,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        await _activate_current_control(brain_app)
+        async with _make_client(brain_app, settings, seed) as client:
+            created = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=_create_body(
+                    "legacy-pending-resolution",
+                    kind="interval",
+                    expression="5m",
+                ),
+            )
+            assert created.status_code == 201, created.text
+            schedule_id = uuid.UUID(created.json()["id"])
+            token = created.json()["control_token"]
+
+            async with brain_app.state.db.session() as session:
+                schedule = await session.get(Schedule, schedule_id)
+                assert schedule is not None
+                slot = schedule.next_run_at
+                assert slot is not None
+                fire_id = derive_scheduler_fire_id(
+                    schedule_id,
+                    slot.replace(tzinfo=UTC),
+                )
+                pending = PendingFire(
+                    id=uuid.uuid4(),
+                    fire_id=fire_id,
+                    schedule_id=schedule_id,
+                    project_id=seed["project_id"],
+                    engine="celery",
+                    payload={},
+                    scheduled_for=slot,
+                    enqueued_at=slot,
+                    expires_at=slot + timedelta(days=1),
+                    protocol_marker=1,
+                    state_write_nonce=uuid.uuid4(),
+                    observed_control_token=None,
+                    receipt_control_token=None,
+                )
+                session.add_all(
+                    [
+                        pending,
+                        ScheduleFire(
+                            id=uuid.uuid4(),
+                            fire_id=fire_id,
+                            schedule_id=schedule_id,
+                            project_id=seed["project_id"],
+                            command_id=None,
+                            status="buffered",
+                            scheduled_for=slot,
+                            fired_at=slot,
+                            protocol_marker=1,
+                            state_write_nonce=uuid.uuid4(),
+                            observed_control_token=None,
+                            receipt_control_token=None,
+                        ),
+                    ],
+                )
+                await session.commit()
+                pending_id = pending.id
+
+            payload = {
+                "fire_id": str(fire_id),
+                "source_evidence_kind": "PENDING_FIRE",
+                "source_evidence_id": str(pending_id),
+                "observed_control_token": token,
+                "work_may_have_executed": True,
+                "enabled_after_resolution": True,
+            }
+
+            async def _fail_audit(*args: object, **kwargs: object) -> None:
+                raise RuntimeError(
+                    "injected legacy resolution audit failure",
+                )
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    AuditService,
+                    "record",
+                    _fail_audit,
+                )
+                audit_failed = await client.post(
+                    (f"/api/v1/projects/default/schedules/{schedule_id}/resolve-legacy-evidence"),
+                    json=payload,
+                )
+                assert audit_failed.status_code == 500
+
+            async with brain_app.state.db.session() as session:
+                rolled_back = await session.get(Schedule, schedule_id)
+                pending_rolled_back = await session.get(
+                    PendingFire,
+                    pending_id,
+                )
+                fire_rolled_back = (
+                    await session.execute(
+                        select(ScheduleFire).where(
+                            ScheduleFire.fire_id == fire_id,
+                        ),
+                    )
+                ).scalar_one()
+                assert rolled_back is not None
+                assert str(rolled_back.control_token) == token
+                assert rolled_back.schedule_revision == 1
+                assert pending_rolled_back is not None
+                assert fire_rolled_back.status == "buffered"
+                assert (
+                    await session.execute(
+                        select(ScheduleOccurrenceResolution),
+                    )
+                ).scalars().all() == []
+
+            resolved = await client.post(
+                (f"/api/v1/projects/default/schedules/{schedule_id}/resolve-legacy-evidence"),
+                json=payload,
+            )
+
+        assert resolved.status_code == 200, resolved.text
+        assert resolved.json()["disposition"] == "resolved"
+        assert resolved.json()["source_evidence_id"] == str(pending_id)
+        async with brain_app.state.db.session() as session:
+            assert await session.get(PendingFire, pending_id) is None
+            fire = (
+                await session.execute(
+                    select(ScheduleFire).where(
+                        ScheduleFire.fire_id == fire_id,
+                    ),
+                )
+            ).scalar_one()
+            assert fire.status == "operator_skipped"
 
 
 # =====================================================================
@@ -366,6 +793,54 @@ class TestDefaultSchedulerOwnerFallback:
 
 
 class TestUpdateSchedule:
+    @pytest.mark.asyncio
+    async def test_active_current_update_rotates_control_and_emits_revision(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        await _activate_current_control(brain_app)
+        async with _make_client(brain_app, settings, seed) as client:
+            created = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=_create_body("rotate-me"),
+            )
+            schedule_id = created.json()["id"]
+            async with brain_app.state.db.session() as session:
+                before = await session.get(Schedule, uuid.UUID(schedule_id))
+                assert before is not None
+                old_token = before.control_token
+
+            updated = await client.patch(
+                f"/api/v1/projects/default/schedules/{schedule_id}",
+                json={"expression": "*/15 * * * *"},
+            )
+        assert updated.status_code == 200, updated.text
+
+        async with brain_app.state.db.session() as session:
+            row = await session.get(Schedule, uuid.UUID(schedule_id))
+            assert row is not None
+            assert row.control_token is not None
+            assert row.control_token != old_token
+            assert row.schedule_revision == 2
+            changes = (
+                (
+                    await session.execute(
+                        select(ScheduleChangeLog)
+                        .where(ScheduleChangeLog.schedule_id == row.id)
+                        .order_by(ScheduleChangeLog.revision),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert [change.revision for change in changes] == [1, 2]
+
     @pytest.mark.asyncio
     async def test_partial_update_only_touches_sent_fields(
         self,
@@ -483,6 +958,114 @@ class TestUpdateIDOR:
 
 
 class TestDeleteSchedule:
+    @pytest.mark.asyncio
+    async def test_active_current_delete_commits_tombstone(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        await _activate_current_control(brain_app)
+        async with _make_client(brain_app, settings, seed) as client:
+            created = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=_create_body("do-not-cascade"),
+            )
+            schedule_id = created.json()["id"]
+            response = await client.delete(
+                f"/api/v1/projects/default/schedules/{schedule_id}",
+            )
+        assert response.status_code == 204
+
+        async with brain_app.state.db.session() as session:
+            assert await session.get(Schedule, uuid.UUID(schedule_id)) is None
+            tombstone = await session.scalar(
+                select(ScheduleChangeLog).where(
+                    ScheduleChangeLog.schedule_id == uuid.UUID(schedule_id),
+                    ScheduleChangeLog.change_kind == "delete",
+                ),
+            )
+            assert tombstone is not None
+            assert tombstone.snapshot is None
+
+    @pytest.mark.asyncio
+    async def test_active_current_disable_is_revisioned_without_agent_command(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        await _activate_current_control(brain_app)
+        async with _make_client(brain_app, settings, seed) as client:
+            created = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=_create_body("disable-current"),
+            )
+            schedule_id = created.json()["id"]
+            response = await client.post(
+                f"/api/v1/projects/default/schedules/{schedule_id}/disable",
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["is_enabled"] is False
+
+        async with brain_app.state.db.session() as session:
+            row = await session.get(Schedule, uuid.UUID(schedule_id))
+            assert row is not None
+            assert row.schedule_revision == 2
+            assert row.legacy_fire_control_token is None
+
+    @pytest.mark.asyncio
+    async def test_active_current_fired_schedule_can_be_reenabled_on_sqlite(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        """SQLite must not leak its naive datetime round-trip into cadence."""
+
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        await _activate_current_control(brain_app)
+        async with _make_client(brain_app, settings, seed) as client:
+            created = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=_create_body("reenable-fired-current"),
+            )
+            assert created.status_code == 201, created.text
+            schedule_id = uuid.UUID(created.json()["id"])
+
+            # Persist an aware fire cursor, then leave the transaction so the
+            # next request observes SQLite's real naive datetime round-trip.
+            async with brain_app.state.db.session() as session:
+                row = await session.get(Schedule, schedule_id)
+                assert row is not None
+                row.last_run_at = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
+                await session.commit()
+
+            disabled = await client.post(
+                f"/api/v1/projects/default/schedules/{schedule_id}/disable",
+            )
+            assert disabled.status_code == 200, disabled.text
+
+            enabled = await client.post(
+                f"/api/v1/projects/default/schedules/{schedule_id}/enable",
+            )
+
+        assert enabled.status_code == 200, enabled.text
+        assert enabled.json()["is_enabled"] is True
+        assert enabled.json()["last_run_at"].startswith("2026-07-25T12:00:00")
+        assert enabled.json()["next_run_at"] is not None
+
     @pytest.mark.asyncio
     async def test_delete_returns_204_and_removes_row(
         self,

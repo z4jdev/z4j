@@ -62,6 +62,13 @@ def cli_settings(
     monkeypatch.setenv("Z4J_SECRET", secret)
     monkeypatch.setenv("Z4J_SESSION_SECRET", session_secret)
     monkeypatch.setenv("Z4J_ENVIRONMENT", "dev")
+    monkeypatch.setenv("Z4J_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    # These are legacy-v1 verifier regression tests. An audit-only key
+    # exported by an earlier in-process migration test must not silently
+    # switch their fixture to the Boundary-F verifier.
+    monkeypatch.delenv("Z4J_AUDIT_CHAIN_SECRET", raising=False)
+    monkeypatch.delenv("Z4J_AUDIT_CHAIN_PREVIOUS_SECRETS", raising=False)
     # A developer's rotation-window var would add extra verify
     # secrets; drop it so the test is hermetic.
     monkeypatch.delenv("Z4J_SECRETS_PREVIOUS", raising=False)
@@ -73,6 +80,7 @@ def cli_settings(
         database_url=db_url,
         secret=secret,  # type: ignore[arg-type]
         session_secret=session_secret,  # type: ignore[arg-type]
+        audit_chain_secret=None,
         environment="dev",
     )
 
@@ -194,10 +202,30 @@ async def _row_hmac(settings: Settings, row_id: uuid.UUID) -> str:
         await engine.dispose()
 
 
-async def _set_prune_watermark(settings: Settings, row_hmac: str) -> None:
-    """Simulate a legitimate retention prune by recording its watermark."""
+async def _set_prune_watermark(
+    settings: Settings,
+    row_hmac: str,
+    *,
+    authenticate: bool = True,
+) -> None:
+    """Simulate a retention prune by recording its watermark.
+
+    A legitimate sweep stores the watermark AUTHENTICATED to the master
+    secret (``authenticate=True``). ``authenticate=False`` stores the raw
+    ``row_hmac`` to model a DB-write attacker who has no master secret --
+    the verifier must reject that and flag the truncation.
+    """
     from z4j_brain.persistence.models import Z4JMeta
-    from z4j_brain.persistence.repositories.audit_log import AUDIT_PRUNE_WATERMARK_KEY
+    from z4j_brain.persistence.repositories.audit_log import (
+        AUDIT_PRUNE_WATERMARK_KEY,
+        format_prune_watermark,
+    )
+
+    if authenticate:
+        secret = settings.secret.get_secret_value().encode("utf-8")
+        value = format_prune_watermark(secret, row_hmac)
+    else:
+        value = row_hmac
 
     engine = create_async_engine(settings.database_url, future=True)
     try:
@@ -207,7 +235,7 @@ async def _set_prune_watermark(settings: Settings, row_hmac: str) -> None:
             expire_on_commit=False,
         )
         async with factory() as session:
-            session.add(Z4JMeta(key=AUDIT_PRUNE_WATERMARK_KEY, value=row_hmac))
+            session.add(Z4JMeta(key=AUDIT_PRUNE_WATERMARK_KEY, value=value))
             await session.commit()
     finally:
         await engine.dispose()
@@ -316,7 +344,7 @@ class TestAuditVerifyCLI:
 class TestAuditVerifyCLIPruneWatermark:
     """After retention deletes the genesis row, the CLI must accept the
     first surviving row's non-null prev_row_hmac when it matches the
-    stored prune watermark (1.7 audit R2) -- while still catching a
+    stored prune watermark (1.7 audit) -- while still catching a
     genuine tamper.
     """
 

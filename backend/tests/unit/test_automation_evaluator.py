@@ -1,9 +1,8 @@
-"""Automation rule condition grammar + evaluator (Cluster R1).
+"""Automation rule condition grammar + evaluator.
 
 The evaluator is the security-critical core: a FIXED grammar (no CEL /
 sandbox), fail-closed on the hot path so a malformed rule that could
-drive a destructive action simply never fires.
-"""
+drive a destructive action simply never fires."""
 
 from __future__ import annotations
 
@@ -269,7 +268,7 @@ class TestMatchingRules:
 
 
 # ---------------------------------------------------------------------------
-# fingerprint condition (R4)
+# fingerprint condition
 # ---------------------------------------------------------------------------
 
 

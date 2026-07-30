@@ -8,6 +8,7 @@ login - we use the smaller test cost from the conftest fixture.
 from __future__ import annotations
 
 import secrets
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -21,9 +22,13 @@ from z4j_brain.settings import Settings
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(tmp_path: Path) -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        # Use SQLite's real multi-connection arbitration. StaticPool-backed
+        # in-memory SQLite lets concurrent AsyncSessions drive one physical
+        # connection at once, which produces transaction interference instead
+        # of testing the password-reset token CAS.
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'auth.sqlite'}",
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         environment="dev",
@@ -41,19 +46,8 @@ def settings() -> Settings:
 
 @pytest.fixture
 async def brain_app(settings: Settings):
-    """Build the brain on a shared in-memory engine.
-
-    A single shared engine + StaticPool is required because we
-    create the schema in one connection and need every subsequent
-    handler-bound session to see it.
-    """
-    from sqlalchemy.pool import StaticPool
-
-    engine = create_async_engine(
-        settings.database_url,
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+    """Build the brain on the same file-backed SQLite shape users run."""
+    engine = create_async_engine(settings.database_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -229,7 +223,7 @@ class TestPasswordResetRequest:
 
 @pytest.mark.asyncio
 class TestPasswordResetConfirmR5M2:
-    """1.6.5 round-5 audit (R5-M2) regression.
+    """1.6.5 round-5 audit regression.
 
     The confirm path must atomically claim the reset token so that
     two concurrent POST /password-reset/confirm requests with the
@@ -346,11 +340,11 @@ class TestPasswordResetConfirmR5M2:
         success_count = sum(1 for r in results if r.status_code == 200)
         failure_count = sum(1 for r in results if r.status_code == 404)
         assert success_count == 1, (
-            f"R5-M2: expected exactly 1 successful confirm, got "
+            f": expected exactly 1 successful confirm, got "
             f"{success_count}. Statuses: {[r.status_code for r in results]}"
         )
         assert failure_count == len(attempts) - 1, (
-            f"R5-M2: expected {len(attempts) - 1} 404 confirms, got "
+            f": expected {len(attempts) - 1} 404 confirms, got "
             f"{failure_count}. Statuses: {[r.status_code for r in results]}"
         )
 
@@ -397,7 +391,7 @@ class TestPasswordResetConfirmR5M2:
 
 @pytest.mark.asyncio
 class TestPasswordResetFailedAudit:
-    """1.7 audit R4: a FAILED password-reset confirm must leave a
+    """1.7 audit: a FAILED password-reset confirm must leave a
     durable ``auth.password_reset_failed`` audit row.
 
     Pre-fix the invalid / expired / replayed-token path raised before

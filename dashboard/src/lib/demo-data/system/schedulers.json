@@ -7,7 +7,7 @@
       "ok": true,
       "error": null,
       "info": {
-        "version": "1.6.9",
+        "version": "1.8.0",
         "instance_id": "sched-1-a3f9",
         "uptime_seconds": 615240,
         "brain_grpc_url": "brain:50051",
@@ -26,7 +26,7 @@
       "ok": true,
       "error": null,
       "info": {
-        "version": "1.6.9",
+        "version": "1.8.0",
         "instance_id": "sched-2-b71c",
         "uptime_seconds": 88320,
         "brain_grpc_url": "brain:50051",

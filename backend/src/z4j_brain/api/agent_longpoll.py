@@ -77,10 +77,16 @@ from z4j_core.transport.frames import (
 from z4j_core.transport.framing import FrameSigner, FrameVerifier
 from z4j_core.transport.hmac import derive_project_secret
 
+from z4j_brain.domain.command_wire import wire_target
 from z4j_brain.domain.ip_rate_limit import require_agent_connect_throttle
+from z4j_brain.domain.retry_contract import (
+    RETRY_FAMILY_ACTIONS,
+    required_retry_engine,
+    session_supports_retry_engine,
+)
 from z4j_brain.persistence.enums import CommandStatus
 from z4j_brain.websocket.auth import resolve_agent_by_bearer
-from z4j_brain.websocket.frame_router import FrameRouter
+from z4j_brain.websocket.frame_router import FrameOutcome, FrameRouter
 
 if TYPE_CHECKING:
     from z4j_brain.persistence.database import DatabaseManager
@@ -114,6 +120,77 @@ router = APIRouter(prefix="/agent", tags=["agent-longpoll"])
 
 _SESSION_REGISTRY_MAX = 4096
 _SESSION_HEADER = "X-Z4J-Session-Nonce"
+#: Long-poll analogue of WebSocket runtime-feature observability. This sticky
+#: metadata is never retry authority; ``_RETRY_CONTRACTS_HEADER`` below is
+#: checked on the exact request that claims a command.
+_RUNTIME_FEATURES_HEADER = "X-Z4J-Runtime-Features"
+_RETRY_CONTRACTS_HEADER = "X-Z4J-Retry-Contracts"
+#: Bound so a malformed or hostile header cannot bloat the stored metadata.
+_MAX_RUNTIME_FEATURES = 64
+_MAX_RUNTIME_FEATURE_LEN = 64
+
+
+def _longpoll_delivery_authority(
+    agent_id: uuid.UUID,
+    session_nonce: str | None,
+) -> tuple[uuid.UUID, str] | None:
+    """Derive credential-free authority from one verified long-poll nonce."""
+
+    if not session_nonce:
+        return None
+    owner = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"z4j-longpoll-owner:{agent_id}:{session_nonce}",
+    )
+    generation = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"z4j-longpoll-generation:{agent_id}:{session_nonce}",
+    )
+    return owner, str(generation)
+
+
+def _parse_runtime_features(raw: str | None) -> list[str] | None:
+    """Parse the comma-separated feature header, or None when absent.
+
+    None means "the agent said nothing", which is NOT the same as "the agent
+    said it has no features": the first must leave any previously recorded set
+    alone, the second must clear it.
+    """
+    if raw is None:
+        return None
+    out: list[str] = []
+    for part in raw.split(","):
+        name = part.strip()
+        if name and len(name) <= _MAX_RUNTIME_FEATURE_LEN and name not in out:
+            out.append(name)
+        if len(out) >= _MAX_RUNTIME_FEATURES:
+            break
+    return out
+
+
+def _parse_retry_contracts(raw: str | None) -> dict[str, int]:
+    """Parse ``engine=version`` pairs for this exact polling request.
+
+    Missing or malformed input fails closed to an empty set. Nothing is read
+    from or written to sticky Agent metadata.
+    """
+    if not raw:
+        return {}
+    contracts: dict[str, int] = {}
+    for part in raw.split(","):
+        engine, separator, version = part.strip().partition("=")
+        if (
+            separator != "="
+            or version != "1"
+            or not engine
+            or len(engine) > _MAX_RUNTIME_FEATURE_LEN
+        ):
+            return {}
+        contracts[engine] = 1
+        if len(contracts) > _MAX_RUNTIME_FEATURES:
+            return {}
+    return contracts
+
 
 #: Per-agent session cap. Without this, one valid bearer can flood
 #: 4 096 distinct nonces and LRU-evict every legitimate agent's
@@ -264,7 +341,7 @@ async def _record_longpoll_liveness(
     (its HMAC passed) AND durably handled. A fully-rejected upload does
     NOT refresh liveness, otherwise a bearer holder who cannot produce a
     valid frame HMAC could keep a dead agent pinned ONLINE by POSTing
-    garbage, suppressing the offline sweep and its alerts (R5-L1). The
+    garbage, suppressing the offline sweep and its alerts. The
     offline sweep keys off a stale ``last_seen_at``, so refreshing it on
     unverified traffic would defeat it.
 
@@ -337,6 +414,7 @@ class FrameUploadResponse(BaseModel):
     accepted: int
     rejected: int
     errors: list[str] = Field(default_factory=list)
+    error_code: str | None = None
 
 
 class CommandPullResponse(BaseModel):
@@ -398,6 +476,10 @@ async def agent_events(  # noqa: PLR0915  long-poll event-upload handler
     ingestor = request.app.state.event_ingestor
     dispatcher = request.app.state.command_dispatcher
     dashboard_hub = getattr(request.app.state, "dashboard_hub", None)
+    delivery_authority = _longpoll_delivery_authority(
+        agent.id,
+        session_nonce,
+    )
 
     frame_router = FrameRouter(
         db=db,
@@ -406,11 +488,14 @@ async def agent_events(  # noqa: PLR0915  long-poll event-upload handler
         project_id=agent.project_id,
         agent_id=agent.id,
         dashboard_hub=dashboard_hub,
+        transport_kind=("longpoll" if delivery_authority is not None else None),
+        registry_owner_id=(delivery_authority[0] if delivery_authority is not None else None),
+        session_generation=(delivery_authority[1] if delivery_authority is not None else None),
         automation_notify_coalesce_seconds=settings.automation_notify_coalesce_seconds,
         automation_outbox_max_rows_per_project=settings.automation_outbox_max_rows_per_project,
     )
 
-    # Per-frame accounting, keyed to the brain's 3-state dispatch verdict:
+    # Per-frame accounting, keyed to the brain's dispatch verdict:
     #   ``accepted``      -- frames the agent should CONFIRM+DELETE: a
     #     DURABLE store, a permanent DROP (deterministic; re-sending fails
     #     identically), or an unparseable frame dropped at the source.
@@ -420,13 +505,14 @@ async def agent_events(  # noqa: PLR0915  long-poll event-upload handler
     #   ``authenticated`` -- frames that passed parse + HMAC (reached
     #     dispatch). This is the ONLY liveness signal: an unauthenticated
     #     frame (parse fail before HMAC, version skew before HMAC, or a
-    #     signature failure) must never refresh ``last_seen_at`` (R5-L1).
+    #     signature failure) must never refresh ``last_seen_at``.
     # The RESPONSE accepted-count = ``accepted`` (DURABLE + DROP + parse-
     # drop); the agent confirms iff it equals the frames it sent.
     accepted = 0
     rejected = 0
     authenticated = 0
     errors: list[str] = []
+    error_code: str | None = None
     session_invalidated = False
     total = len(body.frames)
     for idx, raw in enumerate(body.frames):
@@ -478,9 +564,9 @@ async def agent_events(  # noqa: PLR0915  long-poll event-upload handler
             # identically forever. Drop-and-ack it at the source (count it
             # accepted below) so the agent's confirm_on_send deletes it
             # instead of looping on it and starving every frame behind it
-            # (R8). It does NOT count toward liveness: the parse failure is
+            # It does NOT count toward liveness: the parse failure is
             # raised BEFORE HMAC verification, so an unauthenticated garbage
-            # frame must never refresh last_seen_at (R5-L1).
+            # frame must never refresh last_seen_at.
             accepted += 1
             logger.warning(
                 "z4j longpoll: dropping unparseable agent frame "
@@ -495,7 +581,7 @@ async def agent_events(  # noqa: PLR0915  long-poll event-upload handler
         # NOT count toward the authenticated-liveness signal: a bearer-token
         # holder without the project HMAC could otherwise keep a dead agent
         # marked ONLINE by POSTing hello frames, defeating the offline sweep
-        # (R5-L1). Drop-and-ack it (accepted, matching the deterministic-drop
+        # Drop-and-ack it (accepted, matching the deterministic-drop
         # pattern so a sender never loops) and skip the liveness counter.
         if isinstance(frame, (HelloFrame, HelloAckFrame)):
             accepted += 1
@@ -508,16 +594,14 @@ async def agent_events(  # noqa: PLR0915  long-poll event-upload handler
             continue
 
         # The frame passed parse + HMAC -> it proves an authenticated,
-        # live agent regardless of whether it stores (R5-L1 liveness).
+        # live agent regardless of whether it stores.
         authenticated += 1
 
-        # dispatch() returns a 3-state FrameOutcome; over long-poll the HTTP
-        # 200 accepted-count IS the ack the agent confirms against, so a
-        # CONFIRMED outcome (DURABLE store or permanent DROP) counts
-        # accepted and a TRANSIENT one counts rejected (agent re-sends).
-        # The brain resolves every DETERMINISTIC failure to DROP at source,
-        # so a rejected frame is always a genuine self-healing transient
-        # (round-8: this is what keeps the agent's no-drop retry safe).
+        # Over long-poll the HTTP 200 accepted-count is the acknowledgement.
+        # CONFIRMED outcomes (DURABLE store or permanent DROP) count
+        # accepted. TRANSIENT counts rejected so the agent re-sends;
+        # UPGRADE_REQUIRED also stays unconfirmed but carries a typed,
+        # operator-actionable failure.
         try:
             outcome = await frame_router.dispatch(frame)
         except Exception:  # defensive: dispatch is contracted not to raise
@@ -528,14 +612,18 @@ async def agent_events(  # noqa: PLR0915  long-poll event-upload handler
                 agent_id=str(agent.id),
             )
             continue
-        if outcome.confirmed:
+        if outcome is FrameOutcome.UPGRADE_REQUIRED:
+            rejected += 1
+            error_code = "scheduler_upgrade_required"
+            errors.append("scheduler adapter upgrade required")
+        elif outcome.confirmed:
             accepted += 1
         else:
             rejected += 1
             errors.append("transient; agent re-sends")
 
     # Liveness refreshes ONLY on an authenticated frame (passed parse +
-    # HMAC), never on garbage / version-skew / bad-signature traffic (R5-L1).
+    # HMAC), never on garbage / version-skew / bad-signature traffic.
     # Best-effort: the frame outcomes above are already RESOLVED, so a
     # deterministic liveness-write failure (schema/permission) must NOT turn
     # the resolved 200 into a 500 -- that would make the agent re-POST
@@ -556,17 +644,21 @@ async def agent_events(  # noqa: PLR0915  long-poll event-upload handler
         accepted=accepted,
         rejected=rejected,
         errors=errors[:10],
+        error_code=error_code,
     )
 
 
 @router.get("/commands", response_model=CommandPullResponse)
-async def agent_commands(  # noqa: PLR0915  long-poll command handler
+async def agent_commands(  # noqa: PLR0915, PLR0912  long-poll command handler
     request: Request,
     response: Response,
     wait: int = Query(default=30, ge=0, le=60),
-    max_frames: int = Query(default=50, ge=1, le=500),
+    # Ge=0 -- max_frames=0 is a non-claiming liveness/identity probe.
+    max_frames: int = Query(default=50, ge=0, le=500),
     authorization: str | None = Header(default=None),
     session_nonce: str | None = Header(default=None, alias=_SESSION_HEADER),
+    runtime_features: str | None = Header(default=None, alias=_RUNTIME_FEATURES_HEADER),
+    retry_contracts: str | None = Header(default=None, alias=_RETRY_CONTRACTS_HEADER),
     _throttle: None = Depends(require_agent_connect_throttle),
 ) -> CommandPullResponse:
     """Long-poll for pending commands targeting this agent."""
@@ -595,11 +687,39 @@ async def agent_commands(  # noqa: PLR0915  long-poll command handler
     response.headers["X-Z4J-Agent-Id"] = str(agent.id)
     response.headers["X-Z4J-Project-Id"] = str(agent.project_id)
 
+    # max_frames=0 is a NON-CLAIMING liveness/identity probe. connect()
+    # uses it to learn the canonical agent/project UUIDs (the headers above) and
+    # confirm reachability WITHOUT claiming any command. The old probe used
+    # max_frames>=1 and DISCARDED the body, so it marked a pending DESTRUCTIVE
+    # command DISPATCHED; being non-redeliverable it was then never re-sent and
+    # stranded until timeout. Returning before the claim loop preserves the
+    # claim==delivery invariant: only receive_frames (which actually delivers the
+    # body to the runtime) may claim a command.
+    if max_frames == 0:
+        # Record runtime-wide feature flags for operator observability. Retry
+        # authority is not read from this sticky row; the adapter-derived
+        # contract header is checked on each claiming request below.
+        features = _parse_runtime_features(runtime_features)
+        if features is not None:
+            async with db.session() as session:
+                from z4j_brain.persistence.repositories import AgentRepository
+
+                await AgentRepository(session).record_runtime_features(
+                    agent_id=agent.id, runtime_features=features
+                )
+                await session.commit()
+        return CommandPullResponse(frames=[])
+
     master_bytes = settings.secret.get_secret_value().encode("utf-8")
+    session_retry_contracts = _parse_retry_contracts(retry_contracts)
     signer, _ = await _get_or_create_session(
         agent=agent,
         master_secret=master_bytes,
         session_nonce=session_nonce,
+    )
+    current_authority = _longpoll_delivery_authority(
+        agent.id,
+        session_nonce,
     )
 
     # Inner helper that does ONE pass over the commands table for
@@ -620,58 +740,132 @@ async def agent_commands(  # noqa: PLR0915  long-poll command handler
     # delivery completed.
     from datetime import UTC, datetime, timedelta
 
-    redispatch_cutoff = datetime.now(UTC) - timedelta(
-        seconds=getattr(
-            settings,
-            "agent_longpoll_redispatch_seconds",
-            60.0,
-        ),
-    )
-
-    async def _pull_pending() -> list[Command]:
-        from sqlalchemy import or_
+    async def _pull_pending(limit: int) -> list[Command]:
+        if limit <= 0:
+            return []
+        from sqlalchemy import and_, or_
 
         from z4j_brain.persistence.models import Command
+        from z4j_brain.persistence.repositories.commands import (
+            _REDELIVERABLE_ACTIONS,
+        )
 
+        # Recompute the cutoffs on EACH poll, not once at request start
+        # frozen into this closure. A DISPATCHED row that becomes lease-eligible
+        # (its last send ages past ``min_interval``) DURING the wait must be seen
+        # on the next poll; with frozen cutoffs the eligibility boundary never
+        # advanced with wall-clock time, so such a row was only picked up on the
+        # NEXT long-poll request -- delaying recovery by up to a full wait cycle.
+        _now = datetime.now(UTC)
+        redispatch_cutoff = _now - timedelta(
+            seconds=getattr(
+                settings,
+                "agent_longpoll_redispatch_seconds",
+                60.0,
+            ),
+        )
+        # The lease cutoff -- a DISPATCHED row is re-send-eligible only
+        # if its last send was at least min_interval ago (matches
+        # claim_redispatch's server-side lease).
+        lease_cutoff = _now - timedelta(
+            seconds=getattr(
+                settings,
+                "agent_longpoll_redispatch_min_interval_seconds",
+                10.0,
+            ),
+        )
+        retry_engines = tuple(session_retry_contracts)
+        session_eligible = or_(
+            ~Command.action.in_(RETRY_FAMILY_ACTIONS),
+            and_(
+                Command.action == "retry_task",
+                Command.payload["engine"].as_string().in_(retry_engines),
+            ),
+            and_(
+                Command.action == "bulk_retry",
+                Command.payload["filter"]["engine"].as_string().in_(retry_engines),
+            ),
+        )
+        delivery_states = [
+            Command.status == CommandStatus.PENDING,
+            and_(
+                Command.status == CommandStatus.DISPATCHED,
+                Command.schedule_protocol_marker.is_(None),
+                Command.dispatched_at >= redispatch_cutoff,
+                Command.dispatched_at <= lease_cutoff,
+                Command.action.in_(_REDELIVERABLE_ACTIONS),
+            ),
+        ]
+        if current_authority is not None:
+            delivery_states.append(
+                and_(
+                    Command.status == CommandStatus.DISPATCHED,
+                    Command.schedule_protocol_marker.is_not(None),
+                    Command.agent_acknowledged_at.is_(None),
+                    Command.delivery_transport_kind == "longpoll",
+                    Command.delivery_registry_owner_id == current_authority[0],
+                    Command.delivery_session_generation == current_authority[1],
+                    Command.delivery_claim_token.is_not(None),
+                    Command.cadence_redelivery_deadline > _now,
+                    Command.timeout_at > _now,
+                    Command.dispatched_at <= lease_cutoff,
+                ),
+            )
         async with db.session() as session:
             result = await session.execute(
                 select(Command)
                 .where(
                     Command.agent_id == agent.id,
-                    or_(
-                        Command.status == CommandStatus.PENDING,
-                        # Recently dispatched but possibly never
-                        # delivered (network drop). Re-send;
-                        # agent dedups by id.
-                        (
-                            (Command.status == CommandStatus.DISPATCHED)
-                            & (Command.dispatched_at >= redispatch_cutoff)
-                        ),
-                    ),
+                    session_eligible,
+                    # Every selected DISPATCHED row is already
+                    # deliverable.  Generic recovery uses its action allowlist;
+                    # marked cadence recovery instead requires this exact
+                    # verified nonce-derived owner and immutable deadline.
+                    or_(*delivery_states),
                 )
                 .order_by(Command.issued_at.asc())
-                .limit(max_frames),
+                .limit(limit),
             )
             return list(result.scalars().all())
 
-    # Fast path: any pending commands right now? Skip the wait loop
-    # entirely if so - typical long-poll will return empty most
-    # times but immediately on a real command issuance.
-    pending = await _pull_pending()
-    if not pending and wait > 0:
+    # Boundary B: a long-poll request is itself the exact immutable send edge.
+    # The generation binds this agent + nonce without persisting the raw nonce.
+    generation = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"z4j-longpoll:{agent.id}:{session_nonce or '<legacy>'}",
+    )
+
+    async def _claim_bulk(limit: int) -> list[Command]:
+        if limit <= 0:
+            return []
+        coordinator = request.app.state.bulk_retry_coordinator
+        return await coordinator.claim_for_longpoll(
+            project_id=agent.project_id,
+            agent_id=agent.id,
+            retry_contracts=dict(session_retry_contracts),
+            generation=generation,
+            maximum=limit,
+        )
+
+    # Fast path: claim durable children first, then fill the response with
+    # ordinary commands. Both paths remain bounded by max_frames.
+    bulk_claimed = await _claim_bulk(max_frames)
+    pending = await _pull_pending(max_frames - len(bulk_claimed))
+    if not bulk_claimed and not pending and wait > 0:
         # Slow path: poll the table at 250 ms intervals up to
         # ``wait`` seconds. A future improvement is to wake on a
         # Postgres NOTIFY (the registry already publishes one);
         # the polling fallback works even without a Postgres
         # backend (SQLite dev mode).
         deadline = asyncio.get_running_loop().time() + wait
-        while not pending:
+        while not bulk_claimed and not pending:
             await asyncio.sleep(0.25)
             if asyncio.get_running_loop().time() >= deadline:
                 break
-            pending = await _pull_pending()
+            bulk_claimed = await _claim_bulk(max_frames)
+            pending = await _pull_pending(max_frames - len(bulk_claimed))
 
-    if not pending:
+    if not bulk_claimed and not pending:
         return CommandPullResponse(frames=[])
 
     # Claim → sign → respond, in that order. Each step is critical:
@@ -694,12 +888,65 @@ async def agent_commands(  # noqa: PLR0915  long-poll command handler
     #
     # 3. Append to ``out_frames`` only after both succeed.
     out_frames: list[str] = []
+    # These rows were inserted DISPATCHED in the irreversible child-claim
+    # transaction. Sign them directly; never pass them through the generic
+    # DISPATCHED redispatch branch (bulk_retry is intentionally non-redeliverable).
+    if bulk_claimed:
+        async with db.session() as bulk_session:
+            from z4j_brain.persistence.repositories import (
+                BulkRetryRequestRepository,
+                CommandRepository,
+            )
+
+            bulk_commands = CommandRepository(bulk_session)
+            for cmd in bulk_claimed:
+                try:
+                    payload = CommandPayload(
+                        action=cmd.action,
+                        target=wire_target(
+                            cmd.target_type,
+                            cmd.target_id,
+                            cmd.payload,
+                        ),
+                        parameters=cmd.payload,
+                        timeout_seconds=settings.command_timeout_seconds,
+                        issued_by=str(cmd.issued_by) if cmd.issued_by else None,
+                    )
+                    frame = CommandFrame(id=str(cmd.id), payload=payload)
+                    out_frames.append(signer.sign_and_serialize(frame).decode("utf-8"))
+                except Exception as exc:
+                    logger.exception(
+                        "z4j longpoll: failed to sign durable bulk child after claim",
+                        command_id=str(cmd.id),
+                    )
+                    await bulk_commands.mark_failed(
+                        cmd.id,
+                        error=f"longpoll sign failed: {type(exc).__name__}",
+                    )
+            await BulkRetryRequestRepository(bulk_session).reconcile_command_outcomes(
+                limit=len(bulk_claimed)
+            )
+            await bulk_session.commit()
+
     async with db.session() as session:
         from z4j_brain.persistence.repositories import CommandRepository
+        from z4j_brain.persistence.repositories.commands import (
+            action_is_redeliverable,
+        )
 
         commands_repo = CommandRepository(session)
         for cmd in pending:
+            # Defense in depth against dialect/JSON-expression drift: the same
+            # adapter-derived request contract is checked again immediately
+            # before the claim.
+            if not session_supports_retry_engine(
+                session_retry_contracts,
+                required_retry_engine(cmd.action, cmd.payload),
+            ):
+                continue
             claimed = False
+            current_claim = False
+            command_to_send = cmd
             try:
                 # Two paths now feed this loop:
                 #
@@ -710,24 +957,87 @@ async def agent_commands(  # noqa: PLR0915  long-poll command handler
                 #    so the agent gets it. Agent-side dedup
                 #    silently absorbs duplicates that reached a
                 #    still-running process.
-                if cmd.status == CommandStatus.DISPATCHED:
-                    # Recovery path - skip the claim (idempotent
-                    # re-send).
+                if cmd.schedule_protocol_marker is not None:
+                    if current_authority is None:
+                        continue
+                    (
+                        current_claim,
+                        claimed_command,
+                    ) = await commands_repo.claim_current_schedule_delivery(
+                        cmd.id,
+                        project_id=agent.project_id,
+                        agent_id=agent.id,
+                        transport_kind="longpoll",
+                        registry_owner_id=current_authority[0],
+                        session_generation=current_authority[1],
+                        timeout_seconds=settings.command_timeout_seconds,
+                        recovery_min_interval_seconds=getattr(
+                            settings,
+                            "agent_longpoll_redispatch_min_interval_seconds",
+                            10.0,
+                        ),
+                    )
+                    if not current_claim or claimed_command is None:
+                        continue
                     claimed = True
-                else:
-                    claimed = await commands_repo.mark_dispatched(cmd.id)
+                    command_to_send = claimed_command
+                elif cmd.status == CommandStatus.DISPATCHED:
+                    # Never RE-DELIVER a non-idempotent command whose
+                    # outcome is unknown -- it may have already executed and only
+                    # the result frame was lost, so a re-send would double-execute
+                    # a destructive op (purge/restart/retry/bulk). At-most-once:
+                    # skip it and let the CommandTimeoutWorker retire it. Fires
+                    # (fire_id-deduped) and idempotent actions still recover.
+                    if not action_is_redeliverable(cmd.action):
+                        continue
+                    # Single-winner recovery redispatch as a real
+                    # LEASE. claim_redispatch wins only if the last send was >=
+                    # min_interval ago (a SERVER-side cutoff), so a re-send happens
+                    # at most once per lease interval -- NOT once per poll, which
+                    # the old caller-supplied not_after=dispatched_at allowed
+                    # (every sequential poll re-read the bumped value and re-won,
+                    # flooding concurrent workers / a restarted agent).
+                    claimed = await commands_repo.claim_redispatch(
+                        cmd.id,
+                        min_interval_seconds=getattr(
+                            settings,
+                            "agent_longpoll_redispatch_min_interval_seconds",
+                            10.0,
+                        ),
+                    )
                     if not claimed:
+                        continue
+                else:
+                    dispatch_generation = await commands_repo.mark_dispatched(
+                        cmd.id,
+                        timeout_seconds=settings.command_timeout_seconds,
+                    )
+                    if not dispatch_generation:
                         # Another poller (or the WebSocket gateway) won the
                         # race for this command. Skip silently.
                         continue
                 payload = CommandPayload(
-                    action=cmd.action,
-                    target={"type": cmd.target_type, "id": cmd.target_id},
-                    parameters=cmd.payload,
+                    action=command_to_send.action,
+                    target=wire_target(
+                        command_to_send.target_type,
+                        command_to_send.target_id,
+                        command_to_send.payload,
+                    ),
+                    parameters=command_to_send.payload,
                     timeout_seconds=settings.command_timeout_seconds,
-                    issued_by=str(cmd.issued_by) if cmd.issued_by else None,
+                    issued_by=(
+                        str(command_to_send.issued_by) if command_to_send.issued_by else None
+                    ),
+                    delivery_claim_token=(
+                        str(command_to_send.delivery_claim_token)
+                        if command_to_send.delivery_claim_token is not None
+                        else None
+                    ),
                 )
-                frame = CommandFrame(id=str(cmd.id), payload=payload)
+                frame = CommandFrame(
+                    id=str(command_to_send.id),
+                    payload=payload,
+                )
                 signed_bytes = signer.sign_and_serialize(frame)
                 out_frames.append(signed_bytes.decode("utf-8"))
             except Exception as exc:
@@ -735,7 +1045,7 @@ async def agent_commands(  # noqa: PLR0915  long-poll command handler
                     "z4j longpoll: failed to sign command after claim",
                     command_id=str(cmd.id),
                 )
-                if claimed:
+                if claimed and not current_claim:
                     # Already DISPATCHED - surface as failed so the
                     # user / dashboard sees something instead of
                     # a silent timeout. mark_failed accepts both

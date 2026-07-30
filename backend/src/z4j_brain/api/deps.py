@@ -160,11 +160,31 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
     Tied to the FastAPI request scope. Rolls back on any unhandled
     exception. Handlers commit explicitly when they intend to
-    persist their changes.
+    persist their changes. SQLite mutation requests reserve the writer
+    before dependency resolution can perform the first authentication or
+    domain read; this is the request-owned Boundary-F write unit.
     """
     db = get_db(request)
-    async with db.session() as session:
+    write = not is_safe_method(request.method)
+    async with db.session(write=write) as session:
         yield session
+
+
+async def begin_sqlite_immediate_write_unit(
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Reserve SQLite writer authority before a route's first DB read.
+
+    Only routes whose audited transition requires pre-read serialization
+    declare this dependency.  It must be the first item in the route's
+    ``dependencies`` list so authentication, authorization, mutation, and
+    audit all use the same already-reserved request session.
+    """
+    from z4j_brain.persistence.repositories.audit_log import (
+        AuditLogRepository,
+    )
+
+    await AuditLogRepository(session).require_sqlite_immediate_write_unit()
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +410,7 @@ async def _resolve_bearer_user(  # noqa: PLR0912, PLR0915  bearer auth resolutio
     # comes back as a naive ``datetime`` even though we stored it
     # as ``datetime.now(UTC) + ttl``. Comparing naive vs aware
     # raises ``TypeError`` and crashes the auth path with a 500
-    # instead of a clean 401/403 (R6 M1). Coerce here so the path
+    # instead of a clean 401/403. Coerce here so the path
     # is identical across Postgres (tz-aware round-trip) and
     # SQLite (naive round-trip we treat as UTC).
     expires_at = key_row.expires_at
@@ -601,14 +621,50 @@ async def get_optional_user(
 # MFA enrollment enforcement gate
 # ---------------------------------------------------------------------------
 
+
+def _matches_exempt_route(
+    request: Request,
+    allowlist: frozenset[tuple[str, str]],
+) -> bool:
+    """Return True when the request targets an allowlisted exempt route.
+
+    Both MFA gates carry an allowlist of ``(METHOD, "/api/v1/...")``
+    pairs -- the routes a gated session may still reach. The path in
+    each pair is the FULL, mount-prefixed path.
+
+    History: an earlier version matched only ``request.scope["route"].path``.
+    That attribute is NOT reliably the mount-prefixed path -- with
+    ``app.include_router(router, prefix="/api/v1")`` the ``APIRoute``
+    object left in ``scope["route"]`` reports its router-local path
+    (``/auth/me``), NOT ``/api/v1/auth/me``. So every prefixed allowlist
+    entry missed, the gate refused even its own escape routes, and a user
+    who enabled MFA could never present the second factor -- a permanent
+    lockout recoverable only via the ``reset-mfa`` shell command.
+
+    ``request.url.path`` is the actual app-relative path the client hit
+    (``/api/v1/auth/me``), already stripped of any ASGI ``root_path``, so
+    it matches the prefixed allowlist directly. We also accept a match on
+    ``route.path`` so a future FastAPI that DOES bake the prefix keeps
+    working. Both forms are exact-match against a static, parameter-free
+    allowlist, so neither can widen the exemption beyond the intended
+    routes. Every exempt route is parameter-free by construction; if a
+    path-parameter route ever needs exempting, match it on
+    ``route.path`` rather than the value-substituted ``url.path``.
+    """
+    method = request.method.upper()
+    if (method, request.url.path) in allowlist:
+        return True
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", None)
+    return route_path is not None and (method, route_path) in allowlist
+
+
 #: ``(METHOD, route-path-template)`` pairs a session that is PAST its
 #: MFA-enrollment grace deadline may still call: everything a blocked
 #: user needs to become enrolled, and nothing else. Whoami stays
 #: reachable so the dashboard can render the enrollment page; logout
-#: so the user can leave. Templates are matched against
-#: ``request.scope["route"].path`` (the ``/api/v1`` mount prefix is
-#: part of the template), so path-parameter routes could be listed
-#: here verbatim if ever needed.
+#: so the user can leave. Paths are the full ``/api/v1``-prefixed form
+#: and matched via :func:`_matches_exempt_route`.
 _MFA_ENROLLMENT_EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/api/v1/auth/me"),
@@ -653,9 +709,7 @@ def enforce_mfa_enrollment(
     enforcement = evaluate_mfa_enforcement(user=user, settings=settings)
     if not enforcement.blocked:
         return
-    route = request.scope.get("route")
-    path_template = getattr(route, "path", request.url.path)
-    if (request.method.upper(), path_template) in _MFA_ENROLLMENT_EXEMPT_ROUTES:
+    if _matches_exempt_route(request, _MFA_ENROLLMENT_EXEMPT_ROUTES):
         return
     raise MfaEnrollmentRequiredError(
         "MFA enrollment required before this account can be used",
@@ -673,8 +727,8 @@ def enforce_mfa_enrollment(
 #: exactly the routes needed to COMPLETE verification (submit a TOTP or
 #: recovery code at ``/auth/mfa/verify``), plus whoami / mfa-status so the
 #: dashboard can render the prompt, plus logout. Everything else is refused
-#: until the second factor is presented. Matched against the same
-#: ``request.scope["route"].path`` template as the enrollment allowlist.
+#: until the second factor is presented. Paths are the full ``/api/v1``-
+#: prefixed form and matched via :func:`_matches_exempt_route`.
 _MFA_VERIFICATION_EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/api/v1/auth/mfa/verify"),
@@ -728,9 +782,7 @@ def enforce_mfa_verified(
         return
     if session_row.mfa_verified_at is not None:
         return
-    route = request.scope.get("route")
-    path_template = getattr(route, "path", request.url.path)
-    if (request.method.upper(), path_template) in _MFA_VERIFICATION_EXEMPT_ROUTES:
+    if _matches_exempt_route(request, _MFA_VERIFICATION_EXEMPT_ROUTES):
         return
     raise MfaReverifyRequiredError(
         "second-factor verification required before this account can be used",
@@ -767,8 +819,22 @@ async def get_current_user(
             session_row=resolved[0],
             settings=settings,
         )
+        # Stash the resolved user so the ErrorMiddleware denial-audit can
+        # attribute a later 403 to it. get_current_user returns the User
+        # as a dependency value and previously never recorded it on
+        # request.state, so every denial-audit row persisted user_id=NULL
+        # (B17). Set AFTER the MFA gates so a gated request that never
+        # reaches its handler isn't audited as an authenticated actor.
+        request.state.current_user = resolved[1]
+        # Also stash the PK as a plain UUID, while the instance is still
+        # attached. ErrorMiddleware reads this long after the request session
+        # has closed, and reading ``.id`` off the detached ORM instance there
+        # raises DetachedInstanceError instead of yielding the id.
+        request.state.current_user_id = resolved[1].id
         return resolved[1]
     if api_key_user is not None:
+        request.state.current_user = api_key_user
+        request.state.current_user_id = api_key_user.id
         return api_key_user
     raise AuthenticationError("authentication required")
 
@@ -955,6 +1021,7 @@ async def require_csrf(
 
 
 __all__ = [
+    "begin_sqlite_immediate_write_unit",
     "enforce_fresh_mfa",
     "enforce_mfa_enrollment",
     "enforce_mfa_verified",

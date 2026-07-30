@@ -146,7 +146,12 @@ test.describe("mfa - TOTP lifecycle", () => {
     // ---------------------------------------------------------------
     // 3. VERIFY - a fresh TOTP code restores access
     // ---------------------------------------------------------------
-    const verifyToken = await freshTotp(adminPage, secretBase32);
+    // Avoid the enroll step's counter: the brain single-uses each 30s
+    // step for anti-replay, so if enroll + this verify land in the same
+    // window the reused code is rejected exactly like a wrong one.
+    const verifyToken = await freshTotp(adminPage, secretBase32, {
+      avoidCounter: enrollToken.counter,
+    });
     await adminPage.locator("#mfa-code").fill(verifyToken.code);
     await adminPage.getByRole("button", { name: /verify/i }).click();
 

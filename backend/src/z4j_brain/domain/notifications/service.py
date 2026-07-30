@@ -73,7 +73,7 @@ class _PendingDelivery:
     channel_id: UUID | None  # project channel id (or None for user channel)
     user_channel_id: UUID | None  # user channel id (or None for project channel)
     channel_type: str  # webhook / email / slack / telegram
-    channel_name: str | None  # snapshot of channel.name at staging time (R7-M1 twin fix)
+    channel_name: str | None  # snapshot of channel.name at staging time
     config: dict[str, Any]
     # Common context used to build the audit row later:
     project_id: UUID
@@ -472,7 +472,7 @@ class NotificationService:
                     # config dict the dispatcher received - lets the
                     # sanitizer mask URL-bearing substrings.
                     raw_body = outcome.response_body if not outcome.success else None
-                    # R7-M1: pass the dispatcher's config dict directly
+                    # Pass the dispatcher's config dict directly
                     # via ``p.config``. The previous spelling
                     # ``getattr(p, "channel_config", None)`` silently
                     # returned None because the dataclass field is
@@ -509,7 +509,7 @@ class NotificationService:
                             # at insert time so a future channel
                             # rename / delete can't rewrite the audit
                             # row's view of which destination the
-                            # send actually went to. R7-M1 twin fix
+                            # send actually went to. twin fix
                             # (1.6.6): both fields now read directly
                             # off the dataclass. Previously
                             # `channel_name` used getattr against a

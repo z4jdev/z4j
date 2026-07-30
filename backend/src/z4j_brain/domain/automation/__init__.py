@@ -4,8 +4,7 @@ A composition layer over primitives that already exist -- the event
 taxonomy, the notification channels, the command dispatcher, and the
 HMAC-chained audit log. This subpackage owns the FIXED condition grammar
 and its evaluator; the action executor + circuit breaker + event-path
-wiring land in R2.
-"""
+wiring land in."""
 
 from __future__ import annotations
 

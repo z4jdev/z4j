@@ -21,13 +21,20 @@ import os
 from typing import TYPE_CHECKING
 
 import structlog
+from sqlalchemy import inspect, text
 
+from z4j_brain.domain.audit_chain import AuditChainIntegrityError
+from z4j_brain.domain.audit_verifier import (
+    AuditVerificationReport,
+    verify_active_audit_generation,
+)
 from z4j_brain.persistence.repositories import (
     FirstBootTokenRepository,
     MembershipRepository,
     ProjectRepository,
     UserRepository,
 )
+from z4j_brain.schema_transition import RELEASE_MIGRATION_HEAD
 
 if TYPE_CHECKING:
     from z4j_brain.domain.setup_service import SetupService
@@ -45,6 +52,70 @@ logger = structlog.get_logger("z4j.brain.startup")
 # would inherit it). Single-use: ``run_first_boot_check`` consumes
 # it and overwrites with None on first read.
 _CLI_BOOTSTRAP_PASSWORD: str | None = None
+
+
+async def verify_production_authority_at_startup(
+    *,
+    db: DatabaseManager,
+    settings: Settings,
+) -> AuditVerificationReport:
+    """Refuse service before any mutation unless the F authority is intact."""
+
+    if settings.audit_chain_secret is None:
+        raise AuditChainIntegrityError(
+            "activated z4j 1.8 requires the dedicated Z4J_AUDIT_CHAIN_SECRET",
+        )
+
+    async with db.session(write=True) as session:
+        connection = await session.connection()
+        tables = await connection.run_sync(
+            lambda sync_connection: set(inspect(sync_connection).get_table_names()),
+        )
+        if "alembic_version" not in tables:
+            raise AuditChainIntegrityError(
+                "alembic_version is missing; refusing an unmigrated database",
+            )
+        revisions = list(
+            (await session.execute(text("SELECT version_num FROM alembic_version"))).scalars()
+        )
+        if revisions != [RELEASE_MIGRATION_HEAD]:
+            observed = revisions[0] if len(revisions) == 1 else repr(revisions)
+            raise AuditChainIntegrityError(
+                "database migration head is not the activated z4j 1.8 head "
+                f"(observed {observed!r}, expected "
+                f"{RELEASE_MIGRATION_HEAD!r})",
+            )
+        if "audit_chain_preparation" not in tables:
+            raise AuditChainIntegrityError(
+                "audit_chain_preparation is missing after Boundary-F migration",
+            )
+        pending = int(
+            (
+                await session.execute(
+                    text("SELECT COUNT(*) FROM audit_chain_preparation"),
+                )
+            ).scalar_one()
+        )
+        if pending != 0:
+            raise AuditChainIntegrityError(
+                "audit-chain preparation is still pending; run the explicit "
+                "offline activation ceremony",
+            )
+        if "audit_chain_state" not in tables:
+            raise AuditChainIntegrityError(
+                "authenticated audit_chain_state is missing after activation",
+            )
+        report = await verify_active_audit_generation(
+            session,
+            settings,
+            page_size=1000,
+        )
+        if not report.clean:
+            details = "; ".join(report.mismatches) or "verification was not clean"
+            raise AuditChainIntegrityError(
+                f"Boundary-F startup verification failed: {details}",
+            )
+        return report
 
 
 def set_cli_bootstrap_password(password: str) -> None:
@@ -158,6 +229,20 @@ async def run_first_boot_check(
                 await bootstrap_session.commit()
             except Exception:
                 await bootstrap_session.rollback()
+                # Another worker may have won the first-boot race: with
+                # Postgres + multiple uvicorn workers, each worker runs the
+                # lifespan and races _auto_bootstrap_admin, so the losers
+                # hit a UNIQUE violation on the admin email. That is a
+                # BENIGN lost race, not a failure -- re-check and, if the
+                # admin now exists, return quietly rather than alarming the
+                # operator with a traceback + the setup-token banner.
+                async with db.session() as recheck_session:
+                    if not await setup_service.is_first_boot(UserRepository(recheck_session)):
+                        logger.info(
+                            "z4j auto-bootstrap: admin already created "
+                            "(first-boot race won by another worker)",
+                        )
+                        return
                 logger.exception(
                     "z4j auto-bootstrap failed, falling back to setup-token banner",
                 )

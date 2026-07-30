@@ -111,7 +111,7 @@ class AutomationOutboxDrainWorker:
         )
 
         try:
-            async with self._db.session() as session:
+            async with self._db.session(write=True) as session:
                 executor = AutomationExecutor(
                     audit=self._audit,
                     runner=AutomationActionRunner(dispatcher=self._dispatcher),

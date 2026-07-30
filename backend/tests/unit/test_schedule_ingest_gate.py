@@ -180,3 +180,20 @@ async def test_reconcile_failure_does_not_drop_the_event(
     # ... and the failed reconcile left no half-written schedule rows.
     sched_count = (await session.execute(select(func.count()).select_from(Schedule))).scalar_one()
     assert sched_count == 0
+
+
+async def test_reserved_outer_owner_never_reaches_schedule_projection(
+    session: AsyncSession,
+    project: Project,
+    agent: Agent,
+    ingestor: EventIngestor,
+) -> None:
+    event = _snapshot_event([_schedule("forged")])
+    event["engine"] = "z4j-scheduler"
+
+    result = await _ingest(ingestor, session, project, agent, event)
+    await session.commit()
+
+    assert len(result.new_events) == 1
+    sched_count = (await session.execute(select(func.count()).select_from(Schedule))).scalar_one()
+    assert sched_count == 0

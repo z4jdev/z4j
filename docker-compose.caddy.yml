@@ -52,6 +52,25 @@ services:
   # ====================================================================
   z4j:
     ports: !reset []
+    environment:
+      # M2: Caddy forwards the client's Host header (Host: <Z4J_DOMAIN>),
+      # but the default SQLite base compose sets ALLOWED_HOSTS to loopback
+      # only -- so without this every proxied request was 400-rejected with
+      # "invalid Host header" while the brain and Caddy both looked healthy.
+      # Trust the public domain here (loopback stays for the internal
+      # healthcheck). Respects an explicit Z4J_ALLOWED_HOSTS if the operator
+      # set one (e.g. multiple domains) via the .env.
+      Z4J_ALLOWED_HOSTS: ${Z4J_ALLOWED_HOSTS:-["${Z4J_DOMAIN}","localhost","127.0.0.1"]}
+      # Also make the brain's public_url match the TLS domain Caddy serves.
+      Z4J_PUBLIC_URL: ${Z4J_PUBLIC_URL:-https://${Z4J_DOMAIN}}
+      # M15: Caddy forwards X-Forwarded-For, but the brain only honors it from
+      # a TRUSTED proxy. Without this, every request collapses to Caddy's
+      # bridge IP for audit attribution AND for the login/MFA/reset per-IP
+      # rate-limit buckets (one client's failures would throttle everyone).
+      # Trust the pinned z4j_net subnet (see the networks section below) so the
+      # brain honors Caddy's forwarded client IP. Override in .env if you front
+      # z4j with a different proxy / network.
+      Z4J_TRUSTED_PROXIES: ${Z4J_TRUSTED_PROXIES:-["172.28.0.0/16"]}
 
   # ====================================================================
   # Caddy - auto-HTTPS reverse proxy
@@ -86,7 +105,7 @@ services:
     networks:
       - z4j_net
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -99,6 +118,17 @@ services:
         reservations:
           memory: 32m
           cpus: "0.05"
+
+networks:
+  # M15: pin the z4j_net subnet so Z4J_TRUSTED_PROXIES (on the z4j service
+  # above) matches the address Caddy connects from. Merged with the base
+  # compose's z4j_net definition. If 172.28.0.0/16 collides with an existing
+  # network on this host, set both this subnet and Z4J_TRUSTED_PROXIES to a
+  # free range.
+  z4j_net:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
 
 volumes:
   z4j_caddy_data:

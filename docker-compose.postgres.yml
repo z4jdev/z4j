@@ -30,6 +30,7 @@
 #         POSTGRES_PASSWORD=<a long random string>
 #         Z4J_SECRET=<openssl rand -hex 48>
 #         Z4J_SESSION_SECRET=<openssl rand -hex 48>
+#         Z4J_AUDIT_CHAIN_SECRET=<openssl rand -hex 48>
 #         Z4J_PUBLIC_URL=https://z4j.example.com
 #         Z4J_ALLOWED_HOSTS=["z4j.example.com"]
 #
@@ -120,8 +121,12 @@ services:
   z4j:
     build:
       context: .
-      dockerfile: packages/z4j/backend/Dockerfile
+      # Use the split-safe release build. backend/Dockerfile depends on
+      # monorepo siblings that are absent from the packaged source tree.
+      dockerfile: Dockerfile
       target: runtime
+      args:
+        Z4J_VERSION: ${Z4J_VERSION:-1.8.0}
     image: ${Z4J_BRAIN_IMAGE:-z4jdev/z4j:latest}
     container_name: z4j
     depends_on:
@@ -134,9 +139,17 @@ services:
       # for ssl config. For brain↔postgres traffic over the private
       # docker bridge we don't need TLS, so we leave it off entirely
       # and gate it via Z4J_REQUIRE_DB_SSL=false below.
-      Z4J_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-z4j}:${POSTGRES_PASSWORD}@z4j-postgres:5432/${POSTGRES_DB:-z4j}
+      # Pass credentials as data, not by interpolating them into a URL.
+      # z4j builds the SQLAlchemy URL with delimiter-safe quoting at its
+      # single configuration-capture boundary.
+      Z4J_DATABASE_HOST: z4j-postgres
+      Z4J_DATABASE_PORT: "5432"
+      Z4J_DATABASE_USER: ${POSTGRES_USER:-z4j}
+      Z4J_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      Z4J_DATABASE_NAME: ${POSTGRES_DB:-z4j}
       Z4J_SECRET: ${Z4J_SECRET:?Z4J_SECRET is required (48+ bytes of random data)}
       Z4J_SESSION_SECRET: ${Z4J_SESSION_SECRET:?Z4J_SESSION_SECRET is required (48+ bytes of random data)}
+      Z4J_AUDIT_CHAIN_SECRET: ${Z4J_AUDIT_CHAIN_SECRET:?Z4J_AUDIT_CHAIN_SECRET is required (48+ bytes of independent random data)}
       Z4J_PUBLIC_URL: ${Z4J_PUBLIC_URL:?Z4J_PUBLIC_URL is required (e.g. https://z4j.example.com)}
       Z4J_ALLOWED_HOSTS: ${Z4J_ALLOWED_HOSTS:?Z4J_ALLOWED_HOSTS is required (e.g. ["z4j.example.com"])}
 
@@ -147,10 +160,11 @@ services:
       # The line below disables Postgres TLS verification because
       # this compose talks brain↔z4j-postgres over a PRIVATE docker
       # bridge with no outside access. If you point
-      # Z4J_DATABASE_URL at a remote / managed database (RDS, Neon,
-      # Supabase, Cloud SQL, ...) you MUST:
-      #   1. Add ?sslmode=require (or stricter) to the URL above
-      #   2. Set Z4J_REQUIRE_DB_SSL via the environment file to "true"
+      # z4j at a remote / managed database (RDS, Neon, Supabase,
+      # Cloud SQL, ...) you MUST use an override file that supplies:
+      #   1. Z4J_DATABASE_URL with ?sslmode=require (or stricter)
+      #      (an explicit URL takes precedence over the fields above)
+      #   2. Z4J_REQUIRE_DB_SSL=true
       #      (or just delete the line below - true is the default).
       # The brain refuses to start in production with sslmode=disable
       # unless this flag is explicitly set to false (R3 release-
@@ -164,6 +178,16 @@ services:
       Z4J_LOG_JSON: ${Z4J_LOG_JSON:-true}
       Z4J_ENVIRONMENT: ${Z4J_ENVIRONMENT:-production}
 
+      # --- optional: skip interactive first-boot by seeding an admin ---
+      # When both are set and the users table is empty, the brain
+      # provisions the admin user without printing a setup URL. This is
+      # the zero-log-exposure path the setup banner itself recommends;
+      # without this passthrough the vars in your .env never reach the
+      # container and the token banner prints anyway.
+      Z4J_BOOTSTRAP_ADMIN_EMAIL: ${Z4J_BOOTSTRAP_ADMIN_EMAIL:-}
+      Z4J_BOOTSTRAP_ADMIN_PASSWORD: ${Z4J_BOOTSTRAP_ADMIN_PASSWORD:-}
+      Z4J_BOOTSTRAP_ADMIN_DISPLAY_NAME: ${Z4J_BOOTSTRAP_ADMIN_DISPLAY_NAME:-}
+
       # ----- retention -----
       Z4J_EVENT_RETENTION_DAYS: ${Z4J_EVENT_RETENTION_DAYS:-30}
       Z4J_AUDIT_RETENTION_DAYS: ${Z4J_AUDIT_RETENTION_DAYS:-90}
@@ -175,6 +199,12 @@ services:
       # IMPORTANT: put this behind a TLS-terminating reverse proxy
       # (Caddy, nginx, Traefik) in production. Do NOT expose port
       # 8080 directly to the public internet.
+    volumes:
+      # The 1.7 -> 1.8 activation ceremony creates and consumes its
+      # owner-private manifest in separate ``docker compose run --rm``
+      # containers. A named volume is required; the image's anonymous
+      # /data volume would be discarded with the first container.
+      - z4j_brain_state:/data
     networks:
       - z4j_net
     healthcheck:
@@ -212,3 +242,5 @@ networks:
 volumes:
   z4j_pg_data:
     name: z4j_pg_data
+  z4j_brain_state:
+    name: z4j_brain_state

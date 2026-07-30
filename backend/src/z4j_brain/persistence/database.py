@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -43,9 +44,22 @@ def create_engine_from_settings(settings: Settings) -> AsyncEngine:
     state). Both knobs are exposed in settings.py for operator
     tuning. SQLite skips these (kwargs are asyncpg-only).
     """
+    from z4j_brain.management_restore import (
+        assert_database_restore_not_pending,
+    )
+
+    assert_database_restore_not_pending(settings.database_url)
     kwargs: dict = {
-        "pool_size": 20,
-        "max_overflow": 10,
+        # Operator-configurable since 1.8.0. Previously hardcoded, which made
+        # the brain's connection demand impossible to fit to a server the
+        # operator does not control: each uvicorn worker builds its own
+        # engine and `serve` defaults to min(4, cpu_count) workers, so the
+        # worst case is workers * (pool_size + max_overflow). At the defaults
+        # on a 4-core host that is 120, above a stock PostgreSQL
+        # max_connections of 100. Defaults are unchanged; see settings.py and
+        # docs/DATABASE.md for the sizing arithmetic.
+        "pool_size": settings.database_pool_size,
+        "max_overflow": settings.database_max_overflow,
         "pool_pre_ping": True,
         # 1.5.1: shortened from 1800s to the operator-configured
         # value so SQLAlchemy-level pool recycling rotates
@@ -66,6 +80,14 @@ def create_engine_from_settings(settings: Settings) -> AsyncEngine:
             "statement_cache_size": settings.database_statement_cache_size,
         }
     engine = create_async_engine(settings.database_url, **kwargs)
+    from z4j_brain.management_restore import (
+        install_database_restore_fence_engine_hook,
+    )
+
+    install_database_restore_fence_engine_hook(
+        engine,
+        settings.database_url,
+    )
 
     # 1.5.1: wire the leak-visibility instrumentation.
     #
@@ -168,6 +190,11 @@ class DatabaseManager:
     """
 
     def __init__(self, engine: AsyncEngine) -> None:
+        from z4j_brain.persistence.schedule_guard import (
+            install_schedule_guard_engine_hooks,
+        )
+
+        install_schedule_guard_engine_hooks(engine)
         self._engine = engine
         self._sessionmaker: async_sessionmaker[AsyncSession] = async_sessionmaker(
             bind=engine,
@@ -181,7 +208,11 @@ class DatabaseManager:
         return self._engine
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
+    async def session(
+        self,
+        *,
+        write: bool = False,
+    ) -> AsyncIterator[AsyncSession]:
         """Yield a session, rolling back on error.
 
         Used by background workers. Request handlers should depend
@@ -190,6 +221,9 @@ class DatabaseManager:
         """
         async with self._sessionmaker() as session:
             try:
+                if write and self._engine.dialect.name == "sqlite":
+                    await session.execute(text("BEGIN IMMEDIATE"))
+                    session.sync_session.info["z4j_sqlite_immediate"] = True
                 yield session
             except Exception:
                 await session.rollback()
@@ -216,7 +250,12 @@ async def get_session(request: Any) -> AsyncIterator[AsyncSession]:  # type: ign
     should never commit at all.
     """
     db: DatabaseManager = request.app.state.db
-    async with db.session() as session:
+    write = str(getattr(request, "method", "GET")).upper() not in {
+        "GET",
+        "HEAD",
+        "OPTIONS",
+    }
+    async with db.session(write=write) as session:
         yield session
 
 

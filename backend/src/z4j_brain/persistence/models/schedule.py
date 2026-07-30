@@ -163,6 +163,95 @@ class Schedule(PKMixin, TimestampsMixin, Base):
         nullable=True,
     )
 
+    # Boundary D control fields are nullable in Base.metadata-only unit
+    # schemas so legacy fixtures remain explicitly legacy.  The authenticated
+    # D activation migration backfills every real row, installs NOT NULL
+    # constraints for the five current-protocol identity fields, and adds the
+    # database transition guards.  Direct create_all is not activation proof.
+    control_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    legacy_fire_control_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    schedule_revision: Mapped[int | None] = mapped_column(
+        big_integer(),
+        nullable=True,
+    )
+    definition_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    cadence_semantics_version: Mapped[int | None] = mapped_column(
+        nullable=True,
+    )
+    cadence_runtime_fingerprint: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    quarantine_control_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    quarantine_code: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    quarantine_detail: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    quarantined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # Durable latest-accepted cadence fence.  Fire history is retention
+    # bounded, so replay/terminal decisions must never infer this authority
+    # from schedule_fires or last_fire_id.
+    last_cadence_acceptance_control_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    last_cadence_acceptance_fire_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    last_cadence_acceptance_scheduled_for: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_cadence_acceptance_revision: Mapped[int | None] = mapped_column(
+        big_integer(),
+        nullable=True,
+    )
+    # External scheduler adapters use a separate causal namespace.  These
+    # columns are an all-or-none group after Boundary-D activation.  Reserved
+    # ``z4j-scheduler`` rows carry none of them; every external-owner row is
+    # bound to the exact Brain-issued stream epoch and last accepted source
+    # sequence that produced it.
+    external_stream_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    external_epoch_uuid: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    external_epoch_number: Mapped[int | None] = mapped_column(
+        big_integer(),
+        nullable=True,
+    )
+    external_source_key: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    external_source_sequence: Mapped[int | None] = mapped_column(
+        big_integer(),
+        nullable=True,
+    )
+
     __table_args__ = (
         UniqueConstraint(
             "project_id",

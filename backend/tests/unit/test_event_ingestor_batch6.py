@@ -342,7 +342,7 @@ class TestStateMonotonicGuard:
         session: AsyncSession,
         ingestor: EventIngestor,
     ) -> None:
-        """R5 H1 regression - a hostile agent stamping
+        """Regression - a hostile agent stamping
         ``task.succeeded`` just under the clamp window cannot
         lock a task in SUCCESS against a subsequent legitimate
         lifecycle event. The clamp normalises future-dated
@@ -377,7 +377,7 @@ class TestStateMonotonicGuard:
         await session.commit()
 
         # A legitimate task.failed arrives a few seconds later.
-        # With the R5 fix, the existing row's lifecycle timestamp
+        # With the fix, the existing row's lifecycle timestamp
         # never exceeds `now`, so the legitimate event's
         # occurred_at is NOT < existing_latest, and the state
         # transition lands.
@@ -405,8 +405,8 @@ class TestStateMonotonicGuard:
             )
         ).scalar_one()
         # The task should now be FAILURE, not the attacker-locked
-        # SUCCESS (the R5 H1 fix - clamp tight + min(ts, now) on
+        # SUCCESS (the fix - clamp tight + min(ts, now) on
         # the existing row's timestamps).
         assert task.state == TaskState.FAILURE, (
-            f"R5 H1 regression: hostile near-future stamp locked state at {task.state}"
+            f" regression: hostile near-future stamp locked state at {task.state}"
         )

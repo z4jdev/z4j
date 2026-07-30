@@ -1,4 +1,4 @@
-"""R6 M1 regression: Bearer auth must not crash when the API key's
+"""Regression: Bearer auth must not crash when the API key's
 ``expires_at`` column comes back naive (SQLite TIMESTAMP round-trip
 loses tzinfo), even though we stored a tz-aware value."""
 
@@ -72,7 +72,7 @@ class TestExpiresAtTzCoercion:
         assert _check_expires(row) is None
 
     def test_naive_comparison_would_crash_without_coercion(self) -> None:
-        """Documents the pre-R6 M1 bug: raw aware-vs-naive compare
+        """Documents the pre- bug: raw aware-vs-naive compare
         raises ``TypeError``. If the coercion is ever removed from
         the real auth path, _this_ test still passes (it runs the
         new logic) but the real auth handler would regress. The
@@ -95,6 +95,6 @@ class TestAuthDepsActualImplementationCoerces:
 
         src = inspect.getsource(deps._resolve_bearer_user)
         assert "expires_at.replace(tzinfo=UTC)" in src or ("expires_at.replace(tzinfo=" in src), (
-            "R6 M1 regression: _resolve_bearer_user must coerce a naive "
+            " regression: _resolve_bearer_user must coerce a naive "
             "expires_at to UTC before comparing to datetime.now(UTC)"
         )

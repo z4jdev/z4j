@@ -694,7 +694,7 @@ class NotificationDeliveryRepository(BaseRepository[NotificationDelivery]):
 
         Keyset pagination on ``(sent_at, id)`` - the id tiebreaker
         matches the pattern used by the home recent-failures feed
-        (R4 follow-up) so pages are stable even when multiple rows
+        so pages are stable even when multiple rows
         share a millisecond.
         """
         # Accept ``limit + 1`` sentinel loads from keyset-paginated

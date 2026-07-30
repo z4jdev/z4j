@@ -18,11 +18,22 @@ from z4j_brain.persistence.models.agent_offline_alert import AgentOfflineAlert
 from z4j_brain.persistence.models.agent_status_history import AgentStatusHistory
 from z4j_brain.persistence.models.agent_worker import AgentWorker
 from z4j_brain.persistence.models.api_key import ApiKey
+from z4j_brain.persistence.models.audit_chain import (
+    AuditChainPreparation,
+    AuditChainState,
+)
 from z4j_brain.persistence.models.audit_log import AuditLog
 from z4j_brain.persistence.models.automation_firing_outbox import (
     AutomationFiringOutbox,
 )
 from z4j_brain.persistence.models.automation_rule import AutomationRule
+from z4j_brain.persistence.models.bulk_retry_request import (
+    BulkRetryControlState,
+    BulkRetryDeliveryState,
+    BulkRetryOutcome,
+    BulkRetryRequest,
+    BulkRetryRequestChild,
+)
 from z4j_brain.persistence.models.command import Command
 from z4j_brain.persistence.models.event import Event
 from z4j_brain.persistence.models.export_job import ExportJob
@@ -50,7 +61,26 @@ from z4j_brain.persistence.models.project import Project
 from z4j_brain.persistence.models.queue import Queue
 from z4j_brain.persistence.models.saved_view import SavedView
 from z4j_brain.persistence.models.schedule import Schedule
+from z4j_brain.persistence.models.schedule_control import (
+    ScheduleChangeLog,
+    ScheduleRevisionState,
+)
+from z4j_brain.persistence.models.schedule_external import (
+    ScheduleExternalControlOperation,
+    ScheduleExternalEpochAllocator,
+    ScheduleExternalProjection,
+    ScheduleExternalSnapshotFrame,
+    ScheduleExternalStream,
+    ScheduleExternalStreamEpoch,
+    ScheduleOwnerCutover,
+)
 from z4j_brain.persistence.models.schedule_fire import ScheduleFire
+from z4j_brain.persistence.models.schedule_occurrence_resolution import (
+    ScheduleOccurrenceResolution,
+)
+from z4j_brain.persistence.models.schedule_terminal_hold import (
+    ScheduleTerminalHold,
+)
 from z4j_brain.persistence.models.scheduler_rate_bucket import SchedulerRateBucket
 from z4j_brain.persistence.models.session import Session
 from z4j_brain.persistence.models.task import Task
@@ -65,9 +95,16 @@ __all__ = [
     "AgentStatusHistory",
     "AgentWorker",
     "ApiKey",
+    "AuditChainPreparation",
+    "AuditChainState",
     "AuditLog",
     "AutomationFiringOutbox",
     "AutomationRule",
+    "BulkRetryControlState",
+    "BulkRetryDeliveryState",
+    "BulkRetryOutcome",
+    "BulkRetryRequest",
+    "BulkRetryRequestChild",
     "Command",
     "Event",
     "ExportJob",
@@ -88,7 +125,18 @@ __all__ = [
     "Queue",
     "SavedView",
     "Schedule",
+    "ScheduleChangeLog",
+    "ScheduleExternalControlOperation",
+    "ScheduleExternalEpochAllocator",
+    "ScheduleExternalProjection",
+    "ScheduleExternalSnapshotFrame",
+    "ScheduleExternalStream",
+    "ScheduleExternalStreamEpoch",
     "ScheduleFire",
+    "ScheduleOccurrenceResolution",
+    "ScheduleOwnerCutover",
+    "ScheduleRevisionState",
+    "ScheduleTerminalHold",
     "SchedulerRateBucket",
     "Session",
     "Task",

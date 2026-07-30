@@ -150,7 +150,19 @@ async def _probe_scheduler(  # noqa: PLR0911  probe result status mapping
     """
     from urllib.parse import urlparse
 
-    parsed = urlparse(url)
+    # "Never raises" is the contract, and urlparse can. Python 3.14 made it
+    # raise ValueError on malformed IPv6 authorities such as
+    # ``http://[::1]extra`` or ``http://[::1``. A single typo in
+    # Z4J_SCHEDULER_INFO_URLS would otherwise take down the whole fleet
+    # listing with a 500 instead of marking that one entry bad.
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        return FleetEntry(
+            url=url,
+            ok=False,
+            error=f"refused to probe unparseable URL: {exc}",
+        )
     if parsed.scheme not in ("http", "https"):
         return FleetEntry(
             url=url,

@@ -1,0 +1,25 @@
+# Never copy compose secrets or VCS state into an image layer.
+.env
+.env.*
+!.env.example
+.git
+
+# Local Python build and test state. Keep backend/src/z4j_brain/dashboard/dist:
+# it is the compiled dashboard shipped by the z4j wheel and sdist.
+.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.hypothesis
+dist
+build
+**/*.egg-info
+
+# The release image installs the already-compiled dashboard. Frontend source
+# dependency/build trees are neither required nor safe build-context inputs.
+dashboard/node_modules
+dashboard/.pnpm-store
+dashboard/dist

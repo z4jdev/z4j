@@ -48,11 +48,32 @@ services:
   z4j:
     build:
       context: .
-      dockerfile: packages/z4j/backend/Dockerfile
+      # The packaged/split-safe Dockerfile installs this build context
+      # directly. backend/Dockerfile is the monorepo image build and copies
+      # sibling packages that do not exist in the released sdist.
+      dockerfile: Dockerfile
       target: runtime
+      args:
+        Z4J_VERSION: ${Z4J_VERSION:-1.8.0}
     image: ${Z4J_IMAGE:-z4jdev/z4j:latest}
     container_name: z4j
     environment:
+      # --- run posture (added 1.7.1) ---
+      # The runtime image binds 0.0.0.0 (Docker port publishing forwards
+      # to the container IP, not its loopback, so an in-container loopback
+      # bind is unreachable). z4j's dev mode refuses a non-loopback bind
+      # because dev relaxes Secure cookies / HSTS / host validation. This
+      # stack is the "internal-network dev stack" case the refusal message
+      # points at: production posture, host validation pinned to loopback,
+      # plain HTTP explicitly allowed. The host publish below is
+      # loopback-only (127.0.0.1), and browsers treat http://localhost as
+      # a secure context, so the __Host- session/CSRF cookies still work.
+      # For LAN / public access put TLS in front (docker-compose.caddy.yml)
+      # and set Z4J_PUBLIC_URL / Z4J_ALLOWED_HOSTS to your domain.
+      Z4J_ENVIRONMENT: ${Z4J_ENVIRONMENT:-production}
+      Z4J_ALLOWED_HOSTS: ${Z4J_ALLOWED_HOSTS:-["localhost","127.0.0.1"]}
+      Z4J_ALLOW_HTTP_PUBLIC_URL: ${Z4J_ALLOW_HTTP_PUBLIC_URL:-true}
+
       # --- optional: skip interactive first-boot by seeding an admin ---
       # When both are set and the users table is empty, the brain
       # provisions the admin user without printing a setup URL.

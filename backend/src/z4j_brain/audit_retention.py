@@ -63,8 +63,16 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 
+from z4j_brain.domain.audit_chain import (
+    AUDIT_ROW_HMAC_VERSION,
+    AuditChainIntegrityError,
+    authenticate_state,
+    build_audit_keyring,
+    compute_state_mac,
+    normalize_timestamp,
+)
 from z4j_brain.persistence.models import AuditLog
 
 if TYPE_CHECKING:
@@ -280,6 +288,9 @@ class AuditRetentionSweeper:
         assert self._db is not None
         assert self._settings is not None
 
+        if self._settings.audit_chain_secret is not None:
+            return await self._do_sweep_v2()
+
         # Clear last_error at the top of every pass so
         # retention-disabled / no-eligible-rows
         # paths reset the metric. Without this, an error from a
@@ -378,7 +389,7 @@ class AuditRetentionSweeper:
 
         # Record the HMAC-chain prune boundary so `z4j audit verify`
         # does not permanently false-positive on the first surviving row
-        # once retention has deleted the genesis row. (1.7 audit R2.)
+        # once retention has deleted the genesis row. (1.7 audit.)
         if total:
             await self._record_prune_watermark()
 
@@ -398,6 +409,258 @@ class AuditRetentionSweeper:
                 retention_days,
             )
         return total
+
+    async def _do_sweep_v2(self) -> int:
+        """Delete authenticated v2 prefixes and advance state atomically."""
+
+        assert self._db is not None
+        assert self._settings is not None
+
+        self._last_error = None
+        retention_days = self._settings.audit_retention_days
+        if retention_days <= 0:
+            return 0
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        batch_size = max(100, self._settings.audit_retention_sweep_batch_size)
+        max_per_pass = max(
+            batch_size,
+            self._settings.audit_retention_sweep_max_per_pass,
+        )
+        secrets = self._settings.all_audit_chain_secrets_for_verification()
+        if not secrets:
+            raise AuditChainIntegrityError(
+                "dedicated audit-chain key is unavailable",
+            )
+        current_key_id, keyring = build_audit_keyring(secrets[0], secrets[1:])
+
+        total = 0
+        while not self._stop_event.is_set() and total < max_per_pass:
+            async with self._db.session() as session:
+                is_postgres = session.bind is not None and (
+                    session.bind.dialect.name == "postgresql"
+                )
+                if is_postgres:
+                    async with session.begin():
+                        rows = await self._sweep_one_batch_v2(
+                            session,
+                            cutoff=cutoff,
+                            batch_size=min(batch_size, max_per_pass - total),
+                            current_key_id=current_key_id,
+                            keyring=keyring,
+                            is_postgres=True,
+                        )
+                else:
+                    # SQLite must obtain its writer reservation before its
+                    # first read; upgrading a deferred read transaction after
+                    # inspecting state is forbidden.
+                    await session.execute(text("BEGIN IMMEDIATE"))
+                    try:
+                        rows = await self._sweep_one_batch_v2(
+                            session,
+                            cutoff=cutoff,
+                            batch_size=min(batch_size, max_per_pass - total),
+                            current_key_id=current_key_id,
+                            keyring=keyring,
+                            is_postgres=False,
+                        )
+                        await session.commit()
+                    except BaseException:
+                        await session.rollback()
+                        raise
+            total += rows
+            if rows < batch_size:
+                break
+
+        self._last_deleted = total
+        self._total_deleted += total
+        self._last_run_at = datetime.now(UTC)
+        self._last_error = None
+        if total:
+            logger.info(
+                "z4j.brain.audit_retention: authenticated-prefix prune "
+                "removed %d rows older than %s",
+                total,
+                cutoff.isoformat(),
+            )
+        return total
+
+    async def _sweep_one_batch_v2(  # noqa: PLR0912, PLR0915
+        self,
+        session,
+        *,
+        cutoff: datetime,
+        batch_size: int,
+        current_key_id: str,
+        keyring: dict[str, bytes],
+        is_postgres: bool,
+    ) -> int:
+        """Verify and delete exactly one oldest active-generation prefix."""
+
+        from z4j_brain.domain.audit_service import AuditService
+        from z4j_brain.persistence.repositories import AuditLogRepository
+
+        repo = AuditLogRepository(session)
+        if is_postgres:
+            lock_row = await session.execute(
+                text("SELECT pg_try_advisory_xact_lock(:k)"),
+                {"k": _SWEEP_ADVISORY_LOCK_KEY},
+            )
+            if not bool(lock_row.scalar()):
+                return 0
+        await repo.acquire_chain_lock()
+        state = await repo.get_chain_state_for_update()
+        state_payload = authenticate_state(state, keyring)
+        if state_payload["state_key_id"] != current_key_id:
+            raise AuditChainIntegrityError(
+                "configured current audit key differs from authenticated state",
+            )
+
+        head = await repo.get_active_head_for_update(
+            generation=state.generation,
+        )
+        actual_count = await repo.count_active_generation(
+            generation=state.generation,
+        )
+        if actual_count != state.active_row_count:
+            raise AuditChainIntegrityError(
+                "active audit row count does not match authenticated state",
+            )
+        verifier = AuditService(self._settings)
+        if state.active_row_count == 0:
+            if head is not None:
+                raise AuditChainIntegrityError(
+                    "authenticated state says empty but an active head exists",
+                )
+            return 0
+        if head is None:
+            raise AuditChainIntegrityError(
+                "authenticated active audit head is missing",
+            )
+        if (
+            head.row_hmac != state.head_row_hmac
+            or head.hmac_key_id != state.head_hmac_key_id
+            or normalize_timestamp(head.occurred_at) != normalize_timestamp(state.head_occurred_at)
+            or head.id != state.head_id
+            or head.chain_generation != state.generation
+            or head.legacy_frozen is not False
+            or head.hmac_version != AUDIT_ROW_HMAC_VERSION
+            or not verifier.verify_row(head)
+        ):
+            raise AuditChainIntegrityError(
+                "live audit head does not authenticate against state",
+            )
+
+        stmt = (
+            select(AuditLog)
+            .where(
+                AuditLog.legacy_frozen.is_(False),
+                AuditLog.chain_generation == state.generation,
+                AuditLog.occurred_at < cutoff,
+            )
+            .order_by(AuditLog.occurred_at.asc(), AuditLog.id.asc())
+            .limit(batch_size)
+        )
+        if is_postgres:
+            stmt = stmt.with_for_update()
+        selected = list((await session.execute(stmt)).scalars().all())
+        if not selected:
+            return 0
+
+        successor_stmt = (
+            select(AuditLog)
+            .where(
+                AuditLog.legacy_frozen.is_(False),
+                AuditLog.chain_generation == state.generation,
+                (
+                    (AuditLog.occurred_at > selected[-1].occurred_at)
+                    | (
+                        (AuditLog.occurred_at == selected[-1].occurred_at)
+                        & (AuditLog.id > selected[-1].id)
+                    )
+                ),
+            )
+            .order_by(AuditLog.occurred_at.asc(), AuditLog.id.asc())
+            .limit(1)
+        )
+        if is_postgres:
+            successor_stmt = successor_stmt.with_for_update()
+        successor = (await session.execute(successor_stmt)).scalar_one_or_none()
+
+        expected_prev = state.prune_row_hmac
+        if expected_prev is None:
+            if selected[0].prev_row_hmac is not None:
+                raise AuditChainIntegrityError(
+                    "oldest active row is not the generation genesis",
+                )
+        else:
+            if selected[0].prev_row_hmac != expected_prev:
+                raise AuditChainIntegrityError(
+                    "oldest active row does not follow the authenticated prune boundary",
+                )
+            if (
+                normalize_timestamp(selected[0].occurred_at),
+                selected[0].id.int,
+            ) <= (
+                normalize_timestamp(state.prune_occurred_at),
+                state.prune_id.int,
+            ):
+                raise AuditChainIntegrityError(
+                    "selected prefix does not sort after the prune boundary",
+                )
+
+        prior_hmac = expected_prev
+        for row in selected:
+            if row.prev_row_hmac != prior_hmac:
+                raise AuditChainIntegrityError(
+                    "selected audit prefix contains a broken link",
+                )
+            if not verifier.verify_row(row):
+                raise AuditChainIntegrityError(
+                    "selected audit prefix contains an invalid row HMAC",
+                )
+            prior_hmac = row.row_hmac
+        if successor is not None and (
+            successor.prev_row_hmac != prior_hmac or not verifier.verify_row(successor)
+        ):
+            raise AuditChainIntegrityError(
+                "audit prefix successor does not authenticate",
+            )
+
+        await repo.set_chain_transition("retention-v1")
+        if is_postgres:
+            # The preparation migration replaces the legacy branch with the
+            # transition guard.  Setting both keeps this implementation able
+            # to test against the pre-activation trigger without treating the
+            # old permission as signing authority.
+            await session.execute(text("SET LOCAL z4j.audit_sweep = 'on'"))
+        deleted = await session.execute(
+            delete(AuditLog).where(AuditLog.id.in_([row.id for row in selected])),
+        )
+        if int(deleted.rowcount or 0) != len(selected):
+            raise AuditChainIntegrityError(
+                "authenticated retention deleted an unexpected row count",
+            )
+
+        counts = dict(state.active_key_counts)
+        for row in selected:
+            key_id = row.hmac_key_id
+            if key_id is None or counts.get(key_id, 0) <= 0:
+                raise AuditChainIntegrityError(
+                    "selected row key is absent from authenticated key counts",
+                )
+            counts[key_id] -= 1
+            if counts[key_id] == 0:
+                del counts[key_id]
+        boundary = selected[-1]
+        state.prune_row_hmac = boundary.row_hmac
+        state.prune_hmac_key_id = boundary.hmac_key_id
+        state.prune_occurred_at = boundary.occurred_at
+        state.prune_id = boundary.id
+        state.active_row_count -= len(selected)
+        state.active_key_counts = counts
+        state.state_mac = compute_state_mac(keyring[current_key_id], state)
+        await session.flush()
+        return len(selected)
 
     async def _sweep_one_batch_postgres(
         self,
@@ -493,14 +756,19 @@ class AuditRetentionSweeper:
         untouched.
         """
         assert self._db is not None
+        assert self._settings is not None
         from z4j_brain.persistence.repositories import AuditLogRepository
 
+        secret = self._settings.secret.get_secret_value().encode("utf-8")
         async with self._db.session() as session:
             repo = AuditLogRepository(session)
             boundary = await repo.get_oldest_prev_row_hmac()
             if boundary is None:
                 return
-            await repo.set_prune_watermark(boundary)
+            # Store the watermark authenticated to the master secret so a
+            # DB-write adversary cannot re-anchor the chain past a
+            # prefix-truncation (see ``_watermark_mac``).
+            await repo.set_prune_watermark(boundary, secret=secret)
             await session.commit()
 
     # ------------------------------------------------------------------

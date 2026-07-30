@@ -34,7 +34,9 @@ class _FakeDb:
     """Yields a trivial session; the persist callback drives success/failure
     so the retry loop can be exercised without a real engine."""
 
-    def session(self):
+    def session(self, *, write: bool = False):
+        assert write is True
+
         class _CM:
             async def __aenter__(self) -> _FakeSession:
                 return _FakeSession()

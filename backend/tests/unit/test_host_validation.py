@@ -29,7 +29,7 @@ class TestStripPort:
 
 
 class TestStripPortMalformedR4M1:
-    """1.6.5 audit R4-M1 defense-in-depth.
+    """1.6.5 audit defense-in-depth.
 
     The upstream Starlette CVE-2026-48710 (BadHost) is fixed by
     the >=1.0.1 floor in z4j's pyproject; these tests pin the
@@ -111,6 +111,68 @@ async def client(brain_app):
         yield ac
 
 
+@pytest.fixture
+def prod_settings() -> Settings:
+    """Production posture with a public-domain allow-list that does NOT
+    include loopback -- the exact shape that made the container
+    healthcheck (Host: 127.0.0.1) 400-reject before B2."""
+    return Settings(
+        database_url="sqlite+aiosqlite:///:memory:",
+        secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        audit_chain_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        environment="production",
+        public_url="https://z4j.example.com",
+        allowed_hosts=["z4j.example.com"],
+        log_json=False,
+    )
+
+
+@pytest.fixture
+async def prod_client(prod_settings: Settings):
+    engine = create_async_engine(
+        prod_settings.database_url,
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    app = create_app(prod_settings, engine=engine)
+    from httpx import ASGITransport, AsyncClient
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="https://z4j.example.com") as ac:
+        yield ac
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+class TestHealthExemptionB2:
+    """B2 regression: the container healthcheck probes
+    ``http://127.0.0.1:7700/api/v1/health`` (Host: 127.0.0.1), but a
+    production allow-list is pinned to the operator's public domain. The
+    health subtree is exempt from the allow-list check so the probe
+    succeeds and the container reports healthy (else Caddy never starts).
+    Malformed hosts remain rejected on health; non-health routes remain
+    fully validated.
+    """
+
+    async def test_health_allows_loopback_host_not_in_allowlist(self, prod_client) -> None:
+        r = await prod_client.get("/api/v1/health", headers={"Host": "127.0.0.1"})
+        assert r.status_code == 200
+
+    async def test_health_still_rejects_malformed_host(self, prod_client) -> None:
+        r = await prod_client.get("/api/v1/health", headers={"Host": "evil.com/admin"})
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_host"
+
+    async def test_non_health_route_still_rejects_unknown_host(self, prod_client) -> None:
+        # The exemption must NOT leak to real endpoints.
+        r = await prod_client.get("/api/v1/projects", headers={"Host": "127.0.0.1"})
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_host"
+
+
 @pytest.mark.asyncio
 class TestHostValidationDev:
     async def test_localhost_allowed(self, client) -> None:
@@ -120,8 +182,12 @@ class TestHostValidationDev:
         assert r.status_code == 200
 
     async def test_unknown_host_rejected(self, client) -> None:
+        # Uses a NON-exempt path: the health subtree is exempt from the
+        # allow-list check (B2), so an unknown well-formed Host must be
+        # asserted against a normal route. Host validation runs before
+        # routing, so the 400 fires regardless of the route's own auth.
         r = await client.get(
-            "/api/v1/health",
+            "/api/v1/projects",
             headers={"Host": "evil.example.com"},
         )
         assert r.status_code == 400
@@ -137,12 +203,12 @@ class TestHostValidationDev:
 
 @pytest.mark.asyncio
 class TestHostValidationDispatchR5M1:
-    """1.6.5 round-5 audit (R5-M1) regression.
+    """1.6.5 round-5 audit regression.
 
-    R4-M1 hardened ``_strip_port`` to collapse malformed hosts to
-    "" but the dispatcher's pre-R5 check ``if host and host not in
+    Hardened ``_strip_port`` to collapse malformed hosts to
+    "" but the dispatcher's pre- check ``if host and host not in
     allowed`` skipped rejection on the empty side, so a present-
-    but-malformed Host header reached the app. R5-M1 fixed this:
+    but-malformed Host header reached the app. fixed this:
     a present Host header that does not survive _strip_port intact
     is now rejected with 400 ``invalid_host``.
 

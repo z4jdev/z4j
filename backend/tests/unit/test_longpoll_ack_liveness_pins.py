@@ -45,6 +45,7 @@ from z4j_core.transport import CURRENT_PROTOCOL
 from z4j_core.transport.frames import (
     CommandResultFrame,
     CommandResultPayload,
+    ErrorFrame,
     EventBatchAckFrame,
     EventBatchFrame,
     EventBatchPayload,
@@ -205,10 +206,19 @@ class _TransientRaisingIngestor:
 
 class _TransientSkipIngestor:
     """Commits the batch but reports a transiently-skipped event, so the
-    batch is committed-but-not-fully-durable (R6-panel-HIGH)."""
+    batch is committed-but-not-fully-durable (-panel-HIGH)."""
 
     async def ingest_batch(self, **_kwargs):
         return BatchIngestResult(new_events=[], transient_skips=1)
+
+
+class _UpgradeRequiredIngestor:
+    async def ingest_batch(self, **_kwargs):
+        return BatchIngestResult(
+            new_events=[],
+            transient_skips=0,
+            upgrade_required=True,
+        )
 
 
 def _router(send_frame=None, ingestor=None) -> FrameRouter:
@@ -232,7 +242,7 @@ async def test_dispatch_returns_durable_on_success() -> None:
 
 
 async def test_dispatch_drops_on_deterministic_ingest_failure() -> None:
-    """R8: a DETERMINISTIC (permanent) ingest failure returns DROP, so the
+    """A DETERMINISTIC (permanent) ingest failure returns DROP, so the
     long-poll caller counts it accepted and the agent CONFIRMS+DELETES it
     instead of re-sending it forever.
 
@@ -252,7 +262,7 @@ async def test_dispatch_drops_on_deterministic_ingest_failure() -> None:
 
 
 async def test_dispatch_transient_on_transient_ingest_failure() -> None:
-    """R8/R5-M1: a TRANSIENT ingest failure (a lock-timeout cancel, SQLSTATE
+    """A TRANSIENT ingest failure (a lock-timeout cancel, SQLSTATE
     57014) returns TRANSIENT, so the long-poll caller counts it rejected and
     the agent RE-SENDS -- the deliverable event is never evicted before it
     stored. This is the asyncpg lock/pool case the SQLSTATE classifier fixes.
@@ -268,7 +278,7 @@ async def test_dispatch_transient_on_transient_ingest_failure() -> None:
 
 
 async def test_transient_skip_reports_not_durable_and_withholds_ack() -> None:
-    """R6-panel-HIGH: a batch that COMMITTED but transiently skipped an
+    """Panel-HIGH: a batch that COMMITTED but transiently skipped an
     event is NOT fully durable.
 
     dispatch() must return TRANSIENT (so the long-poll handler counts it
@@ -294,8 +304,33 @@ async def test_transient_skip_reports_not_durable_and_withholds_ack() -> None:
     assert sent == []  # no ack was emitted (TRANSIENT withholds it)
 
 
+async def test_schedule_upgrade_rejection_is_typed_and_never_acked() -> None:
+    sent: list = []
+
+    async def send_frame(frame) -> None:
+        sent.append(frame)
+
+    router = _router(
+        send_frame=send_frame,
+        ingestor=_UpgradeRequiredIngestor(),
+    )
+    frame = EventBatchFrame(
+        id="evb_upgrade",
+        payload=EventBatchPayload(
+            events=[{"engine": "celery-beat", "kind": "schedule.snapshot"}],
+        ),
+    )
+    outcome = await router.dispatch(frame)
+    assert outcome is FrameOutcome.UPGRADE_REQUIRED
+    assert outcome.confirmed is False
+    assert len(sent) == 1
+    assert isinstance(sent[0], ErrorFrame)
+    assert sent[0].payload.code == "scheduler_upgrade_required"
+    assert sent[0].payload.fatal is True
+
+
 async def test_dispatch_stays_durable_when_post_commit_hook_fails() -> None:
-    """R6-F2: a post-commit hook failure must NOT flip dispatch off DURABLE.
+    """A post-commit hook failure must NOT flip dispatch off DURABLE.
 
     The events are already durably committed before the publish /
     notification / automation hooks run. If a hook exception propagated,
@@ -318,7 +353,7 @@ async def test_dispatch_stays_durable_when_post_commit_hook_fails() -> None:
 
 
 async def test_post_commit_hooks_receive_only_new_events() -> None:
-    """R6-F3: notifications AND automation fire on new_events only.
+    """Notifications AND automation fire on new_events only.
 
     A re-delivered event was already notified/fired on first delivery;
     firing on the full delivered list re-pages subscribers on every
@@ -360,7 +395,7 @@ async def test_post_commit_hooks_receive_only_new_events() -> None:
 
 
 # ---------------------------------------------------------------------------
-# R8/C3: a CONTROL-frame handler that raises is CLASSIFIED, so a permanent
+# /C3: a CONTROL-frame handler that raises is CLASSIFIED, so a permanent
 # failure (e.g. a NUL byte in a command_result -> SQLSTATE 22xxx) is DROP
 # (agent confirms, no loop) while a transient one (deadlock) is TRANSIENT
 # (agent re-sends). This completes the "brain resolves every deterministic
@@ -407,7 +442,7 @@ async def test_dispatch_transient_on_transient_control_frame_error() -> None:
 
 
 async def test_dispatch_never_raises_on_oversized_frame_id() -> None:
-    """R9: dispatch() must NEVER raise -- the WS ingest worker has no
+    """Dispatch() must NEVER raise -- the WS ingest worker has no
     per-frame except and relies on that contract, so a raise would crash it
     and wedge the connection.
 
@@ -667,14 +702,14 @@ async def test_rejected_upload_does_not_refresh_liveness(
     brain_app,
     agent_ids,
 ) -> None:
-    """R5-L1 (preserved through R8): an upload with no verified,
+    """(Preserved through): an upload with no verified,
     durably-handled frame must NOT bump last_seen_at.
 
     Otherwise a bearer holder who cannot produce a valid frame HMAC could
     keep a dead agent pinned ONLINE by POSTing garbage, defeating the
     offline sweep (which keys off a stale last_seen_at) and its alerts.
 
-    The frame here is a garbage string that fails to PARSE. Under R8 an
+    The frame here is a garbage string that fails to PARSE. Under an
     unparseable frame is dropped-and-acked so the agent does not loop on
     it, which folds it into the RESPONSE accepted-count (== 1). But a
     parse failure is raised BEFORE HMAC verification, so it must NOT count
@@ -692,9 +727,9 @@ async def test_rejected_upload_does_not_refresh_liveness(
         },
     )
     assert r.status_code == 200
-    # Dropped-and-acked so the agent stops re-sending (R8) ...
+    # Dropped-and-acked so the agent stops re-sending...
     assert r.json()["accepted"] == 1
-    # ... but liveness is UNTOUCHED by unauthenticated garbage (R5-L1).
+    # but liveness is UNTOUCHED by unauthenticated garbage.
     after = await _agent_last_seen(brain_app, agent_ids["agent_id"])
     assert after == before
 
@@ -711,7 +746,7 @@ async def test_version_skew_frame_is_retried_not_dropped(
     upgraded replica; the identical bytes parse fine against an upgraded
     one. So the response must count it rejected (accepted != total ->
     agent keeps + re-sends), and -- since the version gate is BEFORE HMAC
-    -- it must NOT refresh liveness (R5-L1).
+    it must NOT refresh liveness.
     """
     before = await _agent_last_seen(brain_app, agent_ids["agent_id"])
     # A syntactically-valid, signed-type frame claiming a wrong version.
@@ -729,7 +764,7 @@ async def test_version_skew_frame_is_retried_not_dropped(
     # RETRY, not confirm: accepted stays 0 (agent will re-send) ...
     assert r.json()["accepted"] == 0
     assert r.json()["rejected"] == 1
-    # ... and liveness is untouched (version gate is pre-HMAC, R5-L1).
+    # and liveness is untouched (version gate is pre-HMAC).
     after = await _agent_last_seen(brain_app, agent_ids["agent_id"])
     assert after == before
 
@@ -745,7 +780,7 @@ async def test_unsigned_hello_frame_does_not_refresh_liveness(
 
     A bearer-token holder who cannot forge a frame HMAC could otherwise keep a
     dead agent pinned ONLINE by POSTing a well-formed hello, defeating the
-    offline sweep (R5-L1). The frame is still drop-and-acked (accepted, so the
+    offline sweep. The frame is still drop-and-acked (accepted, so the
     agent's confirm_on_send purges it -- a hello does not belong on /events),
     but liveness stays put.
     """
@@ -772,7 +807,7 @@ async def test_unsigned_hello_frame_does_not_refresh_liveness(
     assert r.status_code == 200
     # Drop-and-acked so the agent stops re-sending a misrouted hello ...
     assert r.json()["accepted"] == 1
-    # ... but an UNSIGNED handshake frame never refreshes liveness (R5-L1).
+    # but an UNSIGNED handshake frame never refreshes liveness.
     after = await _agent_last_seen(brain_app, agent_ids["agent_id"])
     assert after == before
 

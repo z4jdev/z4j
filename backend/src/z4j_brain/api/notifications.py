@@ -468,7 +468,7 @@ async def _validate_channel_config(  # noqa: PLR0912, PLR0915  per-channel-type 
     elif channel_type == "telegram":
         # Shared helper (domain/notifications/channels.py) so the
         # project-channel + user-channel validators stay in sync.
-        # The earlier in-file regex has moved there - see R3 H7
+        # The earlier in-file regex has moved there - see
         # + external-audit High #2 for rationale.
         from z4j_brain.domain.notifications.channels import (
             validate_telegram_config,
@@ -1266,6 +1266,24 @@ async def test_channel_config(
         projects,
         min_role=ProjectRole.ADMIN,
     )
+    destination_summary = _destination_summary(body.type, body.config)
+    await audit.record(
+        audit_log,
+        action="notifications.channel.test_requested",
+        target_type="notification_channel",
+        target_id=None,
+        result="pending",
+        outcome="allow",
+        user_id=user.id,
+        project_id=project_id,
+        source_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        metadata={
+            "type": body.type,
+            "destination_summary": destination_summary,
+        },
+    )
+    await db_session.commit()
     result = await _dispatch_test(
         body.type,
         body.config,
@@ -1292,7 +1310,7 @@ async def test_channel_config(
         user_agent=request.headers.get("user-agent"),
         metadata={
             "type": body.type,
-            "destination_summary": _destination_summary(body.type, body.config),
+            "destination_summary": destination_summary,
             "ok": result.success,
         },
     )
@@ -1351,11 +1369,32 @@ async def test_saved_channel(
             "channel not found",
             details={"channel_id": str(channel_id)},
         )
-    result = await _dispatch_test(
-        channel.type,
-        channel.config or {},
+    channel_type = channel.type
+    channel_config = dict(channel.config or {})
+    channel_target = str(channel.id)
+    channel_name = channel.name
+    await audit.record(
+        audit_log,
+        action="notifications.channel.test_requested",
+        target_type="notification_channel",
+        target_id=channel_target,
+        result="pending",
+        outcome="allow",
+        user_id=user.id,
         project_id=project_id,
-        channel_id=channel.id,
+        source_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        metadata={
+            "type": channel_type,
+            "name": channel_name,
+        },
+    )
+    await db_session.commit()
+    result = await _dispatch_test(
+        channel_type,
+        channel_config,
+        project_id=project_id,
+        channel_id=channel_id,
         triggered_by_user_id=user.id,
         db_session=db_session,
     )
@@ -1366,7 +1405,7 @@ async def test_saved_channel(
         audit_log,
         action="notifications.channel.test",
         target_type="notification_channel",
-        target_id=str(channel.id),
+        target_id=channel_target,
         result="success" if result.success else "failed",
         outcome="allow",
         user_id=user.id,
@@ -1374,8 +1413,8 @@ async def test_saved_channel(
         source_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
         metadata={
-            "type": channel.type,
-            "name": channel.name,
+            "type": channel_type,
+            "name": channel_name,
             "ok": result.success,
         },
     )
@@ -1647,7 +1686,7 @@ async def update_default(
         default.cooldown_seconds = body.cooldown_seconds
 
     await db_session.flush()
-    # z4j 1.6.5 (audit R4-L1): defaults auto-materialise into every
+    # z4j 1.6.5: defaults auto-materialise into every
     # project member's UserSubscriptions, so mutating one is just as
     # privileged as create/delete and needs the same forensic trail.
     # Pre-1.6.5 only the create/delete neighbors recorded; this PATCH

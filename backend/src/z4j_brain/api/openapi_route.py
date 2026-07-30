@@ -120,7 +120,7 @@ async def _audit_schema_access(
 
         settings = request.app.state.settings
         db = request.app.state.db
-        async with db.session() as session:
+        async with db.session(write=True) as session:
             audit_log = AuditLogRepository(session)
             await AuditService(settings).record(
                 audit_log,

@@ -411,7 +411,7 @@ async def reset_password(
     await sessions.revoke_all_for_user(user.id, reason="password_changed")
     # Wipe trusted-device rows too (mirrors auth.password_reset_confirm and
     # change_password): an admin reset is a compromise-recovery action, so a
-    # planted 30-day MFA-bypass trust row must not survive it (audit 1.7 R2).
+    # planted 30-day MFA-bypass trust row must not survive it.
     from z4j_brain.persistence.repositories import TrustedDeviceRepository
 
     await TrustedDeviceRepository(db_session).delete_all_for_user(user.id)

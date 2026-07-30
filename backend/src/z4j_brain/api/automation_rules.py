@@ -1,4 +1,4 @@
-"""``/api/v1/projects/{slug}/automation/rules`` REST router (Cluster R3).
+"""``/api/v1/projects/{slug}/automation/rules`` REST router.
 
 CRUD for the cross-engine automation rule engine, with the governance
 gates that make destructive automation safe to hand an operator:
@@ -17,8 +17,7 @@ gates that make destructive automation safe to hand an operator:
 - **Every mutation is audited** through the one HMAC-chained audit log.
 
 The per-project kill switch (disable ALL automation for a project) lands
-in a follow-up (needs a project-level flag + migration).
-"""
+in a follow-up (needs a project-level flag + migration)."""
 
 from __future__ import annotations
 

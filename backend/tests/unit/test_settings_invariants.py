@@ -11,6 +11,7 @@ def _kw(**overrides: object) -> dict[str, object]:
         "database_url": "postgresql+asyncpg://u:p@h/d?sslmode=require",
         "secret": "x" * 48,
         "session_secret": "y" * 48,
+        "audit_chain_secret": "a" * 48,
         "environment": "production",
         "public_url": "https://z4j.example.com",
         "allowed_hosts": ["z4j.example.com"],

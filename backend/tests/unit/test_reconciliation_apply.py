@@ -8,11 +8,10 @@ This test is the missing link from the worker tests - it proves
 the *brain side* of the loop closes correctly when an agent comes
 back with an authoritative engine_state.
 
-R3 H1 additions: the transition matrix. Reconciliation may only
+Additions: the transition matrix. Reconciliation may only
 move a task OUT of a non-terminal state; terminal states are
 terminal, and stale non-terminal responses (issued before the row's
-last observed write) are dropped.
-"""
+last observed write) are dropped."""
 
 from __future__ import annotations
 
@@ -153,7 +152,7 @@ async def test_apply_reconciled_state_unknown_task_is_noop(engine, project_and_t
 
 
 # =====================================================================
-# R3 H1: the transition matrix
+# The transition matrix
 # =====================================================================
 
 
@@ -205,7 +204,7 @@ async def _apply(engine, *, project_id: UUID, task_id: str, engine_state: str, *
 
 @pytest.mark.asyncio
 class TestTerminalIsTerminal:
-    """Terminal → anything is rejected outright (R3 H1)."""
+    """Terminal → anything is rejected outright."""
 
     async def test_success_plus_late_pending_stays_success(self, engine, project_and_task):
         # THE reproduced H1 regression: SUCCESS + stale "pending"
@@ -444,7 +443,7 @@ class TestStaleResponseGuard:
 
 
 class TestReadToWriteRaceGuard:
-    """R4-M1: the staleness check runs against the row as READ, so a
+    """The staleness check runs against the row as READ, so a
     fresh event committing between that read and the atomic UPDATE
     could still be overwritten by a stale probe. The UPDATE now also
     requires ``updated_at`` to equal the validated snapshot, so the

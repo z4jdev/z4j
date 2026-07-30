@@ -18,14 +18,13 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Cpu, RefreshCw } from "lucide-react";
+import { Cpu } from "lucide-react";
 import { FilterToolbar } from "@/components/domain/filter-toolbar";
 import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
 import { WorkerStateBadge } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
 import { DataTable } from "@/components/ui/data-table";
-import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,

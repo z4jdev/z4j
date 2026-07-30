@@ -1,4 +1,4 @@
-"""Tests for the Issues aggregation repository (R4)."""
+"""Tests for the Issues aggregation repository."""
 
 from __future__ import annotations
 
@@ -180,7 +180,7 @@ async def test_pagination_cursor(session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_seen_window_tracks_failure_time_not_recovery(session: AsyncSession) -> None:
-    """Codex round-2 Finding 4: a task that FAILED long ago but RECOVERED
+    """A task that FAILED long ago but RECOVERED
     recently (finished_at overwritten) must surface by its failure time, not
     its recovery time. The ?hours window filters on last_failed_at."""
     from datetime import UTC, datetime, timedelta

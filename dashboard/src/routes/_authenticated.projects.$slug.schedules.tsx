@@ -18,8 +18,8 @@ import {
   Play,
   Plus,
   RefreshCcwDot,
-  RefreshCw,
   Trash2,
+  TriangleAlert,
 } from "lucide-react";
 import { toast } from "sonner";
 import { FilterToolbar } from "@/components/domain/filter-toolbar";
@@ -44,6 +44,7 @@ import { Switch } from "@/components/ui/switch";
 import { useCan } from "@/hooks/use-memberships";
 import {
   useDeleteSchedule,
+  useProjectMisfires,
   useScheduleResync,
   useSchedules,
   useToggleSchedule,
@@ -52,7 +53,6 @@ import {
 import { DateCell } from "@/components/domain/date-cell";
 import { ApiError } from "@/lib/api";
 import type { ScheduleKind, SchedulePublic } from "@/lib/api-types";
-import { cn } from "@/lib/utils";
 import { PageShell } from "@/components/domain/page-shell";
 
 export const Route = createFileRoute(
@@ -289,6 +289,7 @@ function SchedulesPage() {
   }
 
   const canManage = useCan(slug, "manage_schedules");
+  const { data: misfires } = useProjectMisfires(slug);
   const columns = useScheduleColumns({
     slug,
     onToggle,
@@ -398,6 +399,31 @@ function SchedulesPage() {
         }
       />
 
+      {misfires && misfires.length > 0 && (
+        <div className="flex items-start gap-3 rounded-md border bg-muted/30 px-4 py-3 text-sm">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
+          <div className="min-w-0">
+            <div className="font-medium">
+              {misfires.length}{" "}
+              {misfires.length === 1 ? "misfire" : "misfires"} in the last 24h
+            </div>
+            <div className="truncate text-xs text-muted-foreground">
+              An enabled schedule fired late past its grace window (a dead or
+              partitioned scheduler is the usual cause):{" "}
+              {Array.from(
+                new Set(
+                  misfires
+                    .map((m) => m.name)
+                    .filter((n): n is string => !!n),
+                ),
+              )
+                .slice(0, 6)
+                .join(", ")}
+            </div>
+          </div>
+        </div>
+      )}
+
       {isLoading && (
         <div className="space-y-2">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -483,21 +509,19 @@ function useScheduleColumns({
         cell: ({ row }: { row: { original: SchedulePublic } }) => {
           const s = row.original;
           // Linkify the name to the schedule detail page where the
-          // "Last 50 fires" panel lives. Keep the scheduler subtitle
-          // unlinked so it reads as plain metadata.
+          // "Last 50 fires" panel lives. The scheduler used to repeat
+          // here as a subtitle, but it already has its own column, so
+          // every row rendered it twice and paid a second line of
+          // height for it - which pushed "Next run" off the right edge
+          // even at 1680px.
           return (
-            <div>
-              <Link
-                to="/projects/$slug/schedules/$scheduleId"
-                params={{ slug, scheduleId: s.id }}
-                className="font-medium underline-offset-4 hover:underline"
-              >
-                {s.name}
-              </Link>
-              <div className="font-mono text-xs text-muted-foreground">
-                {s.scheduler}
-              </div>
-            </div>
+            <Link
+              to="/projects/$slug/schedules/$scheduleId"
+              params={{ slug, scheduleId: s.id }}
+              className="font-medium underline-offset-4 hover:underline"
+            >
+              {s.name}
+            </Link>
           );
         },
         enableSorting: true,
@@ -559,7 +583,7 @@ function useScheduleColumns({
         accessorKey: "priority",
         header: "Priority",
         cell: ({ row }: { row: { original: SchedulePublic } }) => (
-          <TaskPriorityBadge priority={row.original.priority} compact />
+          <TaskPriorityBadge priority={row.original.priority} />
         ),
         enableSorting: true,
       },

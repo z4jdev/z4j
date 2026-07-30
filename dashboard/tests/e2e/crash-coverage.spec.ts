@@ -198,55 +198,62 @@ test.describe("crash-coverage", () => {
     adminPage,
     api,
   }) => {
-    // Create one test project so the project-scoped routes have
-    // a slug to navigate to. Also creates a project membership so
-    // the auth checks pass.
-    if (slug) {
-      await api.post("/projects", {
-        slug,
-        name: `E2E Crash Coverage ${slug}`,
-        environment: "development",
-      });
+    let createdSlug: string | null = null;
+    try {
+      // Create one test project so the project-scoped routes have
+      // a slug to navigate to. Also creates a project membership so
+      // the auth checks pass.
+      if (slug) {
+        await api.post("/projects", {
+          slug,
+          name: `E2E Crash Coverage ${slug}`,
+          environment: "development",
+        });
+        createdSlug = slug;
+      }
+
+      const findings: RouteFinding[] = [];
+
+      for (const route of ROUTES) {
+        const url = route.needsProject
+          ? route.path.replace("{slug}", slug ?? "")
+          : route.path;
+        const result = await visitRoute(adminPage, url);
+        const finding: RouteFinding = {
+          label: route.label,
+          status:
+            result.consoleErrors.length > 0 || result.textCrashes.length > 0
+              ? "FAIL"
+              : "PASS",
+          consoleErrors: result.consoleErrors,
+          textCrashes: result.textCrashes,
+        };
+        findings.push(finding);
+      }
+
+      // Print summary even on success so the audit trail exists.
+      console.log("\n=== crash-coverage findings ===");
+      for (const f of findings) {
+        const tag = f.status === "PASS" ? "[OK]  " : "[FAIL]";
+        console.log(`  ${tag} ${f.label}`);
+        for (const err of f.consoleErrors)
+          console.log(`         console: ${err.slice(0, 200)}`);
+        for (const crash of f.textCrashes)
+          console.log(`         text-crash: ${crash}`);
+      }
+
+      const failed = findings.filter((f) => f.status === "FAIL");
+      expect(
+        failed,
+        `${failed.length} routes had crashes. See findings above.`,
+      ).toHaveLength(0);
+    } finally {
+      // Do not leak a random project into later tests or a developer's
+      // reused local brain.  It contaminated the previous screenshot
+      // baselines and made the visual gate dependent on test history.
+      if (createdSlug) {
+        await api.delete(`/projects/${createdSlug}`);
+      }
     }
-
-    const findings: RouteFinding[] = [];
-
-    for (const route of ROUTES) {
-      const url = route.needsProject
-        ? route.path.replace("{slug}", slug ?? "")
-        : route.path;
-      const result = await visitRoute(adminPage, url);
-      const finding: RouteFinding = {
-        label: route.label,
-        status:
-          result.consoleErrors.length > 0 || result.textCrashes.length > 0
-            ? "FAIL"
-            : "PASS",
-        consoleErrors: result.consoleErrors,
-        textCrashes: result.textCrashes,
-      };
-      findings.push(finding);
-    }
-
-    // Print summary even on success so the audit trail exists.
-    // eslint-disable-next-line no-console
-    console.log("\n=== crash-coverage findings ===");
-    for (const f of findings) {
-      const tag = f.status === "PASS" ? "[OK]  " : "[FAIL]";
-      // eslint-disable-next-line no-console
-      console.log(`  ${tag} ${f.label}`);
-      for (const err of f.consoleErrors)
-        // eslint-disable-next-line no-console
-        console.log(`         console: ${err.slice(0, 200)}`);
-      for (const crash of f.textCrashes)
-        // eslint-disable-next-line no-console
-        console.log(`         text-crash: ${crash}`);
-    }
-
-    const failed = findings.filter((f) => f.status === "FAIL");
-    expect(
-      failed,
-      `${failed.length} routes had crashes. See findings above.`,
-    ).toHaveLength(0);
   });
 });

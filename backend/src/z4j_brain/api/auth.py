@@ -1311,7 +1311,7 @@ async def password_reset_confirm(
     Revokes every existing session for the user so an attacker
     who had a session open doesn't survive the reset.
 
-    z4j 1.6.5 (audit R5-M2): pre-1.6.5 this handler did SELECT,
+    z4j 1.6.5: pre-1.6.5 this handler did SELECT,
     checked ``consumed_at`` in memory, updated the password, and
     then assigned ``row.consumed_at = now``. Two concurrent
     confirm requests with the same valid token could both pass
@@ -1359,7 +1359,7 @@ async def password_reset_confirm(
         # token) must leave a durable audit row -- previously this path
         # raised before any AuditService.record, so brute-force + replay
         # attempts against the reset endpoint were invisible in the
-        # chained log (audit 1.7 R4). Commit BEFORE raising so the
+        # chained log. Commit BEFORE raising so the
         # raise's rollback does not discard the row (the same
         # commit-before-raise discipline the MFA verify-failure paths
         # use). The response body stays the generic ``invalid_or_expired``

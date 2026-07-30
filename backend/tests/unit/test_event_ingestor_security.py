@@ -2,12 +2,11 @@
 
 Covers the Batch-2 / Batch-3 / Batch-4 security fixes:
 
-- cross-project event_id namespacing (H1 R3)
-- SAVEPOINT batch isolation on duplicate (C1 R3)
-- ``_coerce_event_id`` rejects nil / max / non-v4-v7 UUIDs (H2 R3)
-- ``_sanitize_canvas_ref`` drops cross-project parent/root refs (H4 R2)
-- ``occurred_at`` clamp to [-400d, +5min] (C2 R3)
-"""
+cross-project event_id namespacing (H1)
+SAVEPOINT batch isolation on duplicate (C1)
+``_coerce_event_id`` rejects nil / max / non-v4-v7 UUIDs (H2)
+``_sanitize_canvas_ref`` drops cross-project parent/root refs (H4)
+``occurred_at`` clamp to [-400d, +5min] (C2)"""
 
 from __future__ import annotations
 
@@ -98,7 +97,7 @@ def _received(
 
 
 class TestCoerceEventId:
-    """H2 R3: only v4 / v7 accepted; nil + max rejected."""
+    """H2: only v4 / v7 accepted; nil + max rejected."""
 
     def test_accepts_uuid4(self) -> None:
         u = uuid.uuid4()
@@ -134,7 +133,7 @@ class TestCoerceEventId:
 
 
 # ---------------------------------------------------------------------------
-# Cross-project event_id namespacing (H1 R3)
+# Cross-project event_id namespacing (H1)
 # ---------------------------------------------------------------------------
 
 
@@ -220,7 +219,7 @@ class TestCrossProjectNamespacing:
 
 
 # ---------------------------------------------------------------------------
-# SAVEPOINT batch isolation (C1 R3)
+# SAVEPOINT batch isolation (C1)
 # ---------------------------------------------------------------------------
 
 
@@ -274,7 +273,7 @@ class TestSavepointBatchIsolation:
 
 
 # ---------------------------------------------------------------------------
-# Canvas-ref sanitization (H4 R2)
+# Canvas-ref sanitization (H4)
 # ---------------------------------------------------------------------------
 
 
@@ -375,7 +374,7 @@ class TestCanvasRefSanitization:
 
 
 # ---------------------------------------------------------------------------
-# occurred_at clamp (C2 R3)
+# occurred_at clamp (C2)
 # ---------------------------------------------------------------------------
 
 

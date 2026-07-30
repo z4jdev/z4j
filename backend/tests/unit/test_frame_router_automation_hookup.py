@@ -1,12 +1,11 @@
-"""Frame-router -> automation executor hot-path hookup (R2 wiring).
+"""Frame-router -> automation executor hot-path hookup.
 
 Proves an inbound task-lifecycle event fires matching automation rules
 end to end: ``FrameRouter._evaluate_automation`` -> ``AutomationExecutor``
 -> ``AutomationActionRunner`` (notify + retry), through a real DB session
 and a real ``CommandDispatcher``. The evaluator / executor / runner have
 their own focused unit tests; this closes the wiring gap the way
-``test_frame_router_heartbeat_e2e`` does for the heartbeat path.
-"""
+``test_frame_router_heartbeat_e2e`` does for the heartbeat path."""
 
 from __future__ import annotations
 
@@ -74,6 +73,7 @@ class _FakeRegistry:
         *,
         command_id: uuid.UUID,
         agent_id: uuid.UUID,
+        required_retry_engine: str | None = None,
     ) -> DeliveryResult:
         self.calls.append((command_id, agent_id))
         return DeliveryResult(
@@ -197,7 +197,7 @@ async def test_aclose_cancels_pending_automation_tasks(
     db_manager: DatabaseManager,
     settings: Settings,
 ) -> None:
-    # Codex round-2 Finding 2: aclose() must cancel in-flight automation
+    # Aclose() must cancel in-flight automation
     # tasks too (not just ack + notify). A leaked task holds a DB-session
     # slot and keeps the router (and its per-connection caps) alive under
     # reconnect churn.

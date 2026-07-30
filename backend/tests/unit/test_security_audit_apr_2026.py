@@ -77,26 +77,29 @@ class TestH1EmptyAllowListWarning:
                 command_dispatcher=None,  # type: ignore[arg-type]
                 audit_service=None,  # type: ignore[arg-type]
             )
-            # The server's `start()` will fail later when it tries
-            # to bind, but the warning fires before that.
-            with patch.object(
-                logging.getLogger("z4j.brain.scheduler_grpc.server"),
-                "warning",
-            ) as mock_warning:
-                # expected - fake TLS material won't load
-                with contextlib.suppress(Exception):
-                    await srv.start()
-                # Confirm the audit-fix warning fired with the
-                # ``scheduler_grpc_open_ca`` event tag (in either
-                # the message body or the structured ``event``
-                # extra).
-                assert mock_warning.called, "empty allow-list must log a warning"
-                msg = mock_warning.call_args.args[0]
-                extras = mock_warning.call_args.kwargs.get("extra", {})
-                assert (
-                    "scheduler_grpc_open_ca" in msg
-                    or extras.get("event") == "scheduler_grpc_open_ca"
-                )
+            try:
+                # The server's `start()` will fail later when it tries
+                # to bind, but the warning fires before that.
+                with patch.object(
+                    logging.getLogger("z4j.brain.scheduler_grpc.server"),
+                    "warning",
+                ) as mock_warning:
+                    # expected - fake TLS material won't load
+                    with contextlib.suppress(Exception):
+                        await srv.start()
+                    # Confirm the audit-fix warning fired with the
+                    # ``scheduler_grpc_open_ca`` event tag (in either
+                    # the message body or the structured ``event``
+                    # extra).
+                    assert mock_warning.called, "empty allow-list must log a warning"
+                    msg = mock_warning.call_args.args[0]
+                    extras = mock_warning.call_args.kwargs.get("extra", {})
+                    assert (
+                        "scheduler_grpc_open_ca" in msg
+                        or extras.get("event") == "scheduler_grpc_open_ca"
+                    )
+            finally:
+                await engine.dispose()
 
         import asyncio
 

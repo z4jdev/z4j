@@ -28,16 +28,15 @@ Safety properties:
 - Fails open - if no online agent for the project, we skip this
   tick and retry next cycle.
 - Writes are single-statement UPDATEs inside one transaction.
-- Leader-locked (R3 M2(b)) - ``main.py`` wraps the tick in the
+Leader-locked ((b)) - ``main.py`` wraps the tick in the
   per-worker advisory lock (same pattern as the partition creator),
   so with ``z4j serve``'s min(4, cpu) uvicorn workers only ONE
   process sweeps per interval instead of four issuing duplicate
   probe commands.
-- Deduplicated (R3 M2(c)) - each probe command carries a
+Deduplicated ((c)) - each probe command carries a
   deterministic per-task / per-sweep-window idempotency key, so any
   duplicate sweep that slips past the lock collapses onto the same
-  ``commands`` row.
-"""
+  ``commands`` row."""
 
 from __future__ import annotations
 
@@ -67,7 +66,7 @@ _IDEMPOTENCY_KEY_MAX_LEN = 200
 def _probe_idempotency_key(engine: str, task_id: str, window: int) -> str:
     """Deterministic per-task / per-sweep-window probe dedupe key.
 
-    R3 M2(c): probe commands used to carry no idempotency key, so
+    (c): probe commands used to carry no idempotency key, so
     duplicate sweeps (multiple brain replicas, a retried tick) issued
     duplicate ``reconcile_task`` commands that nothing downstream
     deduplicated. The key is deterministic over ``(engine, task_id,
@@ -134,11 +133,11 @@ class ReconciliationWorker:
 
         now = datetime.now(UTC)
         cutoff = now - self._stale_threshold
-        # Idempotency window for this sweep (R3 M2(c)) - see
+        # Idempotency window for this sweep ((c)) - see
         # ``_probe_idempotency_key``.
         window = int(now.timestamp() // self._sweep_interval)
 
-        async with self._db.session() as session:
+        async with self._db.session(write=True) as session:
             task_repo = TaskRepository(session)
             agent_repo = AgentRepository(session)
             stuck = await task_repo.list_stuck_for_reconciliation(
@@ -223,7 +222,7 @@ class ReconciliationWorker:
                             user_agent="z4j-reconciliation-worker",
                             # Dedupe duplicate sweeps within one
                             # window onto a single probe command
-                            # (R3 M2(c)).
+                            # ((c)).
                             idempotency_key=_probe_idempotency_key(
                                 t.engine,
                                 t.task_id,

@@ -15,12 +15,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
 import {
   Ban,
+  ChevronDown,
   ClipboardList,
   Download,
   FileJson,
   FileSpreadsheet,
   FileText,
-  RefreshCw,
   RotateCcw,
   Trash2,
 } from "lucide-react";
@@ -45,13 +45,14 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import {
   buildExportUrl,
   useTasks,
@@ -60,13 +61,27 @@ import {
 } from "@/hooks/use-tasks";
 import { useCan } from "@/hooks/use-memberships";
 import { DateCell } from "@/components/domain/date-cell";
-import {
-  formatDuration,
-  truncate,
-} from "@/lib/format";
+import { formatDuration, truncate } from "@/lib/format";
 import type { TaskPriority, TaskPublic, TaskState } from "@/lib/api-types";
-import { cn } from "@/lib/utils";
 import { PageShell } from "@/components/domain/page-shell";
+import {
+  apiPathFromLocation,
+  clearStoredBulkRetry,
+  hasSameBulkRetrySelection,
+  hasStoredBulkRetryRecord,
+  isTerminalBulkRetry,
+  parseStoredBulkRetryBody,
+  persistBulkRetry,
+  readStoredBulkRetry,
+  storedBulkRetryMatchesResource,
+  type DurableBulkRetryBody,
+} from "@/lib/bulk-retry-storage";
+
+interface BulkRetryResource {
+  id: string;
+  idempotency_key: string;
+  status: string;
+}
 
 interface TasksSearch {
   state?: TaskState | "all";
@@ -82,9 +97,15 @@ export const Route = createFileRoute("/_authenticated/projects/$slug/tasks")({
 });
 
 const TASK_STATES: TaskState[] = [
-  "pending", "received", "started",
-  "success", "failure", "retry", "revoked",
-  "rejected", "unknown",
+  "pending",
+  "received",
+  "started",
+  "success",
+  "failure",
+  "retry",
+  "revoked",
+  "rejected",
+  "unknown",
 ];
 
 const PRIORITIES: TaskPriority[] = ["critical", "high", "normal", "low"];
@@ -122,7 +143,10 @@ function TasksPage() {
     limit: pageSize,
   };
 
-  const { data, isLoading, isError, isFetching, refetch } = useTasks(slug, filters);
+  const { data, isLoading, isError, isFetching, refetch } = useTasks(
+    slug,
+    filters,
+  );
 
   const activeFilterCount =
     (stateFilter !== "all" ? 1 : 0) + (priorityFilter.length > 0 ? 1 : 0);
@@ -133,13 +157,6 @@ function TasksPage() {
     setSearchQuery("");
     setCursor(null);
     navigate({ search: {}, replace: true });
-  };
-
-  const togglePriority = (p: TaskPriority) => {
-    setPriorityFilter((prev) =>
-      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p],
-    );
-    setCursor(null);
   };
 
   const columns = useTaskColumns(slug);
@@ -159,7 +176,9 @@ function TasksPage() {
       clearSelection: () => void,
     ) => {
       const count = allPages ? "all matching" : selectedRows.length;
-      if (!window.confirm(`Delete ${count} task records? This cannot be undone.`))
+      if (
+        !window.confirm(`Delete ${count} task records? This cannot be undone.`)
+      )
         return;
 
       setBulkLoading(true);
@@ -198,38 +217,168 @@ function TasksPage() {
       setBulkLoading(true);
       try {
         // For individual tasks, issue retry commands one by one.
-        // For all-pages, use the bulk-retry command endpoint.
+        // For all-pages, use the durable request resource.
         if (allPages) {
-          // Get the first available agent.
-          const agents = await api.get<{ id: string }[]>(
-            `/projects/${slug}/agents`,
-          );
-          const agent = agents[0];
-          if (!agent) {
-            window.alert("No agent available to retry tasks.");
+          if (stateFilter === "all") {
+            window.alert(
+              "Choose an explicit task state before retrying all matching tasks.",
+            );
             return;
           }
-          await api.post(`/projects/${slug}/commands/bulk-retry`, {
-            agent_id: agent.id,
+          const intendedSelection: Omit<
+            DurableBulkRetryBody,
+            "idempotency_key"
+          > = {
             filter: {
-              state: stateFilter === "all" ? "failure" : stateFilter,
+              state: stateFilter,
+              ...(priorityFilter.length > 0
+                ? { priority: priorityFilter }
+                : {}),
+              ...(searchQuery ? { search: searchQuery } : {}),
             },
             max: 1000,
-          });
-        } else {
-          const agents = await api.get<{ id: string }[]>(
-            `/projects/${slug}/agents`,
-          );
-          const agent = agents[0];
-          if (!agent) {
-            window.alert("No agent available to retry tasks.");
+          };
+          const storedRecordExists = hasStoredBulkRetryRecord(slug);
+          let stored = readStoredBulkRetry(slug);
+          if (storedRecordExists && !stored) {
+            window.alert(
+              "The saved retry request is unreadable. No new request was " +
+                "sent because the previous operation may still be unresolved.",
+            );
             return;
           }
+          if (stored?.location) {
+            const priorPath = apiPathFromLocation(stored.location, slug);
+            if (priorPath === null) {
+              window.alert(
+                "The saved retry request points outside this project. No new " +
+                  "request was sent because the previous operation may still be unresolved.",
+              );
+              return;
+            }
+            const prior = await api.get<BulkRetryResource>(priorPath);
+            if (!storedBulkRetryMatchesResource(stored, prior)) {
+              window.alert(
+                "The saved retry request does not match the server resource. " +
+                  "No new request was sent because the previous operation may still be unresolved.",
+              );
+              return;
+            }
+            if (isTerminalBulkRetry(prior.status)) {
+              clearStoredBulkRetry(slug);
+              stored = null;
+            }
+          }
+
+          let body: DurableBulkRetryBody;
+          if (stored) {
+            const parsed = parseStoredBulkRetryBody(stored);
+            if (
+              parsed === null ||
+              !hasSameBulkRetrySelection(parsed, intendedSelection)
+            ) {
+              window.alert(
+                "A retry request for a different task filter is still " +
+                  "unresolved. Resolve that request before starting another.",
+              );
+              return;
+            }
+            body = parsed;
+          } else {
+            const key = crypto.randomUUID();
+            body = {
+              idempotency_key: key,
+              ...intendedSelection,
+            };
+            stored = {
+              key,
+              canonicalBody: JSON.stringify(body),
+              location: null,
+            };
+            // This is the safety boundary: if persistence is unavailable, do
+            // not send a destructive request whose ambiguous response cannot
+            // be replayed with the exact same key and body.
+            if (!persistBulkRetry(slug, stored)) {
+              window.alert(
+                "Cannot persist the retry request in this browser. " +
+                  "No tasks were retried.",
+              );
+              return;
+            }
+          }
+
+          let created: {
+            data: BulkRetryResource;
+            location: string | null;
+          };
+          let responseLocationObserved = stored.location !== null;
+          try {
+            created = await api.postResource<BulkRetryResource>(
+              `/projects/${slug}/bulk-retry-requests`,
+              body,
+              (location) => {
+                responseLocationObserved = true;
+                // Persist the server identity as soon as response headers
+                // arrive, before parsing the body can introduce ambiguity.
+                persistBulkRetry(slug, { ...stored, location });
+              },
+            );
+          } catch (error) {
+            if (
+              error instanceof ApiError &&
+              error.status === 400 &&
+              error.code === "matching task count exceeds max" &&
+              !responseLocationObserved
+            ) {
+              // Only the Brain's exact pre-parent over-limit refusal is
+              // definitive. A generic/re-written 400 can follow an ambiguous
+              // commit and must retain the durable browser identity.
+              clearStoredBulkRetry(slug);
+              window.alert(
+                "The matching selection exceeds the retry limit. " +
+                  "Narrow the filters and try again; no tasks were retried.",
+              );
+              return;
+            }
+            throw error;
+          }
+          const location =
+            created.location ??
+            `/api/v1/projects/${slug}/bulk-retry-requests/${created.data.id}`;
+          const responseRecord = { ...stored, location };
+          persistBulkRetry(slug, responseRecord);
+          if (
+            apiPathFromLocation(location, slug) === null ||
+            !storedBulkRetryMatchesResource(responseRecord, created.data)
+          ) {
+            window.alert(
+              "The retry response identity does not match the saved request. " +
+                "The unresolved request was retained and no new request will be sent.",
+            );
+            return;
+          }
+          if (isTerminalBulkRetry(created.data.status)) {
+            clearStoredBulkRetry(slug);
+          }
+        } else {
+          const agents = await api.get<
+            { id: string; engine_adapters?: string[] }[]
+          >(`/projects/${slug}/agents`);
           for (const row of selectedRows) {
+            const agent = agents.find((candidate) =>
+              candidate.engine_adapters?.includes(row.engine),
+            );
+            if (!agent) {
+              window.alert(
+                `No agent advertising the ${row.engine} retry contract is available.`,
+              );
+              return;
+            }
             await api.post(`/projects/${slug}/commands/retry-task`, {
               agent_id: agent.id,
               engine: row.engine,
               task_id: row.task_id,
+              idempotency_key: crypto.randomUUID(),
             });
           }
         }
@@ -242,7 +391,7 @@ function TasksPage() {
         setBulkLoading(false);
       }
     },
-    [slug, stateFilter, searchQuery, queryClient],
+    [slug, stateFilter, priorityFilter, searchQuery, queryClient],
   );
 
   const handleBulkCancel = useCallback(
@@ -315,29 +464,48 @@ function TasksPage() {
               ))}
             </SelectContent>
           </Select>
-          <Select
-            value={priorityFilter.length === 1 ? priorityFilter[0] : "all"}
-            onValueChange={(v) => {
-              if (v === "all") {
-                setPriorityFilter([]);
-              } else {
-                setPriorityFilter([v as TaskPriority]);
-              }
-              setCursor(null);
-            }}
-          >
-            <SelectTrigger className="w-36 shrink-0">
-              <SelectValue placeholder="Priority" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All priorities</SelectItem>
-              {PRIORITIES.map((p) => (
-                <SelectItem key={p} value={p}>
-                  {p}
-                </SelectItem>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                className="w-36 shrink-0 justify-start font-normal"
+                aria-label="Filter by priority"
+              >
+                {priorityFilter.length === 0
+                  ? "All priorities"
+                  : priorityFilter.length === 1
+                    ? priorityFilter[0]
+                    : `${priorityFilter.length} priorities`}
+                <ChevronDown className="ml-auto size-4 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-44">
+              <DropdownMenuLabel>Priorities</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {PRIORITIES.map((priority) => (
+                <DropdownMenuCheckboxItem
+                  key={priority}
+                  checked={priorityFilter.includes(priority)}
+                  aria-label={`toggle-${priority}-priority`}
+                  onSelect={(event) => event.preventDefault()}
+                  onCheckedChange={(checked) => {
+                    setPriorityFilter((current) => {
+                      const selected = new Set(current);
+                      if (checked) {
+                        selected.add(priority);
+                      } else {
+                        selected.delete(priority);
+                      }
+                      return PRIORITIES.filter((value) => selected.has(value));
+                    });
+                    setCursor(null);
+                  }}
+                >
+                  {priority}
+                </DropdownMenuCheckboxItem>
               ))}
-            </SelectContent>
-          </Select>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </>
       }
     />
@@ -352,10 +520,7 @@ function TasksPage() {
         actions={
           <div className="flex items-center gap-2">
             <ExportMenu slug={slug} filters={filters} />
-            <RefreshButton
-              onRefresh={() => refetch()}
-              pending={isFetching}
-            />
+            <RefreshButton onRefresh={() => refetch()} pending={isFetching} />
           </div>
         }
       />
@@ -552,7 +717,7 @@ function useTaskColumns(slug: string): ColumnDef<TaskPublic, unknown>[] {
         accessorKey: "priority",
         header: "Priority",
         cell: ({ row }: { row: { original: TaskPublic } }) => (
-          <TaskPriorityBadge priority={row.original.priority} compact />
+          <TaskPriorityBadge priority={row.original.priority} />
         ),
         enableSorting: true,
       },
@@ -603,13 +768,7 @@ function useTaskColumns(slug: string): ColumnDef<TaskPublic, unknown>[] {
 // Export menu
 // ---------------------------------------------------------------------------
 
-function ExportMenu({
-  slug,
-  filters,
-}: {
-  slug: string;
-  filters: TaskFilters;
-}) {
+function ExportMenu({ slug, filters }: { slug: string; filters: TaskFilters }) {
   const [fieldSet, setFieldSet] = useState<ExportFieldSet>("metadata");
 
   return (

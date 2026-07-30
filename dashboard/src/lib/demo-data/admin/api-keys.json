@@ -1,0 +1,58 @@
+[
+  {
+    "id": "90000000-0000-4000-b000-000000000001",
+    "name": "ci-deploy-gate",
+    "prefix": "z4j_live_7Qd2",
+    "scopes": ["tasks:read", "schedules:read"],
+    "project_id": "00000000-0000-4000-9000-000000000003",
+    "project_slug": "django.example.com",
+    "last_used_at_offset_s": -900,
+    "last_used_ip": "203.0.113.42",
+    "expires_at": null,
+    "revoked_at": null,
+    "revoked_reason": null,
+    "created_at_offset_s": -7776000
+  },
+  {
+    "id": "90000000-0000-4000-b000-000000000002",
+    "name": "grafana-scraper",
+    "prefix": "z4j_live_Ka91",
+    "scopes": ["tasks:read", "workers:read", "queues:read"],
+    "project_id": null,
+    "project_slug": null,
+    "last_used_at_offset_s": -60,
+    "last_used_ip": "198.51.100.22",
+    "expires_at_offset_s": 15552000,
+    "revoked_at": null,
+    "revoked_reason": null,
+    "created_at_offset_s": -10368000
+  },
+  {
+    "id": "90000000-0000-4000-b000-000000000003",
+    "name": "oncall-runbook",
+    "prefix": "z4j_live_Mv53",
+    "scopes": ["tasks:read", "tasks:write", "commands:write"],
+    "project_id": "00000000-0000-4000-9000-000000000004",
+    "project_slug": "tasks.example.com",
+    "last_used_at_offset_s": -172800,
+    "last_used_ip": "203.0.113.10",
+    "expires_at": null,
+    "revoked_at": null,
+    "revoked_reason": null,
+    "created_at_offset_s": -5184000
+  },
+  {
+    "id": "90000000-0000-4000-b000-000000000004",
+    "name": "laptop-scratch (rotated)",
+    "prefix": "z4j_live_Bt08",
+    "scopes": ["tasks:read"],
+    "project_id": null,
+    "project_slug": null,
+    "last_used_at_offset_s": -2592000,
+    "last_used_ip": "192.0.2.150",
+    "expires_at": null,
+    "revoked_at_offset_s": -2505600,
+    "revoked_reason": "rotated after laptop replacement",
+    "created_at_offset_s": -13824000
+  }
+]

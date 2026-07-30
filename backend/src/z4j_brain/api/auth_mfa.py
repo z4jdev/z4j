@@ -614,6 +614,16 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
                 ip=ip,
                 reason="wrong_recovery_code",
             )
+            # B25: a wrong recovery code must count toward the per-account
+            # MFA lockout, exactly like a wrong TOTP. Without this, recovery
+            # -code brute force was bounded only by the per-IP throttle
+            # (bypassable via a botnet), while ~59-bit code entropy is the
+            # only remaining backstop.
+            await users.record_mfa_failure(
+                user.id,
+                lockout_threshold=settings.mfa_lockout_threshold,
+                lockout_duration_seconds=settings.mfa_lockout_duration_seconds,
+            )
             await db_session.commit()
             raise AuthenticationError(
                 "invalid code",
@@ -632,6 +642,13 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
                 user_id=user.id,
                 ip=ip,
                 reason="recovery_code_race_lost",
+            )
+            # B25: count toward the lockout like every other failed verify
+            # (a defeated race is indistinguishable from a wrong code).
+            await users.record_mfa_failure(
+                user.id,
+                lockout_threshold=settings.mfa_lockout_threshold,
+                lockout_duration_seconds=settings.mfa_lockout_duration_seconds,
             )
             await db_session.commit()
             raise AuthenticationError(

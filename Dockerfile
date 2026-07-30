@@ -1,12 +1,16 @@
 # =============================================================================
 # z4j release Dockerfile.
 #
-# Slim runtime that pip-installs z4j from PyPI. The published wheel
-# bundles the React dashboard, alembic.ini, and migrations -- so this
-# Dockerfile does NOT need pnpm, Vite, or the monorepo source tree to build.
+# Slim runtime that installs z4j from this released source context. The
+# sdist bundles the compiled React dashboard, alembic.ini, and migrations,
+# so this Dockerfile does NOT need pnpm, Vite, or the monorepo source tree.
 #
-# Image is bit-identical to:
-#   pip install "z4j[postgres]==${Z4J_VERSION}"
+# The local install is load-bearing: ``docker compose up --build`` must be
+# testable before this same version exists on PyPI, and must never silently
+# build an older published z4j when invoked from a release artifact.
+#
+# Runtime contents are equivalent to:
+#   pip install "/build/z4j[postgres,scheduler-grpc]" z4j-scheduler
 #   z4j serve
 #
 # Built by .github/workflows/release-docker.yml on tag push (multi-arch
@@ -42,7 +46,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     Z4J_LOG_JSON=true \
     Z4J_BIND_HOST=0.0.0.0 \
     Z4J_BIND_PORT=7700 \
+    Z4J_ENVIRONMENT=production \
+    Z4J_PUBLIC_URL=http://localhost:7700 \
+    Z4J_ALLOWED_HOSTS='["localhost","127.0.0.1"]' \
+    Z4J_ALLOW_HTTP_PUBLIC_URL=true \
     Z4J_HOME=/data
+
+# Copy the released package source before installing it. In the monorepo this
+# context is packages/z4j; in an extracted sdist it is the sdist root. Both
+# contain pyproject.toml, src/, and backend/src/, including the already-built
+# dashboard assets.
+COPY . /build/z4j
 
 # Install runtime OS deps + create non-root user.
 #   - tini: proper PID-1 signal handling
@@ -58,10 +72,18 @@ RUN set -eux; \
     groupadd --system --gid 10001 z4j; \
     useradd --system --uid 10001 --gid z4j --home-dir /app --shell /usr/sbin/nologin z4j; \
     mkdir -p /app /data; \
+    chmod 0700 /data; \
     chown -R z4j:z4j /app /data
 
-# Install z4j from PyPI + run the leanness pass in the SAME RUN so
-# the cleanup actually frees disk in the resulting layer (Docker
+# Install z4j from the released build context. Release sdists carry matching
+# z4j-core and z4j-scheduler sources in their Docker deployment payload so a
+# candidate image can be built before the coordinated package wave is
+# published. A checkout-local build can fall back to the index after that
+# version exists; pre-publish monorepo builds use backend/Dockerfile, which
+# installs the same three local sources.
+#
+# Run the leanness pass in the SAME RUN so the cleanup actually frees disk in the
+# resulting layer (Docker
 # layers are additive; cleanup in a later RUN keeps the original
 # bytes around forever). The leanness pass trims ~80 MB of test
 # fixtures, type stubs, bytecode, and unused SQLAlchemy dialects
@@ -69,7 +91,18 @@ RUN set -eux; \
 # mssql/mysql/oracle dialect packages ship with SQLAlchemy by
 # default but z4j never uses them).
 RUN set -eux; \
-    pip install --no-cache-dir "z4j[postgres]==${Z4J_RESOLVED_VERSION}"; \
+    if [ -f /build/z4j/docker/vendor/z4j-core/pyproject.toml ] \
+        && [ -f /build/z4j/docker/vendor/z4j-scheduler/pyproject.toml ]; then \
+        pip install --no-cache-dir \
+            "/build/z4j/docker/vendor/z4j-core" \
+            "/build/z4j[postgres,scheduler-grpc]" \
+            "/build/z4j/docker/vendor/z4j-scheduler"; \
+    else \
+        test -n "${Z4J_RESOLVED_VERSION}"; \
+        pip install --no-cache-dir \
+            "/build/z4j[postgres,scheduler-grpc]" \
+            "z4j-scheduler==${Z4J_RESOLVED_VERSION}"; \
+    fi; \
     SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])"); \
     find "${SITE_PACKAGES}" -type d -name '__pycache__' -prune -exec rm -rf {} +; \
     find "${SITE_PACKAGES}" -type f -name '*.pyc' -delete; \
@@ -82,7 +115,8 @@ RUN set -eux; \
         "${SITE_PACKAGES}/sqlalchemy/dialects/mysql" \
         "${SITE_PACKAGES}/sqlalchemy/dialects/oracle"; \
     find "${SITE_PACKAGES}" -type f -name '*.so' -exec strip --strip-unneeded {} + \
-        2>/dev/null || true
+        2>/dev/null || true; \
+    rm -rf /build/z4j
 
 # Volume mount for SQLite, persisted secrets, embedded PKI, allowed-hosts.
 # Z4J_HOME=/data is set above so every state file lands here, covered by

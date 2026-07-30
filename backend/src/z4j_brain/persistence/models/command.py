@@ -22,7 +22,7 @@ from sqlalchemy.types import Uuid
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import CommandStatus
 from z4j_brain.persistence.models._mixins import PKMixin
-from z4j_brain.persistence.types import inet, jsonb
+from z4j_brain.persistence.types import big_integer, inet, jsonb
 
 
 class Command(PKMixin, Base):
@@ -33,12 +33,13 @@ class Command(PKMixin, Base):
     executes, then returns a result frame which updates this row.
 
     Attributes:
-        project_id: Owning project. ``ON DELETE CASCADE``.
+        project_id: Historical owning project id. Boundary D deliberately
+            keeps this factual attribution after project deletion.
         issued_by: User who issued the command. ``ON DELETE SET NULL``
             so command history survives user deletion (audit_log
             references the user_id by id, not foreign key cascade).
-        agent_id: Target agent. ``ON DELETE SET NULL`` for the same
-            reason.
+        agent_id: Historical target agent id. Boundary D deliberately keeps
+            this factual attribution after agent deletion.
         action: Command action verb (``retry_task``, ``cancel_task``,
             ``schedule.enable``, ...). Matches the agent dispatcher's
             recognized actions.
@@ -62,7 +63,6 @@ class Command(PKMixin, Base):
 
     project_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
     )
     issued_by: Mapped[uuid.UUID | None] = mapped_column(
@@ -72,7 +72,6 @@ class Command(PKMixin, Base):
     )
     agent_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("agents.id", ondelete="SET NULL"),
         nullable=True,
     )
     action: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -117,6 +116,100 @@ class Command(PKMixin, Base):
         nullable=False,
     )
     source_ip: Mapped[str | None] = mapped_column(inet(), nullable=True)
+    bulk_retry_child_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("bulk_retry_request_children.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Boundary-D cadence acceptance evidence.  These columns are nullable only
+    # for rows predating activation or for non-cadence commands.  A current
+    # schedule.fire command is deliverable only when the entire tuple is
+    # present and internally consistent.
+    schedule_protocol_marker: Mapped[int | None] = mapped_column(nullable=True)
+    schedule_state_nonce: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    schedule_fire_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    schedule_scheduled_for: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    schedule_observed_control_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    schedule_receipt_control_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    schedule_execution_fire_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    schedule_acceptance_revision: Mapped[int | None] = mapped_column(
+        big_integer(),
+        nullable=True,
+    )
+    schedule_definition_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    schedule_expected_revision: Mapped[int | None] = mapped_column(
+        big_integer(),
+        nullable=True,
+    )
+    schedule_expected_last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    schedule_expected_next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    schedule_next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    cadence_initial_claim_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    first_delivery_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    cadence_redelivery_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    delivery_transport_kind: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    delivery_registry_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    delivery_session_generation: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    delivery_claim_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
+    agent_acknowledged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -132,6 +225,11 @@ class Command(PKMixin, Base):
         ),
         Index("ix_commands_timeout_at", "timeout_at"),
         Index("ix_commands_issued_by_at", "issued_by", "issued_at"),
+        Index(
+            "ux_commands_bulk_retry_child",
+            "bulk_retry_child_id",
+            unique=True,
+        ),
     )
 
 

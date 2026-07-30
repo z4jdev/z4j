@@ -105,7 +105,7 @@ async def resolve_and_pin(url: str) -> tuple[str | None, str | None]:
     the first **safe resolved IP** so callers can connect to that
     exact IP instead of re-resolving the hostname at request time.
 
-    This closes the DNS-rebinding window (R3 finding M15) - an
+    This closes the DNS-rebinding window (finding M15) - an
     attacker who controls a domain's DNS and flips the A record
     between validation and the actual HTTP connection would
     otherwise get a private IP dialled despite the upfront check.
@@ -214,7 +214,7 @@ async def _post(
             timeout=_TIMEOUT,
             follow_redirects=False,
         )
-    # Per-call timeout override (v1.6 R5 fix; the R2 fix tried to
+    # Per-call timeout override (v1.6 fix; the fix tried to
     # pass a dict via ``extensions["timeout"]`` but httpx 0.28+
     # silently ignores that shape -- verified at runtime, the
     # timeout never fired. The correct surface in httpx 0.28+ is
@@ -302,18 +302,18 @@ def _allowed_schemes() -> frozenset[str]:
 _BLOCKED_NETWORKS = [
     ipaddress.ip_network("0.0.0.0/8"),  # "this network" (RFC 1122)
     ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("100.64.0.0/10"),  # R7-MED: CGNAT (RFC 6598)
+    ipaddress.ip_network("100.64.0.0/10"),  # CGNAT (RFC 6598)
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("198.18.0.0/15"),  # R7-MED: benchmark (RFC 2544)
+    ipaddress.ip_network("198.18.0.0/15"),  # Benchmark (RFC 2544)
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),  # link-local / AWS metadata
     ipaddress.ip_network("::/128"),  # IPv6 unspecified
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),  # IPv6 private
     ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
-    ipaddress.ip_network("2002::/16"),  # R7-MED: 6to4 (can wrap loopback)
-    ipaddress.ip_network("64:ff9b::/96"),  # R7-MED: NAT64
+    ipaddress.ip_network("2002::/16"),  # 6to4 (can wrap loopback)
+    ipaddress.ip_network("64:ff9b::/96"),  # NAT64
 ]
 
 

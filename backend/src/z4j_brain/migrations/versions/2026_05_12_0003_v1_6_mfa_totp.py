@@ -68,11 +68,9 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models.mfa_recovery_code import MfaRecoveryCode
 from z4j_brain.persistence.models.trusted_device import TrustedDevice
-
 
 # ---------------------------------------------------------------------------
 # Alembic revision identifiers

@@ -16,9 +16,10 @@ within a fraction of a second, so the suite stays fast.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography import x509
@@ -163,6 +164,7 @@ def _make_settings(
     restart_max: int = 0,
     restart_backoff: float = 0.05,
     grace: float = 1.0,
+    environment: str = "dev",
 ) -> MagicMock:
     """Build a Settings stand-in with only the fields the supervisor reads.
 
@@ -180,6 +182,7 @@ def _make_settings(
     s.embedded_scheduler_restart_max_attempts = restart_max
     s.embedded_scheduler_restart_backoff_seconds = restart_backoff
     s.embedded_scheduler_shutdown_grace_seconds = grace
+    s.environment = environment
     return s
 
 
@@ -303,15 +306,107 @@ class TestEmbeddedSchedulerSupervisor:
         # process is the unit of HA, not the embedded scheduler).
         assert env["Z4J_SCHEDULER_LEADER_BACKEND"] == "single"
 
+    async def test_env_inherits_brain_environment_when_scheduler_unset(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Brain ``--environment dev`` must reach the embedded child."""
+        monkeypatch.delenv("Z4J_SCHEDULER_ENVIRONMENT", raising=False)
+        sup = EmbeddedSchedulerSupervisor(
+            settings=_make_settings(environment="dev"),
+            pki=_make_pki(tmp_path),  # type: ignore[arg-type]
+            brain_grpc_host="127.0.0.1",
+            brain_grpc_port=54321,
+            brain_rest_url="http://127.0.0.1:7700",
+        )
+
+        env = sup._build_subprocess_env()
+
+        assert env["Z4J_SCHEDULER_ENVIRONMENT"] == "dev"
+
+    async def test_explicit_scheduler_environment_takes_precedence(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit child override remains authoritative."""
+        monkeypatch.setenv("Z4J_SCHEDULER_ENVIRONMENT", "production")
+        sup = EmbeddedSchedulerSupervisor(
+            settings=_make_settings(environment="dev"),
+            pki=_make_pki(tmp_path),  # type: ignore[arg-type]
+            brain_grpc_host="127.0.0.1",
+            brain_grpc_port=54321,
+            brain_rest_url="http://127.0.0.1:7700",
+        )
+
+        env = sup._build_subprocess_env()
+
+        assert env["Z4J_SCHEDULER_ENVIRONMENT"] == "production"
+
+    async def test_production_embedded_child_defaults_to_safe_loopback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The documented production embedded shape must start without extras."""
+        monkeypatch.delenv("Z4J_SCHEDULER_BIND_HOST", raising=False)
+        monkeypatch.delenv("Z4J_SCHEDULER_METRICS_AUTH_TOKEN", raising=False)
+        sup = EmbeddedSchedulerSupervisor(
+            settings=_make_settings(environment="production"),
+            pki=_make_pki(tmp_path),  # type: ignore[arg-type]
+            brain_grpc_host="127.0.0.1",
+            brain_grpc_port=54321,
+            brain_rest_url="http://127.0.0.1:7700",
+        )
+
+        env = sup._build_subprocess_env()
+
+        assert env["Z4J_SCHEDULER_BIND_HOST"] == "127.0.0.1"
+        from z4j_scheduler.settings import Settings as SchedulerSettings
+
+        with patch.dict(os.environ, env, clear=True):
+            child = SchedulerSettings(_env_file=None)
+        assert child.environment == "production"
+        assert child.bind_host == "127.0.0.1"
+        assert child.metrics_auth_token is None
+
+    async def test_explicit_scheduler_bind_host_takes_precedence(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Operators may deliberately expose an authenticated child endpoint."""
+        monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "0.0.0.0")
+        monkeypatch.setenv("Z4J_SCHEDULER_METRICS_AUTH_TOKEN", "m" * 32)
+        sup = EmbeddedSchedulerSupervisor(
+            settings=_make_settings(environment="production"),
+            pki=_make_pki(tmp_path),  # type: ignore[arg-type]
+            brain_grpc_host="127.0.0.1",
+            brain_grpc_port=54321,
+            brain_rest_url="http://127.0.0.1:7700",
+        )
+
+        env = sup._build_subprocess_env()
+
+        assert env["Z4J_SCHEDULER_BIND_HOST"] == "0.0.0.0"
+        assert env["Z4J_SCHEDULER_METRICS_AUTH_TOKEN"] == "m" * 32
+
     async def test_restart_cap_zero_disables_auto_restart(
         self,
         tmp_path: Path,
     ) -> None:
         """``restart_max_attempts=0`` means a single crash is permanent."""
-        # Subprocess that exits immediately.
+        # A real subprocess that exits after a short delay. The delay is
+        # deliberate: the assertion must synchronize on the watchdog's
+        # completion, not assume a loaded CI host will observe a crash within
+        # an arbitrary sleep window.
         sup = EmbeddedSchedulerSupervisor(
             settings=_make_settings(
-                argv=["-c", "import sys; sys.exit(7)"],
+                argv=[
+                    "-c",
+                    "import sys,time; time.sleep(0.5); sys.exit(7)",
+                ],
                 restart_max=0,
             ),
             pki=_make_pki(tmp_path),  # type: ignore[arg-type]
@@ -332,9 +427,10 @@ class TestEmbeddedSchedulerSupervisor:
         sup._spawn_subprocess = spawn_with_direct_argv  # type: ignore[method-assign]
 
         await sup.start()
-        # Wait long enough for the subprocess to die + watchdog
-        # to observe.
-        await asyncio.sleep(0.3)
+        watchdog = sup._watchdog
+        assert watchdog is not None
+        await asyncio.wait_for(asyncio.shield(watchdog), timeout=10.0)
+        assert sup.permanently_failed
         await sup.stop()
         # Watchdog must NOT have respawned.
         assert sup.restart_count == 1, (
@@ -373,8 +469,13 @@ class TestEmbeddedSchedulerSupervisor:
         sup._spawn_subprocess = spawn_with_direct_argv  # type: ignore[method-assign]
 
         await sup.start()
-        # Long enough for 1 initial + 2 respawns + watchdog give-up.
-        await asyncio.sleep(1.0)
+        # Wait for the behavior under test, not a guessed wall-clock delay.
+        # Process creation on a loaded CI host can legitimately take longer
+        # than one second even though each child exits immediately.
+        watchdog = sup._watchdog
+        assert watchdog is not None
+        await asyncio.wait_for(asyncio.shield(watchdog), timeout=10.0)
+        assert sup.permanently_failed
         await sup.stop()
         # 1 initial + 2 respawns = 3 total spawn calls. Each spawn
         # crashes immediately (sys.exit(7)) so restart_count is

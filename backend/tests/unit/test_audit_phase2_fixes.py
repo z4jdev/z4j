@@ -81,7 +81,7 @@ class TestInterceptorRemovePrefix:
         # back to lstrip this assertion catches it.
         # Pull the source of the interceptor module and confirm
         # ``lstrip("DNS:")`` no longer appears.
-        # Round-9 audit fix R9-Sched-MED (Apr 2026): the helper now
+        # Round-9 audit fix -Sched-MED (Apr 2026): the helper now
         # iterates a tuple of prefixes (DNS:, IP:, URI:, email:)
         # using ``removeprefix`` rather than a single literal call;
         # we still assert the substring ``removeprefix`` is present
@@ -96,7 +96,7 @@ class TestInterceptorRemovePrefix:
         assert "removeprefix" in source
         # And every general-name prefix is in the strip set.
         for prefix in ("DNS:", "IP:", "URI:", "email:"):
-            assert prefix in source, f"_normalise_cn must strip {prefix} (R9-Sched-MED)"
+            assert prefix in source, f"_normalise_cn must strip {prefix} (-Sched-MED)"
 
 
 # =====================================================================

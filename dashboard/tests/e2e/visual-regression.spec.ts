@@ -83,7 +83,13 @@ test.describe("Visual regression - high-traffic pages", () => {
     await adminPage.waitForLoadState("networkidle");
     await expect(adminPage).toHaveScreenshot("audit.png", {
       fullPage: true,
-      mask: await maskTimestamps(adminPage),
+      // Audit targets, source IPs, and timestamps are runtime data.  Keep
+      // the table shell/header under visual review while masking the body
+      // so a generated UUID can never become part of the baseline.
+      mask: [
+        ...(await maskTimestamps(adminPage)),
+        adminPage.locator("tbody"),
+      ],
     });
   });
 

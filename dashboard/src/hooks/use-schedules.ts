@@ -67,6 +67,53 @@ export function useScheduleFires(
   });
 }
 
+/** One detected misfire of a schedule. Mirrors ``ScheduleMisfirePublic``
+ *  in api/schedules.py: the brain's misfire detector writes an audit row
+ *  each time an enabled schedule's expected fire is late past its grace
+ *  window (a dead or partitioned scheduler is the usual cause). */
+export interface ScheduleMisfirePublic {
+  schedule_id: string;
+  detected_at: string;
+  expected_fire_at: string | null;
+  lateness_seconds: number | null;
+  grace_seconds: number | null;
+  name: string | null;
+  engine: string | null;
+  kind: string | null;
+}
+
+/** Rolling window for the "recent misfires" banner (M16). */
+export const RECENT_MISFIRE_WINDOW_HOURS = 24;
+const RECENT_MISFIRE_WINDOW_MS = RECENT_MISFIRE_WINDOW_HOURS * 60 * 60 * 1000;
+
+/** Project-wide misfires (GET /projects/{slug}/schedules/misfires, VIEWER):
+ *  every detected misfire across the project's schedules, newest first.
+ *  Brain-side because a scheduler that died cannot report its own death. */
+export function useProjectMisfires(slug: string) {
+  return useQuery<ScheduleMisfirePublic[]>({
+    queryKey: ["project-misfires", slug],
+    queryFn: () =>
+      api.get<ScheduleMisfirePublic[]>(
+        `/projects/${slug}/schedules/misfires?limit=50`,
+      ),
+    // M16: the endpoint has no time window, so once ANY misfire was recorded
+    // the destructive-styled banner stayed forever -- until audit retention
+    // pruned the rows (typically months) -- even after the scheduler
+    // recovered, training operators to ignore the signal. Bound client-side
+    // to the last RECENT_MISFIRE_WINDOW_HOURS using detected_at (already in
+    // the payload) so the banner clears on its own once misfires stop.
+    select: (rows) => {
+      const cutoff = Date.now() - RECENT_MISFIRE_WINDOW_MS;
+      return rows.filter((m) => {
+        const t = Date.parse(m.detected_at);
+        return Number.isFinite(t) && t >= cutoff;
+      });
+    },
+    enabled: !!slug,
+    refetchInterval: 30_000,
+  });
+}
+
 export function useToggleSchedule(slug: string) {
   const qc = useQueryClient();
   return useMutation({

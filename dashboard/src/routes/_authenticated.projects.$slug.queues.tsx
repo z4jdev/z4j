@@ -1,11 +1,10 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { Layers, RefreshCw } from "lucide-react";
+import { Layers } from "lucide-react";
 import { FilterToolbar } from "@/components/domain/filter-toolbar";
 import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
 import { EmptyState } from "@/components/domain/empty-state";
-import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
   Table,

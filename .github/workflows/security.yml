@@ -1,19 +1,9 @@
 name: Security
 
-# Supply-chain + container security scans. Runs on every push to main,
-# every PR, and once a day on a cron so new CVEs in already-locked
-# dependencies surface without requiring a code push.
-#
-# Two scans:
-#
-#   1. pip-audit: reports known CVEs in Python dependencies. Fails the
-#      workflow on any advisory (so an un-bumped psycopg / starlette /
-#      pydantic CVE blocks merges until triaged).
-#   2. trivy: scans the built container image for OS-level CVEs
-#      (Debian base, system libs). Reports CRITICAL + HIGH only.
-#
-# Both upload SARIF to GitHub Security so findings land in the Security
-# tab alongside Dependabot.
+# Security gates for the generated standalone z4j repository. The dependency
+# job resolves every published optional extra. The container job builds this
+# commit and scans that candidate; scanning Docker Hub ``latest`` would only
+# re-check a previously released image and could not gate a Dockerfile change.
 
 on:
   push:
@@ -21,10 +11,8 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Daily at 03:00 UTC. Picks up overnight CVE publishes before the
-    # morning reviewers see their PR queue.
     - cron: "0 3 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 concurrency:
   group: security-${{ github.ref }}
@@ -32,74 +20,89 @@ concurrency:
 
 permissions:
   contents: read
-  security-events: write  # required for SARIF upload
+  security-events: write
 
 jobs:
   pip-audit:
-    name: pip-audit (Python deps)
-    runs-on: ubuntu-latest
+    name: Dependency CVE scan (all published extras)
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install pip-audit
-        run: pip install --quiet pip-audit
+        run: pip install --quiet "pip-audit==2.10.1"
 
-      - name: Audit the project's declared deps
+      - name: Export every declared dependency
         run: |
-          # --strict: NON-ZERO EXIT on any advisory. This exit code IS
-          # the gate -- an un-bumped psycopg / starlette / pydantic CVE
-          # fails the job and blocks merges until triaged. (The prior
-          # version swallowed the failure with `|| echo`, so it never
-          # actually gated, and asked for `--format=sarif`, which
-          # pip-audit does not support -- the missing file then failed
-          # the SARIF upload. Both bugs are fixed by gating on exit code
-          # and printing a human-readable table instead.)
-          # --progress-spinner off: noise-free CI logs.
-          # Read from pyproject.toml directly; covers runtime + optional
-          # deps without needing a separate requirements file.
-          # NOTE: --disable-pip is ONLY valid with -r <requirements>; with
-          # a project path it errors ("can only be used with --requirement").
-          # Auditing the project (.) lets pip-audit resolve the declared
-          # dependency tree from pyproject and check it against the advisory DB.
-          pip-audit \
-            --strict \
-            --progress-spinner off \
-            .
+          python - <<'PY'
+          from pathlib import Path
+          import tomllib
 
-  trivy-image:
-    name: trivy (container image CVEs)
-    runs-on: ubuntu-latest
-    # Only run on main + scheduled. Trivy pulls the published image from
-    # Docker Hub; there's no point scanning a PR that hasn't been built
-    # yet. PRs that change the Dockerfile get caught by the scheduled
-    # run after merge.
-    if: github.event_name != 'pull_request'
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
+              "project"
+          ]
+          requirements = list(project.get("dependencies", ()))
+          for group in project.get("optional-dependencies", {}).values():
+              requirements.extend(group)
+          Path("requirements-audit.txt").write_text(
+              "\n".join(sorted(set(requirements))) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Audit the complete declared graph
+        run: |
+          pip-audit -r requirements-audit.txt \
+            --strict \
+            --progress-spinner off
+
+  trivy:
+    name: Trivy candidate filesystem + image
+    runs-on: ubuntu-24.04
     steps:
-      - name: Run Trivy vulnerability scanner on the published image
-        # SHA-pinned per the R8-M1 supply-chain policy (third-party
-        # actions pinned by full commit SHA). The old `@0.28.0` tag does
-        # not exist on the action repo, so every run failed to resolve.
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Scan candidate filesystem
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: z4jdev/z4j:latest
+          scan-type: fs
+          scan-ref: "."
           format: sarif
-          output: trivy-image.sarif
-          # CRITICAL + HIGH only - LOW/MEDIUM noise would drown the
-          # useful signal. Unignored findings block the workflow
-          # (exit-code: 1) so the release pipeline visibly breaks.
+          output: trivy-fs.sarif
           severity: CRITICAL,HIGH
           exit-code: "1"
-          ignore-unfixed: true  # hide "no fix available" noise
+          ignore-unfixed: true
 
-      - name: Upload SARIF
+      - name: Upload filesystem SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@b6a472f63d85b9c78a3ac5e89422239fc15e9b3c # v3.28.1
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Build candidate image from this commit
+        run: docker build --tag "z4j-security-candidate:${GITHUB_SHA}" .
+
+      - name: Scan candidate image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: z4j-security-candidate:${{ github.sha }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Upload image SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@b6a472f63d85b9c78a3ac5e89422239fc15e9b3c # v3.28.1
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image

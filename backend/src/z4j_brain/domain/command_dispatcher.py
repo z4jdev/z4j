@@ -36,7 +36,10 @@ from uuid import UUID
 
 import structlog
 
+from z4j_brain.domain.retry_contract import required_retry_engine
 from z4j_brain.errors import AgentOfflineError
+from z4j_brain.persistence.enums import CommandStatus
+from z4j_brain.persistence.repositories.commands import action_is_redeliverable
 
 if TYPE_CHECKING:
     from z4j_brain.domain.audit_service import AuditService
@@ -51,6 +54,19 @@ if TYPE_CHECKING:
 
 
 logger = structlog.get_logger("z4j.brain.command_dispatcher")
+
+
+def _dispatch_is_fresh(dispatched_at: datetime | None, window_seconds: float) -> bool:
+    """True if a DISPATCHED command was claimed within ``window_seconds``.
+
+    A re-issue of a FRESHLY-dispatched command treats it as in-flight / delivered
+    (do not re-send); an older one is orphaned and gets re-driven.
+    """
+    if dispatched_at is None:
+        return False
+    # SQLite returns naive timestamps; normalise to aware UTC before subtracting.
+    aware = dispatched_at if dispatched_at.tzinfo else dispatched_at.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - aware).total_seconds() < window_seconds
 
 
 class CommandDispatcher:
@@ -111,7 +127,65 @@ class CommandDispatcher:
     # Issue
     # ------------------------------------------------------------------
 
-    async def issue(
+    async def deliver_persisted(
+        self,
+        *,
+        command_id: UUID,
+        agent_id: UUID,
+        action: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Publish a command that another transaction already persisted.
+
+        Boundary D uses this only after its schedule, command, fire, change
+        envelope, and audit evidence have committed atomically.
+        """
+
+        try:
+            await self._registry.deliver(
+                command_id=command_id,
+                agent_id=agent_id,
+                required_retry_engine=required_retry_engine(action, payload),
+            )
+        except Exception:
+            logger.exception(
+                "z4j command_dispatcher: persisted command delivery crashed",
+                command_id=str(command_id),
+                agent_id=str(agent_id),
+            )
+
+    async def deliver_frozen(
+        self,
+        *,
+        command_id: UUID,
+        agent_id: UUID,
+        registry_owner_id: UUID,
+        session_generation: str,
+    ) -> bool:
+        """Deliver only through one persisted WebSocket generation."""
+
+        try:
+            return await self._registry.deliver_frozen(
+                command_id=command_id,
+                agent_id=agent_id,
+                registry_owner_id=registry_owner_id,
+                session_generation=session_generation,
+            )
+        except Exception:
+            logger.exception(
+                "z4j command_dispatcher: frozen command delivery crashed",
+                command_id=str(command_id),
+                agent_id=str(agent_id),
+            )
+            return False
+
+    @property
+    def command_timeout_seconds(self) -> int:
+        """Configured command response bound used by preplanned operations."""
+
+        return self._settings.command_timeout_seconds
+
+    async def issue(  # noqa: PLR0911, PLR0912  status+freshness+at-most-once re-issue branches
         self,
         *,
         commands: CommandRepository,
@@ -126,6 +200,8 @@ class CommandDispatcher:
         ip: str | None,
         user_agent: str | None,
         idempotency_key: str | None = None,
+        pre_completed_result: dict[str, Any] | None = None,
+        enforce_payload_identity: bool = False,
     ) -> Command:
         """Persist a command and ask the registry to deliver it.
 
@@ -137,11 +213,16 @@ class CommandDispatcher:
         The command + audit rows are committed before delivery so
         the ``deliver_local`` callback (which opens its own session)
         can read the command row.
+
+        M1: when ``pre_completed_result`` is supplied the command is COMPLETED
+        in place with that result and NOT delivered to any agent (a brain-side
+        synthetic success, e.g. the no-owned-match bulk-retry no-op). Still
+        inserted + audited + committed so it is a durable, queryable record.
         """
         timeout_at = datetime.now(UTC) + timedelta(
             seconds=self._settings.command_timeout_seconds,
         )
-        command = await commands.insert(
+        command, created = await commands.insert(
             project_id=project_id,
             agent_id=agent_id,
             issued_by=issued_by,
@@ -152,6 +233,7 @@ class CommandDispatcher:
             idempotency_key=idempotency_key,
             timeout_at=timeout_at,
             source_ip=ip,
+            enforce_payload_identity=enforce_payload_identity,
         )
 
         # Audit BEFORE deliver - the audit row is the durable
@@ -175,11 +257,104 @@ class CommandDispatcher:
             },
         )
 
+        # M1 +: a synthetic success completes IN PLACE and is NOT
+        # delivered. Do the completion in the SAME transaction as the insert and
+        # commit ONCE, so no committed status=PENDING window is ever visible to a
+        # concurrent long-poll/reconnect drain (H1: the no-op payload carries
+        # task_ids=[], which an older RQ adapter reads as registry-sweep mode).
+        # And complete ONLY a row WE created: on an idempotency-key collision the
+        # existing row belongs to some OTHER request (possibly an in-flight
+        # PENDING retry_task); marking it completed with our no-op result would
+        # hijack it (H3). A genuine repeat no-op is already COMPLETED, so
+        # returning it unchanged preserves idempotency.
+        if pre_completed_result is not None:
+            if created:
+                await commands.mark_completed(command.id, result_payload=pre_completed_result)
+            await commands.session.commit()
+            await commands.session.refresh(command)
+            return command
+
         # Commit the command + audit rows so that the deliver
         # callback (which opens its own session) can read the row.
         # Without this, the command is only flush()ed and invisible
         # to other transactions.
         await commands.session.commit()
+
+        # 4: an idempotent re-issue (same key) that returned an
+        # EXISTING command is resolved by a STATUS + FRESHNESS decision, not the
+        # blanket "any non-PENDING -> success" (which reported a FAILED/TIMEOUT
+        # collision as delivered, and silently LOST a pushed-but-never-received
+        # fire on replay). deliver_local claims via ``mark_dispatched WHERE
+        # status=PENDING`` (0 rows for a non-PENDING row), so re-driving a
+        # genuinely-delivered row would wedge -- hence we re-drive ONLY the
+        # orphaned cases and short-circuit the rest.
+        if not created:
+            status = command.status
+            if status in (
+                CommandStatus.COMPLETED,
+                CommandStatus.FAILED,
+                CommandStatus.CANCELLED,
+            ):
+                # Terminal: the task already ran (or was cancelled). Returning it
+                # is idempotent (preserves the catch-up drain); re-delivery
+                # would risk a double-execution.
+                return command
+            if status == CommandStatus.DISPATCHED and _dispatch_is_fresh(
+                command.dispatched_at,
+                getattr(self._settings, "agent_longpoll_redispatch_seconds", 60.0),
+            ):
+                # DISPATCHED == physically delivered while FRESH: either
+                # genuinely delivered, or a concurrent deliver is mid-push (the
+                # P2-1 claim-race winner). Return without re-sending.
+                return command
+            if status in (CommandStatus.DISPATCHED, CommandStatus.TIMEOUT):
+                # ORPHANED: a stale-DISPATCHED (pushed but no result came back) or
+                # a TIMEOUT.
+                #
+                # (At-most-once for destructive): re-driving here is only
+                # safe when re-EXECUTION is safe. "No result observed" does NOT
+                # prove "the action did not execute" -- the agent may have run it
+                # and only the result frame was lost. For a NON-idempotent action
+                # (purge_queue / restart_worker / retry_task / bulk_retry /
+                # requeue_dead_letter) a re-drive would double-execute a
+                # side-effecting operation, so we DO NOT re-drive: return the row
+                # as-is (ambiguous outcome; the CommandTimeoutWorker retires it).
+                # Cadence fires (deduped on fire_id) and idempotent actions
+                # (cancel / reconcile) remain re-drivable so a genuinely-lost
+                # delivery still recovers.
+                if not action_is_redeliverable(command.action):
+                    return command
+                # Re-drive ONCE: revert to PENDING with a fresh timeout and
+                # re-deliver.: the revert is a compare-and-swap on the
+                # OBSERVED dispatched_at so a concurrent rearm+redispatch is not
+                # clobbered (ABA).: transfer ownership to the (possibly
+                # re-picked) target agent so an agent-scoped ack can terminalize
+                # the row instead of it wedging under the offline original owner.
+                reverted = await commands.revert_dispatch(
+                    command.id,
+                    timeout_seconds=self._settings.command_timeout_seconds,
+                    expected_dispatched_at=command.dispatched_at,
+                    new_agent_id=agent_id,
+                )
+                await commands.session.commit()
+                await commands.session.refresh(command)
+                if not reverted:
+                    # Concurrently advanced to terminal, or the CAS lost to a
+                    # concurrent rearm+redispatch; treat as done / in-flight.
+                    return command
+            # PENDING (fresh, or just reverted) falls through to delivery.
+            # A PENDING fire returned from an idempotency-collision may
+            # still be owned by an agent that went offline before it was ever
+            # dispatched, while a DIFFERENT agent was re-picked for this delivery.
+            # Transfer ownership to the target so the target's agent-scoped ack can
+            # terminalize it (mirrors the DISPATCHED/TIMEOUT transfer).
+            # Status-guarded to PENDING; a no-op when the owner already matches
+            # (every operator command, which conflicts on an agent mismatch at
+            # insert). Only reached on the re-issue path (not created).
+            elif command.agent_id != agent_id:
+                await commands.reassign_pending_owner(command.id, new_agent_id=agent_id)
+                await commands.session.commit()
+                await commands.session.refresh(command)
 
         # Ask the registry to deliver. The local fast path
         # (synchronous push + UPDATE status='dispatched') happens
@@ -190,6 +365,13 @@ class CommandDispatcher:
             result = await self._registry.deliver(
                 command_id=command.id,
                 agent_id=agent_id,
+                # An idempotency collision returns the immutable existing row.
+                # Gate the session against the exact command the delivery
+                # callback will reload and sign, never the re-issuer's input.
+                required_retry_engine=required_retry_engine(
+                    command.action,
+                    command.payload,
+                ),
             )
         except Exception:
             logger.exception(
@@ -201,9 +383,19 @@ class CommandDispatcher:
 
         if result is not None and not result.delivered_locally and not result.notified_cluster:
             # Edge case: deliver returned but neither path fired.
-            # The registry treats unknown agents this way. Surface
-            # a clean error to the caller - the row stays pending,
-            # the timeout sweeper handles cleanup.
+            # Before surfacing agent-offline, re-read the row. A
+            # CONCURRENT deliver (another worker / a long-poll redispatch) may have
+            # WON the ``mark_dispatched WHERE status=PENDING`` claim and already
+            # pushed the command -- in which case this caller's local claim simply
+            # lost the race and the command IS on its way. Reporting AgentOffline
+            # here would write a spurious failed-fire record for a delivered
+            # command. If the row is now DISPATCHED/terminal, return it as success
+            # WITHOUT re-delivering. Only a still-PENDING row is genuinely offline.
+            await commands.session.refresh(command)
+            if command.status != CommandStatus.PENDING:
+                return command
+            # The registry treats unknown agents this way. Surface a clean error
+            # to the caller - the row stays pending, the timeout sweeper cleans up.
             raise AgentOfflineError(
                 "agent is not connected",
                 details={"agent_id": str(agent_id)},
@@ -243,6 +435,10 @@ class CommandDispatcher:
         command_id: UUID,
         project_id: UUID | None = None,
         agent_id: UUID | None = None,
+        transport_kind: str | None = None,
+        registry_owner_id: UUID | None = None,
+        session_generation: str | None = None,
+        delivery_claim_token: str | None = None,
     ) -> None:
         """Mark a command as dispatched.
 
@@ -250,13 +446,62 @@ class CommandDispatcher:
         ``mark_dispatched`` SQL has a ``WHERE status='pending'``
         guard).
         """
+        from z4j_brain.domain.schedule_fire_authority import (
+            SCHEDULE_FIRE_PROTOCOL_MARKER,
+        )
+
+        candidate = await commands.get_for_dispatch(command_id)
+        if candidate is not None and candidate.action == "schedule.external.control":
+            if project_id is None or agent_id is None:
+                return
+            from z4j_brain.persistence.repositories.schedule_external import (
+                ScheduleExternalRepository,
+            )
+
+            await ScheduleExternalRepository(
+                commands.session,
+            ).acknowledge_control_delivery(
+                command_id=command_id,
+                project_id=project_id,
+                agent_id=agent_id,
+                transport_kind=transport_kind,
+                registry_owner_id=registry_owner_id,
+                session_generation=session_generation,
+                delivery_claim_token=delivery_claim_token,
+                occurred_at=datetime.now(UTC),
+            )
+            return
+        if (
+            candidate is not None
+            and candidate.schedule_protocol_marker == SCHEDULE_FIRE_PROTOCOL_MARKER
+        ):
+            if project_id is None or agent_id is None:
+                return
+            from z4j_brain.persistence.repositories.schedule_control import (
+                ScheduleControlRepository,
+            )
+
+            await ScheduleControlRepository(
+                commands.session,
+            ).acknowledge_current_agent_delivery(
+                command_id=command_id,
+                project_id=project_id,
+                agent_id=agent_id,
+                transport_kind=transport_kind,
+                registry_owner_id=registry_owner_id,
+                session_generation=session_generation,
+                delivery_claim_token=delivery_claim_token,
+                occurred_at=datetime.now(UTC),
+            )
+            return
         await commands.mark_dispatched(
             command_id,
+            timeout_seconds=self._settings.command_timeout_seconds,
             project_id=project_id,
             agent_id=agent_id,
         )
 
-    async def handle_result(
+    async def handle_result(  # noqa: PLR0912 - protocol-specific terminal routing
         self,
         *,
         commands: CommandRepository,
@@ -267,6 +512,10 @@ class CommandDispatcher:
         error: str | None,
         project_id: UUID | None = None,
         agent_id: UUID | None = None,
+        transport_kind: str | None = None,
+        registry_owner_id: UUID | None = None,
+        session_generation: str | None = None,
+        delivery_claim_token: str | None = None,
     ) -> None:
         """Mark a command completed or failed based on the agent's reply.
 
@@ -274,6 +523,111 @@ class CommandDispatcher:
         is one of ``"success"`` / ``"failed"`` / ``"timeout"`` -
         we map to the brain enum.
         """
+        from z4j_brain.domain.schedule_fire_authority import (
+            SCHEDULE_FIRE_PROTOCOL_MARKER,
+        )
+
+        candidate = await commands.get_for_dispatch(command_id)
+        if candidate is not None and candidate.action == "schedule.external.control":
+            if project_id is None or agent_id is None:
+                return
+            from z4j_brain.persistence.repositories.schedule_external import (
+                ScheduleExternalRepository,
+            )
+
+            transition = await ScheduleExternalRepository(
+                commands.session,
+            ).apply_control_result(
+                command_id=command_id,
+                project_id=project_id,
+                agent_id=agent_id,
+                status=status,
+                result_payload=result_payload,
+                error=error,
+                transport_kind=transport_kind,
+                registry_owner_id=registry_owner_id,
+                session_generation=session_generation,
+                delivery_claim_token=delivery_claim_token,
+                occurred_at=datetime.now(UTC),
+            )
+            if transition.disposition in {
+                "result_recorded",
+                "ambiguous",
+            }:
+                operation = transition.operation
+                command = transition.command
+                await self._audit.record(
+                    audit_log,
+                    action=(
+                        "schedule.external_control.result"
+                        if transition.disposition == "result_recorded"
+                        else "schedule.external_control.ambiguous"
+                    ),
+                    target_type="schedule",
+                    target_id=(
+                        str(operation.schedule_id) if operation is not None else candidate.target_id
+                    ),
+                    result=status,
+                    outcome=("allow" if transition.disposition == "result_recorded" else "failure"),
+                    project_id=project_id,
+                    metadata={
+                        "command_id": str(command_id),
+                        "operation_id": (str(operation.id) if operation is not None else None),
+                        "agent_id": (
+                            str(command.agent_id)
+                            if command is not None and command.agent_id is not None
+                            else str(agent_id)
+                        ),
+                        "projection_authoritative": False,
+                        "error": error,
+                    },
+                )
+            return
+        if (
+            candidate is not None
+            and candidate.schedule_protocol_marker == SCHEDULE_FIRE_PROTOCOL_MARKER
+        ):
+            if project_id is None or agent_id is None:
+                return
+            from z4j_brain.persistence.repositories.schedule_control import (
+                ScheduleControlRepository,
+            )
+
+            transition = await ScheduleControlRepository(
+                commands.session,
+            ).apply_current_agent_result(
+                command_id=command_id,
+                project_id=project_id,
+                agent_id=agent_id,
+                status=status,
+                result_payload=result_payload,
+                error=error,
+                transport_kind=transport_kind,
+                registry_owner_id=registry_owner_id,
+                session_generation=session_generation,
+                delivery_claim_token=delivery_claim_token,
+                occurred_at=datetime.now(UTC),
+            )
+            command = transition.command
+            if transition.command_transitioned and command is not None:
+                succeeded = status == "success"
+                await self._audit.record(
+                    audit_log,
+                    action=("command.completed" if succeeded else "command.failed"),
+                    target_type=command.target_type,
+                    target_id=command.target_id,
+                    result="success" if succeeded else "failed",
+                    outcome="allow" if succeeded else "failure",
+                    project_id=command.project_id,
+                    metadata={
+                        "command_id": str(command_id),
+                        "agent_id": str(command.agent_id),
+                        "error": error,
+                        "cadence_hold_created": transition.hold_created,
+                    },
+                )
+            return
+
         if status == "success":
             transitioned = await commands.mark_completed(
                 command_id,
@@ -345,6 +699,18 @@ class CommandDispatcher:
             },
         )
 
+        if command.bulk_retry_child_id is not None:
+            # Project the authenticated result in this same transaction.  This
+            # also refines a prior UNKNOWN child after a late result; delivery
+            # state remains irreversibly claimed.
+            from z4j_brain.persistence.repositories import (
+                BulkRetryRequestRepository,
+            )
+
+            await BulkRetryRequestRepository(commands.session).reconcile_command_outcomes(
+                limit=1, command_id=command_id
+            )
+
         # Reconciliation post-processing: when a ``reconcile_task``
         # command comes back successful, the result dict carries the
         # adapter's view of the engine's authoritative state. Apply
@@ -415,7 +781,7 @@ class CommandDispatcher:
             engine_state=engine_state,
             finished_at=finished_at,
             exception_text=result_payload.get("exception"),
-            # R3 H1 staleness anchor: the probe cannot have observed
+            # Staleness anchor: the probe cannot have observed
             # anything newer than its own issuance, so a task row
             # written after ``issued_at`` outranks a non-terminal
             # probe response.

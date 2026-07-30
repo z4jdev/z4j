@@ -1,4 +1,4 @@
-"""R3-M8: multi-worker Prometheus aggregation.
+"""Multi-worker Prometheus aggregation.
 
 ``z4j serve`` defaults to min(4, cpu) uvicorn worker processes, and
 the brain's metric registry is per-process, so durable-claim-gated
@@ -19,8 +19,7 @@ These tests pin the scrape-time branch selection, the per-gauge
 zeroing (required so livesum aggregation stays honest), and the
 serve-path env setup helper. A true multi-process integration test
 is intentionally out of scope; the release orchestrator boot-smokes
-the real image.
-"""
+the real image."""
 
 from __future__ import annotations
 
@@ -360,11 +359,13 @@ class TestSetupMultiprocessMetricsEnv:
             assert "multiprocess metrics active" in out
             assert created in out
         finally:
+            os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
             shutil.rmtree(created, ignore_errors=True)
+        assert "PROMETHEUS_MULTIPROC_DIR" not in os.environ
 
 
 class TestDeadWorkerReaping:
-    """R4-M2: dead workers' live-gauge files must not keep inflating
+    """Dead workers' live-gauge files must not keep inflating
     livesum aggregates forever. The scrape path reaps value files of
     PIDs that no longer exist before collecting.
     """

@@ -87,6 +87,54 @@ class AgentRepository(BaseRepository[Agent]):
     # State updates - used by the gateway + AgentHealthWorker
     # ------------------------------------------------------------------
 
+    async def record_runtime_features(self, *, agent_id: UUID, runtime_features: list[str]) -> None:
+        """Persist the runtime feature flags an agent advertised.
+
+        The WebSocket handshake records these through:meth:`mark_online`.
+        Long-poll has no handshake frame, so it advertises the same list in a
+        header on its connect probe and lands here. Both transports must reach
+        the same stored value, because the retry gate now REFUSES a command to
+        an agent that has not attested the safe contract -- if only one transport
+        recorded it, every agent on the other would be refused.
+
+        Same dialect split as :meth:`mark_online`: ``jsonb_set`` on Postgres so a
+        concurrent reconnect cannot clobber a sibling key, read-modify-write on
+        SQLite, which has no ``jsonb_set`` and is single-writer anyway.
+        """
+        value = list(runtime_features)
+        dialect = self.session.bind.dialect.name if self.session.bind is not None else ""
+        if dialect == "postgresql":
+            import json
+
+            from sqlalchemy import text as _text
+
+            expr = (
+                "jsonb_set(COALESCE(metadata, CAST('{}' AS jsonb)), "
+                "'{runtime_features}', CAST(:rf AS jsonb), true)"
+            )
+            await self.session.execute(
+                update(Agent)
+                .where(Agent.id == agent_id)
+                .values(
+                    agent_metadata=_text(expr).bindparams(rf=json.dumps(value)),
+                ),
+            )
+            return
+        row = await self.session.execute(
+            select(Agent.agent_metadata).where(Agent.id == agent_id),
+        )
+        current = row.scalar_one_or_none()
+        if current is None:
+            # No such agent, or the column is NULL and the row may not exist.
+            # A missing agent is not this method's problem to report; the caller
+            # resolved it moments ago.
+            current = {}
+        new_meta = dict(current)
+        new_meta["runtime_features"] = value
+        await self.session.execute(
+            update(Agent).where(Agent.id == agent_id).values(agent_metadata=new_meta),
+        )
+
     async def mark_online(
         self,
         agent_id: UUID,
@@ -98,6 +146,7 @@ class AgentRepository(BaseRepository[Agent]):
         capabilities: dict[str, Any],
         host: dict[str, Any] | None = None,
         agent_version: str | None = None,
+        runtime_features: list[str] | None = None,
     ) -> datetime:
         """Set state=online + bump connect/seen + refresh handshake metadata.
 
@@ -128,6 +177,16 @@ class AgentRepository(BaseRepository[Agent]):
             # *update available* badge against the bundled
             # ``versions.json`` snapshot.
             metadata_updates["version"] = str(agent_version)
+        if runtime_features is not None:
+            # RH1: persist the runtime feature flags the agent advertised, for
+            # operator INSPECTION only (e.g. surfacing which agents run the
+            # 1.7.1+ runtime). This is ADVISORY, NOT a safety gate: retry safety
+            # is enforced by the override-presence rule in
+            # ``z4j_brain.domain.retry_contract`` (see HelloPayload.runtime_
+            # features). Recorded only on the WS handshake -- the long-poll
+            # transport carries no hello -- but because nothing gates on it, that
+            # gap is cosmetic. Stored under agent_metadata['runtime_features'].
+            metadata_updates["runtime_features"] = list(runtime_features)
 
         # Use Postgres
         # ``jsonb_set`` so the metadata write is a single atomic UPDATE
@@ -180,7 +239,9 @@ class AgentRepository(BaseRepository[Agent]):
                         engine_adapters=engine_adapters,
                         scheduler_adapters=scheduler_adapters,
                         capabilities=capabilities,
-                        agent_metadata=_text(expr).bindparams(**bind_params),
+                        agent_metadata=_text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                            expr,
+                        ).bindparams(**bind_params),
                     ),
                 )
             else:

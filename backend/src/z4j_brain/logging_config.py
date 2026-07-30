@@ -56,7 +56,16 @@ def configure_logging(*, level: str, json_output: bool) -> None:
     if json_output:
         renderer = structlog.processors.JSONRenderer()
     else:
-        renderer = structlog.dev.ConsoleRenderer(colors=True)
+        stdout_is_tty = bool(
+            getattr(sys.stdout, "isatty", lambda: False)(),
+        )
+        renderer = structlog.dev.ConsoleRenderer(
+            colors=stdout_is_tty,
+            force_colors=stdout_is_tty,
+            exception_formatter=(
+                structlog.dev.rich_traceback if stdout_is_tty else structlog.dev.plain_traceback
+            ),
+        )
 
     formatter = structlog.stdlib.ProcessorFormatter(
         foreign_pre_chain=shared_processors,

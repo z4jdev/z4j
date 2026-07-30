@@ -17,13 +17,14 @@ mirrors them via the agent's signal hooks.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from z4j_brain.api.deps import (
+    begin_sqlite_immediate_write_unit,
     get_audit_log_repo,
     get_audit_service,
     get_client_ip,
@@ -37,8 +38,8 @@ from z4j_brain.api.deps import (
     resolve_api_key_id,
 )
 from z4j_brain.domain.ip_rate_limit import require_bulk_action_throttle
-from z4j_brain.errors import NotFoundError, ValidationError
-from z4j_brain.persistence.enums import ProjectRole
+from z4j_brain.errors import ConflictError, NotFoundError, ValidationError
+from z4j_brain.persistence.enums import CommandStatus, ProjectRole
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,6 +90,32 @@ class SchedulePublic(BaseModel):
     catch_up: str = "skip"
     source: str = "dashboard"
     source_hash: str | None = None
+    control_token: uuid.UUID | None = None
+    legacy_fire_control_token: uuid.UUID | None = None
+    schedule_revision: int | None = None
+    quarantine_control_token: uuid.UUID | None = None
+    quarantine_code: str | None = None
+    quarantine_detail: str | None = None
+    quarantined_at: datetime | None = None
+
+
+class ExternalScheduleControlOperationPublic(BaseModel):
+    """Project-scoped status for one projection-authoritative control."""
+
+    id: uuid.UUID
+    schedule_id: uuid.UUID
+    command_id: uuid.UUID
+    stream_id: uuid.UUID
+    epoch_uuid: uuid.UUID
+    epoch_number: int
+    source_key: str
+    status: str
+    expected_accepted_sequence: int
+    reserved_sequence: int | None
+    desired_is_enabled: bool
+    result_projection_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
 
 
 def _payload(schedule: Schedule) -> SchedulePublic:
@@ -118,6 +145,46 @@ def _payload(schedule: Schedule) -> SchedulePublic:
         catch_up=getattr(schedule, "catch_up", None) or "skip",
         source=getattr(schedule, "source", None) or "dashboard",
         source_hash=getattr(schedule, "source_hash", None),
+        control_token=getattr(schedule, "control_token", None),
+        legacy_fire_control_token=getattr(
+            schedule,
+            "legacy_fire_control_token",
+            None,
+        ),
+        schedule_revision=getattr(schedule, "schedule_revision", None),
+        quarantine_control_token=getattr(
+            schedule,
+            "quarantine_control_token",
+            None,
+        ),
+        quarantine_code=getattr(schedule, "quarantine_code", None),
+        quarantine_detail=getattr(schedule, "quarantine_detail", None),
+        quarantined_at=getattr(schedule, "quarantined_at", None),
+    )
+
+
+def _external_control_payload(
+    operation: Any,
+) -> ExternalScheduleControlOperationPublic:
+    if operation.command_id is None:
+        raise RuntimeError("external control operation is missing its command")
+    return ExternalScheduleControlOperationPublic(
+        id=operation.id,
+        schedule_id=operation.schedule_id,
+        command_id=operation.command_id,
+        stream_id=operation.stream_id,
+        epoch_uuid=operation.epoch_uuid,
+        epoch_number=operation.epoch_number,
+        source_key=operation.source_key,
+        status=operation.status,
+        expected_accepted_sequence=operation.expected_accepted_sequence,
+        reserved_sequence=operation.reserved_sequence,
+        desired_is_enabled=bool(
+            operation.desired_projection["is_enabled"],
+        ),
+        result_projection_id=operation.result_projection_id,
+        created_at=operation.created_at,
+        updated_at=operation.updated_at,
     )
 
 
@@ -157,7 +224,13 @@ def _decode_schedules_cursor(
 ) -> tuple[str | None, uuid.UUID | None]:
     if not raw or "|" not in raw:
         return None, None
-    name, _, hex_id = raw.partition("|")
+    # B11: split on the LAST '|'. A schedule name may itself contain '|'
+    # (the validator only bans control chars), and the uuid hex never
+    # does, so partition() on the FIRST '|' fed the trailing name segment
+    # into UUID(hex=...) -> ValueError -> (None, None) -> the server
+    # restarted from page 1 and re-emitted the SAME next_cursor, so the
+    # dashboard's ``do/while(cursor)`` loop never advanced (tab hang/OOM).
+    name, _, hex_id = raw.rpartition("|")
     try:
         sched_id = uuid.UUID(hex=hex_id)
     except ValueError:
@@ -463,6 +536,47 @@ async def list_project_misfires(
     # Each row spans a different schedule; the schedule id is the audit
     # row's target_id (written by the misfire detector).
     return [_misfire_payload(r, uuid.UUID(str(r.target_id))) for r in rows]
+
+
+@router.get(
+    "/external-control-operations/{operation_id}",
+    response_model=ExternalScheduleControlOperationPublic,
+)
+async def get_external_schedule_control_operation(
+    slug: str,
+    operation_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+) -> ExternalScheduleControlOperationPublic:
+    """Return the durable status named by an external-control Location."""
+
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.repositories.schedule_external import (
+        ScheduleExternalRepository,
+    )
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.VIEWER,
+    )
+    operation = await ScheduleExternalRepository(
+        db_session,
+    ).get_control_operation_for_project(
+        project_id=project.id,
+        operation_id=operation_id,
+    )
+    if operation is None:
+        raise NotFoundError(
+            "external schedule control operation not found",
+            details={"operation_id": str(operation_id)},
+        )
+    return _external_control_payload(operation)
 
 
 @router.get("/{schedule_id}", response_model=SchedulePublic)
@@ -786,6 +900,55 @@ class ScheduleUpdateIn(BaseModel):
         return _validate_args_kwargs_size(v, "kwargs")
 
 
+class LegacyFireGrantIn(BaseModel):
+    """Explicit operator authority for one tokenless scheduler generation."""
+
+    observed_control_token: uuid.UUID
+    allow: bool
+    all_replicas_quiesced_and_resynced: bool = False
+
+
+class ResolveTerminalFireIn(BaseModel):
+    fire_id: uuid.UUID
+    command_id: uuid.UUID
+    expected_status: CommandStatus
+    observed_control_token: uuid.UUID
+    work_may_have_executed: bool
+    enabled_after_resolution: bool = True
+
+
+class ResolveTerminalFirePublic(BaseModel):
+    disposition: str
+    schedule: SchedulePublic | None
+    command_id: uuid.UUID
+    fire_id: uuid.UUID
+    command_status: CommandStatus
+    resolution_control_token: uuid.UUID | None
+    committed_revision: int | None
+    grant_carried: bool
+
+
+class ResolveLegacyEvidenceIn(BaseModel):
+    fire_id: uuid.UUID
+    source_evidence_kind: str = Field(
+        pattern="^(PENDING_FIRE|SCHEDULE_FIRE)$",
+    )
+    source_evidence_id: uuid.UUID
+    observed_control_token: uuid.UUID
+    work_may_have_executed: bool
+    enabled_after_resolution: bool = True
+
+
+class ResolveLegacyEvidencePublic(BaseModel):
+    disposition: str
+    schedule: SchedulePublic | None
+    fire_id: uuid.UUID
+    source_evidence_kind: str
+    source_evidence_id: uuid.UUID
+    resolution_control_token: uuid.UUID | None
+    committed_revision: int | None
+
+
 @router.post(
     "",
     response_model=SchedulePublic,
@@ -811,6 +974,10 @@ async def create_schedule(
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import ScheduleRepository
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+        ScheduleControlStateUnavailableError,
+    )
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
@@ -838,11 +1005,19 @@ async def create_schedule(
 
     repo = ScheduleRepository(db_session)
     try:
-        row = await repo.create_for_project(
-            project_id=project.id,
-            data=create_data,
-        )
-    except ValueError as exc:
+        control = ScheduleControlRepository(db_session)
+        if create_data["scheduler"] == "z4j-scheduler" and await control.control_is_active():
+            row = await control.create_current(
+                project_id=project.id,
+                data=create_data,
+                planning_at=datetime.now(UTC),
+            )
+        else:
+            row = await repo.create_for_project(
+                project_id=project.id,
+                data=create_data,
+            )
+    except (ScheduleControlStateUnavailableError, ValueError) as exc:
         # 422 Unprocessable Entity - the request was syntactically
         # OK but the values failed semantic validation (bad enum,
         # missing required field). Audit-Phase3-4 fix: previously
@@ -893,6 +1068,10 @@ async def update_schedule(
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import ScheduleRepository
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+        ScheduleControlStateUnavailableError,
+    )
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
@@ -908,12 +1087,29 @@ async def update_schedule(
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
     repo = ScheduleRepository(db_session)
     try:
-        row = await repo.update_for_project(
+        existing = await repo.get_for_project(
             project_id=project.id,
             schedule_id=schedule_id,
-            data=patch,
         )
-    except ValueError as exc:
+        control = ScheduleControlRepository(db_session)
+        if (
+            existing is not None
+            and existing.scheduler == "z4j-scheduler"
+            and await control.control_is_active()
+        ):
+            row = await control.update_current(
+                project_id=project.id,
+                schedule_id=schedule_id,
+                data=patch,
+                planning_at=datetime.now(UTC),
+            )
+        else:
+            row = await repo.update_for_project(
+                project_id=project.id,
+                schedule_id=schedule_id,
+                data=patch,
+            )
+    except (ScheduleControlStateUnavailableError, ValueError) as exc:
         # 422 (not 404). Bad enum / unknown field is a semantic
         # validation failure, not a "resource missing" condition.
         raise ValidationError(
@@ -943,6 +1139,367 @@ async def update_schedule(
     return _payload(row)
 
 
+@router.post(
+    "/{schedule_id}/legacy-fire-grant",
+    response_model=SchedulePublic,
+    dependencies=[Depends(require_csrf)],
+)
+async def set_legacy_fire_grant(
+    slug: str,
+    schedule_id: uuid.UUID,
+    body: LegacyFireGrantIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
+    ip: str = Depends(get_client_ip),
+) -> SchedulePublic:
+    """Grant/revoke tokenless 1.7 cadence for one observed generation."""
+
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+        ScheduleControlStateUnavailableError,
+    )
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.ADMIN,
+    )
+
+    try:
+        transition = await ScheduleControlRepository(
+            db_session,
+        ).set_legacy_fire_grant(
+            project_id=project.id,
+            schedule_id=schedule_id,
+            observed_control_token=body.observed_control_token,
+            allow=body.allow,
+            all_replicas_quiesced_and_resynced=(body.all_replicas_quiesced_and_resynced),
+            occurred_at=datetime.now(UTC),
+        )
+    except ValueError as exc:
+        raise ValidationError(
+            str(exc),
+            details={"reason": str(exc)},
+        ) from exc
+    except ScheduleControlStateUnavailableError as exc:
+        raise ConflictError(
+            "schedule control authority is unavailable",
+            details={"reason": str(exc)},
+        ) from exc
+
+    row = transition.schedule
+    if row is None:
+        raise NotFoundError(
+            "schedule not found",
+            details={"schedule_id": str(schedule_id)},
+        )
+    if transition.disposition == "stale_control":
+        raise ConflictError(
+            "schedule control generation changed",
+            details={
+                "observed_control_token": str(
+                    body.observed_control_token,
+                ),
+                "live_control_token": str(row.control_token),
+            },
+        )
+    if transition.disposition == "blocked_unresolved_evidence":
+        raise ConflictError(
+            "legacy fire grant is blocked by unresolved cadence evidence",
+            details={"blockers": list(transition.blockers)},
+        )
+
+    if transition.committed_revision is not None:
+        await audit.record(
+            audit_log,
+            action=(
+                "schedule.legacy_fire_granted" if body.allow else "schedule.legacy_fire_revoked"
+            ),
+            target_type="schedule",
+            target_id=str(schedule_id),
+            result=transition.disposition,
+            outcome="allow",
+            user_id=user.id,
+            project_id=project.id,
+            api_key_id=resolve_api_key_id(request),
+            source_ip=ip,
+            metadata={
+                "control_token": str(row.control_token),
+                "attestation_version": 1 if body.allow else None,
+            },
+        )
+    await db_session.commit()
+    return _payload(row)
+
+
+@router.post(
+    "/{schedule_id}/resolve-terminal-fire",
+    response_model=ResolveTerminalFirePublic,
+    dependencies=[Depends(require_csrf)],
+)
+async def resolve_terminal_fire(
+    slug: str,
+    schedule_id: uuid.UUID,
+    body: ResolveTerminalFireIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
+    ip: str = Depends(get_client_ip),
+) -> ResolveTerminalFirePublic:
+    """Skip one exact ambiguous occurrence and resume without retrying it."""
+
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+        ScheduleControlStateUnavailableError,
+    )
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.OPERATOR,
+    )
+    try:
+        transition = await ScheduleControlRepository(
+            db_session,
+        ).resolve_terminal_occurrence(
+            project_id=project.id,
+            schedule_id=schedule_id,
+            fire_id=body.fire_id,
+            command_id=body.command_id,
+            expected_status=body.expected_status,
+            observed_control_token=body.observed_control_token,
+            resolved_by=user.id,
+            work_may_have_executed=body.work_may_have_executed,
+            enabled_after_resolution=body.enabled_after_resolution,
+            occurred_at=datetime.now(UTC),
+        )
+    except ValueError as exc:
+        raise ValidationError(
+            str(exc),
+            details={"reason": str(exc)},
+        ) from exc
+    except ScheduleControlStateUnavailableError as exc:
+        raise ConflictError(
+            "cadence occurrence evidence is unavailable",
+            details={"reason": str(exc)},
+        ) from exc
+
+    if transition.disposition in {
+        "not_found",
+        "schedule_not_found",
+    }:
+        raise NotFoundError(
+            "cadence occurrence not found",
+            details={
+                "schedule_id": str(schedule_id),
+                "fire_id": str(body.fire_id),
+                "command_id": str(body.command_id),
+            },
+        )
+    if transition.disposition not in {
+        "resolved",
+        "already_resolved",
+        "already_deleted",
+    }:
+        row = transition.schedule
+        raise ConflictError(
+            "cadence occurrence cannot be resolved from this state",
+            details={
+                "disposition": transition.disposition,
+                "live_control_token": (str(row.control_token) if row is not None else None),
+            },
+        )
+
+    if transition.changed:
+        await audit.record(
+            audit_log,
+            action="schedule.fire.operator_skipped",
+            target_type="schedule",
+            target_id=str(schedule_id),
+            result="resolved",
+            outcome="allow",
+            user_id=user.id,
+            project_id=project.id,
+            api_key_id=resolve_api_key_id(request),
+            source_ip=ip,
+            metadata={
+                "fire_id": str(body.fire_id),
+                "command_id": str(body.command_id),
+                "command_status": body.expected_status.value,
+                "work_may_have_executed": True,
+                "grant_carried": transition.grant_carried,
+                "resolution_control_token": (
+                    str(transition.schedule.control_token)
+                    if transition.schedule is not None
+                    else None
+                ),
+            },
+        )
+    await db_session.commit()
+
+    resolution_token = None
+    if transition.hold is not None:
+        resolution_token = transition.hold.resolution_control_token
+    elif transition.resolution is not None:
+        resolution_token = transition.resolution.resolution_control_token
+    return ResolveTerminalFirePublic(
+        disposition=transition.disposition,
+        schedule=(_payload(transition.schedule) if transition.schedule is not None else None),
+        command_id=body.command_id,
+        fire_id=body.fire_id,
+        command_status=body.expected_status,
+        resolution_control_token=resolution_token,
+        committed_revision=transition.committed_revision,
+        grant_carried=transition.grant_carried,
+    )
+
+
+@router.post(
+    "/{schedule_id}/resolve-legacy-evidence",
+    response_model=ResolveLegacyEvidencePublic,
+    dependencies=[Depends(require_csrf)],
+)
+async def resolve_legacy_evidence(
+    slug: str,
+    schedule_id: uuid.UUID,
+    body: ResolveLegacyEvidenceIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
+    ip: str = Depends(get_client_ip),
+) -> ResolveLegacyEvidencePublic:
+    """Resolve exact receipt-NULL pending/fire evidence with no command."""
+
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+        ScheduleControlStateUnavailableError,
+    )
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.OPERATOR,
+    )
+    try:
+        transition = await ScheduleControlRepository(
+            db_session,
+        ).resolve_legacy_evidence(
+            project_id=project.id,
+            schedule_id=schedule_id,
+            fire_id=body.fire_id,
+            source_evidence_kind=body.source_evidence_kind,
+            source_evidence_id=body.source_evidence_id,
+            observed_control_token=body.observed_control_token,
+            resolved_by=user.id,
+            work_may_have_executed=body.work_may_have_executed,
+            enabled_after_resolution=body.enabled_after_resolution,
+            occurred_at=datetime.now(UTC),
+        )
+    except ValueError as exc:
+        raise ValidationError(
+            str(exc),
+            details={"reason": str(exc)},
+        ) from exc
+    except ScheduleControlStateUnavailableError as exc:
+        raise ConflictError(
+            "legacy cadence evidence is unavailable",
+            details={"reason": str(exc)},
+        ) from exc
+
+    if transition.disposition in {
+        "not_found",
+        "schedule_not_found",
+    }:
+        raise NotFoundError(
+            "legacy cadence evidence not found",
+            details={
+                "schedule_id": str(schedule_id),
+                "fire_id": str(body.fire_id),
+                "source_evidence_id": str(
+                    body.source_evidence_id,
+                ),
+            },
+        )
+    if transition.disposition not in {
+        "resolved",
+        "already_resolved",
+        "already_deleted",
+    }:
+        row = transition.schedule
+        raise ConflictError(
+            "legacy cadence evidence cannot be resolved from this state",
+            details={
+                "disposition": transition.disposition,
+                "live_control_token": (str(row.control_token) if row is not None else None),
+            },
+        )
+    if transition.changed:
+        await audit.record(
+            audit_log,
+            action="schedule.fire.legacy_operator_skipped",
+            target_type="schedule",
+            target_id=str(schedule_id),
+            result="resolved",
+            outcome="allow",
+            user_id=user.id,
+            project_id=project.id,
+            api_key_id=resolve_api_key_id(request),
+            source_ip=ip,
+            metadata={
+                "fire_id": str(body.fire_id),
+                "source_evidence_kind": (body.source_evidence_kind),
+                "source_evidence_id": str(
+                    body.source_evidence_id,
+                ),
+                "work_may_have_executed": True,
+                "resolution_control_token": (
+                    str(transition.schedule.control_token)
+                    if transition.schedule is not None
+                    else None
+                ),
+            },
+        )
+    await db_session.commit()
+    return ResolveLegacyEvidencePublic(
+        disposition=transition.disposition,
+        schedule=(_payload(transition.schedule) if transition.schedule is not None else None),
+        fire_id=body.fire_id,
+        source_evidence_kind=body.source_evidence_kind,
+        source_evidence_id=body.source_evidence_id,
+        resolution_control_token=(
+            transition.resolution.resolution_control_token
+            if transition.resolution is not None
+            else None
+        ),
+        committed_revision=transition.committed_revision,
+    )
+
+
 @router.delete(
     "/{schedule_id}",
     status_code=204,
@@ -966,6 +1523,9 @@ async def delete_schedule(
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import ScheduleRepository
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+    )
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
@@ -977,10 +1537,38 @@ async def delete_schedule(
     )
 
     repo = ScheduleRepository(db_session)
-    deleted = await repo.delete_for_project(
+    existing = await repo.get_for_project(
         project_id=project.id,
         schedule_id=schedule_id,
     )
+    if existing is None:
+        raise NotFoundError(
+            "schedule not found",
+            details={"schedule_id": str(schedule_id)},
+        )
+    control = ScheduleControlRepository(db_session)
+    control_active = await control.control_is_active()
+    committed_revision: int | None = None
+    evidence_closed = 0
+    if control_active:
+        if existing.scheduler != "z4j-scheduler":
+            raise ConflictError(
+                "external schedule deletion requires Boundary-E epoch authority",
+                details={"schedule_id": str(schedule_id)},
+            )
+        transition = await control.delete_current(
+            project_id=project.id,
+            schedule_id=schedule_id,
+            occurred_at=datetime.now(UTC),
+        )
+        deleted = transition.disposition == "deleted"
+        committed_revision = transition.committed_revision
+        evidence_closed = transition.evidence_closed
+    else:
+        deleted = await repo.delete_for_project(
+            project_id=project.id,
+            schedule_id=schedule_id,
+        )
     if not deleted:
         raise NotFoundError(
             "schedule not found",
@@ -998,7 +1586,10 @@ async def delete_schedule(
         project_id=project.id,
         api_key_id=resolve_api_key_id(request),
         source_ip=ip,
-        metadata={},
+        metadata={
+            "schedule_revision": committed_revision,
+            "evidence_closed": evidence_closed,
+        },
     )
     await db_session.commit()
 
@@ -1069,15 +1660,17 @@ async def _pick_scheduler_agent(
     )
 
 
-async def _enable_or_disable(
+async def _enable_or_disable(  # noqa: PLR0915 - reserved/external/legacy authority split
     *,
     slug: str,
     schedule_id: uuid.UUID,
     enabled: bool,
+    response: Response,
     user: User,
     memberships: MembershipRepository,
     projects: ProjectRepository,
     audit_log: AuditLogRepository,
+    audit: AuditService,
     dispatcher: CommandDispatcher,
     db_session: AsyncSession,
     ip: str,
@@ -1086,6 +1679,9 @@ async def _enable_or_disable(
     from z4j_brain.persistence.repositories import (
         CommandRepository,
         ScheduleRepository,
+    )
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
     )
 
     policy = PolicyEngine()
@@ -1107,6 +1703,172 @@ async def _enable_or_disable(
             "schedule not found",
             details={"schedule_id": str(schedule_id)},
         )
+
+    control = ScheduleControlRepository(db_session)
+    if schedule.scheduler == "z4j-scheduler" and await control.control_is_active():
+        updated = await control.update_current(
+            project_id=project.id,
+            schedule_id=schedule_id,
+            data={"is_enabled": enabled},
+            planning_at=datetime.now(UTC),
+        )
+        assert updated is not None
+        await audit.record(
+            audit_log,
+            action=("schedule.enable" if enabled else "schedule.disable"),
+            target_type="schedule",
+            target_id=str(schedule_id),
+            result="success",
+            outcome="allow",
+            user_id=user.id,
+            project_id=project.id,
+            source_ip=ip,
+            metadata={"control_token": str(updated.control_token)},
+        )
+        await db_session.commit()
+        return _payload(updated)
+
+    if schedule.scheduler != "z4j-scheduler":
+        from z4j_brain.persistence.repositories.schedule_external import (
+            ScheduleExternalRepository,
+        )
+
+        action = "schedule.enable" if enabled else "schedule.disable"
+        if schedule.external_stream_id is None:
+            await audit.record(
+                audit_log,
+                action=action,
+                target_type="schedule",
+                target_id=str(schedule_id),
+                result="upgrade_required",
+                outcome="deny",
+                user_id=user.id,
+                project_id=project.id,
+                source_ip=ip,
+                metadata={
+                    "reason": "external_stream_not_activated",
+                    "scheduler": schedule.scheduler,
+                },
+            )
+            await db_session.commit()
+            raise ConflictError(
+                "external schedule control requires a current sequenced WebSocket adapter",
+                details={
+                    "schedule_id": str(schedule_id),
+                    "reason": "external_stream_not_activated",
+                },
+            )
+        plan = await ScheduleExternalRepository(
+            db_session,
+        ).plan_control_operation(
+            project_id=project.id,
+            stream_id=schedule.external_stream_id,
+            schedule_id=schedule_id,
+            enabled=enabled,
+            issued_by=user.id,
+            source_ip=ip,
+            timeout_at=datetime.now(UTC)
+            + timedelta(
+                seconds=dispatcher.command_timeout_seconds,
+            ),
+        )
+        operation = plan.operation
+        command = plan.command
+        location = (
+            f"/api/v1/projects/{slug}/schedules/external-control-operations/{operation.id}"
+            if operation is not None
+            else None
+        )
+        if plan.disposition == "operation_conflict":
+            await audit.record(
+                audit_log,
+                action=action,
+                target_type="schedule",
+                target_id=str(schedule_id),
+                result="conflict",
+                outcome="deny",
+                user_id=user.id,
+                project_id=project.id,
+                source_ip=ip,
+                metadata={
+                    "reason": "external_control_in_flight",
+                    "operation_id": (str(operation.id) if operation is not None else None),
+                },
+            )
+            await db_session.commit()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": ("an opposite external schedule control is already in flight"),
+                    "operation_id": (str(operation.id) if operation is not None else None),
+                },
+                headers=({"Location": location} if location else None),
+            )
+        if plan.disposition in {
+            "stream_not_found",
+            "stream_not_executable",
+            "schedule_not_current",
+            "schedule_not_executable",
+        }:
+            await audit.record(
+                audit_log,
+                action=action,
+                target_type="schedule",
+                target_id=str(schedule_id),
+                result="upgrade_required",
+                outcome="deny",
+                user_id=user.id,
+                project_id=project.id,
+                source_ip=ip,
+                metadata={"reason": plan.disposition},
+            )
+            await db_session.commit()
+            raise ConflictError(
+                "external schedule control has no current WebSocket executor authority",
+                details={
+                    "schedule_id": str(schedule_id),
+                    "reason": plan.disposition,
+                },
+            )
+        await audit.record(
+            audit_log,
+            action=action,
+            target_type="schedule",
+            target_id=str(schedule_id),
+            result=("already_effective" if plan.disposition == "already_effective" else "queued"),
+            outcome="allow",
+            user_id=user.id,
+            project_id=project.id,
+            source_ip=ip,
+            metadata={
+                "operation_id": (str(operation.id) if operation is not None else None),
+                "command_id": (str(command.id) if command is not None else None),
+                "disposition": plan.disposition,
+                "state_changes_on_projection_only": True,
+            },
+        )
+        await db_session.commit()
+        if location is not None:
+            response.headers["Location"] = location
+            if plan.disposition in {
+                "planned",
+                "idempotent_replay",
+            }:
+                response.status_code = 202
+        if (
+            command is not None
+            and operation is not None
+            and plan.stream is not None
+            and operation.status == "PENDING"
+        ):
+            await dispatcher.deliver_frozen(
+                command_id=command.id,
+                agent_id=operation.agent_id,
+                registry_owner_id=operation.registry_owner_id,
+                session_generation=operation.session_generation or "",
+            )
+            await dispatcher.notify_dashboard_command_change(project.id)
+        return _payload(schedule)
 
     target_agent = await _pick_scheduler_agent(
         db_session=db_session,
@@ -1155,15 +1917,20 @@ async def _enable_or_disable(
 @router.post(
     "/{schedule_id}/enable",
     response_model=SchedulePublic,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[
+        Depends(begin_sqlite_immediate_write_unit),
+        Depends(require_csrf),
+    ],
 )
 async def enable_schedule(
     slug: str,
     schedule_id: uuid.UUID,
+    response: Response,
     user: User = Depends(get_current_user),
     memberships: MembershipRepository = Depends(get_membership_repo),
     projects: ProjectRepository = Depends(get_project_repo),
     audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
     dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
     db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
@@ -1172,10 +1939,12 @@ async def enable_schedule(
         slug=slug,
         schedule_id=schedule_id,
         enabled=True,
+        response=response,
         user=user,
         memberships=memberships,
         projects=projects,
         audit_log=audit_log,
+        audit=audit,
         dispatcher=dispatcher,
         db_session=db_session,
         ip=ip,
@@ -1185,15 +1954,20 @@ async def enable_schedule(
 @router.post(
     "/{schedule_id}/disable",
     response_model=SchedulePublic,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[
+        Depends(begin_sqlite_immediate_write_unit),
+        Depends(require_csrf),
+    ],
 )
 async def disable_schedule(
     slug: str,
     schedule_id: uuid.UUID,
+    response: Response,
     user: User = Depends(get_current_user),
     memberships: MembershipRepository = Depends(get_membership_repo),
     projects: ProjectRepository = Depends(get_project_repo),
     audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
     dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
     db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
@@ -1202,10 +1976,12 @@ async def disable_schedule(
         slug=slug,
         schedule_id=schedule_id,
         enabled=False,
+        response=response,
         user=user,
         memberships=memberships,
         projects=projects,
         audit_log=audit_log,
+        audit=audit,
         dispatcher=dispatcher,
         db_session=db_session,
         ip=ip,

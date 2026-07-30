@@ -1,4 +1,4 @@
-"""Issues aggregation (R4): group task failures by fingerprint.
+"""Issues aggregation: group task failures by fingerprint.
 
 An "issue" is a distinct failure fingerprint on a project. This repository
 aggregates the ``tasks`` table (which carries a stable ``fingerprint`` set
@@ -9,8 +9,7 @@ representative exception + task name.
 
 Pagination is an OPAQUE offset cursor. Distinct fingerprints per project are
 few (one per bug class), so offset is robust + dialect-agnostic; the cursor
-stays opaque so it can become a keyset later without an API change.
-"""
+stays opaque so it can become a keyset later without an API change."""
 
 from __future__ import annotations
 

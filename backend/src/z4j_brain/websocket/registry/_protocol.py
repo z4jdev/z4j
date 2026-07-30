@@ -5,8 +5,11 @@ implementations are easy to compare side-by-side.
 
 Contract:
 
-- ``register(agent_id, ws, worker_id=None)`` - the gateway calls
-  this once per successful handshake.
+- ``register(agent_id, ws, worker_id=None, retry_contracts=...)`` -
+  the gateway calls this once per successful handshake and receives
+  an immutable :class:`SessionHandle`. The handle binds the socket,
+  worker slot, connection generation, and adapter-derived retry
+  contracts.
 
   * v1.1.x semantics (worker_id=None): one WebSocket per agent;
     a second connection from the same agent kicks the first
@@ -26,7 +29,7 @@ Contract:
   worker_id at register time. A 1.1.x agent and a 1.2.0 agent
   on different worker_ids of the same agent_id can both be
   online simultaneously; the legacy connection is just one more
-  slot in the (agent_id -> {worker_id: ws}) map.
+  slot in the (agent_id -> {worker_id: SessionHandle}) map.
 
 - ``unregister(agent_id, ws=ws, worker_id=...)`` - called from
   the disconnect handler. With ``worker_id=None`` (legacy) it
@@ -36,13 +39,15 @@ Contract:
 - ``is_online(agent_id)`` - True if ANY worker (legacy or
   worker-id-aware) is connected for this agent.
 
-- ``deliver(command_id, agent_id)`` - the load-bearing call. The
-  caller has already INSERTed a ``commands`` row with status
-  ``pending``; this asks the cluster to push it. With multiple
-  workers per agent the registry picks one (first-available
-  semantics; future: per-role routing). ACTUAL delivery
-  confirmation arrives as a ``command_result`` frame; the
-  timeout sweeper handles the case where it never does.
+- ``deliver(command_id, agent_id, required_retry_engine=...)`` - the
+  load-bearing call. The caller has already INSERTed a ``commands``
+  row with status ``pending``; this asks the cluster to push it.
+  Non-retry commands use first-available semantics. Retry-family
+  commands select only a session whose loaded adapter advertised the
+  required versioned contract, and the selected generation is never
+  re-resolved after claim. ACTUAL delivery confirmation arrives as a
+  ``command_result`` frame; the timeout sweeper handles the case where
+  it never does.
 
 Implementations are free to be backend-specific below the line -
 the Protocol exists so :mod:`z4j_brain.domain.command_dispatcher`
@@ -51,9 +56,9 @@ and the route layer never need to know.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -109,6 +114,44 @@ class DeliveryResult:
     agent_was_known: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SessionHandle:
+    """One immutable WebSocket connection generation."""
+
+    agent_id: UUID
+    worker_id: str | None
+    websocket: WebSocket
+    retry_contracts: frozenset[tuple[str, int]]
+    generation: UUID
+    registry_owner_id: UUID = field(default_factory=uuid4)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        agent_id: UUID,
+        worker_id: str | None,
+        websocket: WebSocket,
+        retry_contracts: dict[str, int] | None,
+        registry_owner_id: UUID | None = None,
+    ) -> SessionHandle:
+        return cls(
+            agent_id=agent_id,
+            worker_id=worker_id,
+            websocket=websocket,
+            retry_contracts=frozenset((retry_contracts or {}).items()),
+            generation=uuid4(),
+            registry_owner_id=registry_owner_id or uuid4(),
+        )
+
+    def supports_retry_engine(self, engine: str | None) -> bool:
+        if engine is None:
+            return True
+        if not engine:
+            return False
+        return (engine, 1) in self.retry_contracts
+
+
 class BrainRegistry(Protocol):
     """Where commands go when they need to find their agent."""
 
@@ -120,13 +163,18 @@ class BrainRegistry(Protocol):
         ws: WebSocket,
         worker_id: str | None = None,
         cap: int = 0,
-    ) -> None:
+        retry_contracts: dict[str, int] | None = None,
+    ) -> SessionHandle:
         """Register ``ws`` under (agent_id, worker_id).
 
         ``cap``: per-agent concurrent-worker cap (1.2.1+). When
         positive and adding this connection would push past it,
         raises :class:`WorkerCapExceeded`. ``cap=0`` (or omitted)
         keeps the unbounded 1.2.0 behavior.
+
+        ``retry_contracts`` is derived from the capability map sent
+        by the adapters loaded in this exact connection. It is
+        immutable for the returned session generation.
         """
         ...
 
@@ -168,7 +216,44 @@ class BrainRegistry(Protocol):
         *,
         command_id: UUID,
         agent_id: UUID,
+        required_retry_engine: str | None = None,
     ) -> DeliveryResult: ...
+
+    async def deliver_exact(
+        self,
+        *,
+        command_id: UUID,
+        session: SessionHandle,
+    ) -> bool:
+        """Deliver only while ``session`` is still the registered generation."""
+        ...
+
+    async def deliver_frozen(
+        self,
+        *,
+        command_id: UUID,
+        agent_id: UUID,
+        registry_owner_id: UUID,
+        session_generation: str,
+    ) -> bool:
+        """Recover only through the exact persisted WebSocket authority."""
+        ...
+
+    async def select_session(
+        self,
+        *,
+        agent_id: UUID,
+        required_retry_engine: str | None = None,
+    ) -> SessionHandle | None: ...
+
+    async def select_project_session(
+        self,
+        *,
+        project_id: UUID,
+        required_retry_engine: str,
+    ) -> SessionHandle | None:
+        """Select one exact local generation for project-scoped routing."""
+        ...
 
     async def kick(self, agent_id: UUID) -> int:
         """Close every WebSocket connection registered for ``agent_id``.
@@ -214,4 +299,9 @@ class BrainRegistry(Protocol):
         """Cleanly stop background tasks. Called from lifespan shutdown."""
 
 
-__all__ = ["BrainRegistry", "DeliveryResult", "WorkerCapExceeded"]
+__all__ = [
+    "BrainRegistry",
+    "DeliveryResult",
+    "SessionHandle",
+    "WorkerCapExceeded",
+]

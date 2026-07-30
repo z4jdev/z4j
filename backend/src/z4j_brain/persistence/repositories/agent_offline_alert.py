@@ -6,8 +6,7 @@ Unlike a misfire (a fact about the past that cannot un-happen), an
 offline episode is a LIVE state that can end at any moment, so both the
 claim and the retention prune here are conditional on the agent's
 CURRENT row: the claim inserts only while the episode is still active
-(R3-M4) and the prune deletes only once it has ended (R3-L1).
-"""
+and the prune deletes only once it has ended."""
 
 from __future__ import annotations
 
@@ -59,7 +58,7 @@ class AgentOfflineAlertRepository:
         candidate was selected with. The health worker selects candidates
         in one session and claims in another; an agent that reconnected in
         between must not be minted a claim (and a false durable alert) for
-        an episode that no longer exists (R3-M4) -- the conditional insert
+        an episode that no longer exists -- the conditional insert
         simply affects zero rows and the caller skips silently. A plain
         ``INSERT ... SELECT`` is a single atomic statement on SQLite and
         Postgres alike, so no dialect-specific upsert is needed. The
@@ -106,7 +105,7 @@ class AgentOfflineAlertRepository:
         shows ``state=offline`` with ``last_seen_at`` equal to the claim's
         ``anchor_at``) is retained REGARDLESS of age: deleting it would
         make the next sweep re-claim and re-alert an unchanged ongoing
-        outage (R3-L1). One alert per episode, however long it lasts.
+        outage. One alert per episode, however long it lasts.
         Aged-out claims ARE dropped once the episode is over: the agent
         recovered (state no longer offline), a new episode started
         (``last_seen_at`` moved off the claim's anchor), or the agent row

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -120,10 +121,18 @@ class TestDeliver:
     async def test_deliver_callback_failure(
         self,
         captured_deliveries: list[uuid.UUID],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from z4j_brain.websocket.registry import local
+
         async def deliver_fail(command_id: uuid.UUID, ws: Any) -> bool:
             raise RuntimeError("kaboom")
 
+        class UnwritableLogger:
+            def exception(self, *_args: object, **_kwargs: object) -> None:
+                raise UnicodeEncodeError("cp1252", "→", 0, 1, "unencodable")
+
+        monkeypatch.setattr(local, "logger", UnwritableLogger())
         registry = LocalRegistry(deliver_local=deliver_fail)
         agent_id = uuid.uuid4()
         await registry.register(
@@ -138,6 +147,94 @@ class TestDeliver:
         # Crash inside the callback collapses to "not delivered".
         assert result.delivered_locally is False
         assert result.agent_was_known is True
+
+    async def test_frozen_delivery_rejects_replacement_generation(
+        self,
+        registry: LocalRegistry,
+        captured_deliveries: list[uuid.UUID],
+    ) -> None:
+        agent_id = uuid.uuid4()
+        project_id = uuid.uuid4()
+        first = await registry.register(
+            project_id=project_id,
+            agent_id=agent_id,
+            ws=FakeWebSocket("first"),
+            worker_id="worker",
+        )
+        command_id = uuid.uuid4()
+        assert await registry.deliver_frozen(
+            command_id=command_id,
+            agent_id=agent_id,
+            registry_owner_id=first.registry_owner_id,
+            session_generation=str(first.generation),
+        )
+        assert captured_deliveries == [command_id]
+
+        await registry.register(
+            project_id=project_id,
+            agent_id=agent_id,
+            ws=FakeWebSocket("replacement"),
+            worker_id="worker",
+        )
+        assert not await registry.deliver_frozen(
+            command_id=uuid.uuid4(),
+            agent_id=agent_id,
+            registry_owner_id=first.registry_owner_id,
+            session_generation=str(first.generation),
+        )
+        assert captured_deliveries == [command_id]
+
+    async def test_exact_delivery_allows_reconnect_and_rejects_displaced_send(
+        self,
+    ) -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        delivered_to: list[str] = []
+
+        async def blocking_deliver(
+            _command_id: uuid.UUID,
+            ws: Any,
+        ) -> bool:
+            entered.set()
+            await release.wait()
+            validate = ws._z4j_validate_registry_generation
+            if not await validate():
+                return False
+            delivered_to.append(ws.name)
+            return True
+
+        registry = LocalRegistry(deliver_local=blocking_deliver)
+        agent_id = uuid.uuid4()
+        project_id = uuid.uuid4()
+        original = await registry.register(
+            project_id=project_id,
+            agent_id=agent_id,
+            ws=FakeWebSocket("original"),
+            worker_id="worker",
+        )
+        delivery = asyncio.create_task(
+            registry.deliver_exact(
+                command_id=uuid.uuid4(),
+                session=original,
+            ),
+        )
+        await entered.wait()
+        try:
+            replacement_handle = await asyncio.wait_for(
+                registry.register(
+                    project_id=project_id,
+                    agent_id=agent_id,
+                    ws=FakeWebSocket("replacement"),
+                    worker_id="worker",
+                ),
+                timeout=1,
+            )
+        finally:
+            release.set()
+            delivered = await asyncio.wait_for(delivery, timeout=1)
+        assert replacement_handle.generation != original.generation
+        assert delivered is False
+        assert delivered_to == []
 
 
 @pytest.mark.asyncio

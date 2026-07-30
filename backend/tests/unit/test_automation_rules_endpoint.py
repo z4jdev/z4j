@@ -1,10 +1,9 @@
-"""Endpoint tests for the automation-rules API (Cluster R3).
+"""Endpoint tests for the automation-rules API.
 
 Exercises the full HTTP path -- CRUD, grammar validation, RBAC role
 differentiation, and the destructive-action fresh-MFA step-up -- against
 the real ``create_app`` on in-memory SQLite, mirroring
-``test_b5_endpoints``'s seeded-session pattern.
-"""
+``test_b5_endpoints``'s seeded-session pattern."""
 
 from __future__ import annotations
 

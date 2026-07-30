@@ -293,3 +293,15 @@ class TestEndToEndLoop:
                 body = tasks_resp.json()
                 names = {t["name"] for t in body["items"]}
                 assert "myapp.tasks.send_email" in names
+
+        # TestClient cancels the WebSocket handler through an AnyIO cancel
+        # scope as the session closes. Registered-connection cleanup must
+        # survive that cancellation long enough to persist the final state.
+        # Reconnect the original test-loop engine only after TestClient's
+        # loop and app-owned pool are fully shut down.
+        async with migrated_engine.connect() as conn:
+            final_state = await conn.scalar(
+                text("SELECT state FROM agents WHERE id = :agent_id"),
+                {"agent_id": seeded["agent_id"]},
+            )
+        assert final_state == "offline"

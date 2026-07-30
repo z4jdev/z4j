@@ -1,4 +1,4 @@
-"""``/api/v1/projects/{slug}/issues`` REST router (R4).
+"""``/api/v1/projects/{slug}/issues`` REST router.
 
 An "issue" is a distinct failure fingerprint on a project -- the same
 logical bug grouped across runs and engines. This endpoint aggregates the
@@ -9,8 +9,7 @@ affected, and a representative exception + task name.
 ``GET /projects/{slug}/issues`` -- VIEWER role. An issue is operational
 data about tasks the member can already read (no who-did-what), so unlike
 the audit log it is safe for any project member. Cursor-paginated with
-optional engine / status / time-window filters.
-"""
+optional engine / status / time-window filters."""
 
 from __future__ import annotations
 

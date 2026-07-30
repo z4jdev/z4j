@@ -126,6 +126,26 @@ class TestScheduleToPb:
         assert msg.catch_up == "skip"
         assert json.loads(msg.args_json.decode()) == []
         assert json.loads(msg.kwargs_json.decode()) == {}
+        assert msg.control_token == ""
+        assert msg.schedule_revision == 0
+        assert msg.definition_digest == ""
+        assert msg.cadence_semantics_version == 0
+        assert msg.cadence_runtime_fingerprint == ""
+
+    def test_current_control_generation(self) -> None:
+        sched = _make_schedule_obj()
+        token = uuid.uuid4()
+        sched.control_token = token
+        sched.schedule_revision = 41
+        sched.definition_digest = "d" * 64
+        sched.cadence_semantics_version = 1
+        sched.cadence_runtime_fingerprint = "f" * 64
+        msg = _schedule_to_pb(sched)
+        assert msg.control_token == str(token)
+        assert msg.schedule_revision == 41
+        assert msg.definition_digest == "d" * 64
+        assert msg.cadence_semantics_version == 1
+        assert msg.cadence_runtime_fingerprint == "f" * 64
 
 
 # =====================================================================

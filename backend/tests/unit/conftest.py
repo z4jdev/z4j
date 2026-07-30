@@ -7,14 +7,42 @@ B7 will use a real Postgres 18 container.
 
 from __future__ import annotations
 
+import os
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from z4j_brain.main import create_app
 from z4j_brain.settings import Settings
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_configuration() -> Iterator[None]:
+    """Keep process-global configuration changes inside one test.
+
+    Boundary-F entrypoint tests exercise the real snapshot exporter, which
+    must populate ``os.environ`` for child tools.  Some of those keys do not
+    exist before the test, so ``monkeypatch.delenv`` cannot register them for
+    restoration.  Without an exact before/after boundary, a newly exported
+    audit key silently switches every later development fixture to the v2
+    signer and turns the complete suite into an order-dependent result.
+    """
+    from z4j_brain import configuration
+
+    original_environment = {
+        key: value for key, value in os.environ.items() if key.startswith("Z4J_")
+    }
+    original_snapshot = configuration.active_configuration_snapshot()
+    try:
+        yield
+    finally:
+        for key in tuple(os.environ):
+            if key.startswith("Z4J_"):
+                del os.environ[key]
+        os.environ.update(original_environment)
+        configuration.set_active_configuration_snapshot(original_snapshot)
 
 
 @pytest.fixture
@@ -48,7 +76,7 @@ async def brain_app(brain_settings: Settings):
         future=True,
     )
     app = create_app(brain_settings, engine=engine)
-    # Round-9 audit fix R8-Bootstrap-MED test support (Apr 2026):
+    # Round-9 audit fix -Bootstrap-MED test support (Apr 2026):
     # the unit-test fixture uses ASGITransport directly without
     # the lifespan wrapper, so ``app.state.lifespan_ready`` is
     # never flipped by the production startup hook. Set it

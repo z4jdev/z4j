@@ -21,6 +21,7 @@ def settings() -> Settings:
         database_url="sqlite+aiosqlite:///:memory:",
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        audit_chain_secret=None,
         environment="dev",
     )
 
@@ -171,12 +172,14 @@ class TestVerify:
             database_url="sqlite+aiosqlite:///:memory:",
             secret="x" * 48,  # type: ignore[arg-type]
             session_secret="y" * 48,  # type: ignore[arg-type]
+            audit_chain_secret=None,
             environment="dev",
         )
         s2 = Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             secret="z" * 48,  # type: ignore[arg-type]
             session_secret="y" * 48,  # type: ignore[arg-type]
+            audit_chain_secret=None,
             environment="dev",
         )
         a1 = AuditService(s1)

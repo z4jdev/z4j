@@ -15,7 +15,6 @@ import {
   FolderKanban,
   KeyRound,
   Palette,
-  Send,
   Settings,
   Shield,
   SlidersHorizontal,

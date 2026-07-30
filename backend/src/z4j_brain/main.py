@@ -44,6 +44,7 @@ from z4j_brain.api import (
     setup,
 )
 from z4j_brain.api import automation_rules as automation_rules_api
+from z4j_brain.api import bulk_retry_requests as bulk_retry_requests_api
 from z4j_brain.api import commands as commands_api
 from z4j_brain.api import events as events_api
 from z4j_brain.api import home as home_api
@@ -77,6 +78,7 @@ from z4j_brain.domain.workers import (
     WorkerSupervisor,
 )
 from z4j_brain.domain.workers.agent_hygiene import AgentHygieneWorker
+from z4j_brain.domain.workers.bulk_retry import BulkRetryCoordinator
 from z4j_brain.domain.workers.misfire_detector import MisfireDetector
 from z4j_brain.domain.workers.partition_creator import PartitionCreatorWorker
 from z4j_brain.domain.workers.pending_fires import PendingFiresReplayWorker
@@ -102,7 +104,10 @@ from z4j_brain.persistence.database import (
 )
 from z4j_brain.persistence.statement_timeout import install_statement_timeouts
 from z4j_brain.settings import Settings
-from z4j_brain.startup import run_first_boot_check
+from z4j_brain.startup import (
+    run_first_boot_check,
+    verify_production_authority_at_startup,
+)
 from z4j_brain.startup_version import SchemaVersionError, check_and_update_schema_version
 from z4j_brain.websocket import dashboard_gateway as ws_dashboard_gateway
 from z4j_brain.websocket import gateway as ws_gateway
@@ -154,7 +159,17 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     engine: AsyncEngine | None = None,
 ) -> FastAPI:
     """Build the FastAPI app."""
-    settings = settings or Settings()  # type: ignore[call-arg]
+    if settings is None:
+        from z4j_brain.configuration import (
+            capture_configuration,
+            export_snapshot_environment,
+            settings_from_snapshot,
+        )
+
+        snapshot = capture_configuration()
+        export_snapshot_environment(snapshot)
+        settings = settings_from_snapshot(snapshot)
+    command_timeout_seconds = settings.command_timeout_seconds
     configure_logging(level=settings.log_level, json_output=settings.log_json)
     # Optional error capture (Sentry). No-op when Z4J_SENTRY_DSN is
     # unset OR when ``sentry-sdk`` is not installed. Initialised here
@@ -241,7 +256,10 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     # to the same agent; the agent's in-memory dedup catches it
     # within 300s, but a process restart between the two pushes
     # would mean duplicate execution for destructive commands.
-    async def deliver_local(command_id: UUID, ws: WebSocket) -> bool:
+    async def deliver_local(  # noqa: PLR0911, PLR0912
+        command_id: UUID,
+        ws: WebSocket,
+    ) -> bool:
         from z4j_brain.persistence.repositories import CommandRepository
 
         async with db.session() as session:
@@ -249,13 +267,56 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
             command = await commands.get_for_dispatch(command_id)
             if command is None:
                 return False
+            registry_owner_id = getattr(
+                ws,
+                "_z4j_registry_owner_id",
+                None,
+            )
+            session_generation = getattr(
+                ws,
+                "_z4j_session_generation",
+                None,
+            )
+            selected_agent_id = getattr(ws, "_z4j_agent_id", None)
+            if (
+                registry_owner_id is not None
+                and session_generation is not None
+                and selected_agent_id is not None
+            ):
+                is_current, current_command = await commands.claim_current_schedule_delivery(
+                    command_id,
+                    project_id=command.project_id,
+                    agent_id=selected_agent_id,
+                    transport_kind="websocket",
+                    registry_owner_id=registry_owner_id,
+                    session_generation=str(session_generation),
+                    timeout_seconds=command_timeout_seconds,
+                )
+                if is_current:
+                    await session.commit()
+                    if current_command is None:
+                        return False
+                    command = current_command
+                    generation = command.dispatched_at
+                else:
+                    generation = None
+            else:
+                is_current = command.schedule_protocol_marker is not None
+                if is_current:
+                    return False
+                generation = None
             # Claim before push. If another caller already
-            # claimed (rowcount=0), bail without pushing.
-            claimed = await commands.mark_dispatched(command_id)
-            if not claimed:
+            # claimed (rowcount=0), bail without pushing.: capture the
+            # GENERATION so a later revert can only undo this exact claim.
+            if not is_current:
+                generation = await commands.mark_dispatched(
+                    command_id,
+                    timeout_seconds=command_timeout_seconds,
+                )
+                if not generation:
+                    await session.commit()
+                    return False
                 await session.commit()
-                return False
-            await session.commit()
 
         try:
             await ws_gateway.deliver_command_frame(
@@ -264,12 +325,64 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                 command=command,
             )
         except Exception:
+            if command.schedule_protocol_marker is not None:
+                logger.warning(
+                    "z4j main: current cadence send became ambiguous after "
+                    "its immutable delivery claim; refusing generic revert",
+                    command_id=str(command_id),
+                )
+                return False
+            # Only revert a REDELIVERABLE command on a send failure. For a
+            # non-idempotent action (purge/restart/retry/bulk/requeue) the send
+            # exception does NOT prove the bytes never reached and executed at the
+            # agent -- reverting would re-drive a possibly-already-run destructive
+            # op. Leave it DISPATCHED so CommandTimeoutWorker surfaces the
+            # ambiguous outcome (at-most-once). Redeliverable actions (fires,
+            # deduped on command_id in the agent's durable dedup; cancel/reconcile)
+            # revert and re-deliver as before.
+            from z4j_brain.persistence.repositories.commands import (
+                action_is_redeliverable,
+            )
+
+            if not action_is_redeliverable(command.action):
+                logger.warning(
+                    "z4j main: deliver_command_frame crashed AFTER claim for a "
+                    "non-redeliverable action %s; leaving DISPATCHED (at-most-once) "
+                    "for CommandTimeoutWorker to surface the ambiguous outcome",
+                    command.action,
+                    command_id=str(command_id),
+                )
+                return False
             logger.exception(
                 "z4j main: deliver_command_frame crashed AFTER claim - "
-                "command stuck in DISPATCHED state until "
-                "CommandTimeoutWorker expires it",
+                "reverting the DISPATCHED claim so the command is "
+                "re-deliverable",
                 command_id=str(command_id),
             )
+            # The push failed, so the agent did NOT receive the command.
+            # Revert the claim (DISPATCHED -> PENDING) so DISPATCHED keeps meaning
+            # "physically delivered".: pass the generation so a stale
+            # concurrent redispatch is never clobbered. Best-effort: if the revert
+            # itself fails, the row stays DISPATCHED and CommandTimeoutWorker
+            # eventually expires it, which is strictly no worse.
+            try:
+                async with db.session() as revert_session:
+                    reverted = await CommandRepository(revert_session).revert_dispatch(
+                        command_id,
+                        expected_dispatched_at=generation,
+                    )
+                    await revert_session.commit()
+                if not reverted:
+                    logger.warning(
+                        "z4j main: could not revert DISPATCHED claim (row already "
+                        "advanced / superseded); leaving to CommandTimeoutWorker",
+                        command_id=str(command_id),
+                    )
+            except Exception:
+                logger.exception(
+                    "z4j main: revert of DISPATCHED claim failed; leaving to CommandTimeoutWorker",
+                    command_id=str(command_id),
+                )
             return False
         return True
 
@@ -314,6 +427,11 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         registry=registry,
         audit=audit_service,
         dashboard_hub=dashboard_hub,
+    )
+    bulk_retry_coordinator = BulkRetryCoordinator(
+        db=db,
+        settings=settings,
+        registry=registry,
     )
 
     # ------------------------------------------------------------------
@@ -408,8 +526,17 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     # Now gated behind ``Z4J_SCHEDULER_GRPC_ENABLED``.
     _workers: list[PeriodicWorker] = [
         PeriodicWorker(
+            name="bulk_retry_coordinator",
+            tick=bulk_retry_coordinator.tick,
+            interval_seconds=float(settings.bulk_retry_scan_seconds),
+        ),
+        PeriodicWorker(
             name="command_timeout_worker",
-            tick=CommandTimeoutWorker(db).tick,
+            tick=CommandTimeoutWorker(
+                db,
+                audit=audit_service,
+                registry=registry,
+            ).tick,
             interval_seconds=float(settings.command_timeout_sweep_seconds),
         ),
         PeriodicWorker(
@@ -433,7 +560,7 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         ),
         PeriodicWorker(
             name="reconciliation_worker",
-            # Leader-locked (R3 M2(b)): pre-fix every brain process
+            # Leader-locked ((b)): pre-fix every brain process
             # ran its own sweep, so ``z4j serve``'s min(4, cpu)
             # workers each issued a duplicate ``reconcile_task``
             # probe per stuck task per interval. Same advisory-lock
@@ -445,7 +572,7 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                     db,
                     stale_threshold_seconds=(settings.reconciliation_stale_threshold_seconds),
                     # The sweep cadence doubles as the probe
-                    # idempotency-key window (R3 M2(c)).
+                    # idempotency-key window ((c)).
                     sweep_interval_seconds=(settings.reconciliation_sweep_seconds),
                     dispatcher=command_dispatcher,
                 ).tick,
@@ -546,6 +673,8 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         _pending_fires_replay = PendingFiresReplayWorker(
             db=db,
             dispatcher=command_dispatcher,
+            audit=audit_service,
+            command_timeout_seconds=settings.command_timeout_seconds,
         )
         _circuit_breaker = ScheduleCircuitBreakerWorker(
             db=db,
@@ -653,28 +782,33 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0912, PLR0915  startup/shutdown sequencing
+        embedded_scheduler_lock: Any = None
         logger.info(
             "z4j starting",
             version=__version__,
             environment=settings.environment,
         )
+
+        # Boundary F is the first database authority consulted at runtime.
+        # Verify the exact activated migration head plus the complete
+        # authenticated frozen/active audit snapshot before first-boot,
+        # schema-version bookkeeping, workers, or any other mutation.
         try:
-            await run_first_boot_check(
+            report = await verify_production_authority_at_startup(
                 db=db,
-                setup_service=setup_service,
                 settings=settings,
             )
         except Exception:
-            # CRITICAL severity: a failure here usually means the
-            # database is unreachable, which means the brain is
-            # going to fail every request that hits the DB. We
-            # still continue (so /api/v1/health stays up for the
-            # liveness probe) but the operator MUST see this in
-            # the logs without scrolling.
             logger.critical(
-                "z4j first-boot check failed; brain will be unhealthy on any DB-touching request",
+                "z4j REFUSING TO START: Boundary-F audit authority could not be authenticated",
                 exc_info=True,
             )
+            raise
+        logger.info(
+            "z4j Boundary-F audit authority verified",
+            active_rows=report.verified_active_rows,
+            frozen_rows=report.verified_frozen_rows,
+        )
 
         # Schema version check: verify the database was not migrated
         # by a newer version of z4j-brain. If it was, refuse to start
@@ -697,6 +831,19 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                 "z4j: schema version check failed (non-fatal)",
                 exc_info=True,
             )
+
+        try:
+            await run_first_boot_check(
+                db=db,
+                setup_service=setup_service,
+                settings=settings,
+            )
+        except Exception:
+            logger.critical(
+                "z4j first-boot check failed; refusing partially initialized service",
+                exc_info=True,
+            )
+            raise
 
         # Shared HTTP client for notification channel dispatchers
         # (PERF-04). One pooled client per worker process - keep-alive
@@ -948,11 +1095,11 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                 try_acquire_singleton_lock,
             )
 
-            got_lock = await try_acquire_singleton_lock(
+            embedded_scheduler_lock = await try_acquire_singleton_lock(
                 db,
                 "embedded_scheduler_supervisor",
             )
-            if not got_lock:
+            if embedded_scheduler_lock is None:
                 logger.info(
                     "z4j embedded scheduler: another brain worker holds "
                     "the supervisor lock; skipping spawn in this worker",
@@ -980,6 +1127,14 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                 try:
                     await embedded_supervisor.start()
                 except Exception:
+                    try:
+                        await embedded_scheduler_lock.release()
+                    except Exception:
+                        logger.exception(
+                            "z4j embedded scheduler singleton lock "
+                            "release after failed start crashed",
+                        )
+                    embedded_scheduler_lock = None
                     logger.critical(
                         "z4j embedded scheduler supervisor start "
                         "failed; brain will keep running but the embedded "
@@ -1013,6 +1168,18 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                     logger.exception(
                         "z4j embedded scheduler supervisor stop crashed",
                     )
+            # The PostgreSQL singleton lock is session-scoped. Release it
+            # only after the child is stopped, and before disposing the DB
+            # pool. Returning a still-locked connection to the pool would
+            # let an unrelated future borrower inherit the lock.
+            if embedded_scheduler_lock is not None:
+                try:
+                    await embedded_scheduler_lock.release()
+                except Exception:
+                    logger.exception(
+                        "z4j embedded scheduler singleton lock release crashed",
+                    )
+                embedded_scheduler_lock = None
             # Close the singleton TriggerScheduleClient (lazy-built
             # by the schedules trigger route). Failure here is non-
             # fatal - the channel is going away anyway.
@@ -1141,6 +1308,7 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     app.state.setup_service = setup_service
     app.state.event_ingestor = ingestor
     app.state.command_dispatcher = command_dispatcher
+    app.state.bulk_retry_coordinator = bulk_retry_coordinator
     app.state.brain_registry = registry
     app.state.dashboard_hub = dashboard_hub
     app.state.worker_supervisor = supervisor
@@ -1168,7 +1336,6 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     # Middleware (outermost first)
     # ------------------------------------------------------------------
     app.add_middleware(ErrorMiddleware)
-    app.add_middleware(SecurityHeadersMiddleware, settings=settings)
     app.add_middleware(HostValidationMiddleware, settings=settings)
     app.add_middleware(RequestIdMiddleware)
     app.add_middleware(RealClientIPMiddleware, resolver=proxy_resolver)
@@ -1194,6 +1361,15 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
             allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
         )
 
+    # SecurityHeaders is registered LAST so it is the OUTERMOST user
+    # middleware (Starlette wraps last-added outermost). Earlier it sat
+    # inside BodySizeLimit and HostValidation, so their early 413 / 400
+    # responses were returned WITHOUT the security headers -- breaking the
+    # "every response carries the baseline headers" invariant (B27). As the
+    # outermost layer it now stamps the headers on every response, including
+    # those early rejections and CORS preflights.
+    app.add_middleware(SecurityHeadersMiddleware, settings=settings)
+
     # ------------------------------------------------------------------
     # Routers
     # ------------------------------------------------------------------
@@ -1213,6 +1389,7 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     app.include_router(agent_workers_api.router, prefix="/api/v1")
     app.include_router(queues_api.router, prefix="/api/v1")
     app.include_router(commands_api.router, prefix="/api/v1")
+    app.include_router(bulk_retry_requests_api.router, prefix="/api/v1")
     app.include_router(automation_rules_api.router, prefix="/api/v1")
     app.include_router(automation_rules_api.settings_router, prefix="/api/v1")
     app.include_router(schedules_api.router, prefix="/api/v1")

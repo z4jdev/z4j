@@ -24,10 +24,8 @@
  */
 import { createFileRoute } from "@tanstack/react-router";
 import {
-  AlertTriangle,
   CheckCircle2,
   Clock,
-  RefreshCw,
   Server,
   WifiOff,
   XCircle,
@@ -36,7 +34,6 @@ import { PageHeader } from "@/components/domain/page-header";
 import { RefreshButton } from "@/components/domain/refresh-button";
 import { EmptyState } from "@/components/domain/empty-state";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -265,7 +262,6 @@ function FleetRow({ entry }: { entry: FleetEntry }) {
       </TableCell>
       <TableCell>
         <SubsystemDots
-          ready={info.ready}
           brainConnected={subsystems.brain_client_connected}
           cacheSynced={subsystems.cache_initial_sync_complete}
           leaderUp={subsystems.leader_gate_initialised}
@@ -320,12 +316,10 @@ function UptimeCell({ seconds }: { seconds?: number }) {
 }
 
 function SubsystemDots({
-  ready,
   brainConnected,
   cacheSynced,
   leaderUp,
 }: {
-  ready?: boolean;
   brainConnected?: boolean;
   cacheSynced?: boolean;
   leaderUp?: boolean;
@@ -354,8 +348,3 @@ function Dot({ label, ok }: { label: string; ok?: boolean }) {
     />
   );
 }
-
-// Suppress unused-import warning for AlertTriangle - kept around
-// for future row-level warning states (e.g. version skew within
-// the fleet).
-const _unused = AlertTriangle;

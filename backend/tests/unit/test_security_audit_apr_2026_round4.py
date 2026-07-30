@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 # =====================================================================
-# H-R4-1: total_runs SQL-side increment (atomicity)
+# H--1: total_runs SQL-side increment (atomicity)
 # =====================================================================
 
 
@@ -52,7 +52,7 @@ class TestR4TotalRunsAtomicIncrement:
 
 
 # =====================================================================
-# H-R4-2: CommandRepository.insert idempotency
+# H--2: CommandRepository.insert idempotency
 # =====================================================================
 
 
@@ -98,7 +98,7 @@ class TestR4CommandInsertIdempotent:
 
             # First insert - wins.
             async with db.session() as s:
-                row1 = await CommandRepository(s).insert(
+                row1, _ = await CommandRepository(s).insert(
                     project_id=project_id,
                     agent_id=None,
                     issued_by=None,
@@ -116,7 +116,7 @@ class TestR4CommandInsertIdempotent:
             # Second insert with the same idempotency_key - was
             # IntegrityError pre-fix; returns row1 post-fix.
             async with db.session() as s:
-                row2 = await CommandRepository(s).insert(
+                row2, _ = await CommandRepository(s).insert(
                     project_id=project_id,
                     agent_id=None,
                     issued_by=None,
@@ -165,7 +165,7 @@ class TestR4CommandInsertIdempotent:
 
 
 # =====================================================================
-# H-R4-3 / H-1 (worker): SAVEPOINT in repository idempotency paths
+# H--3 / H-1 (worker): SAVEPOINT in repository idempotency paths
 # =====================================================================
 
 
@@ -504,7 +504,7 @@ class TestR4NotificationDedupOnDuplicateAck:
                 await s.commit()
 
             async with db.session() as s:
-                _row1, first1 = await ScheduleFireRepository(
+                _row1, first1, _bs1 = await ScheduleFireRepository(
                     s,
                 ).acknowledge(
                     fire_id=fire_id,
@@ -515,7 +515,7 @@ class TestR4NotificationDedupOnDuplicateAck:
 
             # Second ack for the same fire_id - duplicate.
             async with db.session() as s:
-                _row2, first2 = await ScheduleFireRepository(
+                _row2, first2, _bs2 = await ScheduleFireRepository(
                     s,
                 ).acknowledge(
                     fire_id=fire_id,

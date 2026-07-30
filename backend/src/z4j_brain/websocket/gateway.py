@@ -20,6 +20,10 @@ Close codes:
 - ``4401`` - invalid bearer token
 - ``4400`` - first frame was not ``hello`` or shape was malformed
 - ``4426`` - protocol version not supported
+- ``4427`` - agent outside the supported version skew. RESERVED, not sent
+  yet: outdated agents treat unknown close codes as transient and would
+  reconnect-storm. See ``CLOSE_VERSION_SKEW``.
+- ``4429`` - agent connect rate limit exceeded
 - ``4002`` - replaced by a newer connection from the same agent
 - ``1000`` - clean shutdown
 - ``1011`` - internal server error
@@ -31,9 +35,11 @@ import asyncio
 import contextlib
 import json
 import uuid
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from collections.abc import Coroutine
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
+import anyio
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError as PydanticValidationError
@@ -55,20 +61,100 @@ from z4j_core.transport.versioning import SUPPORTED_PROTOCOLS
 from z4j_brain import (
     __version__ as BRAIN_VERSION,  # noqa: N812  conventional version-constant alias
 )
+from z4j_brain.domain.command_wire import wire_target
+from z4j_brain.domain.retry_contract import (
+    required_retry_engine,
+    retry_contracts_from_capabilities,
+)
+from z4j_brain.domain.version_check import ParsedVersion
 from z4j_brain.websocket.auth import resolve_agent_by_bearer
 from z4j_brain.websocket.frame_router import FrameRouter
 
 if TYPE_CHECKING:
     from z4j_brain.domain import CommandDispatcher, EventIngestor
+    from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.persistence.models import Command
     from z4j_brain.settings import Settings
-    from z4j_brain.websocket.registry import BrainRegistry
+    from z4j_brain.websocket.dashboard_hub import DashboardHub
+    from z4j_brain.websocket.registry import BrainRegistry, SessionHandle
 from z4j_brain.websocket.registry._protocol import WorkerCapExceeded
 
 logger = structlog.get_logger("z4j.brain.gateway")
 
 router = APIRouter(tags=["gateway"])
+
+#: Reserved close code for "agent is outside the supported version skew".
+#: NOT sent yet, deliberately. z4j-bare 1.8 learns to treat it as terminal;
+#: until 1.8 agents are the floor, closing with it would make outdated agents
+#: reconnect-storm, because they classify unknown close codes as transient.
+#: The brain starts using it once that floor is reached. See the skew comment
+#: in ``ws_agent`` and docs/UPGRADE.md.
+CLOSE_VERSION_SKEW = 4427
+
+#: How many minors an agent may trail the brain by, per docs/UPGRADE.md.
+_MAX_AGENT_MINOR_LAG = 1
+
+
+def _warn_on_version_skew(
+    *,
+    agent_id: uuid.UUID,
+    agent_version: str,
+    brain_version: str,
+) -> None:
+    """Log only when the agent is OUTSIDE the supported skew window.
+
+    Supported, and therefore silent: same major, agent minor equal to the
+    brain's or exactly one behind. That is the normal rolling-upgrade state and
+    warning about it trains operators to ignore the log.
+
+    Warned about:
+
+    - agent NEWER than the brain, which the contract forbids outright
+    - agent more than one minor behind, which is what a 1.6 -> 1.8 jump
+      produces and why docs/UPGRADE.md makes 1.7 a required stop
+    - a different major, where nothing is promised
+    """
+    # "0.0.0" is the sentinel an agent sends when it cannot determine its own
+    # version; skew is unknowable rather than wrong, so stay quiet.
+    if not agent_version or not brain_version or agent_version == "0.0.0":
+        return
+
+    agent = ParsedVersion.parse(agent_version)
+    brain = ParsedVersion.parse(brain_version)
+    if agent is None or brain is None:
+        logger.warning(
+            "z4j gateway: agent/brain version unparseable, skew unchecked",
+            agent_id=str(agent_id),
+            agent_version=agent_version,
+            brain_version=brain_version,
+        )
+        return
+
+    if agent.major == brain.major:
+        lag = brain.minor - agent.minor
+        if 0 <= lag <= _MAX_AGENT_MINOR_LAG:
+            return
+        reason = (
+            "agent is newer than the brain; the contract requires brain >= agent"
+            if lag < 0
+            else f"agent trails the brain by {lag} minors, "
+            f"maximum supported is {_MAX_AGENT_MINOR_LAG}"
+        )
+    else:
+        reason = "agent and brain are different majors; no compatibility is promised"
+
+    logger.warning(
+        "z4j gateway: agent outside the supported version skew",
+        agent_id=str(agent_id),
+        agent_version=str(agent),
+        brain_version=str(brain),
+        reason=reason,
+        remedy=(
+            "upgrade the agent to within one minor of the brain; see "
+            "docs/UPGRADE.md for the required intermediate versions"
+        ),
+    )
 
 
 @router.websocket("/ws/agent")
@@ -129,7 +215,7 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
         # Audit the rejection BEFORE closing the socket so the write
         # completes without racing the connection teardown.
         try:
-            async with db.session() as audit_session:
+            async with db.session(write=True) as audit_session:
                 await websocket.app.state.audit_service.record(
                     AuditLogRepository(audit_session),
                     action="agent.auth.bearer_failed",
@@ -179,22 +265,31 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
         await _safe_close(websocket, code=4426)
         return
 
-    # Version compatibility check: warn if agent and brain CalVer
-    # major.minor differ (e.g., agent 2026.4 vs brain 2026.5).
-    # We don't reject mismatches yet - just log a warning so
-    # operators know to upgrade their agents.
+    # Agent/brain version skew against the documented contract in
+    # docs/UPGRADE.md: brain minor >= agent minor, and the agent may be at
+    # most ONE minor behind, same major.
+    #
+    # The previous implementation compared major.minor for plain inequality and
+    # still reasoned about CalVer ("agent 2026.4 vs brain 2026.5") long after
+    # the move to SemVer. Equality is the wrong test: it fired on a 1.7 agent
+    # against a 1.8 brain, which the contract explicitly SUPPORTS, so the log
+    # could not distinguish a supported rolling upgrade from an unsupported
+    # one and operators learned to ignore it.
+    #
+    # Still a warning, not a rejection, and that is deliberate. A deployed
+    # 1.6/1.7 agent classifies any close code other than 4401/4403 as a
+    # transient ConnectionError and reconnects on the normal backoff, so
+    # rejecting here would make exactly the outdated agents we are rejecting
+    # reconnect-storm the brain. z4j-bare 1.8 adds terminal handling for
+    # CLOSE_VERSION_SKEW; once 1.8 agents are the floor, the brain can start
+    # closing with it. Same sequencing Celery used for the v1 -> v2 task
+    # protocol: teach the old side to cope first, enforce afterwards.
     agent_ver = getattr(first_frame.payload, "agent_version", "")
-    brain_ver = BRAIN_VERSION
-    if agent_ver and brain_ver and agent_ver != "0.0.0":
-        agent_parts = agent_ver.split(".")[:2]
-        brain_parts = brain_ver.split(".")[:2]
-        if agent_parts != brain_parts:
-            logger.warning(
-                "z4j gateway: agent/brain version mismatch",
-                agent_id=str(agent_id),
-                agent_version=agent_ver,
-                brain_version=brain_ver,
-            )
+    _warn_on_version_skew(
+        agent_id=agent_id,
+        agent_version=agent_ver,
+        brain_version=BRAIN_VERSION,
+    )
 
     # ------------------------------------------------------------------
     # 3) Update the agent row, send hello_ack
@@ -226,6 +321,10 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
             # Agents older than 1.0.3 may report empty / 0.0.0; the
             # dashboard renders ``unknown`` in that case.
             agent_version=(agent_ver if agent_ver and agent_ver != "0.0.0" else None),
+            # Runtime-wide flags remain sticky observability only. Boundary A
+            # derives retry authority from the hello's per-adapter capability
+            # map below and binds it to the immutable registry session.
+            runtime_features=list(getattr(first_frame.payload, "runtime_features", []) or []),
         )
         await db_session.commit()
 
@@ -316,31 +415,19 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
     async def _send_frame(out: Frame) -> None:
         await websocket.send_bytes(signer.sign_and_serialize(out))
 
-    frame_router = FrameRouter(
-        db=db,
-        ingestor=ingestor,
-        dispatcher=dispatcher,
-        project_id=project_id,
-        agent_id=agent_id,
-        dashboard_hub=getattr(websocket.app.state, "dashboard_hub", None),
-        worker_id=first_frame.payload.worker_id,
-        send_frame=_send_frame,
-        automation_notify_coalesce_seconds=settings.automation_notify_coalesce_seconds,
-        automation_outbox_max_rows_per_project=settings.automation_outbox_max_rows_per_project,
-    )
-
     # Worker-first protocol (1.2.0+): pull the optional worker_id
     # off the Hello payload and pass to the registry. None for
     # legacy 1.1.x agents - the registry preserves the historical
     # "one connection per agent_id" semantics for those.
     agent_worker_id = first_frame.payload.worker_id
     try:
-        await registry.register(
+        session_handle = await registry.register(
             project_id=project_id,
             agent_id=agent_id,
             ws=websocket,
             worker_id=agent_worker_id,
             cap=settings.ws_per_agent_concurrency_cap,
+            retry_contracts=retry_contracts_from_capabilities(first_frame.payload.capabilities),
         )
     except WorkerCapExceeded as exc:
         # Per-agent worker cap exceeded (1.2.1+, audit F2). Bound
@@ -356,6 +443,22 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
         )
         await _safe_close(websocket, code=4429)
         return
+
+    frame_router = FrameRouter(
+        db=db,
+        ingestor=ingestor,
+        dispatcher=dispatcher,
+        project_id=project_id,
+        agent_id=agent_id,
+        dashboard_hub=getattr(websocket.app.state, "dashboard_hub", None),
+        worker_id=first_frame.payload.worker_id,
+        transport_kind="websocket",
+        registry_owner_id=session_handle.registry_owner_id,
+        session_generation=str(session_handle.generation),
+        send_frame=_send_frame,
+        automation_notify_coalesce_seconds=settings.automation_notify_coalesce_seconds,
+        automation_outbox_max_rows_per_project=settings.automation_outbox_max_rows_per_project,
+    )
 
     # Worker-first persistence (1.2.1+): durable per-worker tracking
     # in agent_workers. Idempotent upsert; safe to retry on each
@@ -390,11 +493,26 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
         )
 
     try:
+        await _issue_external_schedule_activations(
+            db=db,
+            settings=settings,
+            dispatcher=dispatcher,
+            registry=registry,
+            session_handle=session_handle,
+            project_id=project_id,
+            agent_id=agent_id,
+            schedulers=list(first_frame.payload.schedulers),
+            capabilities={
+                key: list(value) for key, value in first_frame.payload.capabilities.items()
+            },
+            runtime_features=list(first_frame.payload.runtime_features),
+        )
         await _drain_pending_for_agent(
             db=db,
             settings=settings,
             agent_id=agent_id,
-            websocket=websocket,
+            session_handle=session_handle,
+            registry=registry,
         )
 
         # ------------------------------------------------------------------
@@ -599,66 +717,144 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
             with contextlib.suppress(Exception):
                 frame_router.aclose()
     finally:
-        # Pass our own
-        # ``websocket`` so the registry only evicts the entry IF it
-        # still points at us. v1.2.0: also pass worker_id so the
-        # registry only drops THIS worker's slot, not all slots
-        # under this agent_id.
-        # v1.2.1 (audit F3 fix): use the atomic return value rather
-        # than a separate ``is_online`` check. Pre-1.2.1 the gateway
-        # called ``unregister`` then ``is_online`` then ``mark_offline``
-        # - between the second and third calls, another worker could
-        # register, making the brain DB say offline while a worker
-        # was actually connected. ``unregister`` now returns whether
-        # the LAST worker was just removed, decided under the
-        # registry lock.
-        last_worker_gone = await registry.unregister(
-            agent_id,
-            ws=websocket,
-            worker_id=agent_worker_id,
+        await _finish_registered_connection_before_cancelling(
+            _cleanup_registered_connection(
+                registry=registry,
+                agent_id=agent_id,
+                websocket=websocket,
+                agent_worker_id=agent_worker_id,
+                db=db,
+                connect_at=connect_at,
+                dashboard_hub=dashboard_hub,
+                project_id=project_id,
+                audit=dispatcher.audit,
+                registry_owner_id=session_handle.registry_owner_id,
+                session_generation=str(session_handle.generation),
+            ),
         )
-        # Worker-first persistence (1.2.1+): flip THIS worker's row
-        # to offline regardless of whether others remain. The agent-
-        # level mark_offline only fires on the last-worker-gone case
-        # (atomic via the registry return value, F3 fix).
-        try:
-            async with db.session() as db_session:
-                await AgentWorkerRepository(db_session).mark_offline(
-                    agent_id=agent_id,
-                    worker_id=agent_worker_id,
-                )
-                if last_worker_gone:
-                    # Pass connect_at so the conditional
-                    # WHERE clause in mark_offline skips the row when a
-                    # fresher reconnect has already bumped last_connect_at.
-                    # Without this guard the late mark_offline would pin
-                    # the agent to state=offline indefinitely while the
-                    # new ws + heartbeats stream uninterrupted.
-                    await AgentRepository(db_session).mark_offline(
-                        agent_id,
-                        captured_at=connect_at,
-                    )
-                await db_session.commit()
-        except Exception:
-            logger.exception(
-                "z4j gateway: agent_worker offline flip failed",
-                agent_id=str(agent_id),
-                worker_id=agent_worker_id,
-            )
-        if dashboard_hub is not None:
-            try:
-                await dashboard_hub.publish_agent_change(project_id)
-            except Exception:
-                logger.exception(
-                    "z4j gateway: dashboard agent offline publish failed",
-                    agent_id=str(agent_id),
-                )
-        await _safe_close(websocket, code=1000)
 
 
 # ---------------------------------------------------------------------------
 # Module-private helpers
 # ---------------------------------------------------------------------------
+
+
+async def _finish_registered_connection_before_cancelling(
+    cleanup: Coroutine[Any, Any, None],
+) -> None:
+    """Finish registered-agent cleanup before propagating cancellation.
+
+    ASGI servers may cancel a WebSocket handler as soon as the peer's close
+    frame is observed.  The registered connection still owns durable
+    worker/agent state and may be between SQLAlchemy checkout and pre-ping.
+    Letting cancellation land there both skips the offline flip and can strand
+    an async pooled connection until cycle-GC.  Run cleanup in its own task,
+    shield it from the first cancellation, await it to completion, and only
+    then re-raise the caller's cancellation.
+    """
+    with anyio.CancelScope(shield=True):
+        cleanup_task = asyncio.create_task(
+            cleanup,
+            name="z4j-gateway-registered-connection-cleanup",
+        )
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            await cleanup_task
+            raise
+
+
+async def _cleanup_registered_connection(
+    *,
+    registry: BrainRegistry,
+    agent_id: uuid.UUID,
+    websocket: WebSocket,
+    agent_worker_id: str | None,
+    db: DatabaseManager,
+    connect_at: datetime,
+    dashboard_hub: DashboardHub | None,
+    project_id: uuid.UUID,
+    audit: AuditService,
+    registry_owner_id: uuid.UUID,
+    session_generation: str,
+) -> None:
+    """Unregister one connection and persist its final offline state."""
+    from z4j_brain.persistence.repositories import (
+        AgentRepository,
+        AgentWorkerRepository,
+        AuditLogRepository,
+        ScheduleExternalRepository,
+    )
+
+    # Pass our own ``websocket`` so the registry only evicts the entry IF it
+    # still points at us. v1.2.0: also pass worker_id so the registry only
+    # drops THIS worker's slot, not all slots under this agent_id.
+    #
+    # v1.2.1 (audit F3 fix): use the atomic return value rather than a separate
+    # ``is_online`` check. ``unregister`` returns whether the LAST worker was
+    # removed, decided under the registry lock.
+    last_worker_gone = await registry.unregister(
+        agent_id,
+        ws=websocket,
+        worker_id=agent_worker_id,
+    )
+    # Worker-first persistence: flip THIS worker's row to offline regardless
+    # of whether others remain. The agent-level flip only fires when the last
+    # worker is gone.
+    try:
+        async with db.session(write=True) as db_session:
+            ambiguous_operations = await ScheduleExternalRepository(
+                db_session,
+            ).mark_claimed_controls_for_executor_loss(
+                project_id=project_id,
+                agent_id=agent_id,
+                registry_owner_id=registry_owner_id,
+                session_generation=session_generation,
+                occurred_at=datetime.now(UTC),
+            )
+            for operation_id in ambiguous_operations:
+                await audit.record(
+                    AuditLogRepository(db_session),
+                    action="schedule.external_control.executor_lost",
+                    target_type="schedule_external_control_operation",
+                    target_id=str(operation_id),
+                    result="ambiguous",
+                    outcome="failure",
+                    project_id=project_id,
+                    metadata={
+                        "operation_id": str(operation_id),
+                        "agent_id": str(agent_id),
+                        "registry_owner_id": str(registry_owner_id),
+                        "session_generation": session_generation,
+                    },
+                )
+            await AgentWorkerRepository(db_session).mark_offline(
+                agent_id=agent_id,
+                worker_id=agent_worker_id,
+            )
+            if last_worker_gone:
+                # The captured mark-online time prevents this connection's
+                # late cleanup from clobbering a fresher reconnect.
+                await AgentRepository(db_session).mark_offline(
+                    agent_id,
+                    captured_at=connect_at,
+                )
+            await db_session.commit()
+    except Exception:
+        logger.exception(
+            "z4j gateway: agent_worker offline flip failed",
+            agent_id=str(agent_id),
+            worker_id=agent_worker_id,
+        )
+    if dashboard_hub is not None:
+        try:
+            await dashboard_hub.publish_agent_change(project_id)
+        except Exception:
+            logger.exception(
+                "z4j gateway: dashboard agent offline publish failed",
+                agent_id=str(agent_id),
+            )
+    await _safe_close(websocket, code=1000)
 
 
 class _BadFrameError(Exception):
@@ -739,12 +935,194 @@ def _registry_from(ws: WebSocket) -> BrainRegistry:
 # ---------------------------------------------------------------------------
 
 
+async def _issue_external_schedule_activations(
+    *,
+    db: DatabaseManager,
+    settings: Settings,
+    dispatcher: CommandDispatcher,
+    registry: BrainRegistry,
+    session_handle: SessionHandle,
+    project_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    schedulers: list[str],
+    capabilities: dict[str, list[str]],
+    runtime_features: list[str],
+) -> int:
+    """Assign fresh stable sources to this exact WebSocket generation."""
+    from z4j_core.schedule_external import (
+        EXTERNAL_SCHEDULE_RUNTIME_FEATURE,
+        EXTERNAL_SCHEDULE_STABLE_SNAPSHOT_CAPABILITY,
+        external_schedule_source_scope,
+    )
+
+    if EXTERNAL_SCHEDULE_RUNTIME_FEATURE not in runtime_features:
+        return 0
+
+    from z4j_brain.persistence.repositories import (
+        AuditLogRepository,
+        CommandRepository,
+    )
+    from z4j_brain.persistence.repositories.schedule_external import (
+        ScheduleExternalRepository,
+    )
+
+    delivered = 0
+    for owner in sorted(set(schedulers)):
+        if EXTERNAL_SCHEDULE_STABLE_SNAPSHOT_CAPABILITY not in capabilities.get(owner, ()):
+            continue
+        adapter_instance_id = str(uuid.uuid4())
+        source_scope = external_schedule_source_scope(owner)
+        try:
+            async with db.session(write=True) as session:
+                external = ScheduleExternalRepository(session)
+                stream = await external.ensure_activation_epoch(
+                    project_id=project_id,
+                    owner=owner,
+                    source_scope=source_scope,
+                    occurred_at=datetime.now(UTC),
+                    adapter_instance_id=adapter_instance_id,
+                    executor_agent_id=agent_id,
+                    executor_registry_owner_id=(session_handle.registry_owner_id),
+                    executor_session_generation=str(
+                        session_handle.generation,
+                    ),
+                    executor_worker_id=session_handle.worker_id,
+                )
+                if stream.phase == "RESTORE_REACTIVATION_REQUIRED":
+                    stream = await external.ensure_activation_epoch(
+                        project_id=project_id,
+                        owner=owner,
+                        source_scope=source_scope,
+                        occurred_at=datetime.now(UTC),
+                        adapter_instance_id=adapter_instance_id,
+                        executor_agent_id=agent_id,
+                        executor_registry_owner_id=(session_handle.registry_owner_id),
+                        executor_session_generation=str(
+                            session_handle.generation,
+                        ),
+                        executor_worker_id=session_handle.worker_id,
+                        reactivate_restored=True,
+                    )
+                replaced_undelivered = False
+                if (
+                    stream.phase == "ACTIVATING"
+                    and stream.accepted_sequence == 0
+                    and stream.activation_requirement is None
+                    and stream.authorized_adapter_instance_id != adapter_instance_id
+                ):
+                    replaced_undelivered = await external.abandon_undelivered_activation(
+                        project_id=project_id,
+                        stream_id=stream.id,
+                        occurred_at=datetime.now(UTC),
+                    )
+                    if replaced_undelivered:
+                        stream = await external.ensure_activation_epoch(
+                            project_id=project_id,
+                            owner=owner,
+                            source_scope=source_scope,
+                            occurred_at=datetime.now(UTC),
+                            adapter_instance_id=adapter_instance_id,
+                            executor_agent_id=agent_id,
+                            executor_registry_owner_id=(session_handle.registry_owner_id),
+                            executor_session_generation=str(
+                                session_handle.generation,
+                            ),
+                            executor_worker_id=session_handle.worker_id,
+                            replace_retired=True,
+                        )
+                if (
+                    stream.phase != "ACTIVATING"
+                    or stream.accepted_sequence != 0
+                    or stream.activation_requirement is not None
+                    or stream.authorized_adapter_instance_id != adapter_instance_id
+                ):
+                    await session.rollback()
+                    continue
+                payload = {
+                    "scheduler": owner,
+                    "owner": owner,
+                    "source_scope": source_scope,
+                    "stream_id": str(stream.id),
+                    "epoch_uuid": str(stream.current_epoch_uuid),
+                    "epoch_number": stream.current_epoch_number,
+                    "adapter_instance_id": adapter_instance_id,
+                    "stable_source": True,
+                    "registry_owner_id": str(
+                        session_handle.registry_owner_id,
+                    ),
+                    "session_generation": str(session_handle.generation),
+                }
+                command, created = await CommandRepository(session).insert(
+                    project_id=project_id,
+                    agent_id=agent_id,
+                    issued_by=None,
+                    action="schedule.external.activate",
+                    target_type="scheduler",
+                    target_id=owner,
+                    payload=payload,
+                    idempotency_key=(
+                        f"external-activation:{stream.current_epoch_uuid}:{adapter_instance_id}"
+                    ),
+                    timeout_at=datetime.now(UTC)
+                    + timedelta(
+                        seconds=settings.command_timeout_seconds,
+                    ),
+                    source_ip=None,
+                    enforce_payload_identity=True,
+                )
+                if not created:
+                    await session.rollback()
+                    continue
+                await dispatcher.audit.record(
+                    AuditLogRepository(session),
+                    action="schedule.external.activate",
+                    target_type="schedule_external_stream",
+                    target_id=str(stream.id),
+                    result="success",
+                    outcome="allow",
+                    project_id=project_id,
+                    metadata={
+                        "command_id": str(command.id),
+                        "agent_id": str(agent_id),
+                        "worker_id": session_handle.worker_id,
+                        "registry_owner_id": str(
+                            session_handle.registry_owner_id,
+                        ),
+                        "session_generation": str(
+                            session_handle.generation,
+                        ),
+                        "owner": owner,
+                        "source_scope": source_scope,
+                        "epoch_uuid": str(stream.current_epoch_uuid),
+                        "epoch_number": stream.current_epoch_number,
+                        "adapter_instance_id": adapter_instance_id,
+                        "replaced_undelivered_activation": (replaced_undelivered),
+                    },
+                )
+                await session.commit()
+                command_id = command.id
+            if await registry.deliver_exact(
+                command_id=command_id,
+                session=session_handle,
+            ):
+                delivered += 1
+        except Exception:
+            logger.exception(
+                "z4j gateway: external schedule activation issue failed",
+                project_id=str(project_id),
+                agent_id=str(agent_id),
+                owner=owner,
+            )
+    return delivered
+
+
 async def _drain_pending_for_agent(
     *,
     db: DatabaseManager,
     settings: Settings,
     agent_id: uuid.UUID,
-    websocket: WebSocket,
+    session_handle: SessionHandle,
+    registry: BrainRegistry | None = None,
 ) -> None:
     """Push every pending command targeting this agent.
 
@@ -752,17 +1130,33 @@ async def _drain_pending_for_agent(
     was offline at the moment a command was issued - the row was
     persisted with ``status='pending'`` and is now waiting for us.
     """
-    from sqlalchemy import select
+    from sqlalchemy import and_, or_, select
 
+    from z4j_brain.domain.retry_contract import RETRY_FAMILY_ACTIONS
     from z4j_brain.persistence.enums import CommandStatus
     from z4j_brain.persistence.models import Command
 
+    retry_engines = tuple(
+        engine for engine, version in session_handle.retry_contracts if version == 1
+    )
+    session_eligible = or_(
+        ~Command.action.in_(RETRY_FAMILY_ACTIONS),
+        and_(
+            Command.action == "retry_task",
+            Command.payload["engine"].as_string().in_(retry_engines),
+        ),
+        and_(
+            Command.action == "bulk_retry",
+            Command.payload["filter"]["engine"].as_string().in_(retry_engines),
+        ),
+    )
     async with db.session() as session:
         result = await session.execute(
             select(Command)
             .where(
                 Command.agent_id == agent_id,
                 Command.status == CommandStatus.PENDING,
+                session_eligible,
             )
             .order_by(Command.issued_at.asc())
             .limit(500),
@@ -770,6 +1164,21 @@ async def _drain_pending_for_agent(
         commands = list(result.scalars().all())
 
     for cmd in commands:
+        # Boundary A: this reconnect drain belongs to exactly the newly
+        # registered session generation. An old colocated adapter cannot claim
+        # a retry merely because another worker under the agent id attested.
+        if not session_handle.supports_retry_engine(required_retry_engine(cmd.action, cmd.payload)):
+            continue
+        if registry is not None:
+            # Production reaches the database claim and physical send only
+            # while this exact immutable generation remains registered.  The
+            # registry holds its map lock across the callback, so a replacement
+            # cannot slip between those edges.
+            await registry.deliver_exact(
+                command_id=cmd.id,
+                session=session_handle,
+            )
+            continue
         # Claim FIRST, push second. Otherwise the registry's
         # reconcile loop could see this same PENDING command and
         # concurrently push it to the same agent - causing
@@ -782,26 +1191,87 @@ async def _drain_pending_for_agent(
         async with db.session() as session:
             from z4j_brain.persistence.repositories import CommandRepository
 
-            claimed = await CommandRepository(session).mark_dispatched(
+            commands = CommandRepository(session)
+            is_current, current_command = await commands.claim_current_schedule_delivery(
                 cmd.id,
+                project_id=cmd.project_id,
+                agent_id=session_handle.agent_id,
+                transport_kind="websocket",
+                registry_owner_id=session_handle.registry_owner_id,
+                session_generation=str(session_handle.generation),
+                timeout_seconds=settings.command_timeout_seconds,
             )
+            if is_current:
+                generation = current_command.dispatched_at if current_command is not None else None
+                command_to_send = current_command or cmd
+            else:
+                generation = await commands.mark_dispatched(
+                    cmd.id,
+                    timeout_seconds=settings.command_timeout_seconds,
+                )
+                command_to_send = cmd
             await session.commit()
-        if not claimed:
+        if not generation:
             # Another worker / replica already claimed it.
             continue
         try:
             await deliver_command_frame(
-                websocket=websocket,
+                websocket=session_handle.websocket,
                 settings=settings,
-                command=cmd,
+                command=command_to_send,
             )
         except Exception:
-            logger.exception(
-                "z4j gateway: drain push failed AFTER claim - command "
-                "is stuck in DISPATCHED state until CommandTimeoutWorker "
-                "expires it. Continuing with the next command.",
-                command_id=str(cmd.id),
+            if command_to_send.schedule_protocol_marker is not None:
+                logger.warning(
+                    "z4j gateway: current cadence drain send became ambiguous "
+                    "after its immutable claim; refusing generic revert",
+                    command_id=str(command_to_send.id),
+                )
+                continue
+            # Only revert a REDELIVERABLE command on a send failure -- the
+            # send exception does not prove a non-idempotent action never reached
+            # and executed at the agent, so reverting a destructive command would
+            # re-drive a possibly-already-run side effect. Leave it DISPATCHED for
+            # CommandTimeoutWorker (at-most-once).
+            from z4j_brain.persistence.repositories.commands import (
+                CommandRepository,
+                action_is_redeliverable,
             )
+
+            if not action_is_redeliverable(command_to_send.action):
+                logger.warning(
+                    "z4j gateway: drain push failed AFTER claim for a "
+                    "non-redeliverable action %s; leaving DISPATCHED "
+                    "(at-most-once). Continuing with the next command.",
+                    command_to_send.action,
+                    command_id=str(command_to_send.id),
+                )
+                continue
+            logger.exception(
+                "z4j gateway: drain push failed AFTER claim - reverting the "
+                "DISPATCHED claim so the command is re-drivable. Continuing "
+                "with the next command.",
+                command_id=str(command_to_send.id),
+            )
+            # The claim (mark_dispatched) was committed but the push
+            # failed, so the agent never received the frame. Revert the claim
+            # DISPATCHED->PENDING (mirroring deliver_local's failed-push revert)
+            # so the invariant DISPATCHED == physically delivered holds.:
+            # pass the generation so a concurrent redispatch is never clobbered.
+            try:
+                async with db.session() as revert_session:
+                    await CommandRepository(revert_session).revert_dispatch(
+                        command_to_send.id,
+                        timeout_seconds=settings.command_timeout_seconds,
+                        expected_dispatched_at=generation,
+                    )
+                    await revert_session.commit()
+            except Exception:
+                logger.exception(
+                    "z4j gateway: failed to revert DISPATCHED claim after a "
+                    "drain push failure; CommandTimeoutWorker will retire it.",
+                    command_id=str(command_to_send.id),
+                )
             # Continue draining so a single push failure doesn't
             # strand the whole batch.
             continue
@@ -836,18 +1306,27 @@ async def deliver_command_frame(
         )
     payload = CommandPayload(
         action=command.action,
-        target={
-            "type": command.target_type,
-            "id": command.target_id,
-        },
+        target=wire_target(command.target_type, command.target_id, command.payload),
         parameters=command.payload,
         timeout_seconds=settings.command_timeout_seconds,
         issued_by=str(command.issued_by) if command.issued_by else None,
+        delivery_claim_token=(
+            str(command.delivery_claim_token) if command.delivery_claim_token is not None else None
+        ),
     )
     frame = CommandFrame(
         id=str(command.id),
         payload=payload,
     )
+    validate_generation = getattr(
+        websocket,
+        "_z4j_validate_registry_generation",
+        None,
+    )
+    if validate_generation is not None and not await validate_generation():
+        raise RuntimeError(
+            "selected websocket generation was replaced before physical delivery",
+        )
     await websocket.send_bytes(signer.sign_and_serialize(frame))
 
 

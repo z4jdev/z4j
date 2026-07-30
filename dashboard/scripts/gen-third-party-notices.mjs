@@ -1,0 +1,133 @@
+#!/usr/bin/env node
+/**
+ * gen-third-party-notices.mjs -- regenerate public/THIRD-PARTY-NOTICES.txt.
+ *
+ * The production dashboard bundle ships minified third-party JS (React,
+ * Radix, TanStack, ...) with their source @license banners stripped by
+ * the bundler. Permissive licenses (MIT / ISC / BSD / Apache-2.0)
+ * require conveying the copyright + permission notice with the
+ * distribution, so this script aggregates every PRODUCTION dependency's
+ * name, version, license, and author into one attribution file that
+ * vite copies from public/ into every dist (the PyPI wheel bundle AND
+ * the demo deployment serve it at /THIRD-PARTY-NOTICES.txt).
+ *
+ * Run after dependency changes, then commit the regenerated file:
+ *
+ *   pnpm --config.verify-deps-before-run=false exec \
+ *     node scripts/gen-third-party-notices.mjs
+ *
+ * Data source: `pnpm licenses list --prod --json` (the resolved
+ * lockfile graph, so transitive runtime deps are included).
+ */
+
+import { execSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = resolve(here, "..");
+
+const raw = execSync(
+  "pnpm --config.verify-deps-before-run=false licenses list --prod --json",
+  { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+);
+const byLicense = JSON.parse(raw);
+
+const LICENSE_TEXTS = {
+  MIT: `Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.`,
+  ISC: `Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.`,
+  "0BSD": `Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.`,
+  "Apache-2.0": `Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use these files except in compliance with the License. You may obtain a copy
+of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations under
+the License.`,
+  Unlicense: `This is free and unencumbered software released into the public domain. For
+the full text see https://unlicense.org/`,
+};
+
+const lines = [];
+lines.push("THIRD-PARTY SOFTWARE NOTICES");
+lines.push("============================");
+lines.push("");
+lines.push(
+  "The z4j dashboard bundles the following third-party JavaScript",
+  "packages (production dependency graph, including transitive",
+  "dependencies). Each is used under its stated license; the license",
+  "texts are reproduced at the end of this file. This file is",
+  "regenerated by scripts/gen-third-party-notices.mjs.",
+);
+lines.push("");
+
+const licenseNames = Object.keys(byLicense).sort();
+for (const lic of licenseNames) {
+  const pkgs = [...byLicense[lic]].sort((a, b) => a.name.localeCompare(b.name));
+  lines.push(`## ${lic} (${pkgs.length} package${pkgs.length === 1 ? "" : "s"})`);
+  lines.push("");
+  for (const p of pkgs) {
+    const versions = (p.versions || []).join(", ");
+    const author =
+      typeof p.author === "string" && p.author.trim() ? ` -- ${p.author.trim()}` : "";
+    const home = p.homepage ? ` (${p.homepage})` : "";
+    lines.push(`- ${p.name} ${versions}${author}${home}`);
+  }
+  lines.push("");
+}
+
+lines.push("");
+lines.push("LICENSE TEXTS");
+lines.push("=============");
+for (const lic of licenseNames) {
+  lines.push("");
+  lines.push(`### ${lic}`);
+  lines.push("");
+  lines.push(LICENSE_TEXTS[lic] ?? `See https://spdx.org/licenses/${lic}.html`);
+}
+lines.push("");
+
+const out = resolve(root, "public", "THIRD-PARTY-NOTICES.txt");
+writeFileSync(out, lines.join("\n"), "utf8");
+const count = Object.values(byLicense).reduce((n, v) => n + v.length, 0);
+console.log(`[third-party-notices] wrote ${out} (${count} packages, ${licenseNames.length} licenses)`);

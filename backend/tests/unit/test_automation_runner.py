@@ -1,4 +1,4 @@
-"""Real automation ActionRunner: in-app notify + retry/cancel (R2 wiring)."""
+"""Real automation ActionRunner: in-app notify + retry/cancel."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from z4j_brain.errors import AgentOfflineError
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.persistence.models import (
+    Agent,
     Membership,
     Project,
     Task,
@@ -304,3 +305,126 @@ class TestRunner:
             fields={},
         )
         assert outcome == "unsupported"
+
+
+async def _agent(session, project_id, *, runtime_features, agent_id=None):
+    agent = Agent(
+        id=agent_id or uuid.uuid4(),
+        project_id=project_id,
+        name="a",
+        token_hash=uuid.uuid4().hex,
+        protocol_version="2",
+        framework_adapter="bare",
+        agent_metadata={"runtime_features": list(runtime_features)},
+    )
+    session.add(agent)
+    await session.flush()
+    return agent
+
+
+def test_retry_contract_helpers() -> None:
+    from z4j_brain.domain.retry_contract import (
+        engine_is_native_retry,
+        polyfill_retry_has_operator_overrides,
+    )
+
+    assert engine_is_native_retry("celery") is True
+    assert engine_is_native_retry("rq") is True
+    assert engine_is_native_retry("dramatiq") is True
+    assert engine_is_native_retry("huey") is False
+    assert engine_is_native_retry(None) is False
+    # Both override halves present -> safe; either absent -> not.
+    assert polyfill_retry_has_operator_overrides([], {}) is True
+    assert polyfill_retry_has_operator_overrides(None, {}) is False
+    assert polyfill_retry_has_operator_overrides([], None) is False
+    assert polyfill_retry_has_operator_overrides(None, None) is False
+
+
+@pytest.mark.asyncio
+class TestRetryCapabilityGateRH1:
+    """RH1 (direction 1): an automation auto-retry of a POLYFILL engine is
+    refused STATICALLY -- the engine has no native retry so the agent lowers it
+    to a re-submit, the brain's stored arguments are redacted, and an automation
+    rule supplies no operator overrides, so no runtime version could re-run it
+    safely. The refusal does NOT depend on any negotiated runtime-capability
+    record (which is per-agent, last-writer-wins, and absent on long-poll).
+    Native engines retry by reference and are never gated."""
+
+    async def test_polyfill_retry_refused_without_feature(self, session: AsyncSession) -> None:
+        project, user = await _project_with_member(session, role=ProjectRole.ADMIN)
+        agent = await _agent(session, project.id, runtime_features=[])  # pre-1.7.1
+        session.add(
+            Task(id=uuid.uuid4(), project_id=project.id, engine="huey", task_id="h1", name="app.t"),
+        )
+        await session.flush()
+        disp = _FakeDispatcher()
+        runner = AutomationActionRunner(dispatcher=disp)
+        outcome = await runner.run(
+            session=session,
+            rule=_rule(project.id, name="r", created_by=user.id),
+            action_spec={"type": "retry"},
+            fields={"task_id": "h1", "engine": "huey", "agent_id": agent.id},
+        )
+        assert outcome == "polyfill_retry_needs_overrides"
+        assert disp.calls == []  # NOT dispatched
+
+    async def test_polyfill_retry_refused_even_with_feature_flag(
+        self, session: AsyncSession
+    ) -> None:
+        # Even a 1.7.1 agent advertising "retry_by_reference" cannot receive an
+        # automation polyfill retry: the rule carries no operator overrides, so
+        # the re-submit would still run with wrong inputs. The advisory flag must
+        # NOT override the static refusal.
+        project, user = await _project_with_member(session, role=ProjectRole.ADMIN)
+        agent = await _agent(session, project.id, runtime_features=["retry_by_reference"])
+        session.add(
+            Task(id=uuid.uuid4(), project_id=project.id, engine="huey", task_id="h2", name="app.t"),
+        )
+        await session.flush()
+        disp = _FakeDispatcher()
+        runner = AutomationActionRunner(dispatcher=disp)
+        outcome = await runner.run(
+            session=session,
+            rule=_rule(project.id, name="r", created_by=user.id),
+            action_spec={"type": "retry"},
+            fields={"task_id": "h2", "engine": "huey", "agent_id": agent.id},
+        )
+        assert outcome == "polyfill_retry_needs_overrides"
+        assert disp.calls == []
+
+    async def test_polyfill_retry_refused_when_agent_missing(self, session: AsyncSession) -> None:
+        # The static refusal does not even consult the agent record.
+        project, user = await _project_with_member(session, role=ProjectRole.ADMIN)
+        session.add(
+            Task(id=uuid.uuid4(), project_id=project.id, engine="huey", task_id="h3", name="app.t"),
+        )
+        await session.flush()
+        disp = _FakeDispatcher()
+        runner = AutomationActionRunner(dispatcher=disp)
+        outcome = await runner.run(
+            session=session,
+            rule=_rule(project.id, name="r", created_by=user.id),
+            action_spec={"type": "retry"},
+            fields={"task_id": "h3", "engine": "huey", "agent_id": uuid.uuid4()},
+        )
+        assert outcome == "polyfill_retry_needs_overrides"
+        assert disp.calls == []
+
+    async def test_native_retry_not_gated(self, session: AsyncSession) -> None:
+        # celery is native -> the gate is skipped even with no agent row.
+        project, user = await _project_with_member(session, role=ProjectRole.ADMIN)
+        session.add(
+            Task(
+                id=uuid.uuid4(), project_id=project.id, engine="celery", task_id="c1", name="app.t"
+            ),
+        )
+        await session.flush()
+        disp = _FakeDispatcher()
+        runner = AutomationActionRunner(dispatcher=disp)
+        outcome = await runner.run(
+            session=session,
+            rule=_rule(project.id, name="r", created_by=user.id),
+            action_spec={"type": "retry"},
+            fields={"task_id": "c1", "engine": "celery", "agent_id": uuid.uuid4()},
+        )
+        assert outcome == "issued"

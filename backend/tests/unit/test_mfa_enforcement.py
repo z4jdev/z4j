@@ -193,6 +193,9 @@ def gate_request(method: str = "GET", path: str = "/api/v1/projects"):  # type: 
         scope={"route": SimpleNamespace(path=path)},
         method=method,
         url=SimpleNamespace(path=path),
+        # get_current_user stashes the resolved user here (B17); a real
+        # Starlette request.state is always assignable.
+        state=SimpleNamespace(),
     )
 
 

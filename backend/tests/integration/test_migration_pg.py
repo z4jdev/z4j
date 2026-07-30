@@ -18,10 +18,13 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import uuid
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 from z4j_brain.settings import Settings
 
@@ -46,7 +49,13 @@ def _alembic_config(settings: Settings):
     return cfg
 
 
-async def _run_alembic(settings: Settings, action: str, target: str) -> None:
+async def _run_alembic(
+    settings: Settings,
+    action: str,
+    target: str,
+    *,
+    config_attributes: Mapping[str, object] | None = None,
+) -> None:
     """Run ``alembic upgrade <target>`` or ``alembic downgrade <target>``.
 
     Mirrors the env-var wiring from the ``migrated_engine`` fixture
@@ -55,12 +64,15 @@ async def _run_alembic(settings: Settings, action: str, target: str) -> None:
     from alembic import command
 
     cfg = _alembic_config(settings)
+    if config_attributes is not None:
+        cfg.attributes.update(config_attributes)
     saved = {
         k: os.environ.get(k)
         for k in (
             "Z4J_DATABASE_URL",
             "Z4J_SECRET",
             "Z4J_SESSION_SECRET",
+            "Z4J_AUDIT_CHAIN_SECRET",
             "Z4J_ENVIRONMENT",
             "Z4J_REQUIRE_DB_SSL",
         )
@@ -69,6 +81,8 @@ async def _run_alembic(settings: Settings, action: str, target: str) -> None:
         os.environ["Z4J_DATABASE_URL"] = settings.database_url
         os.environ["Z4J_SECRET"] = settings.secret.get_secret_value()
         os.environ["Z4J_SESSION_SECRET"] = settings.session_secret.get_secret_value()
+        assert settings.audit_chain_secret is not None
+        os.environ["Z4J_AUDIT_CHAIN_SECRET"] = settings.audit_chain_secret.get_secret_value()
         os.environ["Z4J_ENVIRONMENT"] = "dev"
         os.environ["Z4J_REQUIRE_DB_SSL"] = "false"
         runner = command.upgrade if action == "upgrade" else command.downgrade
@@ -84,10 +98,527 @@ async def _run_alembic(settings: Settings, action: str, target: str) -> None:
                 os.environ[k] = v
 
 
+async def test_alembic_upgrade_shares_the_schema_transition_lock(
+    integration_engine: AsyncEngine,
+    integration_settings: Settings,
+) -> None:
+    from z4j_brain.schema_transition import (
+        SCHEMA_TRANSITION_ADVISORY_LOCK_KEY,
+    )
+
+    async with integration_engine.connect() as holder:
+        transaction = await holder.begin()
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": SCHEMA_TRANSITION_ADVISORY_LOCK_KEY},
+        )
+        upgrade = asyncio.create_task(
+            _run_alembic(integration_settings, "upgrade", "head"),
+        )
+        await asyncio.sleep(1.0)
+        assert not upgrade.done()
+        assert (
+            await holder.scalar(
+                text("SELECT to_regclass('public.users')"),
+            )
+            is None
+        )
+        await transaction.rollback()
+        await asyncio.wait_for(upgrade, timeout=30)
+
+    async with integration_engine.connect() as connection:
+        assert (
+            await connection.scalar(
+                text("SELECT version_num FROM alembic_version"),
+            )
+            == "v1_8_schedule_cursor_repair"
+        )
+
+
+async def test_populated_1_7_upgrade_completes_manifest_ceremony_and_boot_gate(
+    integration_engine: AsyncEngine,
+    integration_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The existing-install path must preserve rows and pass the boot gate."""
+
+    from z4j_brain import cli
+    from z4j_brain.domain.audit_activation import read_activation_manifest
+    from z4j_brain.domain.schedule_cadence import (
+        CADENCE_SEMANTICS_VERSION,
+        cadence_runtime_fingerprint,
+    )
+    from z4j_brain.domain.schedule_fire_authority import (
+        derive_scheduler_fire_id,
+    )
+    from z4j_brain.persistence.database import DatabaseManager
+    from z4j_brain.persistence.models import Schedule
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+    )
+    from z4j_brain.startup import verify_production_authority_at_startup
+
+    project_id = uuid.uuid4()
+    schedule_id = uuid.uuid4()
+    legacy_last = datetime(
+        2026,
+        7,
+        28,
+        5,
+        10,
+        35,
+        357644,
+        tzinfo=UTC,
+    )
+    await _run_alembic(
+        integration_settings,
+        "upgrade",
+        "v1_7_security_hardening",
+    )
+    async with integration_engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO projects (id, slug, name) "
+                "VALUES (:project_id, 'populated-17', 'Populated 1.7')",
+            ),
+            {"project_id": project_id},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO users (email, password_hash, is_admin, is_active) "
+                "VALUES ('populated-17@example.com', 'test-only-hash', true, true)",
+            ),
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO schedules("
+                "id, project_id, engine, scheduler, name, task_name, kind, "
+                "expression, timezone, is_enabled, last_run_at, total_runs"
+                ") VALUES ("
+                ":schedule_id, :project_id, 'celery', 'z4j-scheduler', "
+                "'legacy-subsecond', 'jobs.legacy_subsecond', 'interval', "
+                "'5s', 'UTC', true, :last_run_at, 23"
+                ")",
+            ),
+            {
+                "schedule_id": schedule_id,
+                "project_id": project_id,
+                "last_run_at": legacy_last,
+            },
+        )
+
+    await _run_alembic(
+        integration_settings,
+        "upgrade",
+        "v1_8_audit_chain_prepare",
+    )
+    monkeypatch.setenv("Z4J_DATABASE_URL", integration_settings.database_url)
+    monkeypatch.setenv(
+        "Z4J_SECRET",
+        integration_settings.secret.get_secret_value(),
+    )
+    monkeypatch.setenv(
+        "Z4J_SESSION_SECRET",
+        integration_settings.session_secret.get_secret_value(),
+    )
+    assert integration_settings.audit_chain_secret is not None
+    monkeypatch.setenv(
+        "Z4J_AUDIT_CHAIN_SECRET",
+        integration_settings.audit_chain_secret.get_secret_value(),
+    )
+    monkeypatch.setenv("Z4J_ENVIRONMENT", "dev")
+    monkeypatch.setenv("Z4J_REQUIRE_DB_SSL", "false")
+    tmp_path.chmod(0o700)  # noqa: ASYNC240 - one test-fixture metadata call
+    manifest_path = tmp_path / "activation.json"
+
+    assert (
+        await asyncio.to_thread(
+            cli.main,
+            [
+                "audit",
+                "activate-chain-state",
+                "--manifest",
+                str(manifest_path),
+            ],
+        )
+        == 0
+    )
+    manifest = read_activation_manifest(manifest_path)
+    assert manifest["classification_failures"] == [
+        "existing-empty-audit-table",
+    ]
+    assert manifest["requires_ambiguity_attestation"] is True
+
+    # Empty legacy audit history is ambiguous, not fresh. The manifest's
+    # exact digest is required; a generic --apply remains safely parked.
+    assert (
+        await asyncio.to_thread(
+            cli.main,
+            [
+                "audit",
+                "activate-chain-state",
+                "--manifest",
+                str(manifest_path),
+                "--apply",
+            ],
+        )
+        == 1
+    )
+    async with integration_engine.connect() as connection:
+        assert (
+            await connection.scalar(
+                text("SELECT version_num FROM alembic_version"),
+            )
+            == "v1_8_audit_chain_prepare"
+        )
+
+    assert (
+        await asyncio.to_thread(
+            cli.main,
+            [
+                "audit",
+                "activate-chain-state",
+                "--manifest",
+                str(manifest_path),
+                "--apply",
+                "--attest-manifest-digest",
+                str(manifest["manifest_digest"]),
+            ],
+        )
+        == 0
+    )
+    async with integration_engine.connect() as connection:
+        head, projects, users, state = (
+            await connection.execute(
+                text(
+                    "SELECT "
+                    "(SELECT version_num FROM alembic_version), "
+                    "(SELECT COUNT(*) FROM projects), "
+                    "(SELECT COUNT(*) FROM users), "
+                    "to_regclass('public.audit_chain_state')::text",
+                ),
+            )
+        ).one()
+    assert (head, projects, users, state) == (
+        "v1_8_schedule_cursor_repair",
+        1,
+        1,
+        "audit_chain_state",
+    )
+
+    report = await verify_production_authority_at_startup(
+        db=DatabaseManager(integration_engine),
+        settings=integration_settings,
+    )
+    assert report.clean
+
+    database = DatabaseManager(integration_engine)
+    async with database.session(write=True) as session:
+        schedule = await session.get(Schedule, schedule_id)
+        assert schedule is not None
+        assert schedule.control_token is not None
+        assert schedule.definition_digest is not None
+        assert schedule.schedule_revision is not None
+        assert schedule.last_run_at is not None
+        assert schedule.next_run_at is not None
+        assert schedule.last_run_at.microsecond == 0
+        assert schedule.next_run_at.microsecond == 0
+        slot = schedule.next_run_at.astimezone(UTC)
+        successor = slot + timedelta(seconds=5)
+        transition = await ScheduleControlRepository(
+            session,
+        ).accept_current_fire_progress(
+            project_id=project_id,
+            schedule_id=schedule_id,
+            fire_id=derive_scheduler_fire_id(schedule_id, slot),
+            scheduled_for=slot,
+            observed_control_token=schedule.control_token,
+            definition_digest=schedule.definition_digest,
+            expected_revision=schedule.schedule_revision,
+            expected_last_run_at=schedule.last_run_at,
+            expected_next_run_at=slot,
+            prepared_next_run_at=successor,
+            cadence_semantics_version=CADENCE_SEMANTICS_VERSION,
+            cadence_fingerprint=cadence_runtime_fingerprint(),
+            occurred_at=slot + timedelta(seconds=1),
+        )
+        assert transition.disposition == "applied"
+        assert schedule.total_runs == 24
+        await session.commit()
+
+
+async def test_activated_postgres_subsecond_cursor_is_repaired_and_executes(
+    integration_engine: AsyncEngine,
+    integration_settings: Settings,
+) -> None:
+    """The follow-up head must recover a database already activated by the RC."""
+
+    from z4j_brain.domain.schedule_cadence import (
+        CADENCE_SEMANTICS_VERSION,
+        cadence_runtime_fingerprint,
+    )
+    from z4j_brain.domain.schedule_fire_authority import (
+        derive_scheduler_fire_id,
+    )
+    from z4j_brain.persistence.database import DatabaseManager
+    from z4j_brain.persistence.models import Schedule, ScheduleChangeLog
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+    )
+
+    await _run_alembic(
+        integration_settings,
+        "upgrade",
+        "v1_8_audit_chain_activate",
+    )
+    project_id = uuid.uuid4()
+    schedule_id = uuid.uuid4()
+    legacy_last = datetime(
+        2026,
+        7,
+        28,
+        5,
+        10,
+        35,
+        357644,
+        tzinfo=UTC,
+    )
+    async with integration_engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO projects (id, slug, name) "
+                "VALUES (:project_id, 'activated-subsecond', "
+                "'Activated subsecond')",
+            ),
+            {"project_id": project_id},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO schedules("
+                "id, project_id, engine, scheduler, name, task_name, kind, "
+                "expression, timezone, is_enabled, last_run_at, total_runs"
+                ") VALUES ("
+                ":schedule_id, :project_id, 'celery', 'z4j-scheduler', "
+                "'activated-subsecond', 'jobs.activated_subsecond', "
+                "'interval', '5s', 'UTC', true, :last_run_at, 23"
+                ")",
+            ),
+            {
+                "schedule_id": schedule_id,
+                "project_id": project_id,
+                "last_run_at": legacy_last,
+            },
+        )
+
+    await _run_alembic(
+        integration_settings,
+        "upgrade",
+        "v1_8_schedule_control_activate",
+        config_attributes={
+            "z4j_test_preserve_legacy_cursor_precision": True,
+        },
+    )
+    async with integration_engine.connect() as connection:
+        old_head, old_last, old_next, old_runs = (
+            await connection.execute(
+                text(
+                    "SELECT "
+                    "(SELECT version_num FROM alembic_version), "
+                    "last_run_at, next_run_at, total_runs "
+                    "FROM schedules WHERE id = :schedule_id",
+                ),
+                {"schedule_id": schedule_id},
+            )
+        ).one()
+    assert old_head == "v1_8_schedule_control_activate"
+    assert old_last.microsecond == 357644
+    assert old_next.microsecond == 357644
+    assert old_runs == 23
+
+    await _run_alembic(integration_settings, "upgrade", "head")
+    database = DatabaseManager(integration_engine)
+    async with database.session(write=True) as session:
+        schedule = await session.get(Schedule, schedule_id)
+        assert schedule is not None
+        assert schedule.control_token is not None
+        assert schedule.definition_digest is not None
+        assert schedule.schedule_revision is not None
+        assert schedule.last_run_at is not None
+        assert schedule.next_run_at is not None
+        assert schedule.last_run_at.microsecond == 0
+        assert schedule.next_run_at.microsecond == 0
+
+        repair_log = (
+            await session.execute(
+                select(ScheduleChangeLog).where(
+                    ScheduleChangeLog.schedule_id == schedule_id,
+                    ScheduleChangeLog.revision == schedule.schedule_revision,
+                ),
+            )
+        ).scalar_one()
+        assert repair_log.snapshot is not None
+        assert repair_log.snapshot["transition"]["kind"] == ("repair_legacy_cursor_seed")
+
+        slot = schedule.next_run_at.astimezone(UTC)
+        transition = await ScheduleControlRepository(
+            session,
+        ).accept_current_fire_progress(
+            project_id=project_id,
+            schedule_id=schedule_id,
+            fire_id=derive_scheduler_fire_id(schedule_id, slot),
+            scheduled_for=slot,
+            observed_control_token=schedule.control_token,
+            definition_digest=schedule.definition_digest,
+            expected_revision=schedule.schedule_revision,
+            expected_last_run_at=schedule.last_run_at,
+            expected_next_run_at=slot,
+            prepared_next_run_at=slot + timedelta(seconds=5),
+            cadence_semantics_version=CADENCE_SEMANTICS_VERSION,
+            cadence_fingerprint=cadence_runtime_fingerprint(),
+            occurred_at=slot + timedelta(seconds=1),
+        )
+        assert transition.disposition == "applied"
+        assert schedule.total_runs == 24
+        await session.commit()
+
+
+async def test_activated_postgres_invalid_quarantine_cursor_is_parked(
+    integration_engine: AsyncEngine,
+    integration_settings: Settings,
+) -> None:
+    """An affected-RC invalid quarantine must not strand migration at old head."""
+
+    await _run_alembic(
+        integration_settings,
+        "upgrade",
+        "v1_8_audit_chain_activate",
+    )
+    project_id = uuid.uuid4()
+    schedule_id = uuid.uuid4()
+    legacy_last = datetime(
+        2026,
+        7,
+        28,
+        5,
+        10,
+        35,
+        357644,
+        tzinfo=UTC,
+    )
+    legacy_next = legacy_last + timedelta(seconds=5)
+    async with integration_engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO projects (id, slug, name) "
+                "VALUES (:project_id, 'invalid-quarantine-repair', "
+                "'Invalid quarantine repair')",
+            ),
+            {"project_id": project_id},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO schedules("
+                "id, project_id, engine, scheduler, name, task_name, kind, "
+                "expression, timezone, is_enabled, last_run_at, next_run_at, "
+                "total_runs"
+                ") VALUES ("
+                ":schedule_id, :project_id, 'celery', 'z4j-scheduler', "
+                "'invalid-quarantine-repair', "
+                "'jobs.invalid_quarantine_repair', "
+                "'interval', 'not-an-interval', 'UTC', true, "
+                ":last_run_at, :next_run_at, 17"
+                ")",
+            ),
+            {
+                "schedule_id": schedule_id,
+                "project_id": project_id,
+                "last_run_at": legacy_last,
+                "next_run_at": legacy_next,
+            },
+        )
+
+    await _run_alembic(
+        integration_settings,
+        "upgrade",
+        "v1_8_schedule_control_activate",
+        config_attributes={
+            "z4j_test_preserve_legacy_cursor_precision": True,
+        },
+    )
+    async with integration_engine.connect() as connection:
+        (
+            old_head,
+            old_enabled,
+            old_quarantine_code,
+            quarantine_matches_control,
+            old_last,
+            old_next,
+        ) = (
+            await connection.execute(
+                text(
+                    "SELECT "
+                    "(SELECT version_num FROM alembic_version), "
+                    "is_enabled, quarantine_code, "
+                    "quarantine_control_token = control_token, "
+                    "last_run_at, next_run_at "
+                    "FROM schedules WHERE id = :schedule_id",
+                ),
+                {"schedule_id": schedule_id},
+            )
+        ).one()
+    assert old_head == "v1_8_schedule_control_activate"
+    assert not old_enabled
+    assert old_quarantine_code == "migration_definition_invalid"
+    assert quarantine_matches_control
+    assert old_last.microsecond == 357644
+    assert old_next.microsecond == 357644
+
+    await _run_alembic(integration_settings, "upgrade", "head")
+    async with integration_engine.connect() as connection:
+        (
+            head,
+            is_enabled,
+            quarantine_code,
+            quarantine_matches_control,
+            last_run_at,
+            next_run_at,
+            total_runs,
+            snapshot,
+        ) = (
+            await connection.execute(
+                text(
+                    "SELECT "
+                    "(SELECT version_num FROM alembic_version), "
+                    "s.is_enabled, s.quarantine_code, "
+                    "s.quarantine_control_token = s.control_token, "
+                    "s.last_run_at, s.next_run_at, s.total_runs, c.snapshot "
+                    "FROM schedules s "
+                    "JOIN schedule_change_log c "
+                    "ON c.schedule_id = s.id "
+                    "AND c.revision = s.schedule_revision "
+                    "WHERE s.id = :schedule_id",
+                ),
+                {"schedule_id": schedule_id},
+            )
+        ).one()
+    assert head == "v1_8_schedule_cursor_repair"
+    assert not is_enabled
+    assert quarantine_code == "migration_definition_invalid"
+    assert quarantine_matches_control
+    assert last_run_at.microsecond == 0
+    assert next_run_at is None
+    assert total_runs == 17
+    assert snapshot["transition"]["kind"] == "repair_legacy_cursor_seed"
+    assert snapshot["transition"]["repaired_next_run_at"] is None
+
+
 # Tables and ENUM types we expect to NOT exist after ``downgrade base``.
 # Sourced from the explicit drop list in ``v1_3_0_initial.downgrade()``
 # plus ``alembic_version`` (which alembic itself drops at base).
 _Z4J_TABLES_THAT_MUST_BE_GONE = (
+    "schedule_change_log",
+    "schedule_revision_state",
     "users",
     "projects",
     "memberships",
@@ -132,6 +663,10 @@ _Z4J_TABLES_THAT_MUST_BE_GONE = (
     # 1.7 durable misfire dedup: dropped by v1_7_schema.downgrade()
     # (its _down_misfire_alerts step).
     "misfire_alerts",
+    # 1.8 Boundary B: downgrade is permitted only when this parent table is
+    # empty, then both durable-operation tables must be removed.
+    "bulk_retry_requests",
+    "bulk_retry_request_children",
 )
 
 # The seven native enum types the baseline actually creates. The old
@@ -262,8 +797,8 @@ class TestMigrationStructure:
         migrated_engine: AsyncEngine,
     ) -> None:
         """A5: schedule_fires is RANGE-partitioned by scheduled_for, with the
-        DEFAULT partition, at least one daily, and the composite PK + unique
-        Postgres requires for the partition key."""
+        DEFAULT partition, at least one daily, and the Boundary-D
+        generation-scoped unique including the partition key."""
         async with migrated_engine.connect() as conn:
             relkind = (
                 await conn.execute(
@@ -296,12 +831,26 @@ class TestMigrationStructure:
                 await conn.execute(
                     text(
                         "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                        "WHERE conname = 'uq_schedule_fires_fire_id' "
+                        "WHERE conname = "
+                        "'uq_schedule_fires_fire_receipt' "
                         "AND conrelid = 'schedule_fires'::regclass",
                     ),
                 )
             ).scalar_one()
-            assert "(fire_id, scheduled_for)" in uq
+            assert "(fire_id, receipt_control_token, scheduled_for)" in uq
+            legacy_uq = (
+                await conn.execute(
+                    text(
+                        "SELECT indexdef FROM pg_indexes "
+                        "WHERE schemaname = 'public' "
+                        "AND tablename = 'schedule_fires' "
+                        "AND indexname = "
+                        "'uq_schedule_fires_legacy_fire'",
+                    ),
+                )
+            ).scalar_one()
+            assert "(fire_id, scheduled_for)" in legacy_uq
+            assert "receipt_control_token IS NULL" in legacy_uq
             pk = (
                 await conn.execute(
                     text(
@@ -345,6 +894,122 @@ class TestMigrationStructure:
                 )
             ).scalar()
         assert still is None  # dropped by DROP-PARTITION retention
+
+    async def test_partition_retention_preserves_unresolved_legacy_evidence(
+        self,
+        integration_engine: AsyncEngine,
+        integration_settings: Settings,
+    ) -> None:
+        """A backfilled receipt-NULL row blocks its whole old partition."""
+
+        from z4j_brain.domain.workers.schedule_fires_partition import (
+            ScheduleFiresPartitionWorker,
+        )
+        from z4j_brain.persistence.database import DatabaseManager
+        from z4j_brain.persistence.models import ScheduleFire
+        from z4j_brain.persistence.repositories.schedule_fires import (
+            ScheduleFireRepository,
+        )
+
+        await _run_alembic(
+            integration_settings,
+            "upgrade",
+            "v1_8_audit_chain_activate",
+        )
+        project_id = uuid.uuid4()
+        schedule_id = uuid.uuid4()
+        fire_id = uuid.uuid4()
+        row_id = uuid.uuid4()
+        async with integration_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE schedule_fires_2019_01_03 "
+                    "PARTITION OF schedule_fires "
+                    "FOR VALUES FROM ('2019-01-03') TO ('2019-01-04')",
+                ),
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO projects (id, slug, name) "
+                    "VALUES (:id, 'legacy-retention', 'Legacy retention')",
+                ),
+                {"id": project_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO schedules "
+                    "(id, project_id, engine, scheduler, name, task_name, "
+                    "kind, expression) VALUES "
+                    "(:id, :project_id, 'celery', 'z4j-scheduler', "
+                    "'legacy-retention', 'jobs.legacy_retention', "
+                    "'interval', '5m')",
+                ),
+                {"id": schedule_id, "project_id": project_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO schedule_fires "
+                    "(id, fire_id, schedule_id, project_id, status, "
+                    "scheduled_for, fired_at) VALUES "
+                    "(:id, :fire_id, :schedule_id, :project_id, 'failed', "
+                    "'2019-01-03T12:00:00Z', '2019-01-03T12:00:00Z')",
+                ),
+                {
+                    "id": row_id,
+                    "fire_id": fire_id,
+                    "schedule_id": schedule_id,
+                    "project_id": project_id,
+                },
+            )
+
+        await _run_alembic(integration_settings, "upgrade", "head")
+        database = DatabaseManager(integration_engine)
+        async with database.session(write=True) as session:
+            fire = await session.get(ScheduleFire, row_id)
+            assert fire is not None
+            original_nonce = fire.state_write_nonce
+            assert original_nonce is not None
+            retained_fire, changed = await ScheduleFireRepository(
+                session,
+            ).acknowledge_legacy_history(
+                fire=fire,
+                command_id=None,
+                status="success",
+                new_task_id="legacy-pg-history",
+            )
+            assert changed is True
+            assert retained_fire.status == "failed"
+            assert retained_fire.acked_at is None
+            assert retained_fire.state_write_nonce != original_nonce
+            await session.commit()
+        worker = ScheduleFiresPartitionWorker(
+            db=database,
+            settings=integration_settings,
+        )
+        await worker.tick()
+        async with integration_engine.connect() as conn:
+            still = (
+                await conn.execute(
+                    text(
+                        "SELECT to_regclass('public.schedule_fires_2019_01_03')",
+                    ),
+                )
+            ).scalar()
+            retained = (
+                await conn.execute(
+                    text(
+                        "SELECT receipt_control_token, protocol_marker, "
+                        "scheduler_ack_status, scheduler_ack_task_id "
+                        "FROM schedule_fires WHERE id = :id",
+                    ),
+                    {"id": row_id},
+                )
+            ).one()
+        assert still == "schedule_fires_2019_01_03"
+        assert retained.receipt_control_token is None
+        assert retained.protocol_marker == 1
+        assert retained.scheduler_ack_status == "success"
+        assert retained.scheduler_ack_task_id == "legacy-pg-history"
 
     async def test_audit_log_triggers_present(
         self,
@@ -390,10 +1055,97 @@ class TestMigrationStructure:
                 text("DELETE FROM projects WHERE slug = 'valid-slug'"),
             )
 
+    async def test_activated_boundary_f_refuses_downgrade_without_mutation(
+        self,
+        migrated_engine: AsyncEngine,
+        integration_settings: Settings,
+    ) -> None:
+        """The irreversible D/F fence fails before authority-state changes."""
+        from alembic.util import CommandError
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        async def _snapshot() -> tuple[object, ...]:
+            engine = create_async_engine(
+                integration_settings.database_url,
+                future=True,
+            )
+            try:
+                async with engine.connect() as conn:
+                    version = (
+                        await conn.execute(
+                            text("SELECT version_num FROM alembic_version"),
+                        )
+                    ).scalar_one()
+                    state = (
+                        await conn.execute(
+                            text(
+                                "SELECT generation, head_id, head_row_hmac, "
+                                "active_row_count, frozen_row_count, state_mac "
+                                "FROM audit_chain_state "
+                                "WHERE singleton_id = 'audit-chain'",
+                            ),
+                        )
+                    ).one()
+                    markers = (
+                        await conn.execute(
+                            text(
+                                "SELECT id, action, row_hmac, chain_generation "
+                                "FROM audit_log ORDER BY occurred_at, id",
+                            ),
+                        )
+                    ).all()
+                    preparation_count = (
+                        await conn.execute(
+                            text("SELECT COUNT(*) FROM audit_chain_preparation"),
+                        )
+                    ).scalar_one()
+                    state_trigger = (
+                        await conn.execute(
+                            text(
+                                "SELECT COUNT(*) FROM pg_trigger "
+                                "WHERE tgrelid = 'audit_chain_state'::regclass "
+                                "AND tgname = 'audit_chain_state_no_update' "
+                                "AND NOT tgisinternal",
+                            ),
+                        )
+                    ).scalar_one()
+                return (
+                    version,
+                    tuple(state),
+                    tuple(tuple(marker) for marker in markers),
+                    preparation_count,
+                    state_trigger,
+                )
+            finally:
+                await engine.dispose()
+
+        await migrated_engine.dispose()
+        before = await _snapshot()
+        assert before[0] == "v1_8_schedule_cursor_repair"
+        assert before[1][3:5] == (2, 0)
+        assert [marker[1] for marker in before[2]] == [
+            "audit.chain_generation_started",
+            "schedule.control_migration_activated",
+        ]
+        assert before[3:] == (0, 1)
+
+        with pytest.raises(
+            CommandError,
+            match="refusing downgrade below Boundary D",
+        ):
+            await _run_alembic(
+                integration_settings,
+                "downgrade",
+                "v1_8_bulk_retry_requests",
+            )
+
+        assert await _snapshot() == before
+
 
 # ---------------------------------------------------------------------------
-# Bidirectional round-trip: upgrade head -> seed -> downgrade base ->
-# verify clean -> upgrade head. This is the load-bearing test for the
+# Bidirectional round-trip below the Boundary-F activation fence: upgrade
+# the pre-F head -> seed -> downgrade base -> verify clean -> upgrade the
+# pre-F head. This is the load-bearing test for the
 # 1.4.x compatibility-floor promise that schema migrations are
 # bidirectional. If this ever fails, the bidirectional claim in
 # z4j.dev/operations/database-migrations is no longer true.
@@ -401,9 +1153,10 @@ class TestMigrationStructure:
 
 
 class TestMigrationRoundTrip:
-    """``upgrade head`` -> seed -> ``downgrade base`` -> ``upgrade head``.
+    """Pre-F head -> seed -> ``downgrade base`` -> pre-F head.
 
-    Proves the 1.4.x bidirectional promise. The downgrade path
+    Proves the legacy bidirectional promise without crossing Boundary F,
+    whose authenticated audit state is intentionally irreversible. The downgrade path
     DESTROYS data by design (it returns the database to an empty
     state); the contract is bidirectional **schema**, not
     bidirectional **data**. Operators who need data-preserving
@@ -413,18 +1166,18 @@ class TestMigrationRoundTrip:
 
     async def test_round_trip_clean(
         self,
-        migrated_engine: AsyncEngine,
+        pre_boundary_f_engine: AsyncEngine,
         integration_settings: Settings,
     ) -> None:
-        """``upgrade head`` then ``downgrade base`` then ``upgrade head``.
+        """Pre-F head, ``downgrade base``, then pre-F head again.
 
         After downgrade, no z4j table or ENUM type may remain. After
         the second upgrade, every expected table and ENUM is back.
         """
-        # Sanity: upgrade head already ran via the migrated_engine
+        # Sanity: the pre-F upgrade already ran via the fixture
         # fixture. Confirm a key z4j table exists before we knock
         # everything down.
-        async with migrated_engine.connect() as conn:
+        async with pre_boundary_f_engine.connect() as conn:
             row = (
                 await conn.execute(
                     text(
@@ -433,14 +1186,14 @@ class TestMigrationRoundTrip:
                 )
             ).scalar_one()
         assert row == "audit_log", (
-            "fixture should have run alembic upgrade head; audit_log table missing pre-downgrade"
+            "fixture should have installed the pre-F head; audit_log table missing"
         )
 
         # Seed a small fixture so the downgrade has real rows + FK
         # references to chew through. This proves DROP TABLE CASCADE
         # actually handles the FK web on Postgres rather than
         # silently succeeding against an empty schema.
-        async with migrated_engine.begin() as conn:
+        async with pre_boundary_f_engine.begin() as conn:
             await conn.execute(
                 text(
                     "INSERT INTO projects (slug, name) "
@@ -467,7 +1220,7 @@ class TestMigrationRoundTrip:
         # Engine must be disposed before downgrade so alembic's
         # connection-management can take over without contending for
         # an open pool.
-        await migrated_engine.dispose()
+        await pre_boundary_f_engine.dispose()
 
         # Downgrade to base. Every z4j object should be gone after.
         await _run_alembic(integration_settings, "downgrade", "base")
@@ -551,11 +1304,15 @@ class TestMigrationRoundTrip:
         finally:
             await verify_engine.dispose()
 
-        # Now run upgrade head again and re-verify the schema is back.
+        # Now reinstall the pre-F head and re-verify the schema is back.
         # Proves the migration is replayable against a previously
         # migrated-then-downgraded database (catches state-leak bugs
         # in the install helpers).
-        await _run_alembic(integration_settings, "upgrade", "head")
+        await _run_alembic(
+            integration_settings,
+            "upgrade",
+            "v1_8_bulk_retry_requests",
+        )
 
         replay_engine = create_async_engine(
             integration_settings.database_url,
@@ -579,7 +1336,7 @@ class TestMigrationRoundTrip:
                 "audit_log",
                 "alembic_version",
             ):
-                assert tbl in tables, f"replay upgrade head left {tbl} missing"
+                assert tbl in tables, f"replay pre-F upgrade left {tbl} missing"
 
             # Audit-log function is back (the trigger needs it).
             async with replay_engine.connect() as conn:
@@ -594,7 +1351,7 @@ class TestMigrationRoundTrip:
                     )
                 ).scalar_one()
             assert fn_exists is True, (
-                "replay upgrade head did not reinstall audit_log_forbid_mutation"
+                "replay pre-F upgrade did not reinstall audit_log_forbid_mutation"
             )
 
             # Smoke insert proves the schema actually works after replay,
@@ -614,9 +1371,79 @@ class TestMigrationRoundTrip:
         finally:
             await replay_engine.dispose()
 
+    async def test_bulk_retry_parent_refuses_rollback_below_1_8(
+        self,
+        pre_boundary_f_engine: AsyncEngine,
+        integration_settings: Settings,
+    ) -> None:
+        """A live destructive-operation parent makes pre-1.8 rollback unsafe."""
+
+        from alembic.util import CommandError
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        async with pre_boundary_f_engine.begin() as conn:
+            project_id = (
+                await conn.execute(
+                    text(
+                        "INSERT INTO projects (slug, name) "
+                        "VALUES ('boundary-b-rollback', 'Boundary B') "
+                        "RETURNING id",
+                    )
+                )
+            ).scalar_one()
+            await conn.execute(
+                text(
+                    "INSERT INTO bulk_retry_requests ("
+                    "id, project_id, idempotency_key, canonicalizer_version, "
+                    "canonical_request, canonical_digest, effective_request, "
+                    "plan_digest, child_count, max_in_flight, deadline_at"
+                    ") VALUES ("
+                    ":id, :project_id, 'rollback-fence', 1, :canonical_request, "
+                    ":digest, CAST(:effective_request AS jsonb), :digest, "
+                    "0, 8, NOW() + INTERVAL '15 minutes'"
+                    ")",
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "project_id": project_id,
+                    "canonical_request": b'{"action":"bulk_retry"}',
+                    "digest": "0" * 64,
+                    "effective_request": '{"action":"bulk_retry"}',
+                },
+            )
+        await pre_boundary_f_engine.dispose()
+
+        with pytest.raises(CommandError, match="refusing downgrade"):
+            await _run_alembic(
+                integration_settings,
+                "downgrade",
+                "v1_7_security_hardening",
+            )
+
+        verify_engine = create_async_engine(
+            integration_settings.database_url,
+            future=True,
+        )
+        try:
+            async with verify_engine.connect() as conn:
+                version = (
+                    await conn.execute(
+                        text("SELECT version_num FROM alembic_version"),
+                    )
+                ).scalar_one()
+                parents = (
+                    await conn.execute(
+                        text("SELECT COUNT(*) FROM bulk_retry_requests"),
+                    )
+                ).scalar_one()
+            assert version == "v1_8_bulk_retry_requests"
+            assert parents == 1
+        finally:
+            await verify_engine.dispose()
+
     async def test_kill_switch_column_round_trip(
         self,
-        migrated_engine: AsyncEngine,
+        pre_boundary_f_engine: AsyncEngine,
         integration_settings: Settings,
     ) -> None:
         """The 1.7 kill-switch change is bidirectional at the COLUMN level:
@@ -655,8 +1482,8 @@ class TestMigrationRoundTrip:
             finally:
                 await eng.dispose()
 
-        # The fixture already upgraded to head, which includes the column.
-        await migrated_engine.dispose()
+        # The pre-F fixture includes the column without crossing Boundary F.
+        await pre_boundary_f_engine.dispose()
         assert await _column_exists() is True
 
         # Downgrade the whole 1.7 delta to the v1_6_6 floor: the
@@ -669,12 +1496,16 @@ class TestMigrationRoundTrip:
         assert await _column_exists() is False
 
         # Re-upgrade restores it (idempotent add-column guard).
-        await _run_alembic(integration_settings, "upgrade", "head")
+        await _run_alembic(
+            integration_settings,
+            "upgrade",
+            "v1_8_bulk_retry_requests",
+        )
         assert await _column_exists() is True
 
     async def test_schedule_fires_partition_data_round_trip(
         self,
-        migrated_engine: AsyncEngine,
+        pre_boundary_f_engine: AsyncEngine,
         integration_settings: Settings,
     ) -> None:
         """Populated-DB round-trip across the consolidated ``v1_7_schema``.
@@ -847,11 +1678,11 @@ class TestMigrationRoundTrip:
             finally:
                 await eng.dispose()
 
-        # The fixture upgraded to head. Downgrade the whole 1.7 delta to
+        # The fixture installed the pre-F head. Downgrade the whole 1.7 delta to
         # the v1_6_6 floor so schedule_fires is the plain (id)-PK table
         # without triggered_by_user_id (the only boundary below the
         # partition step now that the 1.7 chain is one revision).
-        await migrated_engine.dispose()
+        await pre_boundary_f_engine.dispose()
         await _run_alembic(
             integration_settings,
             "downgrade",
@@ -913,7 +1744,11 @@ class TestMigrationRoundTrip:
         assert len(pre_rows) == len(fires)
 
         # Upgrade THROUGH the partition migration: recreate-and-copy.
-        await _run_alembic(integration_settings, "upgrade", "head")
+        await _run_alembic(
+            integration_settings,
+            "upgrade",
+            "v1_8_bulk_retry_requests",
+        )
 
         part_kind, part_rows, placement = await snapshot()
         assert part_kind == "p", "upgrade should have partitioned schedule_fires"
@@ -977,10 +1812,14 @@ class TestMigrationRoundTrip:
         # No partitions remain; every row lives in the plain table.
         assert set(post_placement.values()) == {"schedule_fires"}
 
-        # Re-upgrade to head with the table POPULATED: the partition
+        # Re-upgrade to the pre-F head with the table POPULATED: the partition
         # migration must also apply cleanly on the way back up (this
         # is the 1.6 -> 1.7 upgrade path operators actually take).
-        await _run_alembic(integration_settings, "upgrade", "head")
+        await _run_alembic(
+            integration_settings,
+            "upgrade",
+            "v1_8_bulk_retry_requests",
+        )
         final_kind, final_rows, _ = await snapshot()
         assert final_kind == "p"
         assert len(final_rows) == len(fires)

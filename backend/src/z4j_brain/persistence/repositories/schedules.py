@@ -13,6 +13,24 @@ from z4j_brain.persistence.models import Schedule
 from z4j_brain.persistence.repositories._base import BaseRepository
 
 
+async def _require_legacy_schedule_writer(
+    session: AsyncSession,
+    *,
+    operation: str,
+) -> None:
+    """Refuse every 1.7 schedule writer after Boundary D activates."""
+
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlConflictError,
+        ScheduleControlRepository,
+    )
+
+    if await ScheduleControlRepository(session).control_is_active():
+        raise ScheduleControlConflictError(
+            f"legacy schedule writer {operation!r} is disabled after Boundary D activation",
+        )
+
+
 class ScheduleRepository(BaseRepository[Schedule]):
     """Schedule CRUD."""
 
@@ -86,6 +104,10 @@ class ScheduleRepository(BaseRepository[Schedule]):
         enabled: bool,
     ) -> bool:
         """Toggle the enabled flag. Returns True if a row was updated."""
+        await _require_legacy_schedule_writer(
+            self.session,
+            operation="set_enabled",
+        )
         result = await self.session.execute(
             update(Schedule)
             .where(Schedule.id == schedule_id)
@@ -109,6 +131,10 @@ class ScheduleRepository(BaseRepository[Schedule]):
         unknown ``kind`` enum value. Caller owns the transaction
         boundary.
         """
+        await _require_legacy_schedule_writer(
+            self.session,
+            operation="create_for_project",
+        )
         from z4j_brain.persistence.enums import ScheduleKind
 
         name = str(data.get("name", "")).strip()
@@ -157,6 +183,10 @@ class ScheduleRepository(BaseRepository[Schedule]):
     ) -> Schedule | None:
         """Apply a partial update. Returns ``None`` if the schedule is
         not in the project (IDOR-safe)."""
+        await _require_legacy_schedule_writer(
+            self.session,
+            operation="update_for_project",
+        )
         from z4j_brain.persistence.enums import ScheduleKind
 
         existing = await self.get_for_project(
@@ -189,6 +219,10 @@ class ScheduleRepository(BaseRepository[Schedule]):
         Cascades to ``pending_fires`` via the FK on schedule_id.
         Returns True iff a row was removed.
         """
+        await _require_legacy_schedule_writer(
+            self.session,
+            operation="delete_for_project",
+        )
         existing = await self.get_for_project(
             project_id=project_id,
             schedule_id=schedule_id,
@@ -220,6 +254,49 @@ class ScheduleRepository(BaseRepository[Schedule]):
 
         Returns the number of rows deleted.
         """
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlConflictError,
+            ScheduleControlRepository,
+        )
+
+        control = ScheduleControlRepository(self.session)
+        if await control.control_is_active():
+            statement = (
+                select(Schedule)
+                .where(
+                    Schedule.project_id == project_id,
+                    Schedule.source == source,
+                )
+                .order_by(Schedule.id)
+                .with_for_update()
+            )
+            if keep_ids:
+                statement = statement.where(
+                    Schedule.id.notin_(keep_ids),
+                )
+            targets = list(
+                (await self.session.execute(statement)).scalars(),
+            )
+            if any(row.scheduler != "z4j-scheduler" for row in targets):
+                raise ScheduleControlConflictError(
+                    "external source reconciliation requires current stream epoch authority",
+                )
+            deleted = 0
+            occurred_at = datetime.now(UTC)
+            for row in targets:
+                transition = await control.delete_current(
+                    project_id=project_id,
+                    schedule_id=row.id,
+                    occurred_at=occurred_at,
+                )
+                if transition.disposition == "deleted":
+                    deleted += 1
+            return deleted
+
+        await _require_legacy_schedule_writer(
+            self.session,
+            operation="delete_by_source_except",
+        )
         from sqlalchemy import delete as sa_delete
 
         stmt = sa_delete(Schedule).where(
@@ -261,7 +338,20 @@ class ScheduleRepository(BaseRepository[Schedule]):
         Returns a summary dict ``{"inserted": N, "updated": M,
         "deleted": K}`` so the caller can log / report counts.
         """
+        await _require_legacy_schedule_writer(
+            self.session,
+            operation="reconcile_snapshot",
+        )
         from sqlalchemy import delete as sa_delete
+
+        from z4j_brain.domain.schedule_authority import (
+            validate_external_schedule_projection,
+        )
+
+        validate_external_schedule_projection(
+            outer_owner=scheduler,
+            rows=(raw for raw in schedules if isinstance(raw, dict)),
+        )
 
         summary = {"inserted": 0, "updated": 0, "deleted": 0}
 
@@ -285,11 +375,16 @@ class ScheduleRepository(BaseRepository[Schedule]):
             # ``scheduler`` field is the canonical source.
             enriched = dict(raw)
             enriched["scheduler"] = scheduler
+            # M14: persist the STRIPPED name so the row matches observed_names
+            # (also stripped) and is not removed by the unobserved-name sweep
+            # below, which would silently churn the schedule every snapshot.
+            enriched["name"] = name
             enriched.setdefault("engine", scheduler.split("-", maxsplit=1)[0] or scheduler)
 
             existed = await self.session.execute(
                 select(Schedule.id).where(
                     Schedule.project_id == project_id,
+                    Schedule.scheduler == scheduler,
                     Schedule.name == name,
                 ),
             )
@@ -327,17 +422,46 @@ class ScheduleRepository(BaseRepository[Schedule]):
     ) -> Schedule:
         """Upsert a schedule from an agent-side schedule event.
 
-        The event payload carries the full schedule data including
-        a name which is unique per project. We use
-        ``(project_id, name)`` as the upsert key.
+        The upsert key is ``(project_id, scheduler, name)`` -- the SAME
+        tuple as the table's ``uq_schedules_project_scheduler_name``
+        unique constraint. Matching on ``(project_id, name)`` alone (as
+        an earlier version did) is WRONG whenever two schedulers own a
+        schedule with the same name -- e.g. both a huey-periodic and an
+        arq-cron adapter register a ``cleanup`` job. The by-name match
+        would find the OTHER scheduler's row and rebrand its ``scheduler``
+        / ``engine`` in place instead of inserting a distinct row, so the
+        two schedulers ping-pong over one row and each one's schedule
+        vanishes from the dashboard the moment the other snapshots.
+        Generic names (``cleanup``, ``nightly_report``, ``heartbeat``)
+        make this collision the common case on any multi-engine project.
         """
-        name = str(data.get("name", ""))
+        await _require_legacy_schedule_writer(
+            self.session,
+            operation="upsert_from_event",
+        )
+        from z4j_brain.domain.schedule_authority import (
+            validate_external_schedule_projection,
+        )
+
+        validate_external_schedule_projection(
+            outer_owner=str(data.get("scheduler", "celery-beat")),
+            rows=(data,),
+        )
+        # M14: canonicalize (strip) the name so the reconcile snapshot's
+        # observed-names set, the match key here, and the persisted row all
+        # agree. A raw " nightly " would otherwise insert a row that the
+        # snapshot's unobserved-name delete removes (it tracked "nightly").
+        name = str(data.get("name", "")).strip()
         if not name:
             raise ValueError("schedule event missing name")
+        # Resolve the owning scheduler the same way the value block below
+        # does, so the match tuple and the persisted row agree.
+        scheduler = str(data.get("scheduler", "celery-beat"))
 
         result = await self.session.execute(
             select(Schedule).where(
                 Schedule.project_id == project_id,
+                Schedule.scheduler == scheduler,
                 Schedule.name == name,
             ),
         )
@@ -377,6 +501,21 @@ class ScheduleRepository(BaseRepository[Schedule]):
             self.session.add(row)
             await self.session.flush()
             return row
+        # apscheduler:123: a DEGRADED placeholder is emitted by an adapter that
+        # could NOT fully map a job (e.g. a transient _to_schedule failure). It
+        # carries no real config (expression="unknown", empty args/kwargs), and
+        # exists only to keep the row ALIVE so the unobserved-name delete sweep
+        # in reconcile_snapshot does not remove a schedule that still exists.
+        # It must NOT overwrite the existing row's real config with those
+        # placeholder values (which would flip a good schedule to "unknown" until
+        # the next clean snapshot). Preserve the existing row; just touch
+        # updated_at so it is not seen as stale. A NEW row (existing is None,
+        # above) still takes the placeholder values -- there is nothing to keep.
+        meta = data.get("metadata")
+        if isinstance(meta, dict) and meta.get("z4j_mapping") == "degraded":
+            existing.updated_at = now
+            await self.session.flush()
+            return existing
         for key, value in values.items():
             setattr(existing, key, value)
         existing.updated_at = now
@@ -404,7 +543,7 @@ def _parse_dt(value: Any) -> datetime | None:
 ImportRowOutcome = str  # "inserted" | "updated" | "unchanged"
 
 
-async def upsert_imported_schedule(
+async def upsert_imported_schedule(  # noqa: PLR0912 - fail-closed owner gates
     *,
     session: AsyncSession,
     project_id: UUID,
@@ -412,11 +551,10 @@ async def upsert_imported_schedule(
 ) -> tuple[ImportRowOutcome, Schedule]:
     """Insert or update one schedule from a migration importer payload.
 
-    Identity is ``(project_id, scheduler, name)``. The same name can
-    legitimately exist for two different schedulers in one project
-    (e.g. the operator runs celery-beat AND z4j-scheduler in the
-    same project during a migration cutover) so the scheduler field
-    must participate in the conflict key.
+    Storage identity is ``(project_id, scheduler, name)``, but once schedule
+    control is active a name may not silently acquire a second owner. Ownership
+    changes must use the explicit preview/finalize cutover protocol so only one
+    enabled authority can survive the transition.
 
     Idempotency: when the row already exists with the same
     ``source_hash``, this is a no-op and returns ``"unchanged"`` so
@@ -434,6 +572,10 @@ async def upsert_imported_schedule(
     failure rolls back cleanly.
     """
     from z4j_brain.persistence.enums import ScheduleKind
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlConflictError,
+        ScheduleControlRepository,
+    )
 
     name = str(data.get("name", "")).strip()
     if not name:
@@ -474,6 +616,28 @@ async def upsert_imported_schedule(
         "source_hash": source_hash,
     }
 
+    control = ScheduleControlRepository(session)
+    control_active = await control.control_is_active()
+    if control_active and scheduler != "z4j-scheduler":
+        raise ScheduleControlConflictError(
+            "external schedule import requires current stream epoch authority",
+        )
+    if control_active:
+        owner_collision = await session.scalar(
+            select(Schedule)
+            .where(
+                Schedule.project_id == project_id,
+                Schedule.name == name,
+                Schedule.scheduler != scheduler,
+            )
+            .with_for_update(),
+        )
+        if owner_collision is not None:
+            raise ScheduleControlConflictError(
+                f"schedule {name!r} is owned by {owner_collision.scheduler!r}; "
+                "an explicit owner cutover is required",
+            )
+
     result = await session.execute(
         select(Schedule).where(
             Schedule.project_id == project_id,
@@ -482,6 +646,37 @@ async def upsert_imported_schedule(
         ),
     )
     existing = result.scalar_one_or_none()
+
+    if control_active:
+        if existing is not None and source_hash and existing.source_hash == source_hash:
+            return "unchanged", existing
+        if existing is None:
+            row = await control.create_current(
+                project_id=project_id,
+                data={
+                    "name": name,
+                    "scheduler": scheduler,
+                    **new_values,
+                },
+                planning_at=datetime.now(UTC),
+            )
+            return "inserted", row
+        updated = await control.update_current(
+            project_id=project_id,
+            schedule_id=existing.id,
+            data=new_values,
+            planning_at=datetime.now(UTC),
+        )
+        if updated is None:
+            raise ScheduleControlConflictError(
+                "imported schedule disappeared during guarded update",
+            )
+        return "updated", updated
+
+    await _require_legacy_schedule_writer(
+        session,
+        operation="upsert_imported_schedule",
+    )
 
     if existing is None:
         row = Schedule(

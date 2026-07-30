@@ -123,18 +123,26 @@ class ScheduleCircuitBreakerWorker:
     async def _disable_and_audit(self, schedule, streak: int) -> None:
         from datetime import UTC, datetime
 
-        from sqlalchemy import update
+        from sqlalchemy import select, update
 
         from z4j_brain.persistence.models import Schedule
         from z4j_brain.persistence.repositories import (
             AuditLogRepository,
             ScheduleFireRepository,
         )
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlRepository,
+        )
 
-        async with self._db.session() as session:
-            # Re-check is_enabled inside the transaction in case an
-            # operator manually disabled the schedule in between.
-            current = await session.get(Schedule, schedule.id)
+        async with self._db.session(write=True) as session:
+            # The global Boundary-D lock order is schedule before fire
+            # evidence. Re-check under that lock so a concurrent accepted fire
+            # cannot land between the streak proof and the disable.
+            current = (
+                await session.execute(
+                    select(Schedule).where(Schedule.id == schedule.id).with_for_update(),
+                )
+            ).scalar_one_or_none()
             if current is None or not current.is_enabled:
                 return
 
@@ -164,14 +172,31 @@ class ScheduleCircuitBreakerWorker:
                 )
                 return
 
-            await session.execute(
-                update(Schedule)
-                .where(Schedule.id == schedule.id)
-                .values(
-                    is_enabled=False,
-                    updated_at=datetime.now(UTC),
-                ),
-            )
+            now = datetime.now(UTC)
+            control = ScheduleControlRepository(session)
+            if await control.control_is_active():
+                if current.scheduler != "z4j-scheduler":
+                    raise RuntimeError(
+                        "external schedule circuit-breaker transition "
+                        "requires Boundary-E epoch authority",
+                    )
+                updated = await control.update_current(
+                    project_id=current.project_id,
+                    schedule_id=current.id,
+                    data={"is_enabled": False},
+                    planning_at=now,
+                )
+                if updated is None:
+                    return
+            else:
+                await session.execute(
+                    update(Schedule)
+                    .where(Schedule.id == schedule.id)
+                    .values(
+                        is_enabled=False,
+                        updated_at=now,
+                    ),
+                )
             if self._audit is not None:
                 await self._audit.record(
                     AuditLogRepository(session),
@@ -262,7 +287,7 @@ class ScheduleFiresPruneWorker:
         cutoff = datetime.now(UTC) - timedelta(
             days=self._settings.schedule_fires_retention_days,
         )
-        async with self._db.session() as session:
+        async with self._db.session(write=True) as session:
             removed = await ScheduleFireRepository(session).delete_older_than(
                 cutoff=cutoff,
             )

@@ -187,7 +187,7 @@ class AuditQueue:
             AuditLogRepository,
         )
 
-        async with self._db.session() as session:
+        async with self._db.session(write=True) as session:
             project_lookup = await session.execute(
                 select(Project.id).where(
                     Project.slug == event.project_slug,

@@ -71,6 +71,264 @@ def _schedule_dict(
 
 
 @pytest.mark.asyncio
+class TestReconcileSnapshotMultiScheduler:
+    """Regression: two schedulers that own a schedule with the SAME name
+    (e.g. huey-periodic and arq-cron both register a ``cleanup`` job) must
+    keep DISTINCT rows. The upsert key is ``(project, scheduler, name)`` --
+    matching the table's unique constraint. Keying on ``(project, name)``
+    alone made the second scheduler's snapshot rebrand the FIRST one's row
+    in place, so each engine's schedule vanished when the other snapshotted.
+    """
+
+    async def test_same_name_across_schedulers_coexist(
+        self,
+        session: AsyncSession,
+        project: Project,
+    ) -> None:
+        repo = ScheduleRepository(session)
+
+        def _dict(name: str, engine: str, scheduler: str) -> dict[str, object]:
+            d = _schedule_dict(name)
+            d["engine"] = engine
+            d["scheduler"] = scheduler
+            return d
+
+        # huey snapshots first: cleanup + nightly_report under huey-periodic.
+        await repo.reconcile_snapshot(
+            project_id=project.id,
+            scheduler="huey-periodic",
+            schedules=[
+                _dict("cleanup", "huey", "huey-periodic"),
+                _dict("nightly_report", "huey", "huey-periodic"),
+            ],
+        )
+        await session.commit()
+
+        # arq snapshots the SAME NAMES under a different scheduler.
+        await repo.reconcile_snapshot(
+            project_id=project.id,
+            scheduler="arq-cron",
+            schedules=[
+                _dict("cleanup", "arq", "arq-cron"),
+                _dict("nightly_report", "arq", "arq-cron"),
+            ],
+        )
+        await session.commit()
+
+        rows = (
+            await session.execute(
+                select(Schedule.engine, Schedule.scheduler, Schedule.name).where(
+                    Schedule.project_id == project.id,
+                ),
+            )
+        ).all()
+        by_engine: dict[str, int] = {}
+        for engine, _scheduler, _name in rows:
+            by_engine[engine] = by_engine.get(engine, 0) + 1
+
+        # Both engines must survive: 4 distinct rows, 2 per engine. Before
+        # the fix this was {"arq": 2} -- huey's rows were hijacked.
+        assert len(rows) == 4, rows
+        assert by_engine == {"huey": 2, "arq": 2}, by_engine
+
+        # And a re-snapshot by huey must NOT clobber arq's rows (no ping-pong).
+        await repo.reconcile_snapshot(
+            project_id=project.id,
+            scheduler="huey-periodic",
+            schedules=[
+                _dict("cleanup", "huey", "huey-periodic"),
+                _dict("nightly_report", "huey", "huey-periodic"),
+            ],
+        )
+        await session.commit()
+        rows2 = (
+            await session.execute(
+                select(func.count())
+                .select_from(Schedule)
+                .where(
+                    Schedule.project_id == project.id,
+                ),
+            )
+        ).scalar_one()
+        assert rows2 == 4
+
+
+@pytest.mark.asyncio
+class TestReservedOwnerBoundary:
+    async def test_reserved_outer_owner_is_rejected_before_mutation(
+        self,
+        session: AsyncSession,
+        project: Project,
+    ) -> None:
+        repo = ScheduleRepository(session)
+
+        with pytest.raises(ValueError, match="reserved z4j-scheduler"):
+            await repo.reconcile_snapshot(
+                project_id=project.id,
+                scheduler="z4j-scheduler",
+                schedules=[_schedule_dict("forged")],
+            )
+
+        count = (await session.execute(select(func.count()).select_from(Schedule))).scalar_one()
+        assert count == 0
+
+    async def test_reserved_inner_owner_rejects_whole_snapshot_before_prune(
+        self,
+        session: AsyncSession,
+        project: Project,
+    ) -> None:
+        repo = ScheduleRepository(session)
+        await repo.reconcile_snapshot(
+            project_id=project.id,
+            scheduler="celery-beat",
+            schedules=[_schedule_dict("A"), _schedule_dict("B")],
+        )
+        await session.commit()
+
+        valid = _schedule_dict("A", expression="0 * * * *")
+        forged = _schedule_dict("C")
+        forged["scheduler"] = "z4j-scheduler"
+        with pytest.raises(ValueError, match="reserved z4j-scheduler"):
+            await repo.reconcile_snapshot(
+                project_id=project.id,
+                scheduler="celery-beat",
+                schedules=[valid, forged],
+            )
+
+        rows = (
+            await session.execute(
+                select(Schedule.name, Schedule.expression).order_by(Schedule.name),
+            )
+        ).all()
+        assert rows == [
+            ("A", "*/5 * * * *"),
+            ("B", "*/5 * * * *"),
+        ]
+
+    async def test_direct_event_upsert_cannot_claim_reserved_owner(
+        self,
+        session: AsyncSession,
+        project: Project,
+    ) -> None:
+        repo = ScheduleRepository(session)
+        forged = _schedule_dict("forged")
+        forged["scheduler"] = "z4j-scheduler"
+
+        with pytest.raises(ValueError, match="reserved z4j-scheduler"):
+            await repo.upsert_from_event(
+                project_id=project.id,
+                data=forged,
+            )
+
+
+@pytest.mark.asyncio
+class TestDegradedPlaceholderPreservesConfig:
+    """apscheduler:123: a DEGRADED placeholder snapshot row (emitted when an
+    adapter cannot fully map a job) keeps the existing row ALIVE but must NOT
+    overwrite its real config with the placeholder's 'unknown' values. It only
+    exists to prevent the unobserved-name delete sweep."""
+
+    async def test_degraded_row_does_not_clobber_existing_config(
+        self,
+        session: AsyncSession,
+        project: Project,
+    ) -> None:
+        repo = ScheduleRepository(session)
+        # A good schedule syncs first.
+        await repo.reconcile_snapshot(
+            project_id=project.id,
+            scheduler="apscheduler",
+            schedules=[
+                _schedule_dict(
+                    "job-1",
+                    task_name="myapp.real_task",
+                    expression="*/10 * * * *",
+                    kind="cron",
+                ),
+            ],
+        )
+        await session.commit()
+
+        # Next cycle the same job fails to map -> a DEGRADED placeholder.
+        degraded = {
+            "name": "job-1",
+            "task_name": "job-1",  # placeholder falls back to the id
+            "kind": "cron",
+            "expression": "unknown",
+            "engine": "apscheduler",
+            "scheduler": "apscheduler",
+            "is_enabled": True,
+            "args": [],
+            "kwargs": {},
+            "metadata": {"z4j_mapping": "degraded"},
+        }
+        await repo.reconcile_snapshot(
+            project_id=project.id,
+            scheduler="apscheduler",
+            schedules=[degraded],
+        )
+        await session.commit()
+
+        row = (
+            await session.execute(
+                select(Schedule).where(
+                    Schedule.project_id == project.id,
+                    Schedule.name == "job-1",
+                ),
+            )
+        ).scalar_one()
+        # Config PRESERVED -- not overwritten by the placeholder's "unknown".
+        assert row.expression == "*/10 * * * *"
+        assert row.task_name == "myapp.real_task"
+        # And the row survived (was not deleted by the sweep).
+        count = (
+            await session.execute(
+                select(func.count())
+                .select_from(Schedule)
+                .where(
+                    Schedule.project_id == project.id,
+                ),
+            )
+        ).scalar_one()
+        assert count == 1
+
+    async def test_degraded_row_for_new_job_still_creates(
+        self,
+        session: AsyncSession,
+        project: Project,
+    ) -> None:
+        # A degraded placeholder for a job with NO existing row still creates it
+        # (better than absent; corrected on the next clean snapshot).
+        repo = ScheduleRepository(session)
+        degraded = {
+            "name": "brand-new",
+            "task_name": "brand-new",
+            "kind": "cron",
+            "expression": "unknown",
+            "engine": "apscheduler",
+            "scheduler": "apscheduler",
+            "is_enabled": True,
+            "args": [],
+            "kwargs": {},
+            "metadata": {"z4j_mapping": "degraded"},
+        }
+        await repo.reconcile_snapshot(
+            project_id=project.id, scheduler="apscheduler", schedules=[degraded]
+        )
+        await session.commit()
+        count = (
+            await session.execute(
+                select(func.count())
+                .select_from(Schedule)
+                .where(
+                    Schedule.project_id == project.id,
+                ),
+            )
+        ).scalar_one()
+        assert count == 1
+
+
+@pytest.mark.asyncio
 class TestReconcileSnapshotInsert:
     async def test_first_snapshot_inserts_every_row(
         self,

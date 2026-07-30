@@ -32,6 +32,8 @@ from z4j_core.transport.frames import (
     AgentStatusFrame,
     CommandAckFrame,
     CommandResultFrame,
+    ErrorFrame,
+    ErrorPayload,
     EventBatchAckFrame,
     EventBatchAckPayload,
     EventBatchFrame,
@@ -62,16 +64,23 @@ class FrameOutcome(Enum):
       would loop on it, pinning its buffer head and overflow-losing later
       frames. Logged loudly. Wire signal is the SAME as DURABLE (confirm);
       only the brain-side bookkeeping differs.
+    * ``UPGRADE_REQUIRED`` -- an authenticated legacy schedule event reached
+      an active Boundary-D brain. The frame stays unconfirmed and the
+      WebSocket peer receives a typed fatal upgrade response.
     """
 
     DURABLE = "durable"
     TRANSIENT = "transient"
     DROP = "drop"
+    UPGRADE_REQUIRED = "upgrade_required"
 
     @property
     def confirmed(self) -> bool:
         """True when the agent should delete the frame (DURABLE or DROP)."""
-        return self is not FrameOutcome.TRANSIENT
+        return self not in {
+            FrameOutcome.TRANSIENT,
+            FrameOutcome.UPGRADE_REQUIRED,
+        }
 
 
 if TYPE_CHECKING:
@@ -113,7 +122,7 @@ _HAS_RULES_TTL_SECONDS = 15.0
 # Celery conf keys (``broker_url``, ``result_backend``,
 # ``broker_transport_options``, ``beat_schedule``, ...) into the brain
 # DB, where they would be exposed to ProjectRole.VIEWER over the worker
-# detail endpoint. Round-7 audit finding R7-H1. Keep the two lists in
+# detail endpoint. Round-7 audit finding. Keep the two lists in
 # sync; the audit-suite scans for divergence is a TODO for 1.7.
 _WORKER_CONF_ALLOWLIST: frozenset[str] = frozenset(
     {
@@ -159,7 +168,7 @@ def _filter_worker_conf(cfg: Any) -> dict[str, Any]:
 
 
 def _fingerprint_of(data: dict[str, Any]) -> str | None:
-    """R4 failure fingerprint from an event's ``data`` (None for a
+    """Failure fingerprint from an event's ``data`` (None for a
     non-failure event with no exception/traceback).
 
     Prefers the fingerprint the event ingestor already computed and
@@ -296,6 +305,9 @@ class FrameRouter:
         agent_id: UUID,
         dashboard_hub: DashboardHub | None = None,
         worker_id: str | None = None,
+        transport_kind: str | None = None,
+        registry_owner_id: UUID | None = None,
+        session_generation: str | None = None,
         send_frame: Callable[[Frame], Awaitable[None]] | None = None,
         automation_notify_coalesce_seconds: int = 0,
         automation_outbox_max_rows_per_project: int = 10_000,
@@ -323,6 +335,12 @@ class FrameRouter:
         # agent_workers (rather than guessing from the heartbeat
         # frame itself, which doesn't carry worker_id).
         self._worker_id = worker_id
+        # Immutable inbound transport authority.  Current cadence ACK/result
+        # transitions use these server-derived values; they never trust worker
+        # id, agent id alone, or a fresh registry lookup after receipt.
+        self._transport_kind = transport_kind
+        self._registry_owner_id = registry_owner_id
+        self._session_generation = session_generation
         # Callback to send a signed frame back
         # over the same connection. Used to emit ``event_batch_ack``
         # after a successful ingest commit so the agent can confirm-
@@ -443,13 +461,10 @@ class FrameRouter:
         ``DROP`` (the agent confirms + deletes it so it does not loop). A
         clean run -> ``DURABLE``.
 
-        This 3-state verdict is exactly what the long-poll ``POST /events``
-        accounting needs: over long-poll the HTTP 200 accepted-count IS the
-        acknowledgement, so a TRANSIENT must count rejected (agent retries)
-        while a DURABLE or DROP counts accepted (agent confirms) -- so a
-        deterministic per-frame failure is resolved at the brain instead of
-        wedging the agent's send loop forever (round-8 finding). On the
-        WebSocket path event_batch acks are emitted inside
+        The long-poll ``POST /events`` route consumes the same verdict:
+        DURABLE and DROP count accepted; TRANSIENT retries; and
+        UPGRADE_REQUIRED remains unconfirmed with a typed fatal response.
+        On the WebSocket path event_batch acks are emitted inside
         :meth:`_handle_event_batch`; control frames are confirmed on send by
         the agent, so the gateway ignores this return for them.
 
@@ -457,7 +472,7 @@ class FrameRouter:
         try/except so ``dispatch`` truly NEVER raises: the WS ingest worker
         (``gateway.py``) has no per-frame error handling and relies on that
         contract, so a raise here (e.g. an unexpected error while building an
-        ack) would crash the worker and wedge the connection (R9). An
+        ack) would crash the worker and wedge the connection. An
         unexpected failure classifies TRANSIENT (agent re-sends) not lost.
         """
         try:
@@ -531,7 +546,10 @@ class FrameRouter:
             events = events[:cap]
         return events
 
-    async def _handle_event_batch(self, frame: EventBatchFrame) -> FrameOutcome:
+    async def _handle_event_batch(  # noqa: PLR0915  transactional ingest and wire outcome
+        self,
+        frame: EventBatchFrame,
+    ) -> FrameOutcome:
         """Ingest an event batch. Returns a :class:`FrameOutcome`:
 
         * ``DURABLE``   -- committed with no transiently-skipped event; the
@@ -540,12 +558,15 @@ class FrameRouter:
           transiently skipped, OR ingest/commit hit a transient DB error
           (deadlock, pool timeout). The ack is withheld (WS) / the frame
           counts rejected (long-poll) so the agent re-sends; the committed
-          events dedup on the replay (R6-panel-HIGH).
+          events dedup on the replay (-panel-HIGH).
         * ``DROP``      -- ingest/commit failed for a PERMANENT reason (a
           deterministic constraint / data error at commit that recurs on
           every replay). The batch is dropped-and-acked (logged loudly) so
           the agent does not loop on it forever; the events in it are lost,
           which is the bounded cost of not wedging the whole send loop.
+        * ``UPGRADE_REQUIRED`` -- Boundary D rejected a legacy unsequenced
+          schedule projection. The batch remains unacknowledged and the
+          transport sends a typed fatal upgrade requirement.
 
         A permanent per-EVENT error is already dropped-and-acked INSIDE
         ``ingest_batch`` (so the batch stays DURABLE); this ``DROP`` outcome
@@ -569,7 +590,7 @@ class FrameRouter:
         # maximum (``EventBatchPayload.events`` max_length, z4j_core frames),
         # so no protocol-legal frame is silently truncated while its ack
         # confirms the whole frame by id -- which would lose the tail
-        # (R8-M2/round-8-external). The downstream notification/automation
+        # (/round-8-external). The downstream notification/automation
         # fan-out is independently bounded (detached-task cap + semaphores +
         # durable outbox), so this does not reopen the amplification concern.
         event_batch_cap = 5_000
@@ -615,8 +636,33 @@ class FrameRouter:
                 # transient skip means the committed events are real (they
                 # dedup on replay) but the batch must NOT be confirmed, so
                 # the agent re-sends and the skipped event gets another
-                # chance (R6-panel-HIGH).
-                if result.fully_durable:
+                # chance (-panel-HIGH).
+                if result.upgrade_required:
+                    outcome = FrameOutcome.UPGRADE_REQUIRED
+                    if self._send_frame is not None:
+                        raw_id = getattr(frame, "id", None)
+                        frame_id = raw_id if isinstance(raw_id, str) else ""
+                        await self._send_frame_safe(
+                            ErrorFrame(
+                                id=f"err_{frame_id}"[:64],
+                                ts=datetime.now(UTC),
+                                payload=ErrorPayload(
+                                    code="scheduler_upgrade_required",
+                                    message=(
+                                        "schedule projection requires a current "
+                                        "Boundary-D scheduler adapter"
+                                    ),
+                                    fatal=True,
+                                ),
+                            ),
+                        )
+                    logger.warning(
+                        "z4j frame_router: rejected legacy schedule event "
+                        "with a typed upgrade requirement",
+                        project_id=str(self._project_id),
+                        agent_id=str(self._agent_id),
+                    )
+                elif result.fully_durable:
                     outcome = FrameOutcome.DURABLE
                 else:
                     outcome = FrameOutcome.TRANSIENT
@@ -656,9 +702,9 @@ class FrameRouter:
         finally:
             # Emit an ``event_batch_ack`` so the agent confirms-and-evicts
             # the matching buffer entries -- on DURABLE (stored) OR DROP
-            # (permanently undeliverable). Withhold ONLY on TRANSIENT, so a
-            # deadlock storm in ingest does NOT silently consume buffer
-            # entries but a deterministic poison batch is not looped forever.
+            # (permanently undeliverable). Withhold on TRANSIENT and
+            # UPGRADE_REQUIRED, so neither a database retry nor an obsolete
+            # scheduler emitter silently consumes its only buffered copy.
             #
             # Fire-and-forget the send so the next event_batch can start
             # ingesting immediately (awaiting inline would push the ack past
@@ -669,8 +715,8 @@ class FrameRouter:
                 # built via ``model_construct`` (HMAC verified, Pydantic
                 # constraints bypassed), so a buggy/compromised agent's
                 # >64-char, non-str, or MISSING ``id`` would otherwise raise a
-                # strict ValidationError HERE (in the finally) and, before R9's
-                # try-wrap, crash the WS ingest worker (R9). Normalise the id
+                # strict ValidationError HERE (in the finally) and, before 's
+                # try-wrap, crash the WS ingest worker. Normalise the id
                 # to a str ONCE: a None / non-str id becomes "" (round-9 LOW),
                 # which the agent's _handle_event_batch_ack ignores -> it
                 # re-sends and the brain dedups, rather than a misleading
@@ -723,18 +769,18 @@ class FrameRouter:
                 self._pending_ack_tasks.add(ack_task)
                 ack_task.add_done_callback(self._pending_ack_tasks.discard)
 
-        # Post-commit side effects run ONLY when the batch actually
-        # committed (DURABLE, or a TRANSIENT whose commit succeeded with a
-        # skipped sibling). Never on DROP (nothing persisted). Each is
-        # best-effort: an exception here must NOT change ``outcome`` -- the
-        # data is already committed and the confirm decision is made (R6-F2).
+        # Post-commit side effects run ONLY when the batch actually committed
+        # (DURABLE, or an unconfirmed outcome with committed siblings). Never
+        # on DROP (nothing persisted). Each is best-effort: an exception here
+        # must NOT change ``outcome`` -- the data is already committed and the
+        # confirm decision is made.
         if committed:
             await self._run_post_commit_hook("publish", self._publish_task_change())
             # Notifications + automation fire on the NEW events only
             # (``new_events``, deduped): a re-delivered event was already
             # notified/fired on its first delivery, so a reconnect re-flush
             # or a long-poll retry must not re-page subscribers or re-run a
-            # rule for the same task state change (R6-F3).
+            # rule for the same task state change.
             await self._run_post_commit_hook(
                 "notifications",
                 self._evaluate_notifications(new_events),
@@ -749,7 +795,7 @@ class FrameRouter:
         """Await a best-effort post-commit side effect, swallowing errors.
 
         The caller has already committed the batch; a hook failure must
-        not propagate (see ``_handle_event_batch`` / R6-F2).
+        not propagate (see ``_handle_event_batch`` /).
         """
         try:
             await coro
@@ -956,7 +1002,7 @@ class FrameRouter:
                                         "active": data.get("active", []),
                                         "active_queues": data.get("active_queues", []),
                                         "registered": data.get("registered", []),
-                                        # SECURITY R7-H1: re-apply the
+                                        # SECURITY: re-apply the
                                         # allowlist defense-in-depth so
                                         # a misbehaving / downgraded /
                                         # malicious adapter cannot
@@ -1197,7 +1243,7 @@ class FrameRouter:
         last_exc: Exception | None = None
         for attempt in range(_CONTROL_FRAME_DB_RETRIES):
             try:
-                async with self._db.session() as session:
+                async with self._db.session(write=True) as session:
                     await persist(session)
                     await session.commit()
                 return
@@ -1235,6 +1281,10 @@ class FrameRouter:
                 command_id=command_id,
                 project_id=self._project_id,
                 agent_id=self._agent_id,
+                transport_kind=self._transport_kind,
+                registry_owner_id=self._registry_owner_id,
+                session_generation=self._session_generation,
+                delivery_claim_token=(frame.payload.delivery_claim_token),
             )
 
         await self._run_control_persist("command_ack", command_id, _persist)
@@ -1260,6 +1310,10 @@ class FrameRouter:
                 error=frame.payload.error,
                 project_id=self._project_id,
                 agent_id=self._agent_id,
+                transport_kind=self._transport_kind,
+                registry_owner_id=self._registry_owner_id,
+                session_generation=self._session_generation,
+                delivery_claim_token=(frame.payload.delivery_claim_token),
             )
 
         await self._run_control_persist("command_result", command_id, _persist)
@@ -1476,7 +1530,7 @@ class FrameRouter:
                 "priority": data.get("priority", "normal"),
                 "exception": data.get("exception"),
                 "runtime_ms": data.get("runtime_ms"),
-                # R4: the failure fingerprint so a rule can condition on a
+                # The failure fingerprint so a rule can condition on a
                 # specific issue (e.g. notify when a fingerprint reappears).
                 "fingerprint": _fingerprint_of(data),
                 # The agent that REPORTED the event is the command target
@@ -1523,7 +1577,7 @@ class FrameRouter:
             )
 
             sem = _get_automation_db_session_semaphore()
-            async with sem, self._db.session() as session:
+            async with sem, self._db.session(write=True) as session:
                 executor = AutomationExecutor(
                     audit=self._dispatcher.audit,
                     runner=AutomationActionRunner(dispatcher=self._dispatcher),

@@ -153,7 +153,7 @@ class WorkerRepository(BaseRepository[Worker]):
         rollback is scoped to this one row - the outer transaction
         (which owns the events batch's other writes) survives.
         If the insert loses the race the caller re-reads the now-
-        existing row and applies the updates (R4 follow-up: the
+        existing row and applies the updates (follow-up: the
         enterprise stack exercised this path under concurrent
         load and caught a ``PendingRollbackError`` cascade).
         """

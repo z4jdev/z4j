@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import secrets
 import uuid
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -76,7 +77,6 @@ class TestC1SchemaVersionWarnNotRaise:
     async def test_db_newer_than_code_warns_continues(
         self,
         session,
-        caplog,
     ) -> None:
         """The exact failure mode that bit operators on 1.0.18→1.0.17.
 
@@ -87,17 +87,20 @@ class TestC1SchemaVersionWarnNotRaise:
         session.add(Z4JMeta(key="schema_version", value="9999.0.0"))
         await session.commit()
 
-        # Must NOT raise
-        with caplog.at_level("WARNING"):
+        # Must NOT raise. Assert against this module's logger call rather
+        # than the process-global handler graph: app-construction tests
+        # legitimately replace root handlers, and that logging state must
+        # not make this behavioral oracle order-dependent.
+        with patch("z4j_brain.startup_version.logger.warning") as warning:
             await check_and_update_schema_version(session)
 
         # And the warning must mention the version mismatch so an
         # operator inspecting logs understands why some features
         # are missing.
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert any("9999.0.0" in r.getMessage() for r in warnings), (
-            f"expected version-skew warning, got: {[r.getMessage() for r in warnings]}"
-        )
+        warning.assert_called_once()
+        args = warning.call_args.args
+        rendered = args[0] % args[1:]
+        assert "9999.0.0" in rendered
 
     async def test_db_older_than_code_still_updates_record(
         self,
@@ -261,7 +264,7 @@ class TestH2SubscriptionFiltersExtraIgnore:
             )
 
     def test_user_subscription_create_keeps_forbid(self):
-        """R3 M11 audit defense still in place."""
+        """Audit defense still in place."""
         from z4j_brain.api.user_notifications import UserSubscriptionCreate
 
         with pytest.raises(ValidationError):

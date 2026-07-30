@@ -82,6 +82,21 @@ describe("formatDuration", () => {
   it("renders multi-hour with minutes", () => {
     expect(formatDuration(3_900_000)).toBe("1h 5m");
   });
+
+  // Regression: the old implementation floored the large unit and
+  // independently rounded the remainder, so a value rounding up
+  // through a unit boundary printed an impossible duration.
+  it("never renders 60 seconds or 60 minutes", () => {
+    expect(formatDuration(119_600)).toBe("2m 0s"); // was "1m 60s"
+    expect(formatDuration(119_500)).toBe("2m 0s"); // was "1m 60s"
+    expect(formatDuration(3_599_700)).toBe("1h 0m"); // was "59m 60s"
+    expect(formatDuration(59_960)).toBe("1m 0s"); // was "60.0s"
+  });
+
+  it("keeps sub-minute precision", () => {
+    expect(formatDuration(59_000)).toBe("59.0s");
+    expect(formatDuration(1_050)).toBe("1.1s");
+  });
 });
 
 describe("formatCompact", () => {
@@ -121,6 +136,26 @@ describe("formatPercent", () => {
   it("respects fractionDigits", () => {
     expect(formatPercent(0.12345, 0)).toBe("12%");
     expect(formatPercent(0.12345, 3)).toBe("12.345%");
+  });
+
+  // Regression: a small-but-nonzero failure rate rendered "0.0%",
+  // which appeared on the project overview directly beside a red
+  // "124 failed" count.
+  it("never renders a nonzero rate as zero", () => {
+    expect(formatPercent(124 / 482_200)).toBe("<0.1%");
+    expect(formatPercent(1 / 482_200)).toBe("<0.1%");
+    expect(formatPercent(0.00004, 2)).toBe("<0.01%");
+    // Just ABOVE the threshold still renders the real value.
+    expect(formatPercent(0.0004, 2)).toBe("0.04%");
+  });
+
+  it("still renders a genuine zero as zero", () => {
+    expect(formatPercent(0)).toBe("0.0%");
+  });
+
+  it("does not round a near-total up to 100%", () => {
+    expect(formatPercent(0.99999)).toBe(">99.9%");
+    expect(formatPercent(1)).toBe("100.0%");
   });
 });
 

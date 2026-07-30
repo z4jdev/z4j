@@ -24,7 +24,7 @@ from z4j_core.models.worker import WorkerState
 #: these, no late event and no reconciliation probe result may move
 #: it back to a non-terminal state - terminal states are terminal.
 #: Shared by the EventIngestor's out-of-order-event guard and by
-#: ``TaskRepository.apply_reconciled_state`` (R3 H1) so the two
+#: ``TaskRepository.apply_reconciled_state`` so the two
 #: write paths cannot drift on what "terminal" means. RETRY and
 #: REJECTED are deliberately NOT terminal: both can legitimately
 #: re-enter the queue (Celery retries; reject with requeue).

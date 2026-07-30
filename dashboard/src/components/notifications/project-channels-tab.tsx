@@ -41,7 +41,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   DropdownMenu,
@@ -72,7 +71,6 @@ import {
   type ChannelType,
   type ChannelTestResult,
   type NotificationChannel,
-  type UserChannel,
 } from "@/hooks/use-notifications";
 
 const CHANNEL_ICONS = {

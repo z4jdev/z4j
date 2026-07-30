@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { apiCall } from "@/lib/api";
+import { api, apiCall } from "@/lib/api";
 import { buildAuditExportUrl } from "@/hooks/use-audit";
 import { buildExportUrl } from "@/hooks/use-tasks";
 
@@ -38,6 +38,67 @@ describe("apiCall", () => {
       "/api/v1/projects",
       expect.objectContaining({ credentials: "include" }),
     );
+  });
+
+  it("exposes a durable Location before response-body processing", async () => {
+    const text = vi.fn().mockRejectedValue(new Error("body stream lost"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        status: 202,
+        ok: true,
+        headers: new Headers({
+          Location: "/api/v1/projects/p/bulk-retry-requests/r",
+        }),
+        text,
+      }),
+    );
+    const locations: string[] = [];
+
+    await expect(
+      api.postResource(
+        "/projects/p/bulk-retry-requests",
+        { idempotency_key: "k" },
+        (location) => locations.push(location),
+      ),
+    ).rejects.toThrow("body stream lost");
+
+    expect(locations).toEqual(["/api/v1/projects/p/bulk-retry-requests/r"]);
+  });
+
+  it("normalizes FastAPI structured detail into an ApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            detail: {
+              error: "matching task count exceeds max",
+              max: 1000,
+              matched_at_least: 1001,
+            },
+          }),
+          {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+
+    await expect(
+      apiCall("/projects/p/bulk-retry-requests", {
+        method: "POST",
+        body: {},
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "matching task count exceeds max",
+      details: {
+        max: 1000,
+        matched_at_least: 1001,
+      },
+    });
   });
 });
 

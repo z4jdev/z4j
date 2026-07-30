@@ -35,7 +35,12 @@ def encode_cursor(sort_value: Any, tiebreaker: uuid.UUID) -> str:
     same type the producer wrote.
     """
     if isinstance(sort_value, datetime):
-        sort_repr: Any = ["dt", sort_value.astimezone(UTC).isoformat()]
+        # M11: a NAIVE datetime is stored as UTC (the brain's timestamps are
+        # tz-naive UTC on SQLite). ``astimezone`` on a naive value reinterprets
+        # it in the HOST's local zone, shifting the encoded cursor on a non-UTC
+        # host so page 2 repeats page 1. Attach UTC first, then normalize.
+        dt = sort_value if sort_value.tzinfo is not None else sort_value.replace(tzinfo=UTC)
+        sort_repr: Any = ["dt", dt.astimezone(UTC).isoformat()]
     elif sort_value is None:
         sort_repr = ["null", None]
     else:

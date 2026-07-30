@@ -20,8 +20,6 @@ this module without going through argparse.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -96,27 +94,27 @@ def backup_sqlite(database_url: str, output: Path) -> None:
         conn.close()
 
 
-def restore_sqlite(database_url: str, source: Path) -> None:
-    """Restore a SQLite DB from ``source``.
+def restore_sqlite(
+    database_url: str,
+    source: Path,
+    *,
+    operation: str | None = None,
+    expected_sha256: str | None = None,
+    stopped_executor_attestation: str | None = None,
+    known_head: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the authenticated crash-resumable SQLite restore ceremony."""
 
-    The brain's process MUST be stopped before calling this (the file
-    needs an exclusive write). The CLI driver enforces this by
-    refusing to run if it can detect a live brain process; this
-    function trusts the caller and just does the file ops.
-    """
-    src = source.expanduser().resolve()
-    if not src.exists():
-        raise FileNotFoundError(f"restore: source file does not exist: {src}")
-    dst = _sqlite_path_from_url(database_url)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    # Move existing DB (if any) to a .pre-restore-bak so the operator
-    # can roll back if the new file turns out to be wrong.
-    if dst.exists():
-        bak = dst.with_suffix(dst.suffix + ".pre-restore-bak")
-        if bak.exists():
-            bak.unlink()
-        dst.replace(bak)
-    shutil.copy2(src, dst)
+    from z4j_brain.management_restore import restore_sqlite_database
+
+    return restore_sqlite_database(
+        database_url,
+        source,
+        operation=operation,
+        expected_sha256=expected_sha256,
+        stopped_executor_attestation=stopped_executor_attestation,
+        known_head=known_head,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -124,89 +122,66 @@ def restore_sqlite(database_url: str, source: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _pg_libpq_url(database_url: str) -> str:
-    """Convert ``postgresql+asyncpg://`` to libpq form for pg_dump."""
-    return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-
-
 def backup_postgres(database_url: str, output: Path) -> None:
-    """Snapshot a PostgreSQL DB via ``pg_dump`` to ``output``.
+    """Snapshot PostgreSQL through the trusted pinned client runner."""
 
-    Uses the custom format (``-Fc``) which is compressible and
-    selective-restore-able, the format ``pg_restore`` was built for.
-    Requires ``pg_dump`` on the operator's PATH.
-    """
-    if shutil.which("pg_dump") is None:
-        raise RuntimeError(
-            "backup: pg_dump not found on PATH. Install postgresql-client "
-            "(Debian/Ubuntu: `apt install postgresql-client`; macOS: "
-            "`brew install libpq && brew link --force libpq`).",
-        )
-    output = output.expanduser().resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists():
-        raise FileExistsError(
-            f"backup: refusing to overwrite existing file at {output}",
-        )
-    libpq_url = _pg_libpq_url(database_url)
-    # -Fc: custom format. -Z6: gzip compression. --no-owner / --no-acl
-    # for portability across environments.
-    result = subprocess.run(  # noqa: S603, PLW1510  fixed internal pg_dump, returncode checked below
-        [  # noqa: S607  pg_dump resolved via PATH by design (shutil.which guard above)
-            "pg_dump",
-            "-Fc",
-            "-Z",
-            "6",
-            "--no-owner",
-            "--no-acl",
-            "-f",
-            str(output),
-            libpq_url,
-        ],
-        capture_output=True,
-        text=True,
+    from z4j_brain.management_restore_postgres import (
+        backup_postgres_database,
     )
-    if result.returncode != 0:
-        # Strip the URL from any error output - it carries the password.
-        stderr = result.stderr.replace(libpq_url, "<DATABASE_URL>")
-        raise RuntimeError(f"backup: pg_dump failed (rc={result.returncode}): {stderr}")
+
+    backup_postgres_database(database_url, output)
 
 
-def restore_postgres(database_url: str, source: Path) -> None:
-    """Restore a PostgreSQL DB from a ``pg_dump -Fc`` file via ``pg_restore``.
+def restore_postgres(
+    database_url: str,
+    source: Path,
+    *,
+    operation: str | None = None,
+    expected_sha256: str | None = None,
+    stopped_executor_attestation: str | None = None,
+    known_head: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the durable PostgreSQL replacement ceremony."""
 
-    Uses ``--clean --if-exists`` so the restore is idempotent against
-    a partially-populated target DB. Operator must arrange to stop
-    the brain (or at least quiesce writes) before calling - we don't
-    detect that here.
-    """
-    if shutil.which("pg_restore") is None:
-        raise RuntimeError(
-            "restore: pg_restore not found on PATH. Install postgresql-client.",
-        )
-    src = source.expanduser().resolve()
-    if not src.exists():
-        raise FileNotFoundError(f"restore: source file does not exist: {src}")
-    libpq_url = _pg_libpq_url(database_url)
-    result = subprocess.run(  # noqa: S603, PLW1510  fixed internal pg_restore, returncode checked below
-        [  # noqa: S607  pg_restore resolved via PATH by design (shutil.which guard above)
-            "pg_restore",
-            "--clean",
-            "--if-exists",
-            "--no-owner",
-            "--no-acl",
-            "-d",
-            libpq_url,
-            str(src),
-        ],
-        capture_output=True,
-        text=True,
+    from z4j_brain.management_restore_postgres import (
+        restore_postgres_database,
     )
-    if result.returncode != 0:
-        stderr = result.stderr.replace(libpq_url, "<DATABASE_URL>")
-        raise RuntimeError(
-            f"restore: pg_restore failed (rc={result.returncode}): {stderr}",
+
+    return restore_postgres_database(
+        database_url,
+        source,
+        operation=operation,
+        expected_sha256=expected_sha256,
+        stopped_executor_attestation=stopped_executor_attestation,
+        known_head=known_head,
+    )
+
+
+def rollback_restore(
+    database_url: str,
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    """Roll back one exact pending database-replacement operation."""
+
+    backend = detect_backend(database_url)
+    if backend == "postgres":
+        from z4j_brain.management_restore_postgres import (
+            rollback_postgres_database,
         )
+
+        return rollback_postgres_database(
+            database_url,
+            operation=operation,
+        )
+    from z4j_brain.management_restore import (
+        rollback_sqlite_database,
+    )
+
+    return rollback_sqlite_database(
+        database_url,
+        operation=operation,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -229,14 +204,34 @@ def backup(database_url: str, output: Path) -> dict[str, Any]:
     }
 
 
-def restore(database_url: str, source: Path) -> dict[str, Any]:
+def restore(
+    database_url: str,
+    source: Path,
+    *,
+    operation: str | None = None,
+    expected_sha256: str | None = None,
+    stopped_executor_attestation: str | None = None,
+    known_head: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Dispatch to the right backend. Returns metadata about the result."""
     backend = detect_backend(database_url)
     if backend == "sqlite":
-        restore_sqlite(database_url, source)
-    else:
-        restore_postgres(database_url, source)
-    return {"backend": backend, "source": str(source.expanduser().resolve())}
+        return restore_sqlite(
+            database_url,
+            source,
+            operation=operation,
+            expected_sha256=expected_sha256,
+            stopped_executor_attestation=(stopped_executor_attestation),
+            known_head=known_head,
+        )
+    return restore_postgres(
+        database_url,
+        source,
+        operation=operation,
+        expected_sha256=expected_sha256,
+        stopped_executor_attestation=stopped_executor_attestation,
+        known_head=known_head,
+    )
 
 
 __all__ = [

@@ -8,11 +8,11 @@ mutations, bulk operations, and worker control land in B5.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from z4j_brain.api._pagination import (
     clamp_limit,
@@ -32,6 +32,11 @@ from z4j_brain.api.deps import (
     require_csrf,
 )
 from z4j_brain.domain.ip_rate_limit import require_bulk_action_throttle
+from z4j_brain.domain.retry_contract import (
+    RETRY_COMMAND_ENGINES,
+    engine_is_native_retry,
+    polyfill_retry_has_operator_overrides,
+)
 from z4j_brain.errors import NotFoundError
 from z4j_brain.persistence.enums import CommandStatus, ProjectRole
 
@@ -60,9 +65,10 @@ if TYPE_CHECKING:
 # for *ingest* (so we don't break when an agent on a newer brain
 # version reports a newly-added engine) - this list applies only
 # to *dispatch*, where we have to actually have an adapter.
-KNOWN_ENGINES: frozenset[str] = frozenset({"celery", "rq", "dramatiq"})
+KNOWN_ENGINES: frozenset[str] = RETRY_COMMAND_ENGINES
 
-# R9 H-1 (HIGH): every key in this frozenset is populated by the
+
+# Every key in this frozenset is populated by the
 # brain server-side from the Task table; an API client must NOT be
 # able to seed any of them through ``BulkRetryRequest.filter``.
 #
@@ -84,6 +90,33 @@ SERVER_OWNED_FILTER_KEYS: frozenset[str] = frozenset(
         "task_names",
         "task_priorities",
         "overrides",
+    }
+)
+
+# 1.7.1 (CX-H5, HIGH/security): the bulk-retry filter is now locked to a
+# SELECTION-ONLY allowlist. A client may only narrow WHICH tasks to retry;
+# every executable field is stripped and re-populated by the brain from its
+# own Task table. The prior denylist (SERVER_OWNED_FILTER_KEYS) stripped only
+# three keys, so a client could smuggle filter["actors"] / ["args"] /
+# ["kwargs"] / ["queues"] straight through to the Dramatiq adapter's
+# ``bulk_retry_action`` and invoke an arbitrary registered actor with
+# attacker-chosen arguments (a confused-deputy actor-invocation primitive).
+# An allowlist closes the whole class at once: anything that is not an
+# explicit, non-executable selection filter is refused (and audited).
+# ``SERVER_OWNED_FILTER_KEYS`` is a strict subset kept for the audit-trail
+# vocabulary and the security regression tests; the allowlist below is what
+# the endpoint actually enforces.
+CLIENT_ALLOWED_BULK_FILTER_KEYS: frozenset[str] = frozenset(
+    {
+        "task_ids",  # the selection set (hard-clamped to body.max)
+        "engine",  # routing; validated against KNOWN_ENGINES
+        "state",  # celery selection: task state
+        "status",  # alias some clients send for state
+        "queue",  # celery selection: single SOURCE queue to filter on
+        # (NOT the per-id executable ``queues`` map)
+        "name",  # celery selection: task-name filter
+        "since",  # celery selection: time-window lower bound
+        "until",  # celery selection: time-window upper bound
     }
 )
 
@@ -177,6 +210,56 @@ class RetryTaskRequest(BaseModel):
                 f"override payload {size} bytes exceeds 64 KiB cap",
             )
         return v
+
+    @field_validator("override_kwargs")
+    @classmethod
+    def _reject_reserved_control_keys(cls, v: object) -> object:
+        """Refuse operator override_kwargs carrying a reserved control key.
+
+        The brain/agent protocol injects control metadata under the ``__z4j_``
+        namespace (e.g. ``__z4j_actor_name__``, ``__z4j_task_name__``,
+        ``__z4j_queue_name__``) to steer a polyfill re-submit. A legitimate retry
+        NEVER carries these -- they are set by the dispatcher, not the operator.
+        An agent runtime that consumes such a key as control metadata (notably a
+        pre-1.7.1 N-1 agent that predates the strip/attest gate) could be steered
+        to enqueue a DIFFERENT registered actor/task than the one being retried.
+        Reject any operator-supplied ``__z4j_`` key at the request boundary so the
+        smuggle can never reach the wire, on any fleet version.
+        """
+        if isinstance(v, dict):
+            reserved = [k for k in v if isinstance(k, str) and k.startswith("__z4j_")]
+            if reserved:
+                raise ValueError(
+                    f"override_kwargs may not contain reserved control keys: {sorted(reserved)}",
+                )
+        return v
+
+    @model_validator(mode="after")
+    def _overrides_both_or_neither(self) -> RetryTaskRequest:
+        """RH1 defense in depth: override_args and override_kwargs must
+        be supplied TOGETHER or not at all.
+
+        Native engines (celery/rq/dramatiq) retry BY REFERENCE and normally need
+        no overrides, so a PARTIAL override -- exactly one half present -- is
+        ambiguous: the operator changed one half but left the other to be
+        reconstructed from a source the brain has redacted. An older (N-1) agent
+        that predates the both-halves contract could substitute an empty value
+        for the missing half and re-run with dropped inputs. Refusing a partial
+        override closes that window statically at the request boundary, for every
+        engine, with no dependence on a negotiated runtime capability. Supplying
+        neither (plain by-reference retry) or both (full operator inputs) is
+        always accepted.
+        """
+        has_args = self.override_args is not None
+        has_kwargs = self.override_kwargs is not None
+        if has_args != has_kwargs:
+            missing = "override_kwargs" if has_args else "override_args"
+            raise ValueError(
+                "override_args and override_kwargs must be supplied together; "
+                f"{missing} is missing. Provide both halves to retry with "
+                "different inputs, or neither to retry the original by reference.",
+            )
+        return self
 
 
 class CancelTaskRequest(BaseModel):
@@ -481,17 +564,53 @@ async def issue_retry_task(
         engine=body.engine,
         task_id=body.task_id,
     )
-    # Polyfill payload (audit-noted as part of the unified action
-    # surface): forward the original task name + args so adapters
-    # without a native ``retry_task`` (huey/arq/taskiq) can lower
-    # the call to ``submit_task`` agent-side. Adapters that DO
-    # implement retry_task natively (celery/rq/dramatiq) ignore the
-    # extra fields.
+    # Polyfill payload: forward the original task NAME (a dotted import
+    # path -- routing metadata, never redacted) so adapters without a
+    # native ``retry_task`` (huey/arq/taskiq) can lower the call to
+    # ``submit_task`` agent-side. Adapters that DO implement retry_task
+    # natively (celery/rq/dramatiq) ignore the extra fields.
+    #
+    # 1.7.1 (H3/M7, correctness/security): the brain stores args/kwargs
+    # ALREADY REDACTED (Task model: "defence in depth before storing"),
+    # so they can never faithfully reconstruct a retry. We therefore
+    # NEVER forward brain-side args/kwargs -- doing so re-ran tasks with
+    # scrubbed values (e.g. the literal string "[REDACTED]", or () on a
+    # default-config app). A native retry re-runs the original broker job
+    # by reference; only operator-owned overrides ride along. When the
+    # original invocation carried arguments that are now unavailable, we
+    # signal it so a polyfill adapter can fail closed rather than silently
+    # re-run with no args.
     original = await task_repo.get_by_engine_task_id(
         project_id=project.id,
         engine=body.engine,
         task_id=body.task_id,
     )
+    # RH1 (direction 1) -- defense in depth. The manual retry endpoint already
+    # validates ``engine`` against KNOWN_ENGINES (all native today), so this
+    # branch is unreachable UNLESS a future release adds a polyfill engine to
+    # KNOWN_ENGINES. If that happens, a polyfill retry is refused unless BOTH
+    # operator override halves are supplied: the engine has no native retry, so
+    # the agent lowers it to a re-submit, and the brain's stored arguments are
+    # redacted -- only real operator overrides make the re-submit safe (on ANY
+    # runtime). This is a static rule on the presence of overrides, not a
+    # negotiated runtime capability; the agent-side dispatcher fails closed on
+    # the same criterion, and the automation runner refuses polyfill retries
+    # outright (it can supply no overrides at all).
+    if not engine_is_native_retry(body.engine) and not polyfill_retry_has_operator_overrides(
+        body.override_args, body.override_kwargs
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": (
+                    f"refusing to retry a {body.engine!r} task: this engine has no "
+                    "native retry, so the agent lowers it to a re-submit, and the "
+                    "brain stores the original arguments redacted. Use 'retry with "
+                    "different inputs' to supply both override_args and "
+                    "override_kwargs explicitly."
+                ),
+            },
+        )
     return await _issue_task_command(
         slug=slug,
         action="retry_task",
@@ -501,10 +620,13 @@ async def issue_retry_task(
             "engine": body.engine,
             "task_id": body.task_id,
             "task_name": original.name if original else None,
-            "args": (original.args if (original and body.override_args is None) else None),
-            "kwargs": (original.kwargs if (original and body.override_kwargs is None) else None),
+            "args": None,
+            "kwargs": None,
             "override_args": body.override_args,
             "override_kwargs": body.override_kwargs,
+            "original_had_args": bool(
+                original is not None and (original.args is not None or original.kwargs is not None)
+            ),
             "eta_seconds": body.eta_seconds,
             "priority": priority_label,
         },
@@ -601,15 +723,19 @@ async def issue_bulk_retry(
     )
     raw_ids = (body.filter or {}).get("task_ids")
 
-    # R9 H-1 (HIGH): strip every server-owned key from the inbound
-    # filter BEFORE enrichment. See SERVER_OWNED_FILTER_KEYS docstring
-    # at module top for the full rationale.
+    # CX-H5: the inbound filter is locked to a
+    # SELECTION-ONLY allowlist. Every key that is not an explicit,
+    # non-executable selection filter is stripped BEFORE enrichment --
+    # this refuses the server-owned keys (task_names / task_priorities /
+    # overrides) AND every executable field (actors / queues / args /
+    # kwargs / func) a client could otherwise smuggle to an engine
+    # adapter. See CLIENT_ALLOWED_BULK_FILTER_KEYS at module top.
     raw_filter = body.filter or {}
-    rejected_client_keys = sorted(k for k in SERVER_OWNED_FILTER_KEYS if k in raw_filter)
-    enriched_filter = {k: v for k, v in raw_filter.items() if k not in SERVER_OWNED_FILTER_KEYS}
+    rejected_client_keys = sorted(k for k in raw_filter if k not in CLIENT_ALLOWED_BULK_FILTER_KEYS)
+    enriched_filter = {k: v for k, v in raw_filter.items() if k in CLIENT_ALLOWED_BULK_FILTER_KEYS}
 
-    # R10-L1: the act of an authenticated operator supplying
-    # server-owned filter keys (the R9-H1 confused-deputy attempt) is
+    # The act of an authenticated operator supplying
+    # server-owned filter keys (the confused-deputy attempt) is
     # a security-relevant event that MUST leave a tamper-evident audit
     # row regardless of whether the request then succeeds or trips the
     # partial-resolution 400 fast-path below. The command-issuance
@@ -637,11 +763,34 @@ async def issue_bulk_retry(
         )
         await db_session.commit()
 
+    # H2: distinguish "task_ids omitted" (a legitimate retry-all-matching
+    # request) from "task_ids present but not a non-empty list" (an explicit
+    # selection that is empty [] or malformed, e.g. a bare string). The latter
+    # must NOT fall through to the all-matching path below -- that would silently
+    # mass-retry the WHOLE project's failed backlog when the operator/UI actually
+    # selected zero (or sent a malformed value). Reject it (fail closed: a
+    # malformed explicit selection must never widen a destructive action).
+    if "task_ids" in raw_filter and not (isinstance(raw_ids, list) and raw_ids):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    "task_ids was supplied but is not a non-empty list of ids. "
+                    "Omit task_ids to retry all matching, or supply at least one "
+                    "id to retry a specific selection."
+                ),
+            },
+        )
+
     if isinstance(raw_ids, list) and raw_ids:
         # Hard cap matches the eventual `max` cap on the agent
         # side - querying more priorities than we'll ever retry
         # is wasted work AND a DoS amplifier.
-        capped_ids = [str(t) for t in raw_ids[: body.max]]
+        # RL3: dedup (order-preserving) BEFORE the cap, so a client sending the
+        # same id twice does not trip the ownership check below (which compares
+        # len(task_names), a deduped dict, against len(capped_ids)) into a
+        # false 400 with zero ids actually missing.
+        capped_ids = list(dict.fromkeys(str(t) for t in raw_ids))[: body.max]
         # The filter MUST carry an explicit engine now - silently
         # defaulting to "celery" would misroute a bulk retry of RQ
         # or Dramatiq tasks (LATENT-1). We still accept the filter
@@ -649,77 +798,130 @@ async def issue_bulk_retry(
         # (which needs an engine for its WHERE clause) rather than
         # guessing.
         filter_engine = raw_filter.get("engine")
-        if filter_engine in KNOWN_ENGINES:
-            task_repo = TaskRepository(db_session)
-            priorities = await task_repo.get_priorities_for_ids(
+        # H4: a bulk retry that targets explicit task_ids MUST name a known
+        # engine, and EVERY id must resolve to a Task row in THIS project for
+        # THAT engine -- for ALL engines, not just RQ. Otherwise an operator
+        # could label foreign ids (RQ ids as engine=celery, or omit the engine
+        # entirely) to skip the project-scoped ownership lookup and have the
+        # sole matching adapter requeue tasks that belong to another workload /
+        # project on shared broker infrastructure.
+        if filter_engine not in KNOWN_ENGINES:
+            await audit_service.record(
+                audit_log,
+                action="command.bulk_retry.refused",
+                target_type="bulk",
+                target_id=None,
+                result="failure",
+                outcome="deny",
+                user_id=user.id,
                 project_id=project.id,
-                engine=str(filter_engine),
-                task_ids=capped_ids,
+                source_ip=ip,
+                metadata={
+                    "reason": "missing_or_unknown_engine",
+                    "engine": str(filter_engine),
+                    "requested_ids": len(capped_ids),
+                    "rejected_client_supplied_filter_keys": (rejected_client_keys),
+                },
             )
-            if priorities:
-                enriched_filter["task_priorities"] = priorities
-            # R8 H-1: RQ's bulk_retry_action requires per-task
-            # task_name so it can call enqueue_call(func=task_name)
-            # without reading job.func_name (which lazy-loads pickle
-            # from the broker). Look up names alongside priorities so
-            # the agent gets both in one round trip. Other engines
-            # ignore filter["task_names"] safely.
-            #
-            # R9 H-1: for RQ specifically, if the DB lookup fails to
-            # resolve ANY of the requested ids, refuse the whole
-            # batch. The agent's bulk_retry_action would otherwise
-            # surface "missing_task_names" for the unresolved ids and
-            # silently retry the resolved ones, which is the wrong
-            # safety posture for RCE-class surfaces -- a client could
-            # cherry-pick which ids to retry by manipulating the input
-            # set against the DB's known coverage. Fail closed instead.
-            task_names = await task_repo.get_names_for_ids(
+            await db_session.commit()
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "bulk_retry with task_ids requires an explicit engine "
+                        "(celery, rq, or dramatiq) so every id can be "
+                        "ownership-verified against this project."
+                    ),
+                    "rejected_client_supplied_keys": rejected_client_keys,
+                },
+            )
+        task_repo = TaskRepository(db_session)
+        priorities = await task_repo.get_priorities_for_ids(
+            project_id=project.id,
+            engine=str(filter_engine),
+            task_ids=capped_ids,
+        )
+        if priorities:
+            enriched_filter["task_priorities"] = priorities
+        # RQ's bulk_retry_action requires per-task task_name so it can
+        # call enqueue_call(func=task_name) without reading job.func_name
+        # (which lazy-loads pickle from the broker). Look up names alongside
+        # priorities so the agent gets both in one round trip. Other engines
+        # ignore filter["task_names"] safely.
+        task_names = await task_repo.get_names_for_ids(
+            project_id=project.id,
+            engine=str(filter_engine),
+            task_ids=capped_ids,
+        )
+        if task_names:
+            enriched_filter["task_names"] = task_names
+        # P1-5: the command MUST carry the SAME canonical id set that ownership
+        # was verified against. enriched_filter still holds the client's RAW
+        # task_ids (with duplicates, and uncapped); overwrite it with capped_ids
+        # (deduped + clamped to body.max) so an adapter cannot retry a duplicate
+        # twice or act on an id that was never ownership-checked.
+        enriched_filter["task_ids"] = capped_ids
+        # H4 /: fail closed when ANY targeted id does not resolve to a
+        # named Task row in this project + engine. A partial resolution means
+        # the client mislabeled the engine, sent foreign ids, or is probing DB
+        # coverage; the agent must never silently retry only the resolved
+        # subset (an RCE-class + cross-project surface).
+        if len(task_names) != len(capped_ids):
+            missing = sorted(set(capped_ids) - set(task_names.keys()))
+            # Record the refusal as a tamper-evident audit row +
+            # commit BEFORE raising, so the 400 fast-path is not an audit
+            # blind spot (an HTTPException would otherwise roll the session
+            # back and leave the refusal with no trace).
+            await audit_service.record(
+                audit_log,
+                action="command.bulk_retry.refused",
+                target_type="bulk",
+                target_id=None,
+                result="failure",
+                outcome="deny",
+                user_id=user.id,
                 project_id=project.id,
-                engine=str(filter_engine),
-                task_ids=capped_ids,
+                source_ip=ip,
+                metadata={
+                    "reason": "partial_task_ownership_resolution",
+                    "engine": str(filter_engine),
+                    "missing_task_names": missing,
+                    "requested_ids": len(capped_ids),
+                    "rejected_client_supplied_filter_keys": (rejected_client_keys),
+                },
             )
-            if task_names:
-                enriched_filter["task_names"] = task_names
-            if filter_engine == "rq" and len(task_names) != len(capped_ids):
-                missing = sorted(set(capped_ids) - set(task_names.keys()))
-                # R10-L1: record the refusal as a tamper-evident audit
-                # row + commit BEFORE raising, so the 400 fast-path is
-                # no longer an audit blind spot. Without this commit
-                # the HTTPException would roll the session back and the
-                # refusal would leave no trace.
-                await audit_service.record(
-                    audit_log,
-                    action="command.bulk_retry.refused",
-                    target_type="bulk",
-                    target_id=None,
-                    result="failure",
-                    outcome="deny",
-                    user_id=user.id,
-                    project_id=project.id,
-                    source_ip=ip,
-                    metadata={
-                        "reason": "rq_partial_task_name_resolution",
-                        "engine": str(filter_engine),
-                        "missing_task_names": missing,
-                        "requested_ids": len(capped_ids),
-                        "rejected_client_supplied_filter_keys": (rejected_client_keys),
-                    },
-                )
-                await db_session.commit()
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "bulk_retry refused: RQ retry requires "
-                        "a brain-known task_name for every targeted id; "
-                        "the DB has no Task row for "
-                        f"{len(missing)} of {len(capped_ids)} ids. "
-                        "Re-enqueue manually with operator-supplied "
-                        "args via the dashboard's 'retry with different "
-                        "inputs' affordance instead.",
-                        "missing_task_names": missing,
-                        "rejected_client_supplied_keys": rejected_client_keys,
-                    },
-                )
+            await db_session.commit()
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "bulk_retry refused: every targeted id must resolve to "
+                        "a Task row in this project for the named engine; the "
+                        f"DB has no match for {len(missing)} of "
+                        f"{len(capped_ids)} ids (wrong engine label, foreign "
+                        "ids, or unknown tasks). Retry only ids this project "
+                        "owns, or use 'retry with different inputs' to supply "
+                        "arguments explicitly."
+                    ),
+                    "missing_task_names": missing,
+                    "rejected_client_supplied_keys": rejected_client_keys,
+                },
+            )
+    else:
+        # Boundary B: this command-shaped endpoint cannot honestly represent a
+        # sealed multi-engine parent.  Keeping the all-matching branch alive
+        # would also leave keyless old callers able to bypass the durable
+        # ledger. Explicit-id compatibility remains above; all-matching callers
+        # must move to the versioned resource.
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "error": (
+                    f"all-matching bulk retry moved to /api/v1/projects/{slug}/bulk-retry-requests"
+                ),
+                "replacement": f"/api/v1/projects/{slug}/bulk-retry-requests",
+            },
+        )
 
     # If the client smuggled server-owned keys, surface the rejection
     # as a structured warning in the command result so the audit trail
@@ -746,6 +948,358 @@ async def issue_bulk_retry(
         db_session=db_session,
         ip=ip,
     )
+
+
+def _parse_filter_datetime(value: Any) -> datetime | None:
+    """Parse a bulk-filter ``since``/``until`` value (ISO-8601 string or epoch
+    seconds) into an aware datetime; None if absent or unparseable (an
+    unparseable bound is simply not applied rather than silently widening)."""
+    import contextlib
+
+    dt: datetime | None = None
+    if isinstance(value, bool):  # bool is an int subclass; not a timestamp
+        return None
+    if isinstance(value, (int, float)):
+        with contextlib.suppress(OverflowError, OSError, ValueError):
+            dt = datetime.fromtimestamp(value, tz=UTC)
+    elif isinstance(value, str) and value.strip():
+        s = value.strip()
+        if s.endswith(("Z", "z")):  # fromisoformat pre-3.11 rejects a bare Z
+            s = s[:-1] + "+00:00"
+        with contextlib.suppress(ValueError):
+            parsed = datetime.fromisoformat(s)
+            dt = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return dt
+
+
+#: The command ``idempotency_key`` column is VARCHAR(200).
+_IDEMPOTENCY_KEY_MAX = 200
+
+#: Reserved pseudo-engine used to namespace the no-owned-match no-op bulk-retry
+#: key so it can NEVER collide with a real per-engine key (commands:1028). Not a
+#: valid engine adapter name, so ``_engine_idempotency_key(base, engine)`` for
+#: any real engine can never produce this suffix.
+_BULK_NOOP_KEY_ENGINE = "__noop__"
+
+#: The single request-scoped idempotency namespace for a bulk retry. Not a
+#: valid engine name, so it can never collide with a real per-engine key. The
+#: FIRST command a request issues commits here, whatever the expansion turned out
+#: to be, so a replay of the same request collides regardless of what the data
+#: looks like the second time.
+_BULK_REQUEST_KEY_ENGINE = "__request__"
+
+
+def _engine_idempotency_key(base: str | None, engine: str) -> str | None:
+    """Per-engine idempotency key for a multi-engine bulk-retry expansion.
+
+    commands:1015: a client key is accepted up to 200 chars (the column width),
+    so a naive ``{base}:{engine}`` can overflow VARCHAR(200). We fold the base to
+    a stable SHA-256 digest so the result always fits AND a retry of the same
+    request maps to the same key (idempotent). ``None`` in -> ``None`` out.
+
+    M2: hash UNIFORMLY (always, not only when the raw key overflows). A
+    two-branch encoding (direct when short, digest when long) is NOT injective:
+    a 200-char base 'x'*200 folds to '<sha256hex>:engine', and a DISTINCT client
+    key equal to that 64-char hex would suffix directly to the SAME
+    '<sha256hex>:engine' -- two different client keys collapsing to one derived
+    key silently dedups the second request against the first. Always hashing
+    makes the transform injective (distinct bases collide only on a real SHA-256
+    collision) and keeps it within the column. The digest is an internal dedup
+    token, never surfaced to the operator, so readability is not lost.
+    """
+    if base is None:
+        return None
+    import hashlib
+
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()  # 64 hex chars
+    return f"{digest}:{engine}"
+
+
+def _validate_narrowing_filters(raw_filter: dict[str, Any]) -> None:
+    """H3: reject a present-but-malformed NARROWING filter instead of silently
+    coercing it to None.
+
+    Dropping a narrowing predicate WIDENS the resolved set (losing ``since``
+    pulls in older failed tasks; a non-string queue/name/engine pulls in other
+    queues/names/engines), so a malformed value would silently mass-retry far
+    more than the operator scoped. Fail closed on a selection filter the server
+    cannot honour. (An empty string is a no-op filter, not a dropped narrowing,
+    so it is allowed; ``state`` falls back to FAILURE, the narrowest set, so it
+    never widens.)
+    """
+    from z4j_brain.persistence.enums import TaskState
+
+    for key in ("queue", "name", "engine"):
+        if key in raw_filter and not isinstance(raw_filter[key], str):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"bulk-retry filter {key!r} must be a string"},
+            )
+    # M1: a present engine must be a KNOWN engine. An unknown engine string (e.g.
+    # a "celrey" typo) otherwise resolves to zero owned rows and returns a
+    # false-success no-op that masks the mistake instead of surfacing it -- and if
+    # it ever DID match rows it would dispatch an unhandleable command. An empty
+    # string is treated as "no engine filter" (unchanged), not an unknown engine.
+    engine = raw_filter.get("engine")
+    if isinstance(engine, str) and engine and engine not in KNOWN_ENGINES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (f"bulk-retry filter 'engine' must be one of {sorted(KNOWN_ENGINES)}"),
+            },
+        )
+    # H2: a present state/status must be a VALID task state. Silently coercing an
+    # invalid value to FAILURE (the old except-branch) mass-retries every failed
+    # task in the project that the operator never scoped -- e.g. a state="sucess"
+    # typo or status=17 selects and re-dispatches the owned FAILED set. Absent /
+    # empty falls back to FAILURE (the narrowest set), so it is allowed.
+    for key in ("state", "status"):
+        if key not in raw_filter:
+            continue
+        value = raw_filter[key]
+        # ABSENT (handled above), an explicit JSON
+        # ``null`` (decoded to ``None``), or an empty string all fall back to
+        # FAILURE, the documented NARROWEST default. Treating ``null`` as absent
+        # is deliberate and SAFE: many JSON clients serialize an unset optional as
+        # ``null``, and the fallback can only ever select the owned FAILED set --
+        # it can NEVER widen the selection beyond FAILURE, so there is no scope
+        # escalation (this is why 's HIGH severity is an over-call). Any
+        # OTHER present value -- including a non-null FALSY one such as ``false`` /
+        # ``0`` / ``[]`` / ``{}`` -- must be a valid TaskState or be rejected, so a
+        # ``state="sucess"`` typo or ``status=17`` cannot coerce to FAILURE and
+        # mass-retry the backlog the operator never scoped.
+        if value is None or value == "":
+            continue
+        try:
+            TaskState(value)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"bulk-retry filter {key!r} is not a valid task state",
+                },
+            ) from exc
+    for bound in ("since", "until"):
+        if raw_filter.get(bound) is not None and _parse_filter_datetime(raw_filter[bound]) is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"bulk-retry filter {bound!r} is not a parseable "
+                        "ISO-8601 or epoch-seconds timestamp"
+                    ),
+                },
+            )
+
+
+async def _resolve_and_issue_all_matching_bulk_retry(
+    *,
+    slug: str,
+    body: BulkRetryRequest,
+    project: Any,
+    raw_filter: dict[str, Any],
+    enriched_filter: dict[str, Any],
+    rejected_client_keys: list[str],
+    user: User,
+    memberships: MembershipRepository,
+    projects: ProjectRepository,
+    audit_log: AuditLogRepository,
+    dispatcher: CommandDispatcher,
+    db_session: AsyncSession,
+    ip: str,
+) -> CommandPublic:
+    """RH4: bind a no-explicit-ids ("retry all matching") bulk_retry to project
+    ownership.
+
+    Resolves the tasks THIS project owns that match the selection (default:
+    FAILED, plus an optional queue/engine) from the brain's own Task rows,
+    groups them by engine, and issues one ownership-verified bulk_retry command
+    per engine -- each carrying explicit task_ids, names, and priorities exactly
+    like the explicit-ids path. Because every id comes from a project-scoped
+    Task row, the agent never sweeps the broker's failed registry and foreign
+    jobs on shared infrastructure can never be retried. Returns the FIRST
+    command issued (the dashboard refreshes the whole command list); a no-match
+    request issues a single clean no-op so the action is still audited.
+    """
+    from z4j_brain.persistence.enums import TaskState
+    from z4j_brain.persistence.repositories import TaskRepository
+
+    task_repo = TaskRepository(db_session)
+
+    # Selection state: default to FAILED. An unknown state string narrows to
+    # FAILURE rather than widening the set (never retry successful tasks by
+    # accident). ``status`` is an accepted alias for ``state``.
+    state_str = raw_filter.get("state") or raw_filter.get("status")
+    try:
+        state = TaskState(state_str) if state_str else TaskState.FAILURE
+    except ValueError:
+        state = TaskState.FAILURE
+
+    _validate_narrowing_filters(raw_filter)
+
+    filter_engine = raw_filter.get("engine")
+    queue = raw_filter.get("queue")
+    name = raw_filter.get("name")
+    # P1-4: the resolution MUST honour EVERY accepted selection filter (name,
+    # since, until), not just state/queue/engine -- otherwise "retry all
+    # matching" with e.g. {name, since, until} dispatches out-of-window,
+    # wrong-name tasks the operator never selected. The client-facing filter is
+    # already allowlisted to selection-only keys (CLIENT_ALLOWED_BULK_FILTER_KEYS).
+    # Freeze the whole REQUEST before expanding it.
+    #
+    # The expansion below derives an idempotency key per ENGINE, so the key a
+    # request commits under depends on what its filter happened to match at the
+    # time. A request that matched nothing committed under the reserved no-op
+    # key; a lost-response replay of the SAME request, once a task had failed
+    # into range, matched something, derived a DIFFERENT per-engine key, and
+    # executed a retry the caller's first response had reported as "nothing
+    # matched". Idempotency has to be a property of the request, not of what the
+    # data looked like when it ran.
+    #
+    # One request-scoped key, checked BEFORE any live query, is enough: a replay
+    # returns the original command and never re-expands, so it can add neither
+    # engines nor tasks.
+    request_key = _engine_idempotency_key(body.idempotency_key, _BULK_REQUEST_KEY_ENGINE)
+    if request_key is not None:
+        from z4j_brain.persistence.repositories import CommandRepository
+
+        prior = await CommandRepository(db_session).get_by_idempotency_key(
+            project_id=project.id, idempotency_key=request_key
+        )
+        if prior is not None:
+            # ``prior`` is an ORM row. CommandPublic does not declare
+            # from_attributes, so model_validate raises on it -- this path 500'd
+            # on every real replay and only looked right because a test double
+            # returned a CommandPublic instead of a row. Serialize the way every
+            # other endpoint in this module does, which also applies the same
+            # redaction rules.
+            return _command_payload(prior)
+
+    owned = await task_repo.list_for_project(
+        project_id=project.id,
+        state=state,
+        queue=queue if isinstance(queue, str) else None,
+        name_substring=name if isinstance(name, str) and name else None,
+        since=_parse_filter_datetime(raw_filter.get("since")),
+        until=_parse_filter_datetime(raw_filter.get("until")),
+        # RH4: scope the query to the requested engine IN SQL so the row cap
+        # bounds that engine's rows -- otherwise other-engine newer rows consume
+        # the limit and owned target-engine rows are silently dropped. When no
+        # engine is requested (multi-engine "retry all"), the cap bounds the
+        # total newest across engines, which is the intended max semantics.
+        engine=filter_engine if isinstance(filter_engine, str) else None,
+        limit=body.max,
+    )
+
+    # Group owned ids by engine (the SQL already applied any engine filter; the
+    # guard below is belt-and-braces). The list_for_project limit bounds the
+    # per-engine set when filter_engine is set, else the total across engines.
+    by_engine: dict[str, list[str]] = {}
+    for task in owned:
+        if filter_engine and task.engine != filter_engine:
+            continue
+        by_engine.setdefault(task.engine, []).append(task.task_id)
+
+    if not by_engine:
+        # M1: nothing this project owns matches. Record a synthetic COMPLETED
+        # success no-op WITHOUT dispatching -- round-tripping a task_ids=[]
+        # command makes the celery/rq adapter report FAILED (v1 requires a
+        # non-empty list), so a legitimate no-match would surface as a failed
+        # command in the dashboard and audit. ``synthetic_success_result`` tells
+        # the dispatcher to complete the command in place instead of delivering.
+        noop_filter = dict(enriched_filter)
+        noop_filter["task_ids"] = []
+        payload: dict[str, Any] = {"filter": noop_filter, "max": body.max}
+        if rejected_client_keys:
+            payload["rejected_client_supplied_filter_keys"] = rejected_client_keys
+        return await _issue_generic_command(
+            slug=slug,
+            action="bulk_retry",
+            target_type="bulk",
+            target_id=None,
+            payload=payload,
+            # commands:1028: namespace the no-op key under a reserved pseudo-
+            # engine so it can never collide with a real per-engine key.
+            # The request-scoped key, NOT a no-op-specific one. Keying the
+            # no-op separately is exactly what let a replay that later matched
+            # something slip past it under a different key.
+            idempotency_key=request_key
+            or _engine_idempotency_key(body.idempotency_key, _BULK_NOOP_KEY_ENGINE),
+            agent_id=body.agent_id,
+            user=user,
+            memberships=memberships,
+            projects=projects,
+            audit_log=audit_log,
+            dispatcher=dispatcher,
+            db_session=db_session,
+            ip=ip,
+            synthetic_success_result={
+                "requested": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "capped": False,
+                "new_task_ids": {},
+                "no_owned_match": True,
+            },
+        )
+
+    first: CommandPublic | None = None
+    # Deterministic order, so "the first engine" is the same on a replay as
+    # it was originally and the request-scoped key always lands on the same one.
+    for engine, ids in sorted(by_engine.items()):
+        capped = ids[: body.max]
+        priorities = await task_repo.get_priorities_for_ids(
+            project_id=project.id,
+            engine=engine,
+            task_ids=capped,
+        )
+        names = await task_repo.get_names_for_ids(
+            project_id=project.id,
+            engine=engine,
+            task_ids=capped,
+        )
+        per_engine_filter = dict(enriched_filter)
+        per_engine_filter["engine"] = engine
+        per_engine_filter["task_ids"] = capped
+        if priorities:
+            per_engine_filter["task_priorities"] = priorities
+        if names:
+            per_engine_filter["task_names"] = names
+        payload = {"filter": per_engine_filter, "max": body.max}
+        if rejected_client_keys:
+            payload["rejected_client_supplied_filter_keys"] = rejected_client_keys
+        issued = await _issue_generic_command(
+            slug=slug,
+            action="bulk_retry",
+            target_type="bulk",
+            target_id=None,
+            payload=payload,
+            # A distinct idempotency key per engine so the several commands from
+            # one request do not collide on the CommandRepository UNIQUE index
+            # (and a retry of the whole request stays idempotent per engine).
+            # Bounded to the VARCHAR(200) column even when the base key is at its
+            # max length (commands:1015).
+            # The FIRST command of the request commits under the
+            # request-scoped key so a replay collides with it whatever the
+            # expansion turns out to be; the rest stay per-engine.
+            idempotency_key=(
+                request_key
+                if first is None and request_key is not None
+                else _engine_idempotency_key(body.idempotency_key, engine)
+            ),
+            agent_id=body.agent_id,
+            user=user,
+            memberships=memberships,
+            projects=projects,
+            audit_log=audit_log,
+            dispatcher=dispatcher,
+            db_session=db_session,
+            ip=ip,
+        )
+        if first is None:
+            first = issued
+    assert first is not None  # by_engine was non-empty
+    return first
 
 
 async def _resolve_purge_confirm_token(
@@ -1098,12 +1652,18 @@ async def _issue_generic_command(
     db_session: AsyncSession,
     ip: str,
     require_role: ProjectRole = ProjectRole.OPERATOR,
+    synthetic_success_result: dict[str, Any] | None = None,
 ) -> CommandPublic:
     """Shared body for every command-issuing endpoint.
 
     Centralises the policy check, the cross-project agent guard,
     and the dispatcher invocation. Sub-routes pass an ``action``
     and a payload; everything else is identical.
+
+    M1: when ``synthetic_success_result`` is supplied the command is COMPLETED
+    in place with that result instead of being delivered to the agent (used by
+    the no-owned-match bulk-retry no-op, which must not round-trip a task_ids=[]
+    command the adapter reports as failed).
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import (
@@ -1142,6 +1702,13 @@ async def _issue_generic_command(
         ip=ip,
         user_agent=None,
         idempotency_key=idempotency_key,
+        pre_completed_result=synthetic_success_result,
+        # Operator endpoints (retry/cancel/bulk-retry) reach the wire via
+        # this helper. Reusing an idempotency key with DIFFERENT parameters (a
+        # different override_kwargs, a different bulk filter) must 409, not be
+        # silently swallowed and return the first command. The fire + automation
+        # paths (which call dispatcher.issue directly) keep the default False.
+        enforce_payload_identity=True,
     )
     await db_session.commit()
 

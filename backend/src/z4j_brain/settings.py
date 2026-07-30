@@ -17,28 +17,6 @@ from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from z4j_core.paths import z4j_home
-
-
-def _env_file_chain() -> tuple[str, ...]:
-    """Build the env-file precedence tuple for Pydantic Settings.
-
-    Resolved at module-load time. Pydantic's later-wins-on-collision
-    behavior orders these from lowest to highest precedence:
-
-    - secret.env: auto-minted secrets (not human-edited)
-    - config.env: human-edited tunables
-    - ./.env: dev-workflow CWD override
-
-    Process env vars beat all three. Files that don't exist are
-    silently ignored by Pydantic Settings.
-    """
-    home = z4j_home()
-    return (
-        str(home / "secret.env"),
-        str(home / "config.env"),
-        ".env",
-    )
 
 
 class ConfigError(ValueError):
@@ -115,20 +93,24 @@ class Settings(BaseSettings):
     # tuple is the lowest-precedence file; later files override
     # earlier files; env vars override every file. Layout (1.5+):
     #
-    #   1. $Z4J_HOME/secret.env  - auto-minted secrets (mode 0o600).
-    #      Operators never edit this file directly.
-    #   2. $Z4J_HOME/config.env  - human-edited runtime tunables.
+    #   1. $Z4J_HOME/config.env  - human-edited runtime tunables.
     #      Generated as a documented template by ``z4j init``.
-    #   3. ./.env  - CWD override for dev workflows. Mirrors the
+    #   2. ./.env  - CWD override for dev workflows. Mirrors the
     #      pre-1.5 single-file behavior so existing dev scripts keep
     #      working unchanged.
+    #
+    # ``secret.env`` is loaded exactly once by the safe configuration
+    # pipeline before Settings construction and never reopened by Pydantic.
     #
     # Process env vars beat all of the above. Z4J_HOME is resolved
     # once at module-load time (the path is operator-set at process
     # start; we never relocate it mid-process).
     model_config = SettingsConfigDict(
         env_prefix="Z4J_",
-        env_file=_env_file_chain(),
+        # Entry points pass one validated immutable snapshot.  Reopening a
+        # pathname here would allow a post-capture swap to change the database
+        # target, audit key, or reported provenance.
+        env_file=None,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -173,6 +155,19 @@ class Settings(BaseSettings):
     previous_session_secrets: SecretStr | None = Field(
         default=None,
         description=("Comma-separated previous session secrets accepted during rotation."),
+    )
+    #: Dedicated Boundary-F audit-chain key.  It is never accepted by
+    #: command, session, agent, CSRF, project-HMAC, or webhook code.
+    audit_chain_secret: SecretStr | None = Field(
+        default=None,
+        description="Dedicated audit-chain signing key (>=32 bytes)",
+    )
+    #: Audit-only verification window used by explicit chain-key rotation.
+    audit_chain_previous_secrets: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Comma-separated prior audit-chain keys. Each entry must be at least 32 bytes."
+        ),
     )
 
     # ------------------------------------------------------------------
@@ -231,6 +226,21 @@ class Settings(BaseSettings):
         le=86_400,
     )
     command_timeout_seconds: int = Field(default=60, ge=1, le=86_400)
+    #: How long a DISPATCHED command is still considered a
+    #: possibly-lost delivery. The long-poll transport re-selects a
+    #: DISPATCHED command within this window (a reconnecting agent whose
+    #: HTTP response was dropped), and the dispatcher's idempotent-re-issue
+    #: guard treats a DISPATCHED row younger than this as in-flight (return)
+    #: vs older as orphaned (re-drive once, for re-drivable actions). This
+    #: field was previously read via ``getattr(..., 60.0)`` with no actual
+    #: setting, so the env var was silently ignored; it is now wired.
+    agent_longpoll_redispatch_seconds: float = Field(default=60.0, ge=1.0, le=3600.0)
+    #: Minimum interval between successive redispatches of the SAME
+    #: still-DISPATCHED command on the long-poll recovery path. The claim is
+    #: a real lease: a re-send fires only if the last send was at least this
+    #: long ago, capping re-sends to at most one per interval (instead of one
+    #: per poll, which flooded concurrent workers / a restarted agent).
+    agent_longpoll_redispatch_min_interval_seconds: float = Field(default=10.0, ge=1.0, le=3600.0)
     agent_offline_timeout_seconds: int = Field(default=30, ge=1, le=3600)
     #: EXTRA grace on top of ``agent_offline_timeout_seconds`` before an
     #: offline agent is treated as a confirmed-down EPISODE by the
@@ -361,6 +371,44 @@ class Settings(BaseSettings):
             "Seconds an idle asyncpg connection lives in the pool "
             "before being closed + reopened. Shorter = better memory "
             "hygiene under sustained load."
+        ),
+    )
+    # Pool sizing. These were hardcoded until 1.8.0, which made the brain's
+    # connection demand impossible to fit to a server the operator does not
+    # control.
+    #
+    # THE ARITHMETIC THAT MATTERS: each uvicorn worker builds its own engine,
+    # and `serve` defaults to ``max(1, min(4, cpu_count))`` workers. So the
+    # worst-case backend demand is
+    #
+    #     workers * (database_pool_size + database_max_overflow)
+    #
+    # plus a small number of LISTEN/NOTIFY connections. At the defaults on a
+    # 4-core host that is 4 * (20 + 10) = 120, which EXCEEDS a stock
+    # PostgreSQL ``max_connections`` of 100 on its own, leaving nothing for a
+    # second brain, a standalone scheduler, or a superuser slot to debug with.
+    #
+    # The defaults are unchanged so no existing deployment shifts underneath
+    # its operator. Anyone sharing a server, running more than one brain, or
+    # on managed PostgreSQL with a low connection cap can now size it.
+    # See docs/DATABASE.md for the sizing guidance.
+    database_pool_size: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description=(
+            "Connections held per engine. Total backend demand is "
+            "workers * (pool_size + max_overflow); `serve` defaults to "
+            "min(4, cpu_count) workers, so raising this multiplies."
+        ),
+    )
+    database_max_overflow: int = Field(
+        default=10,
+        ge=0,
+        le=200,
+        description=(
+            "Connections opened beyond pool_size under burst, then closed. "
+            "Counts toward the server's max_connections while open."
         ),
     )
 
@@ -829,6 +877,20 @@ class Settings(BaseSettings):
     ws_ingest_queue_maxsize: int = Field(default=2_000, ge=16, le=50_000)
     #: Background worker poll intervals.
     command_timeout_sweep_seconds: int = Field(default=5, ge=1, le=300)
+    #: Boundary B durable child-outbox cadence. The supervisor invokes the
+    #: coordinator immediately on startup, then at this interval.
+    bulk_retry_scan_seconds: float = Field(default=1.0, ge=0.1, le=60.0)
+    #: Cross-replica bound is enforced under the locked parent row.
+    bulk_retry_max_in_flight: int = Field(default=8, ge=1, le=256)
+    #: Absolute attempt budget for one parent. Resume explicitly grants a fresh
+    #: window; individual children never mint independent parent budgets.
+    bulk_retry_parent_timeout_seconds: int = Field(
+        default=900,
+        ge=30,
+        le=86_400,
+    )
+    #: Global work cap per coordinator tick.
+    bulk_retry_scan_batch: int = Field(default=64, ge=1, le=1000)
     agent_health_sweep_seconds: int = Field(default=10, ge=1, le=300)
     #: Cadence for :class:`AgentHygieneWorker`. Once a day is
     #: enough; the prune target is "weeks stale", not "minutes".
@@ -1246,7 +1308,7 @@ class Settings(BaseSettings):
         """
         if not isinstance(data, dict):
             return data
-        for field_name in ("secret", "session_secret"):
+        for field_name in ("secret", "session_secret", "audit_chain_secret"):
             raw = data.get(field_name)
             if raw is None:
                 continue
@@ -1259,7 +1321,11 @@ class Settings(BaseSettings):
         # the 32-byte floor.
         # An attacker who could slip in a short "previous" secret
         # would otherwise downgrade the verification surface.
-        for field_name in ("previous_secrets", "previous_session_secrets"):
+        for field_name in (
+            "previous_secrets",
+            "previous_session_secrets",
+            "audit_chain_previous_secrets",
+        ):
             raw = data.get(field_name)
             if raw is None:
                 continue
@@ -1357,10 +1423,59 @@ class Settings(BaseSettings):
         """Cross-field security checks. See :meth:`__init__`."""
         is_dev = self.environment == "dev"
 
+        # The only supported keyless shape is a development/pre-activation
+        # process.  Packaged SQLite bootstrap supplies this field before
+        # production Settings construction; PostgreSQL operators provide it
+        # explicitly.  AuditService independently refuses its v2 signer path
+        # without this key, so changing environment after construction cannot
+        # create a fallback to Z4J_SECRET.
+        if not is_dev and self.audit_chain_secret is None:
+            raise ConfigError(
+                "audit_chain_secret is required outside development; set "
+                "Z4J_AUDIT_CHAIN_SECRET to an independent >=32-byte random key",
+            )
+        if self.audit_chain_secret is not None:
+            from z4j_brain.domain.audit_chain import build_audit_keyring
+
+            current = self.audit_chain_secret.get_secret_value().encode("utf-8")
+            previous = self._parse_secret_list(
+                self.audit_chain_previous_secrets,
+            )
+            try:
+                build_audit_keyring(current, previous)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from None
+
         # CORS: never wildcard with credentials.
         if self.cors_allow_credentials and "*" in self.cors_origins:
             raise ConfigError(
                 "cors_origins must not contain '*' when cors_allow_credentials is True",
+            )
+
+        # The long-poll recovery-lease settings must define a NON-EMPTY
+        # window in which a DISPATCHED command is both selectable (dispatched
+        # within redispatch_seconds) AND lease-eligible (>= min_interval since the
+        # last send), and a command must not be retired before it can be re-driven
+        # at all -- otherwise a dropped command silently never recovers.
+        # STRICT inequality. Allowing the two to be EQUAL leaves a window of
+        # zero width: a command becomes lease-eligible at the same instant it
+        # stops being selectable, so recovery depends on landing on that exact
+        # moment and in practice never happens. A non-empty window has to be
+        # actually non-empty.
+        if (
+            self.agent_longpoll_redispatch_min_interval_seconds
+            >= self.agent_longpoll_redispatch_seconds
+        ):
+            raise ConfigError(
+                "agent_longpoll_redispatch_min_interval_seconds must be < "
+                "agent_longpoll_redispatch_seconds (a larger min-interval leaves "
+                "no window in which a dropped command is re-sendable)",
+            )
+        if self.command_timeout_seconds < self.agent_longpoll_redispatch_min_interval_seconds:
+            raise ConfigError(
+                "command_timeout_seconds must be >= "
+                "agent_longpoll_redispatch_min_interval_seconds (a command would "
+                "otherwise be retired before it is ever lease-eligible for re-send)",
             )
 
         # Production: allowed_hosts must be explicit.
@@ -1483,6 +1598,20 @@ class Settings(BaseSettings):
             self.session_secret.get_secret_value().encode("utf-8"),
         ]
         out.extend(self._parse_secret_list(self.previous_session_secrets))
+        return out
+
+    def all_audit_chain_secrets_for_verification(self) -> list[bytes]:
+        """Return only the dedicated audit-chain key window.
+
+        There is deliberately no fallback to :attr:`secret`.
+        """
+
+        if self.audit_chain_secret is None:
+            return []
+        out = [
+            self.audit_chain_secret.get_secret_value().encode("utf-8"),
+        ]
+        out.extend(self._parse_secret_list(self.audit_chain_previous_secrets))
         return out
 
     @staticmethod

@@ -28,15 +28,15 @@ if _version_not_supported:
 class SchedulerServiceStub(object):
     """SchedulerService is implemented by both sides depending on
     direction:
-    
+
     - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
     AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
     these.
-    
+
     - Scheduler implements: TriggerSchedule (operator-initiated
     manual fires originating from the dashboard). Brain is the
     gRPC client for this one.
-    
+
     In practice this is two separate gRPC services on different
     ports; we declare them as one logical service here for clarity.
     """
@@ -77,20 +77,50 @@ class SchedulerServiceStub(object):
                 request_serializer=scheduler__pb2.PingRequest.SerializeToString,
                 response_deserializer=scheduler__pb2.PingResponse.FromString,
                 _registered_method=True)
+        self.NegotiateSchedulerProtocol = channel.unary_unary(
+                '/z4j.scheduler.v1.SchedulerService/NegotiateSchedulerProtocol',
+                request_serializer=scheduler__pb2.NegotiateSchedulerProtocolRequest.SerializeToString,
+                response_deserializer=scheduler__pb2.NegotiateSchedulerProtocolResponse.FromString,
+                _registered_method=True)
+        self.ListScheduleSnapshot = channel.unary_stream(
+                '/z4j.scheduler.v1.SchedulerService/ListScheduleSnapshot',
+                request_serializer=scheduler__pb2.ListScheduleSnapshotRequest.SerializeToString,
+                response_deserializer=scheduler__pb2.ScheduleSnapshotFrame.FromString,
+                _registered_method=True)
+        self.WatchSchedulesV2 = channel.unary_stream(
+                '/z4j.scheduler.v1.SchedulerService/WatchSchedulesV2',
+                request_serializer=scheduler__pb2.WatchSchedulesV2Request.SerializeToString,
+                response_deserializer=scheduler__pb2.ScheduleWatchFrame.FromString,
+                _registered_method=True)
+        self.GetScheduleState = channel.unary_unary(
+                '/z4j.scheduler.v1.SchedulerService/GetScheduleState',
+                request_serializer=scheduler__pb2.GetScheduleStateRequest.SerializeToString,
+                response_deserializer=scheduler__pb2.GetScheduleStateResponse.FromString,
+                _registered_method=True)
+        self.QuarantineSchedule = channel.unary_unary(
+                '/z4j.scheduler.v1.SchedulerService/QuarantineSchedule',
+                request_serializer=scheduler__pb2.QuarantineScheduleRequest.SerializeToString,
+                response_deserializer=scheduler__pb2.QuarantineScheduleResponse.FromString,
+                _registered_method=True)
+        self.AdvanceScheduleCursor = channel.unary_unary(
+                '/z4j.scheduler.v1.SchedulerService/AdvanceScheduleCursor',
+                request_serializer=scheduler__pb2.AdvanceScheduleCursorRequest.SerializeToString,
+                response_deserializer=scheduler__pb2.AdvanceScheduleCursorResponse.FromString,
+                _registered_method=True)
 
 
 class SchedulerServiceServicer(object):
     """SchedulerService is implemented by both sides depending on
     direction:
-    
+
     - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
     AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
     these.
-    
+
     - Scheduler implements: TriggerSchedule (operator-initiated
     manual fires originating from the dashboard). Brain is the
     gRPC client for this one.
-    
+
     In practice this is two separate gRPC services on different
     ports; we declare them as one logical service here for clarity.
     """
@@ -150,6 +180,50 @@ class SchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def NegotiateSchedulerProtocol(self, request, context):
+        """Authenticated, exact protocol selection. A current peer must select the
+        complete supported tuple; zero/partial values never imply legacy mode.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListScheduleSnapshot(self, request, context):
+        """Current-protocol point-in-time snapshot. The client must buffer through
+        the terminal frame and validate count/digest/watermark before applying.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WatchSchedulesV2(self, request, context):
+        """Current-protocol ordered replay strictly after a committed revision.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetScheduleState(self, request, context):
+        """Revision-bounded per-id recovery for retained local overlays.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def QuarantineSchedule(self, request, context):
+        """Persist a deterministic local definition quarantine by token CAS.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AdvanceScheduleCursor(self, request, context):
+        """Persist a prepared zero-dispatch catch-up cursor transition.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_SchedulerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -183,6 +257,36 @@ def add_SchedulerServiceServicer_to_server(servicer, server):
                     request_deserializer=scheduler__pb2.PingRequest.FromString,
                     response_serializer=scheduler__pb2.PingResponse.SerializeToString,
             ),
+            'NegotiateSchedulerProtocol': grpc.unary_unary_rpc_method_handler(
+                    servicer.NegotiateSchedulerProtocol,
+                    request_deserializer=scheduler__pb2.NegotiateSchedulerProtocolRequest.FromString,
+                    response_serializer=scheduler__pb2.NegotiateSchedulerProtocolResponse.SerializeToString,
+            ),
+            'ListScheduleSnapshot': grpc.unary_stream_rpc_method_handler(
+                    servicer.ListScheduleSnapshot,
+                    request_deserializer=scheduler__pb2.ListScheduleSnapshotRequest.FromString,
+                    response_serializer=scheduler__pb2.ScheduleSnapshotFrame.SerializeToString,
+            ),
+            'WatchSchedulesV2': grpc.unary_stream_rpc_method_handler(
+                    servicer.WatchSchedulesV2,
+                    request_deserializer=scheduler__pb2.WatchSchedulesV2Request.FromString,
+                    response_serializer=scheduler__pb2.ScheduleWatchFrame.SerializeToString,
+            ),
+            'GetScheduleState': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetScheduleState,
+                    request_deserializer=scheduler__pb2.GetScheduleStateRequest.FromString,
+                    response_serializer=scheduler__pb2.GetScheduleStateResponse.SerializeToString,
+            ),
+            'QuarantineSchedule': grpc.unary_unary_rpc_method_handler(
+                    servicer.QuarantineSchedule,
+                    request_deserializer=scheduler__pb2.QuarantineScheduleRequest.FromString,
+                    response_serializer=scheduler__pb2.QuarantineScheduleResponse.SerializeToString,
+            ),
+            'AdvanceScheduleCursor': grpc.unary_unary_rpc_method_handler(
+                    servicer.AdvanceScheduleCursor,
+                    request_deserializer=scheduler__pb2.AdvanceScheduleCursorRequest.FromString,
+                    response_serializer=scheduler__pb2.AdvanceScheduleCursorResponse.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'z4j.scheduler.v1.SchedulerService', rpc_method_handlers)
@@ -194,15 +298,15 @@ def add_SchedulerServiceServicer_to_server(servicer, server):
 class SchedulerService(object):
     """SchedulerService is implemented by both sides depending on
     direction:
-    
+
     - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
     AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
     these.
-    
+
     - Scheduler implements: TriggerSchedule (operator-initiated
     manual fires originating from the dashboard). Brain is the
     gRPC client for this one.
-    
+
     In practice this is two separate gRPC services on different
     ports; we declare them as one logical service here for clarity.
     """
@@ -359,6 +463,168 @@ class SchedulerService(object):
             '/z4j.scheduler.v1.SchedulerService/Ping',
             scheduler__pb2.PingRequest.SerializeToString,
             scheduler__pb2.PingResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def NegotiateSchedulerProtocol(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/z4j.scheduler.v1.SchedulerService/NegotiateSchedulerProtocol',
+            scheduler__pb2.NegotiateSchedulerProtocolRequest.SerializeToString,
+            scheduler__pb2.NegotiateSchedulerProtocolResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListScheduleSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/z4j.scheduler.v1.SchedulerService/ListScheduleSnapshot',
+            scheduler__pb2.ListScheduleSnapshotRequest.SerializeToString,
+            scheduler__pb2.ScheduleSnapshotFrame.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WatchSchedulesV2(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/z4j.scheduler.v1.SchedulerService/WatchSchedulesV2',
+            scheduler__pb2.WatchSchedulesV2Request.SerializeToString,
+            scheduler__pb2.ScheduleWatchFrame.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetScheduleState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/z4j.scheduler.v1.SchedulerService/GetScheduleState',
+            scheduler__pb2.GetScheduleStateRequest.SerializeToString,
+            scheduler__pb2.GetScheduleStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def QuarantineSchedule(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/z4j.scheduler.v1.SchedulerService/QuarantineSchedule',
+            scheduler__pb2.QuarantineScheduleRequest.SerializeToString,
+            scheduler__pb2.QuarantineScheduleResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AdvanceScheduleCursor(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/z4j.scheduler.v1.SchedulerService/AdvanceScheduleCursor',
+            scheduler__pb2.AdvanceScheduleCursorRequest.SerializeToString,
+            scheduler__pb2.AdvanceScheduleCursorResponse.FromString,
             options,
             channel_credentials,
             insecure,

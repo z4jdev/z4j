@@ -1,10 +1,10 @@
-"""z4j 1.6.6 R7-H1: scrub credentialed Celery conf from workers.metadata.
+"""z4j 1.6.6: scrub credentialed Celery conf from workers.metadata.
 
 Revision ID: v1_6_6_scrub_worker_conf
 Revises: v1_6_mfa_totp
 Create Date: 2026-06-07
 
-Round-7 audit finding R7-H1 (HIGH, information disclosure)
+Round-7 audit finding (HIGH, information disclosure)
 ----------------------------------------------------------
 
 Before 1.6.6, ``z4j-celery``'s ``CeleryEngineAdapter.get_worker_details``
@@ -54,8 +54,7 @@ Postgres uses ``jsonb_set`` against the ``jsonb`` column; SQLite
 uses ``json_set`` against the ``json`` column. Dispatch is on
 ``op.get_bind().dialect.name``. Other dialects fall through to the
 generic ORM-level scrub, which is portable but slower; in practice
-1.4+ only supports Postgres / SQLite.
-"""
+1.4+ only supports Postgres / SQLite."""
 
 from __future__ import annotations
 
@@ -63,7 +62,6 @@ from collections.abc import Sequence
 
 from alembic import op
 from sqlalchemy import text
-
 
 # ---------------------------------------------------------------------------
 # Alembic revision identifiers
@@ -144,4 +142,4 @@ def upgrade() -> None:
 def downgrade() -> None:
     """No-op: we cannot resurrect scrubbed credentials, and operators
     would not want them resurrected even if we could."""
-    return None
+    return

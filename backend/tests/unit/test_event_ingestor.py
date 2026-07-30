@@ -422,13 +422,13 @@ async def test_heartbeat_touch_failure_does_not_lose_events(
 
 
 # ---------------------------------------------------------------------------
-# R7-HIGH3 / R8: precise transient/permanent classification. The batch
+# Precise transient/permanent classification. The batch
 # withholds its ack (agent re-sends) ONLY for a TRANSIENT infrastructure
 # error; a PERMANENT content/schema error OR any non-DB deterministic bug is
 # dropped and acked (re-sending would loop forever). TRANSIENT is a strict
 # ALLOWLIST -- unknown defaults to PERMANENT, because the agent's transient-
 # retry path carries no drop budget, so "unknown = transient" pinned the
-# buffer head and overflow-lost innocent events (R8 adversarial finding).
+# buffer head and overflow-lost innocent events.
 # ---------------------------------------------------------------------------
 
 
@@ -438,7 +438,7 @@ class TestIsTransientDbError:
     def test_permanent_content_errors_are_not_transient(self) -> None:
         """IntegrityError / DataError ARE the event's content (constraint /
         bad value), so PERMANENT. ProgrammingError is NOT: it is a brain-side
-        schema/SQL/privilege problem, so TRANSIENT (R8-H2).
+        schema/SQL/privilege problem, so TRANSIENT.
         """
         from sqlalchemy.exc import (
             DataError,
@@ -494,7 +494,7 @@ class TestIsTransientDbError:
         assert _is_transient_db_error(Exception("database is locked")) is True
 
     def test_asyncpg_boxed_sqlstates_classified_by_class(self) -> None:
-        """R8/C1: the asyncpg dialect boxes most server errors as a BARE
+        """/C1: the asyncpg dialect boxes most server errors as a BARE
         DBAPIError (no OperationalError subclass), so classification must
         key on the driver SQLSTATE. Transient classes 08/40/53/55/57/58;
         permanent classes 22/23/42/25.
@@ -519,8 +519,8 @@ class TestIsTransientDbError:
         # TRANSIENT: lock timeout cancel, lock-not-available, resource
         # exhaustion, connection exceptions, deadlock, serialization, class 42
         # schema/SQL (42P01 undefined_table, 42703 undefined_column -- a
-        # rolling-migration gap, R8-H2), and the specific 25006
-        # read_only_sql_transaction (failover window, R9).
+        # rolling-migration gap), and the specific 25006
+        # read_only_sql_transaction (failover window).
         for code in (
             "57014",
             "55P03",
@@ -765,7 +765,7 @@ class TestIsTransientDbError:
         assert _is_transient_db_error(InvalidRequestError("api misuse")) is False
 
     def test_sqlite_operational_error_deterministic_vs_lock(self) -> None:
-        """R9: a no-SQLSTATE SQLite OperationalError is TRANSIENT for a lock
+        """A no-SQLSTATE SQLite OperationalError is TRANSIENT for a lock
         or connection reset, but PERMANENT for a deterministic schema/syntax
         signature (else a bad-migration 'no such column' would loop forever).
         """
@@ -797,7 +797,7 @@ class TestIsTransientDbError:
         assert _is_transient_db_error(e_permanent) is False
 
     def test_non_db_deterministic_errors_are_permanent(self) -> None:
-        """R8: a non-DB deterministic bug (RuntimeError / TypeError /
+        """A non-DB deterministic bug (RuntimeError / TypeError /
         ValueError / SQLAlchemy StatementError / InvalidRequestError) is
         PERMANENT.
 
@@ -828,7 +828,7 @@ async def test_transient_insert_error_withholds_ack(
     ingestor: EventIngestor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R7-HIGH3 wiring: a TRANSIENT per-event insert error marks the
+    """Wiring: a TRANSIENT per-event insert error marks the
     batch not-fully-durable (transient_skips >= 1) so the caller
     withholds the ack and the agent re-sends."""
     from sqlalchemy.exc import OperationalError
@@ -864,7 +864,7 @@ async def test_schema_skew_programmingerror_withholds_ack_not_dropped(
     ingestor: EventIngestor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R8-H2: a ProgrammingError (missing column during a rolling migration)
+    """A ProgrammingError (missing column during a rolling migration)
     is a BRAIN-side schema problem, not malformed event content, so it is
     TRANSIENT -> the ack is WITHHELD and the agent re-sends (heals once the
     migration completes). It must NOT be dropped-and-acked, which would
@@ -904,7 +904,7 @@ async def test_permanent_insert_error_is_dropped_and_acked(
     ingestor: EventIngestor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R7-HIGH3 wiring: a PERMANENT per-event insert error is dropped
+    """Wiring: a PERMANENT per-event insert error is dropped
     (not counted as a transient skip) so the batch STILL acks -- re-
     sending a malformed event would loop forever."""
     from sqlalchemy.exc import IntegrityError
@@ -941,11 +941,11 @@ async def test_non_db_deterministic_insert_error_is_dropped_and_acked(
     ingestor: EventIngestor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R8: a non-DB deterministic per-event error (e.g. a RuntimeError /
+    """A non-DB deterministic per-event error (e.g. a RuntimeError /
     TypeError bug in the ingest/projection path for one payload shape) is
     PERMANENT -> dropped-and-acked, NOT withheld.
 
-    Pre-R8 the classifier defaulted every non-DBAPI exception to
+    Pre- the classifier defaulted every non-DBAPI exception to
     transient, so the batch withheld its ack forever: the agent re-sent
     it every backoff cycle with no drop budget, pinning its buffer head
     and overflow-losing every later event. It must instead drop the one
@@ -984,7 +984,7 @@ async def test_worker_upsert_failure_never_fails_the_batch(
     ingestor: EventIngestor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R9: worker liveness is observability, not event data. If BOTH the
+    """Worker liveness is observability, not event data. If BOTH the
     bulk worker upsert AND the per-row fallback fail (e.g. a deadlock on an
     existing worker's UPDATE), the per-row savepoint must confine the error
     so the ingested events still commit -- otherwise a swallowed worker
@@ -1029,7 +1029,7 @@ async def test_replayed_terminal_event_does_not_double_count_metric(
     ingestor: EventIngestor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R7-LOW + round-9 LOW: a re-delivered terminal event (dedup'd on replay)
+    """+ round-9 LOW: a re-delivered terminal event (dedup'd on replay)
     must NOT re-increment the task throughput counter, AND the increment is
     DEFERRED until the caller emits it post-commit.
 
@@ -1100,7 +1100,7 @@ async def test_duplicate_failure_replay_does_not_rewind_task_fields(
     agent: Agent,
     ingestor: EventIngestor,
 ) -> None:
-    """R8-M3: replaying an OLD failure after a NEWER one must NOT rewind the
+    """Replaying an OLD failure after a NEWER one must NOT rewind the
     task's kind-specific fields (finished_at / exception / traceback).
 
     Those fields are written UNCONDITIONALLY while only the state column is

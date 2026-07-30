@@ -317,7 +317,7 @@ class AgentHealthWorker:
             return
         last_seen = _as_utc(agent.last_seen_at)
         offline_for = (now - last_seen).total_seconds() if last_seen else None
-        async with self._db.session() as session:
+        async with self._db.session(write=True) as session:
             await audit.record(
                 AuditLogRepository(session),
                 action="agent.offline_detected",
@@ -406,7 +406,7 @@ class AgentHealthWorker:
             audit=self._audit,
             runner=AutomationActionRunner(dispatcher=self._dispatcher),
         )
-        async with self._db.session() as session:
+        async with self._db.session(write=True) as session:
             await executor.run_matching(
                 session=session,
                 rules_repo=AutomationRuleRepository(session),

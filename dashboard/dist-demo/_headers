@@ -1,4 +1,4 @@
-/assets/*
+/static/*
   Cache-Control: public, max-age=31536000, immutable
 
 /demo-data/*
@@ -8,4 +8,4 @@
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-2cJQDKeqj1kRCTjHw3lNQZ7VwMSo8xGux8twgDsEuRs='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-EqEyotyKLzCU0V8OtlrxP0ccw75+qBdWsjEd2RgSSnM='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'

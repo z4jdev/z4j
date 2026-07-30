@@ -1,0 +1,83 @@
+# z4j - Caddyfile for the optional docker-compose.caddy.yml overlay.
+#
+# Caddy terminates TLS (auto-provisioned via Let's Encrypt) and
+# reverse-proxies to the z4j-brain container on the private
+# z4j_backend network.
+#
+# Customise freely. Caddy reloads when the file changes; trigger a
+# reload without restarting the container with:
+#
+#   docker kill -s USR1 z4j-caddy
+#
+# Full Caddyfile reference: https://caddyserver.com/docs/caddyfile
+
+{
+	# Contact for ACME renewal and expiry notifications.
+	email {$Z4J_ACME_EMAIL}
+
+	# HTTP/3 over QUIC in addition to HTTP/1.1 and HTTP/2.
+	servers {
+		protocols h1 h2 h3
+	}
+
+	# Let's Encrypt production is the default. Uncomment to use the
+	# staging endpoint while you iterate on DNS / firewall config.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# Local, nonredirecting data-plane health endpoint.  The public site below
+# enables automatic HTTPS, so probing its HTTP listener follows a redirect
+# into certificate/SNI validation and can mark a healthy proxy unhealthy.
+http://127.0.0.1 {
+	respond /healthz 200
+	respond 404
+}
+
+# ----------------------------------------------------------------------
+# z4j dashboard + API
+# ----------------------------------------------------------------------
+{$Z4J_DOMAIN} {
+	# gzip + zstd for dashboard assets and JSON responses.
+	encode zstd gzip
+
+	# WebSocket upgrades for the agent gateway (/ws/agent) are handled
+	# automatically; Caddy passes Connection + Upgrade headers through
+	# reverse_proxy without special configuration.
+	reverse_proxy z4j:7700 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+
+	# Baseline security headers. Tighten CSP in production if you
+	# can enumerate your dashboard's exact asset origins.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# Remove the server header Caddy would otherwise emit.
+		-Server
+	}
+
+	# Access log. Rotate via docker volume or ship to your log sink.
+	log {
+		output file /data/access.log {
+			roll_size 100mb
+			roll_keep 10
+		}
+		format json
+	}
+}
+
+# ----------------------------------------------------------------------
+# Example: a second internal hostname that skips ACME (self-signed).
+# Useful when you also want to reach the brain from inside a VPN or
+# Tailnet without a public DNS record.
+# ----------------------------------------------------------------------
+# z4j.internal {
+#     tls internal
+#     reverse_proxy z4j:7700
+# }

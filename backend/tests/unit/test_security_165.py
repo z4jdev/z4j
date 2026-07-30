@@ -146,7 +146,7 @@ def test_route_carries_fresh_mfa_gate(filename: str, route_marker: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# R4-L1: every fresh-MFA-gated notification route also audit-records
+# Every fresh-MFA-gated notification route also audit-records
 # ---------------------------------------------------------------------------
 #
 # Round-4 audit (2026-05-26) found PATCH /defaults/{default_id} was
@@ -187,7 +187,7 @@ def test_notifications_f1_route_calls_audit_record(
     """Locked: every F1-gated notifications.py route MUST call
     audit.record() in its handler body.
 
-    1.6.5 round-4 audit (R4-L1) found PATCH /defaults/{default_id}
+    1.6.5 round-4 audit found PATCH /defaults/{default_id}
     was the only F1-gated route in this file missing the call --
     the neighboring create/delete handlers both recorded. The
     surface is privileged enough that forensic coverage is a
@@ -213,7 +213,7 @@ def test_notifications_f1_route_calls_audit_record(
     handler_body = text[idx:next_route]
 
     assert "audit.record(" in handler_body, (
-        f"\n1.6.5 R4-L1 regression: notifications.py route "
+        f"\n1.6.5 regression: notifications.py route "
         f"{handler_name!r} (marker {route_marker!r}) is fresh-MFA "
         f"gated but does not call audit.record() in its handler body.\n\n"
         "Every F1-gated notification route mutates a privileged surface "

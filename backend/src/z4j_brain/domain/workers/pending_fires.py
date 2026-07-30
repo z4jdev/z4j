@@ -37,10 +37,12 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 if TYPE_CHECKING:
+    from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.domain.command_dispatcher import CommandDispatcher
     from z4j_brain.persistence.database import DatabaseManager
 
@@ -61,13 +63,19 @@ class PendingFiresReplayWorker:
         *,
         db: DatabaseManager,
         dispatcher: CommandDispatcher,
+        audit: AuditService | None = None,
+        command_timeout_seconds: int = 60,
     ) -> None:
         self._db = db
         self._dispatcher = dispatcher
+        self._audit = audit
+        self._command_timeout_seconds = max(command_timeout_seconds, 1)
 
-    async def tick(self) -> None:  # noqa: PLR0912, PLR0915  pending-fire dispatch sweep
-        from datetime import UTC, datetime
-
+    async def tick(  # noqa: PLR0912, PLR0915  pending-fire dispatch sweep
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> None:
         from sqlalchemy import select
 
         from z4j_brain.persistence.models import PendingFire
@@ -80,10 +88,15 @@ class PendingFiresReplayWorker:
             ScheduleRepository,
         )
 
-        # Step 1: sweep expired.
+        occurred_at = now or datetime.now(UTC)
+        await self._tick_current(occurred_at)
+
+        # Step 1: sweep expired legacy/unmarked buffers. Marked rows were
+        # handled individually above; receipt-NULL marked evidence is retained
+        # for its explicit operator exit.
         async with self._db.session() as session:
             expired = await PendingFiresRepository(session).delete_expired(
-                now=datetime.now(UTC),
+                now=occurred_at,
             )
             await session.commit()
         if expired:
@@ -97,7 +110,9 @@ class PendingFiresReplayWorker:
         # then filter against online agents per pair.
         async with self._db.session() as session:
             result = await session.execute(
-                select(PendingFire.project_id, PendingFire.engine).distinct(),
+                select(PendingFire.project_id, PendingFire.engine)
+                .where(PendingFire.protocol_marker.is_(None))
+                .distinct(),
             )
             pairs = list(result.all())
 
@@ -184,7 +199,7 @@ class PendingFiresReplayWorker:
                     # dispatch fails, the delete is rolled back
                     # and the buffer row remains. If both succeed,
                     # both are committed atomically.
-                    async with self._db.session() as fire_session:
+                    async with self._db.session(write=True) as fire_session:
                         try:
                             command = await self._dispatcher.issue(
                                 commands=CommandRepository(fire_session),
@@ -240,6 +255,165 @@ class PendingFiresReplayWorker:
             logger.info(
                 "z4j.brain.workers.pending_fires: replayed %d buffered fire(s)",
                 replayed_total,
+            )
+
+    async def _tick_current(  # noqa: PLR0912
+        self,
+        occurred_at: datetime,
+    ) -> None:
+        """Expire/replay marked buffers through their fenced transitions."""
+
+        from z4j_brain.persistence.enums import CommandStatus
+        from z4j_brain.persistence.repositories import (
+            AgentRepository,
+            AuditLogRepository,
+            PendingFiresRepository,
+        )
+
+        expired_total = 0
+        async with self._db.session() as session:
+            expired = await PendingFiresRepository(
+                session,
+            ).list_expired_current(now=occurred_at)
+        for pending_id, state_nonce in expired:
+            async with self._db.session(write=True) as session:
+                transition = await PendingFiresRepository(
+                    session,
+                ).expire_current(
+                    pending_id=pending_id,
+                    expected_state_nonce=state_nonce,
+                    occurred_at=occurred_at,
+                )
+                if transition.changed:
+                    if self._audit is None:
+                        raise RuntimeError(
+                            "current pending-fire expiry requires AuditService",
+                        )
+                    pending = transition.pending
+                    assert pending is not None
+                    await self._audit.record(
+                        AuditLogRepository(session),
+                        action="schedule.fire.buffer_expired",
+                        target_type="schedule",
+                        target_id=str(pending.schedule_id),
+                        result="expired",
+                        outcome="failure",
+                        project_id=pending.project_id,
+                        metadata={
+                            "fire_id": str(pending.fire_id),
+                            "acceptance_revision": (pending.acceptance_revision),
+                            "scheduled_for": str(pending.scheduled_for),
+                        },
+                    )
+                    expired_total += 1
+                await session.commit()
+
+        async with self._db.session() as session:
+            pending_rows = await PendingFiresRepository(
+                session,
+            ).list_current_for_replay(now=occurred_at)
+        if not pending_rows:
+            if expired_total:
+                logger.info(
+                    "z4j.brain.workers.pending_fires: expired %d current buffer(s)",
+                    expired_total,
+                )
+            return
+
+        agents_by_project = {}
+        for project_id in {row.project_id for row in pending_rows}:
+            async with self._db.session() as session:
+                agents_by_project[project_id] = await AgentRepository(
+                    session,
+                ).list_online_for_project(project_id)
+
+        replayed_total = 0
+        stale_total = 0
+        for pending in pending_rows:
+            if pending.state_write_nonce is None:
+                continue
+            agent = next(
+                (
+                    candidate
+                    for candidate in agents_by_project.get(
+                        pending.project_id,
+                        (),
+                    )
+                    if pending.engine in (candidate.engine_adapters or ())
+                ),
+                None,
+            )
+            if agent is None:
+                continue
+            async with self._db.session(write=True) as session:
+                transition = await PendingFiresRepository(
+                    session,
+                ).replay_current(
+                    pending_id=pending.id,
+                    expected_state_nonce=pending.state_write_nonce,
+                    agent_id=agent.id,
+                    command_timeout_seconds=(self._command_timeout_seconds),
+                    occurred_at=occurred_at,
+                )
+                if transition.changed:
+                    if self._audit is None:
+                        raise RuntimeError(
+                            "current pending-fire replay requires AuditService",
+                        )
+                    consumed = transition.pending
+                    assert consumed is not None
+                    await self._audit.record(
+                        AuditLogRepository(session),
+                        action=(
+                            "schedule.fire.buffer_replayed"
+                            if transition.command is not None
+                            else "schedule.fire.buffer_stale"
+                        ),
+                        target_type="schedule",
+                        target_id=str(consumed.schedule_id),
+                        result=transition.disposition,
+                        outcome=("allow" if transition.command is not None else "failure"),
+                        project_id=consumed.project_id,
+                        metadata={
+                            "fire_id": str(consumed.fire_id),
+                            "command_id": (
+                                str(transition.command.id)
+                                if transition.command is not None
+                                else None
+                            ),
+                            "acceptance_revision": (consumed.acceptance_revision),
+                        },
+                    )
+                    replayed_total += int(
+                        transition.command is not None,
+                    )
+                    stale_total += int(
+                        transition.command is None,
+                    )
+                command = transition.command
+                await session.commit()
+            if command is not None and command.status == CommandStatus.PENDING:
+                try:
+                    await self._dispatcher.deliver_persisted(
+                        command_id=command.id,
+                        agent_id=agent.id,
+                        action=command.action,
+                        payload=command.payload,
+                    )
+                except Exception:
+                    logger.exception(
+                        "z4j.brain.workers.pending_fires: current "
+                        "post-commit delivery failed for command_id=%s",
+                        command.id,
+                    )
+
+        if expired_total or replayed_total or stale_total:
+            logger.info(
+                "z4j.brain.workers.pending_fires: current transitions "
+                "expired=%d replayed=%d stale=%d",
+                expired_total,
+                replayed_total,
+                stale_total,
             )
 
     @staticmethod

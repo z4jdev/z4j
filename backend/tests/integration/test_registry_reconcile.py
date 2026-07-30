@@ -66,7 +66,8 @@ async def _seed_pending_command(
                 "(id, project_id, agent_id, action, target_type, target_id, "
                 " payload, status, timeout_at, issued_at) "
                 "VALUES (:id, :pid, :aid, 'retry_task', 'task', 'celery:t1', "
-                "        '{}'::jsonb, 'pending', :tmo, NOW())",
+                '        \'{"engine":"celery","task_id":"t1"}\'::jsonb, '
+                "        'pending', :tmo, NOW())",
             ),
             {
                 "id": command_id,
@@ -88,11 +89,11 @@ class TestReconcile:
             migrated_engine,
         )
 
-        deliver_calls: list[uuid.UUID] = []
+        deliver_calls: list[tuple[uuid.UUID, str]] = []
         db = DatabaseManager(migrated_engine)
 
-        async def deliver(cmd_id: uuid.UUID, _ws: Any) -> bool:
-            deliver_calls.append(cmd_id)
+        async def deliver(cmd_id: uuid.UUID, ws: Any) -> bool:
+            deliver_calls.append((cmd_id, ws.name))
             return True
 
         registry = PostgresNotifyRegistry(
@@ -110,7 +111,16 @@ class TestReconcile:
             await registry.register(
                 project_id=project_id,
                 agent_id=agent_id,
-                ws=FakeWebSocket("late"),
+                ws=FakeWebSocket("old-first"),
+                worker_id="old",
+                retry_contracts={},
+            )
+            await registry.register(
+                project_id=project_id,
+                agent_id=agent_id,
+                ws=FakeWebSocket("current-second"),
+                worker_id="current",
+                retry_contracts={"celery": 1},
             )
 
             # Wait up to 6 seconds - the reconcile interval is 2s
@@ -121,6 +131,6 @@ class TestReconcile:
                 await asyncio.sleep(0.1)
 
             assert deliver_calls, "reconcile sweeper never picked up the command"
-            assert deliver_calls[0] == command_id
+            assert deliver_calls[0] == (command_id, "current-second")
         finally:
             await registry.stop()

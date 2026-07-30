@@ -17,7 +17,7 @@ Metric naming follows the Prometheus convention:
 These metrics are designed to be compatible with common Grafana
 dashboard patterns used by Flower and Celery monitoring setups.
 
-Multi-worker aggregation (audit R3-M8): ``z4j serve`` defaults to
+Multi-worker aggregation: ``z4j serve`` defaults to
 min(4, cpu) uvicorn worker PROCESSES, each with its own copy of the
 private registry below, so a load-balanced scrape would otherwise
 see only one worker's counters (incident counters increment in one
@@ -28,8 +28,7 @@ mode: every process writes its values through to mmap files under
 that directory, and the endpoint below aggregates ALL processes at
 scrape time via ``multiprocess.MultiProcessCollector``. When the
 env var is unset (single worker, tests, library embedding) the
-private in-process registry is rendered exactly as before.
-"""
+private in-process registry is rendered exactly as before."""
 
 from __future__ import annotations
 
@@ -727,8 +726,65 @@ def _refresh_self_watch_gauges() -> None:
         record_swallowed("metrics", "wal_err_set")
 
 
+def _windows_pid_is_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    error_access_denied = 5
+    error_invalid_parameter = 87
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(
+        process_query_limited_information,
+        False,
+        pid,
+    )
+    if not handle:
+        code = ctypes.get_last_error()
+        if code == error_invalid_parameter:
+            return False
+        if code == error_access_denied:
+            return True
+        raise OSError(code, ctypes.FormatError(code))
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            code = ctypes.get_last_error()
+            raise OSError(code, ctypes.FormatError(code))
+        return int(exit_code.value) == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return _windows_pid_is_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _reap_dead_worker_metrics(multiproc_dir: str) -> None:
-    """Drop live-gauge files of workers that no longer exist (R4-M2).
+    """Drop live-gauge files of workers that no longer exist.
 
     prometheus_client's multiprocess mode leaves one value file per
     PID; ``mark_process_dead`` is meant to run at child exit, but
@@ -762,13 +818,8 @@ def _reap_dead_worker_metrics(multiproc_dir: str) -> None:
             if pid in seen or pid == os.getpid():
                 continue
             seen.add(pid)
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not _pid_is_alive(pid):
                 multiprocess.mark_process_dead(pid, path=multiproc_dir)
-            except PermissionError:
-                # Exists but owned elsewhere: alive, leave it.
-                continue
     except Exception:
         record_swallowed("metrics", "dead_worker_reap")
 
@@ -848,7 +899,7 @@ async def metrics_endpoint(
     snapshot without forcing every subsystem to update on every
     mutation.
 
-    R3-M8: when ``PROMETHEUS_MULTIPROC_DIR`` is set (multi-worker
+    When ``PROMETHEUS_MULTIPROC_DIR`` is set (multi-worker
     serve), the response aggregates every worker process via
     ``multiprocess.MultiProcessCollector`` instead of rendering only
     this process's private registry.
@@ -872,7 +923,7 @@ async def metrics_endpoint(
         # registry.
         from prometheus_client import multiprocess
 
-        # Reap dead workers BEFORE collecting (R4-M2): uvicorn gives
+        # Reap dead workers BEFORE collecting: uvicorn gives
         # us no child-exit hook, so a killed/replaced worker's live
         # gauge files stayed in the directory and livesum kept adding
         # the corpse's values to the aggregate (round 4 reproduced

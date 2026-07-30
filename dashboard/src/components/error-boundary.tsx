@@ -33,7 +33,6 @@ export class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    // eslint-disable-next-line no-console
     console.error("z4j dashboard caught an unhandled error", error, info);
   }
 

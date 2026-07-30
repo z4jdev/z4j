@@ -1,4 +1,4 @@
-"""Command read redaction (Codex P2): confirm_token is redacted for every
+"""Command read redaction: confirm_token is redacted for every
 role, and who-did-what (issued_by) + the raw payload/result are gated to
 OPERATOR+ so a VIEWER cannot read arguments or the purge secret."""
 

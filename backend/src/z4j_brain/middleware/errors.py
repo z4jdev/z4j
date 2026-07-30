@@ -90,7 +90,45 @@ async def _record_denial_if_relevant(
     *,
     exc: BaseException,
 ) -> None:
-    """Best-effort denial-audit enqueue.
+    """Best-effort denial-audit enqueue that cannot break the response.
+
+    This wrapper is the "best-effort" part, and it is load-bearing. Without
+    it a failure while RECORDING a denial escapes into ``dispatch``, misses
+    the ``Z4JError`` handler that was about to build the real reply, and is
+    caught by the generic ``except Exception`` arm instead, so the operator
+    receives an opaque 500 in place of the actionable 4xx.
+
+    That is not theoretical. In 1.8.0 ``POST /schedules/{id}/trigger`` with
+    no online agent returned 500 rather than the 1.7 behaviour of 404 with
+    "no online agent for this project; start the agent and retry", because
+    reading ``user.id`` here raised ``DetachedInstanceError`` once the
+    request session had closed.
+
+    An audit row is worth strictly less than the correct response: the
+    request already failed and the client is being told so. Losing one
+    best-effort audit event is recoverable; converting every such denial
+    into a 500 is not.
+    """
+    try:
+        await _record_denial(request, exc=exc)
+    except Exception:  # pragma: no cover - defensive by construction
+        # WARNING, not exception(): the denial itself is already being
+        # reported to the caller, and a stack trace per 4xx would let an
+        # enumeration scan flood the log.
+        logger.warning(
+            "denial audit enqueue failed; response unaffected",
+            path=request.url.path,
+            method=request.method,
+            error_class=type(exc).__name__,
+        )
+
+
+async def _record_denial(
+    request: Request,
+    *,
+    exc: BaseException,
+) -> None:
+    """Classify and enqueue the denial-audit event.
 
     Catches:
 
@@ -148,8 +186,27 @@ async def _record_denial_if_relevant(
         DenialAuditEvent,
     )
 
-    user = getattr(request.state, "current_user", None)
-    user_id: UUID | None = getattr(user, "id", None) if user else None
+    # Prefer the plain UUID stashed at authentication time. Reading ``.id``
+    # off the ORM instance here is unsafe: by the time this middleware runs
+    # the request's session has been committed and closed, so every attribute
+    # is expired AND the instance is detached, and the refresh SQLAlchemy
+    # attempts raises ``DetachedInstanceError``.
+    #
+    # ``getattr(user, "id", None)`` does NOT protect against that -- the
+    # default only suppresses ``AttributeError``, and DetachedInstanceError
+    # is a SQLAlchemyError. That is precisely how this turned clean 404s
+    # into 500s.
+    user_id: UUID | None = getattr(request.state, "current_user_id", None)
+    if user_id is None:
+        # Fall back for callers that set current_user without the id (older
+        # embedded harnesses). Guarded, because the whole point is that
+        # touching a detached instance can raise.
+        user = getattr(request.state, "current_user", None)
+        if user is not None:
+            try:
+                user_id = user.id
+            except Exception:
+                user_id = None
 
     audit_queue.enqueue(
         DenialAuditEvent(
@@ -159,7 +216,7 @@ async def _record_denial_if_relevant(
             outcome=outcome,
             user_id=user_id,
             project_slug=match.group("slug"),
-            source_ip=getattr(request.state, "real_client_ip", None),
+            source_ip=getattr(request.state, "client_ip", None),
             user_agent=request.headers.get("user-agent"),
             method=request.method,
             error_class=type(exc).__name__,

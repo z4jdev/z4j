@@ -58,7 +58,7 @@ class TaskRepository(BaseRepository[Task]):
         ``find_owner_project`` returned ``LIMIT 1`` and falsely
         tagged any such reuse as cross-project poisoning.
 
-        R5 M2: the ``LIMIT 2`` implementation still false-dropped
+        The ``LIMIT 2`` implementation still false-dropped
         when 3+ projects share the task_id - Postgres could
         return any two "other" rows without the caller's, yielding
         a false positive. The cleanest fix is two targeted
@@ -149,7 +149,7 @@ class TaskRepository(BaseRepository[Task]):
             # Without the savepoint, the loser's ``UniqueViolation``
             # poisons the outer transaction and cascades a
             # ``PendingRollbackError`` through the whole event
-            # batch (R4 follow-up caught this under concurrent
+            # batch (follow-up caught this under concurrent
             # enterprise-stack load).
             try:
                 async with self.session.begin_nested():
@@ -188,7 +188,7 @@ class TaskRepository(BaseRepository[Task]):
         set the brain expects from any adapter. ``"unknown"`` is a
         no-op (the adapter has no result-backend to consult).
 
-        Transition matrix (R3 H1). Reconciliation may only move a
+        Transition matrix. Reconciliation may only move a
         task OUT of a non-terminal state:
 
         - current TERMINAL (success / failure / revoked) → any:
@@ -279,7 +279,7 @@ class TaskRepository(BaseRepository[Task]):
         values: dict[str, Any] = {"state": new_state}
         if finished_at is not None:
             # Keep the earliest observed finish - same semantics as
-            # the pre-R3 ``if existing.finished_at is None`` guard,
+            # the pre- ``if existing.finished_at is None`` guard,
             # but race-safe inside the single UPDATE.
             values["finished_at"] = func.coalesce(Task.finished_at, finished_at)
         if exception_text:
@@ -290,7 +290,7 @@ class TaskRepository(BaseRepository[Task]):
                 exception_text[:500],
             )
 
-        # CONDITIONAL ATOMIC update (R3 H1): the WHERE clause
+        # CONDITIONAL ATOMIC update: the WHERE clause
         # re-asserts the eligibility rules so two racing appliers (or
         # an applier racing a fresh terminal event) serialize on the
         # row - the loser matches zero rows and reports False, and the
@@ -303,7 +303,7 @@ class TaskRepository(BaseRepository[Task]):
             Task.state != new_state,
         ]
         if new_state not in TERMINAL_TASK_STATES:
-            # Optimistic snapshot guards (R4-M1 + round-4 LOW
+            # Optimistic snapshot guards (+ round-4 LOW
             # residual): the staleness check above ran against the
             # row we READ, but a fresh event can commit between that
             # read and this UPDATE. Two predicates close the gap:
@@ -351,6 +351,7 @@ class TaskRepository(BaseRepository[Task]):
         search_query: str | None = None,
         queue: str | None = None,
         worker: str | None = None,
+        engine: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
         cursor: tuple[Any, UUID] | None = None,
@@ -373,10 +374,21 @@ class TaskRepository(BaseRepository[Task]):
         stmt = select(Task).where(Task.project_id == project_id)
         if state is not None:
             stmt = stmt.where(Task.state == state)
+        if engine is not None:
+            # RH4: the engine predicate MUST be in the SQL WHERE so the row
+            # ``limit`` applies to the already-engine-scoped set. Filtering by
+            # engine in Python AFTER the limit lets other-engine rows consume the
+            # cap and silently drops owned target-engine rows past the window.
+            stmt = stmt.where(Task.engine == engine)
         if priority:
             stmt = stmt.where(Task.priority.in_(priority))
         if name_substring:
-            stmt = stmt.where(Task.name.contains(name_substring))
+            # M3: escape LIKE metacharacters so a literal '%' or '_' in the
+            # operator's selection filter matches literally. contains() defaults
+            # to autoescape=False, which would let name='billing%refund'
+            # over-match 'billingXrefund' and widen a bulk-retry beyond the
+            # operator's intended set (retrying tasks they meant to exclude).
+            stmt = stmt.where(Task.name.contains(name_substring, autoescape=True))
         if search_query:
             like_pattern = f"%{search_query}%"
             stmt = stmt.where(
@@ -411,6 +423,15 @@ class TaskRepository(BaseRepository[Task]):
                             Task.started_at == sort_value,
                             Task.id < tiebreaker,
                         ),
+                        # B12: NULL-started (pending/queued) tasks sort AFTER
+                        # every non-null row under ``NULLS LAST``, so they must
+                        # remain eligible while the cursor is still on a
+                        # non-null row. Without this disjunct ``started_at <
+                        # sort_value`` is NULL for them (SQL three-valued
+                        # logic), so once page 1 filled with non-null rows the
+                        # continuation never reached the NULL section and every
+                        # pending task was permanently invisible.
+                        Task.started_at.is_(None),
                     ),
                 )
         stmt = stmt.order_by(
@@ -472,6 +493,31 @@ class TaskRepository(BaseRepository[Task]):
                 out[tid] = label
         return out
 
+    async def list_by_engine_task_ids(
+        self,
+        *,
+        project_id: UUID,
+        engine: str,
+        task_ids: list[str],
+    ) -> list[Task]:
+        """Return the exact owned rows in caller order.
+
+        Boundary B seals names/priorities into its plan from production Task
+        rows.  Missing ids are omitted so the caller can fail the entire
+        destructive request instead of silently narrowing it.
+        """
+        if not task_ids:
+            return []
+        result = await self.session.execute(
+            select(Task).where(
+                Task.project_id == project_id,
+                Task.engine == engine,
+                Task.task_id.in_(task_ids),
+            )
+        )
+        by_id = {str(task.task_id): task for task in result.scalars().all()}
+        return [by_id[task_id] for task_id in task_ids if task_id in by_id]
+
     async def get_names_for_ids(
         self,
         *,
@@ -481,8 +527,8 @@ class TaskRepository(BaseRepository[Task]):
     ) -> dict[str, str]:
         """Bulk-retry companion: ``{task_id: task_name}`` for the input set.
 
-        Added in 1.6.7 for R8 audit H-1. The RQ adapter's bulk retry
-        path requires per-task ``task_name`` so it can call
+        The RQ adapter's bulk retry path
+        requires per-task ``task_name`` so it can call
         ``queue.enqueue_call(func=task_name, ...)`` without reading
         ``job.func_name`` (which triggers pickle deserialization of
         attacker-controlled bytes inside the agent). Ids that don't
@@ -574,7 +620,7 @@ class TaskRepository(BaseRepository[Task]):
         A "stuck" task is one whose age anchor is older than
         ``stuck_before`` AND whose current state is not terminal. The
         age anchor is ``COALESCE(started_at, received_at,
-        created_at)`` - R3 M2(a): the previous ``started_at IS NOT
+        created_at)`` - (a): the previous ``started_at IS NOT
         NULL`` filter silently excluded tasks that never started, so
         an old PENDING task whose start event was lost could sit
         un-reconciled forever. ``created_at`` is NOT NULL, so the

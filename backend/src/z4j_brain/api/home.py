@@ -151,7 +151,7 @@ class RecentFailuresPublic(BaseModel):
     #: ``(occurred_at, id)`` - without the id tiebreaker, multiple
     #: failures at the exact same millisecond (replay storms,
     #: batch retries) straddle page boundaries and silently drop
-    #: or duplicate (R4 follow-up).
+    #: or duplicate.
     next_cursor: str | None
 
 
@@ -647,7 +647,7 @@ async def get_recent_failures(
     is required to break ties when multiple failures share an exact
     millisecond (replay storms, batch retries). Without it the page
     boundary silently drops or duplicates rows. The cursor is
-    encoded as ``"<iso8601>|<uuid_hex>"`` (R4 follow-up).
+    encoded as ``"<iso8601>|<uuid_hex>"``.
     """
     bound_slug: str | None = getattr(
         request.state,
@@ -701,12 +701,18 @@ async def get_recent_failures(
 
     next_cursor: str | None = None
     if len(rows) > limit:
-        overflow = rows[limit]
-        next_cursor = _encode_recent_failures_cursor(
-            overflow.occurred_at,
-            overflow.id,
-        )
+        # B10: keyset next-page uses a STRICT ``< cursor`` predicate, so the
+        # cursor must be the LAST RETURNED row -- not the trimmed overflow
+        # row. Encoding the overflow row (rows[limit]) excluded it from page
+        # 1 (trimmed) AND page 2 (strictly-less-than), silently dropping one
+        # failure per page boundary. Trim first, then anchor on rows[-1].
+        # (Same fix already applied to notifications.py / user_notifications.py.)
         rows = rows[:limit]
+        last = rows[-1]
+        next_cursor = _encode_recent_failures_cursor(
+            last.occurred_at,
+            last.id,
+        )
 
     items: list[RecentFailurePublic] = []
     for ev in rows:

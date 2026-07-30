@@ -23,6 +23,7 @@ accept) and audit H4 (atomic counter on auth paths):
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import secrets
 import uuid
@@ -300,6 +301,18 @@ async def mint_invitation(
         source_ip=ip,
         metadata={"email": body.email, "role": body.role},
     )
+    await audit.record(
+        audit_log,
+        action="invitation.email_delivery_requested",
+        user_id=user.id,
+        project_id=project.id,
+        target_type="invitation",
+        target_id=str(row.id),
+        result="pending",
+        outcome="allow",
+        source_ip=ip,
+        metadata={"email": body.email, "role": body.role},
+    )
     await db_session.commit()
 
     # Best-effort auto-email the invitee. If the project has an
@@ -316,6 +329,23 @@ async def mint_invitation(
         role=body.role,
         token=plaintext,
     )
+    await audit.record(
+        audit_log,
+        action="invitation.email_delivery_result",
+        user_id=user.id,
+        project_id=project.id,
+        target_type="invitation",
+        target_id=str(row.id),
+        result="success" if email_sent else "failed",
+        outcome="allow" if email_sent else "error",
+        source_ip=ip,
+        metadata={
+            "email": body.email,
+            "role": body.role,
+            "delivered": email_sent,
+        },
+    )
+    await db_session.commit()
 
     return InvitationMintPublic(
         invitation=_invitation_public(row),
@@ -363,12 +393,22 @@ async def _try_send_invitation_email(
             active_only=True,
         )
     except Exception:
+        with contextlib.suppress(Exception):
+            await db_session.rollback()
         logger.exception(
             "z4j: invitation email - failed to list channels",
         )
         return False
 
-    email_channels = [c for c in channels if c.type == "email"]
+    email_channels = [
+        (str(channel.id), dict(channel.config or {}))
+        for channel in channels
+        if channel.type == "email"
+    ]
+    # The query above has captured every value needed by the transport. End
+    # that transaction before SMTP/network I/O; the result is recorded later
+    # in a separate signed transaction.
+    await db_session.rollback()
     if not email_channels:
         return False
 
@@ -388,10 +428,10 @@ async def _try_send_invitation_email(
     )
 
     # Try the first channel that succeeds; stop on first success.
-    for channel in email_channels:
+    for channel_id, channel_config in email_channels:
         try:
             result = await deliver_email(
-                config=dict(channel.config or {}),
+                config=channel_config,
                 payload={
                     "subject": subject,
                     "body": body,
@@ -402,13 +442,13 @@ async def _try_send_invitation_email(
                 return True
             logger.warning(
                 "z4j: invitation email channel %s failed: %s",
-                channel.id,
+                channel_id,
                 result.error,
             )
         except Exception:
             logger.exception(
                 "z4j: invitation email channel %s crashed",
-                channel.id,
+                channel_id,
             )
     return False
 

@@ -73,7 +73,7 @@ class Event(Base):
         # 50M-row project would lock every daily partition in one
         # transaction and take hours. Operators purge events via
         # the retention worker (or an explicit DELETE) FIRST,
-        # then the project delete / archive succeeds. R4 follow-up.
+        # then the project delete / archive succeeds. follow-up.
         ForeignKey("projects.id", ondelete="RESTRICT"),
         nullable=False,
     )

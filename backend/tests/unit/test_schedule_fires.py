@@ -217,6 +217,34 @@ class TestRecord:
 
 
 class TestAcknowledge:
+    def test_latency_is_non_negative_and_saturates_for_retained_history(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 25, tzinfo=UTC)
+
+        assert ScheduleFireRepository._latency_ms(None, now) is None
+        assert (
+            ScheduleFireRepository._latency_ms(
+                now + timedelta(seconds=1),
+                now,
+            )
+            == 0
+        )
+        assert (
+            ScheduleFireRepository._latency_ms(
+                now - timedelta(milliseconds=1234),
+                now,
+            )
+            == 1234
+        )
+        assert (
+            ScheduleFireRepository._latency_ms(
+                datetime(2019, 1, 1, tzinfo=UTC),
+                now,
+            )
+            == 2_147_483_647
+        )
+
     @pytest.mark.asyncio
     async def test_ack_sets_acked_at_and_latency(
         self,
@@ -237,7 +265,7 @@ class TestAcknowledge:
             await s.commit()
 
         async with db.session() as s:
-            row, was_first = await ScheduleFireRepository(s).acknowledge(
+            row, was_first, _became = await ScheduleFireRepository(s).acknowledge(
                 fire_id=fire_id,
                 status="acked_success",
             )
@@ -258,7 +286,7 @@ class TestAcknowledge:
         db: DatabaseManager,
     ) -> None:
         async with db.session() as s:
-            row, was_first = await ScheduleFireRepository(s).acknowledge(
+            row, was_first, _became = await ScheduleFireRepository(s).acknowledge(
                 fire_id=uuid.uuid4(),
                 status="acked_failed",
             )

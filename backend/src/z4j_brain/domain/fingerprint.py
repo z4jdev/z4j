@@ -13,15 +13,14 @@ engine's ``task.failed`` trigger (as a ``fingerprint`` condition field).
 
 Design choices:
 
-- Keep ``file:line`` (per the R4 spec): a code change that shifts a line
+Keep ``file:line`` (per the spec): a code change that shifts a line
   legitimately produces a NEW fingerprint (a new deploy's bug is new).
 - Use the DEEPEST frames (a Python traceback is oldest-first, most-recent
   call last), capped at ``_MAX_FRAMES``, since the frames nearest the raise
   are the most distinctive and the top of a deep stack is mostly framework
   boilerplate.
 - Pure + deterministic: no clock, no randomness, no I/O. Same inputs always
-  hash to the same value across processes and restarts.
-"""
+  hash to the same value across processes and restarts."""
 
 from __future__ import annotations
 

@@ -47,7 +47,7 @@ from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 
 if TYPE_CHECKING:
     from z4j_brain.persistence.database import DatabaseManager
-    from z4j_brain.persistence.models import User
+    from z4j_brain.persistence.models import SessionRow, User
     from z4j_brain.settings import Settings
     from z4j_brain.websocket.dashboard_hub import DashboardHub
 
@@ -72,19 +72,17 @@ async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912 
     # ------------------------------------------------------------------
     # 1) Authenticate (session cookie)
     # ------------------------------------------------------------------
-    user = await _resolve_user(websocket=websocket, settings=settings, db=db)
-    if user is None:
+    resolved = await _resolve_user(websocket=websocket, settings=settings, db=db)
+    if resolved is None:
         await _safe_close(websocket, code=4401)
         return
+    session_row, user = resolved
 
-    # MFA enrollment enforcement: a session past its enrollment grace
-    # deadline is restricted to the enrollment endpoints on the REST
-    # side (see ``enforce_mfa_enrollment`` in api/deps.py); the push
-    # channel is product surface too, so refuse it with the same
-    # "forbidden" close code the membership check uses.
-    from z4j_brain.domain.mfa.enforcement import evaluate_mfa_enforcement
-
-    if evaluate_mfa_enforcement(user=user, settings=settings).blocked:
+    # MFA gates (enrollment enforcement + second-factor verification),
+    # mirroring the REST ``enforce_mfa_enrollment`` / ``enforce_mfa_verified``
+    # dependencies. The push channel is product surface too, so a session
+    # that REST would 403 must not open the live change stream here either.
+    if _mfa_blocks_dashboard(user=user, session_row=session_row, settings=settings):
         await _safe_close(websocket, code=4403)
         return
 
@@ -181,18 +179,50 @@ async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912 
 # ---------------------------------------------------------------------------
 
 
+def _mfa_blocks_dashboard(
+    *,
+    user: User,
+    session_row: SessionRow,
+    settings: Settings,
+) -> bool:
+    """True when MFA policy forbids this session from the push channel.
+
+    Two gates, matching REST:
+
+    1. Enrollment enforcement: a session past its enrollment grace
+       deadline is restricted to the enrollment endpoints
+       (``enforce_mfa_enrollment``).
+    2. Second-factor verification: login mints the session cookie at
+       the PASSWORD step and only returns ``mfa_required`` as a hint, so
+       a password-only session (stolen password, victim has TOTP
+       enrolled) is authenticated-but-not-verified. REST 403s it
+       everywhere but the verify allowlist; without the same gate here
+       that session could open the live change stream on the password
+       alone -- a second-factor bypass on an authenticated channel
+       (``enforce_mfa_verified``).
+    """
+    from z4j_brain.domain.mfa.enforcement import evaluate_mfa_enforcement
+
+    if evaluate_mfa_enforcement(user=user, settings=settings).blocked:
+        return True
+    has_mfa = user.mfa_secret_encrypted is not None and user.mfa_enrolled_at is not None
+    return has_mfa and session_row.mfa_verified_at is None
+
+
 async def _resolve_user(
     *,
     websocket: WebSocket,
     settings: Settings,
     db: DatabaseManager,
-) -> User | None:
-    """Resolve the session cookie → user, or return None.
+) -> tuple[SessionRow, User] | None:
+    """Resolve the session cookie → ``(SessionRow, User)``, or None.
 
     Mirrors the REST ``get_optional_session`` dependency. We can't
     actually use it because Depends doesn't apply to WebSocket
     handlers - but we call the same underlying functions so a
-    cookie that works on REST also works here.
+    cookie that works on REST also works here. Returns the SessionRow
+    too so the caller can enforce the second-factor gate
+    (``session_row.mfa_verified_at``) exactly as REST does.
     """
     cookie_value = websocket.cookies.get(
         cookie_name(environment=settings.environment),
@@ -226,7 +256,7 @@ async def _resolve_user(
             sessions=sessions,
             session_id=sid,
         )
-    return resolved[1] if resolved else None
+    return resolved if resolved else None
 
 
 def _parse_subscribe(raw: str) -> UUID | None:

@@ -39,6 +39,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { PageHeader } from "@/components/domain/page-header";
+import { QueryError } from "@/components/domain/query-error";
 
 // Docs URLs. Kept inline rather than centralised because there is no
 // dashboard-wide docs registry; the page that needs a link knows
@@ -108,26 +109,29 @@ interface AdminSettingsResponse {
 // Component
 // ---------------------------------------------------------------------------
 
-function RuntimeSettingsPage() {
-  const { data, isLoading } = useQuery<AdminSettingsResponse>({
-    queryKey: ["admin-settings"],
-    queryFn: () => api.get<AdminSettingsResponse>("/admin/settings"),
-    // Settings only change at brain restart, so a long stale time is
-    // safe and keeps the page snappy on tab-switch.
-    staleTime: 60_000,
-  });
+// Exported so the failure-state regression test can render the page
+// directly. TanStack's code-splitter keeps a route file with a
+// non-route export in the main bundle; for one admin-only settings
+// page that is a deliberate, small trade for having the blank-page
+// regression pinned by a test.
+export function RuntimeSettingsPage() {
+  const { data, isLoading, isError, error, refetch } =
+    useQuery<AdminSettingsResponse>({
+      queryKey: ["admin-settings"],
+      queryFn: () => api.get<AdminSettingsResponse>("/admin/settings"),
+      // Settings only change at brain restart, so a long stale time is
+      // safe and keeps the page snappy on tab-switch.
+      staleTime: 60_000,
+    });
 
-  if (isLoading) {
-    return (
-      <div className="space-y-6">
-        <Skeleton className="h-24 w-full" />
-        <Skeleton className="h-96 w-full" />
-        <Skeleton className="h-48 w-full" />
-      </div>
-    );
-  }
-  if (!data) return null;
-
+  // The header renders unconditionally, and a failed / empty query
+  // renders an explicit error card. Previously this component did
+  // `if (!data) return null`, so ANY failure - the endpoint down, a
+  // 403 from a non-admin session, a network blip - painted a
+  // completely blank page with no heading, no message and no way to
+  // retry. That is indistinguishable from "this feature does not
+  // exist" and matches the pattern every other settings page already
+  // uses (see settings.api-keys.tsx).
   return (
     <TooltipProvider>
       <div className="space-y-6">
@@ -137,10 +141,34 @@ function RuntimeSettingsPage() {
           description="Effective Settings fields the brain is currently using, with the source each value came from. Mirrors `z4j config show`."
           badges={<Badge variant="muted">read-only</Badge>}
         />
-        <RuntimeNotice />
-        <Z4jHomeCard z4jHome={data.z4j_home} />
-        <SettingsTableCard settings={data.settings} />
-        <ActionsCard settings={data.settings} z4jHome={data.z4j_home} />
+
+        {isLoading && (
+          <>
+            <Skeleton className="h-24 w-full" />
+            <Skeleton className="h-96 w-full" />
+            <Skeleton className="h-48 w-full" />
+          </>
+        )}
+
+        {!isLoading && (isError || !data) && (
+          <QueryError
+            message={
+              error instanceof Error
+                ? error.message
+                : "Failed to load runtime configuration"
+            }
+            onRetry={() => refetch()}
+          />
+        )}
+
+        {!isLoading && !isError && data && (
+          <>
+            <RuntimeNotice />
+            <Z4jHomeCard z4jHome={data.z4j_home} />
+            <SettingsTableCard settings={data.settings} />
+            <ActionsCard settings={data.settings} z4jHome={data.z4j_home} />
+          </>
+        )}
       </div>
     </TooltipProvider>
   );

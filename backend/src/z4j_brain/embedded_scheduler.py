@@ -743,6 +743,28 @@ class EmbeddedSchedulerSupervisor:
             if k in allowed_exact or any(k.startswith(p) for p in allowed_prefixes)
         }
 
+        # The brain CLI's ``--environment`` option configures the parent
+        # Settings object rather than mutating ``os.environ``.  Propagate that
+        # resolved value so an embedded scheduler launched by a development
+        # brain does not silently fall back to the scheduler's production
+        # default and reject the default metrics/bind shape.  Preserve an
+        # explicit child-specific override when the operator supplied one.
+        env.setdefault(
+            "Z4J_SCHEDULER_ENVIRONMENT",
+            self._settings.environment,
+        )
+        # The embedded scheduler is a same-host child: brain reaches its
+        # operational HTTP surface over loopback and no external scheduler
+        # instance needs to connect to it.  The standalone scheduler's
+        # 0.0.0.0 default is therefore both unnecessary and, in production,
+        # intentionally refused unless a distinct scheduler metrics token is
+        # configured.  Give embedded mode the topology-correct loopback
+        # default while preserving an explicit operator override (including
+        # an authenticated non-loopback deployment).
+        env.setdefault(
+            "Z4J_SCHEDULER_BIND_HOST",
+            "127.0.0.1",
+        )
         env["Z4J_SCHEDULER_BRAIN_GRPC_URL"] = f"{self._brain_grpc_host}:{self._brain_grpc_port}"
         env["Z4J_SCHEDULER_BRAIN_REST_URL"] = self._brain_rest_url
         env["Z4J_SCHEDULER_TLS_CERT"] = str(self._pki.client_cert_pem)

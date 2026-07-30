@@ -108,12 +108,28 @@ def row_to_payload(row: Any) -> dict[str, Any]:
         "user_id": _str_uuid(getattr(row, "user_id", None)),
         "api_key_id": _str_uuid(getattr(row, "api_key_id", None)),
         "project_id": _str_uuid(getattr(row, "project_id", None)),
-        "source_ip": getattr(row, "source_ip", None),
+        "source_ip": (
+            str(getattr(row, "source_ip", None))
+            if getattr(row, "source_ip", None) is not None
+            else None
+        ),
         "user_agent": getattr(row, "user_agent", None),
         "metadata": metadata,
         "occurred_at": _iso(row.occurred_at),
         "prev_row_hmac": row.prev_row_hmac,
         "row_hmac": row.row_hmac,
+        "hmac_version": getattr(row, "hmac_version", None),
+        "hmac_key_id": getattr(row, "hmac_key_id", None),
+        "chain_generation": _str_uuid(
+            getattr(row, "chain_generation", None),
+        ),
+        "legacy_frozen": getattr(row, "legacy_frozen", None),
+        "legacy_integrity_class": getattr(
+            row,
+            "legacy_integrity_class",
+            None,
+        ),
+        "legacy_origin": getattr(row, "legacy_origin", None),
     }
 
 

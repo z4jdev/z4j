@@ -307,7 +307,7 @@ class UserSubscriptionCreate(BaseModel):
     # ``extra=forbid`` rejects unknown body keys so a future
     # refactor that accidentally re-adds a ``user_id`` /
     # privilege-controlling field can't silently bypass the
-    # membership check (R3 M11 defence in depth - the caller's
+    # membership check (defence in depth - the caller's
     # identity is already established from the session cookie).
     model_config = {"extra": "forbid"}
 
@@ -802,6 +802,26 @@ async def test_user_channel_config(
     """
     from z4j_brain.api.notifications import _destination_summary
 
+    destination_summary = _destination_summary(body.type, body.config)
+    await audit.record(
+        audit_log,
+        action="user_notifications.channel.test_requested",
+        target_type="user_notification_channel",
+        target_id=None,
+        result="pending",
+        outcome="allow",
+        user_id=user.id,
+        project_id=None,
+        source_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        metadata={
+            "type": body.type,
+            "destination_summary": destination_summary,
+        },
+    )
+    # Durable intent must commit before the first fallible outbound byte, and
+    # no database transaction may remain open while the dispatcher runs.
+    await db_session.commit()
     result = await _dispatch_user_test(body.type, body.config)
     await audit.record(
         audit_log,
@@ -816,7 +836,7 @@ async def test_user_channel_config(
         user_agent=request.headers.get("user-agent"),
         metadata={
             "type": body.type,
-            "destination_summary": _destination_summary(body.type, body.config),
+            "destination_summary": destination_summary,
             "ok": result.success,
         },
     )
@@ -863,12 +883,33 @@ async def test_saved_user_channel(
             "channel not found",
             details={"channel_id": str(channel_id)},
         )
-    result = await _dispatch_user_test(channel.type, channel.config or {})
+    channel_type = channel.type
+    channel_config = dict(channel.config or {})
+    channel_target = str(channel.id)
+    destination_summary = _destination_summary(channel_type, channel_config)
+    await audit.record(
+        audit_log,
+        action="user_notifications.channel.test_requested",
+        target_type="user_notification_channel",
+        target_id=channel_target,
+        result="pending",
+        outcome="allow",
+        user_id=user.id,
+        project_id=None,
+        source_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        metadata={
+            "type": channel_type,
+            "destination_summary": destination_summary,
+        },
+    )
+    await db_session.commit()
+    result = await _dispatch_user_test(channel_type, channel_config)
     await audit.record(
         audit_log,
         action="user_notifications.channel.test",
         target_type="user_notification_channel",
-        target_id=str(channel.id),
+        target_id=channel_target,
         result="success" if result.success else "failed",
         outcome="allow",
         user_id=user.id,
@@ -876,11 +917,8 @@ async def test_saved_user_channel(
         source_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
         metadata={
-            "type": channel.type,
-            "destination_summary": _destination_summary(
-                channel.type,
-                channel.config or {},
-            ),
+            "type": channel_type,
+            "destination_summary": destination_summary,
             "ok": result.success,
         },
     )

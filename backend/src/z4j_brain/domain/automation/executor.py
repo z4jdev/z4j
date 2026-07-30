@@ -1,4 +1,4 @@
-"""Automation action executor + governance (Cluster R2).
+"""Automation action executor + governance.
 
 Given the rules that matched an event, this decides -- per action --
 whether to EXECUTE, DRY-RUN, or SKIP (circuit-breaker failsafe), runs the
@@ -21,8 +21,7 @@ Governance rules enforced here:
   ``failed``, and does not abort the rest of the rule; a DB-level failure
   that poisons the session rolls back only the offending rule (each rule
   commits in its own transaction) so the rest of the event's fan-out
-  still fires -- and the drop is surfaced as a swallowed-error metric.
-"""
+  still fires -- and the drop is surfaced as a swallowed-error metric."""
 
 from __future__ import annotations
 

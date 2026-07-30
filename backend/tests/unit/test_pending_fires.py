@@ -20,6 +20,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
+from z4j_brain.domain.schedule_fire_authority import (
+    SCHEDULE_FIRE_PROTOCOL_MARKER,
+)
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
@@ -265,6 +268,48 @@ class TestDelete:
             removed = await PendingFiresRepository(s).delete_expired(now=now)
             await s.commit()
         assert removed == 2
+
+    @pytest.mark.asyncio
+    async def test_generic_paths_preserve_marked_legacy_evidence(
+        self,
+        db: DatabaseManager,
+    ) -> None:
+        project_id, schedule_id = await _seed_project_and_schedule(db)
+        now = datetime.now(UTC)
+        pending_id = uuid.uuid4()
+        async with db.session() as session:
+            session.add(
+                PendingFire(
+                    id=pending_id,
+                    fire_id=uuid.uuid4(),
+                    schedule_id=schedule_id,
+                    project_id=project_id,
+                    engine="celery",
+                    payload={"fire_id": str(uuid.uuid4())},
+                    scheduled_for=now - timedelta(days=2),
+                    enqueued_at=now - timedelta(days=2),
+                    expires_at=now - timedelta(days=1),
+                    protocol_marker=SCHEDULE_FIRE_PROTOCOL_MARKER,
+                    state_write_nonce=uuid.uuid4(),
+                    observed_control_token=None,
+                    receipt_control_token=None,
+                ),
+            )
+            await session.commit()
+
+        async with db.session() as session:
+            repo = PendingFiresRepository(session)
+            assert await repo.delete_expired(now=now) == 0
+            assert (
+                await repo.list_for_replay(
+                    project_id=project_id,
+                    engine="celery",
+                )
+                == []
+            )
+            await session.commit()
+        async with db.session() as session:
+            assert await session.get(PendingFire, pending_id) is not None
 
 
 class TestCount:

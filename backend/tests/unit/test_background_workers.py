@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import secrets
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
+from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.domain.workers import AgentHealthWorker, CommandTimeoutWorker
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
@@ -31,7 +33,7 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-async def db(settings: Settings) -> DatabaseManager:
+async def db(settings: Settings) -> AsyncIterator[DatabaseManager]:
     engine = create_async_engine(
         settings.database_url,
         poolclass=StaticPool,
@@ -39,7 +41,10 @@ async def db(settings: Settings) -> DatabaseManager:
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    return DatabaseManager(engine)
+    try:
+        yield DatabaseManager(engine)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -47,6 +52,7 @@ class TestCommandTimeoutWorker:
     async def test_marks_overdue_pending_as_timeout(
         self,
         db: DatabaseManager,
+        settings: Settings,
     ) -> None:
         async with db.session() as s:
             project = Project(slug="d", name="D")
@@ -89,7 +95,10 @@ class TestCommandTimeoutWorker:
             )
             await s.commit()
 
-        worker = CommandTimeoutWorker(db)
+        worker = CommandTimeoutWorker(
+            db,
+            audit=AuditService(settings),
+        )
         await worker.tick()
 
         async with db.session() as s:

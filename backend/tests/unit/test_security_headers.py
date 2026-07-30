@@ -2,15 +2,39 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
 import secrets
+from pathlib import Path
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import HTMLResponse
+from starlette.routing import Route
 from z4j_brain.main import create_app
+from z4j_brain.middleware.security_headers import SecurityHeadersMiddleware
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.settings import Settings
+
+# The backend suite intentionally does not require a dashboard build. Prefer
+# the bundled artifact when present, then the frontend build, and finally
+# Vite's canonical source template in a fresh checkout.
+_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+_DASHBOARD_INDEX_HTML = next(
+    candidate
+    for candidate in (
+        _PACKAGE_ROOT / "backend" / "src" / "z4j_brain" / "dashboard" / "dist" / "index.html",
+        _PACKAGE_ROOT / "dashboard" / "dist" / "index.html",
+        _PACKAGE_ROOT / "dashboard" / "index.html",
+    )
+    if candidate.is_file()
+).read_text(encoding="utf-8")
 
 
 @pytest.fixture
@@ -107,6 +131,48 @@ class TestHsts:
 
 @pytest.mark.asyncio
 class TestCspOnHtml:
+    async def test_dashboard_csp_allows_only_exact_first_party_inline_blocks(
+        self,
+        settings: Settings,
+    ) -> None:
+        async def html_response(_request: Request) -> HTMLResponse:
+            return HTMLResponse("<!doctype html><title>CSP test</title>")
+
+        app = Starlette(routes=[Route("/", html_response)])
+        app.add_middleware(SecurityHeadersMiddleware, settings=settings)
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            r = await client.get("/")
+
+        csp = r.headers["content-security-policy"]
+        directives = {
+            fields[0]: fields[1:]
+            for directive in csp.split(";")
+            if (fields := directive.strip().split())
+        }
+
+        inline_script = re.search(
+            r"<script>(.*?)</script>",
+            _DASHBOARD_INDEX_HTML,
+            flags=re.DOTALL,
+        )
+        assert inline_script is not None
+        digest = base64.b64encode(hashlib.sha256(inline_script.group(1).encode()).digest()).decode()
+
+        assert directives["script-src"] == [
+            "'self'",
+            f"'sha256-{digest}'",
+        ]
+        assert directives["style-src-elem"] == [
+            "'self'",
+            "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='",
+            "'sha256-CIxDM5jnsGiKqXs2v7NKCY5MzdR9gu6TtiMJrDw29AY='",
+        ]
+        assert "'unsafe-inline'" not in directives["script-src"]
+        assert "'unsafe-inline'" not in directives["style-src-elem"]
+
     async def test_csp_on_setup_form(self, client) -> None:
         r = await client.get("/setup?token=anything")
         assert "content-security-policy" in r.headers

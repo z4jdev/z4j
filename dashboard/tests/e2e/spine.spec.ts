@@ -20,18 +20,28 @@
  * Every scenario cleans up after itself so the suite can run in
  * any order and against a reused brain.
  */
-import { test, expect, ADMIN_EMAIL } from "./fixtures";
+import { test, expect } from "./fixtures";
 
 test.describe("spine - auth + home", () => {
   test("1. login lands on authenticated page", async ({ adminPage }) => {
-    // Greeting carries the admin's derived display name.
-    const heading = adminPage.getByRole("heading", { level: 2 });
-    await expect(heading).toBeVisible();
-    await expect(heading).toContainText(/(good (morning|afternoon|evening)|default|home)/i);
+    // Multi-project login lands on Home; a single-project account lands
+    // directly on that project's Overview. Confirm either valid heading
+    // and the authenticated chrome.
+    await expect(
+      adminPage
+        .getByRole("heading", {
+          name: /good (morning|afternoon|evening)|welcome|home|overview|needs attention|default/i,
+        })
+        .first(),
+    ).toBeVisible();
+    await expect(adminPage.getByRole("button", { name: /user menu/i })).toBeVisible();
   });
 });
 
-test.describe("spine - projects", () => {
+// Serial: these scenarios share the created project through ``slug`` and
+// build on each other (create -> rename -> archive), so they must run in
+// order in one worker and stop the sequence if an early step fails.
+test.describe.serial("spine - projects", () => {
   const rand = () => Math.random().toString(36).slice(2, 8);
   let slug: string;
 
@@ -43,7 +53,7 @@ test.describe("spine - projects", () => {
       environment: "development",
     });
     await adminPage.goto("/settings/projects");
-    await expect(adminPage.getByText(slug)).toBeVisible();
+    await expect(adminPage.getByText(slug).first()).toBeVisible();
   });
 
   test("3. rename + change environment", async ({ adminPage, api }) => {
@@ -54,7 +64,7 @@ test.describe("spine - projects", () => {
     expect(updated.name).toBe(`E2E Renamed ${slug}`);
     expect(updated.environment).toBe("staging");
     await adminPage.reload();
-    await expect(adminPage.getByText(`E2E Renamed ${slug}`)).toBeVisible();
+    await expect(adminPage.getByText(`E2E Renamed ${slug}`).first()).toBeVisible();
   });
 
   test("4. archive (and fail last-active guard)", async ({ api }) => {
@@ -68,7 +78,7 @@ test.describe("spine - projects", () => {
   });
 });
 
-test.describe("spine - users", () => {
+test.describe.serial("spine - users", () => {
   let userId: string;
   const rand = () => Math.random().toString(36).slice(2, 8);
   const email = `e2e-user-${rand()}@example.com`;
@@ -109,35 +119,17 @@ test.describe("spine - users", () => {
     expect(reac.is_active).toBe(true);
   });
 
-  test("7. admin password reset", async ({ api, page }) => {
-    const res = await page.request.fetch(
-      `/api/v1/users/${userId}/password`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token":
-            (await page.context().cookies()).find(
-              (c) => c.name === "z4j_csrf",
-            )?.value ?? "",
-        },
-        data: JSON.stringify({ new_password: "ResetPass2026!" }),
-      },
-    );
+  test("7. admin password reset", async ({ api }) => {
+    const res = await api.raw("POST", `/users/${userId}/password`, {
+      body: { new_password: "ResetPass2026!" },
+    });
     expect(res.status()).toBe(204);
   });
 
-  test("8. delete user (+ self-delete guard)", async ({ api, page }) => {
-    // Self-delete must be refused.
+  test("8. delete user (+ self-delete guard)", async ({ api }) => {
+    // Self-delete must be refused (409).
     const me = await api.get<{ id: string }>("/auth/me");
-    const selfDel = await page.request.fetch(`/api/v1/users/${me.id}`, {
-      method: "DELETE",
-      headers: {
-        "X-CSRF-Token":
-          (await page.context().cookies()).find((c) => c.name === "z4j_csrf")
-            ?.value ?? "",
-      },
-    });
+    const selfDel = await api.raw("DELETE", `/users/${me.id}`);
     expect(selfDel.status()).toBe(409);
 
     // Delete the test user - should succeed.
@@ -145,11 +137,11 @@ test.describe("spine - users", () => {
   });
 });
 
-test.describe("spine - scoped API tokens", () => {
+test.describe.serial("spine - scoped API tokens", () => {
   let keyId: string;
   let plaintext: string;
 
-  test("9. mint + verify scope enforcement", async ({ api, page }) => {
+  test("9. mint + verify scope enforcement", async ({ api }) => {
     const minted = await api.post<{
       id: string;
       token: string;
@@ -163,36 +155,31 @@ test.describe("spine - scoped API tokens", () => {
     expect(plaintext.startsWith("z4k_")).toBe(true);
     expect(minted.scopes).toEqual(["home:read", "tasks:read"]);
 
+    // Bearer-only (noCookie): the session cookie must NOT ride along or
+    // it would authenticate these instead of the scoped key.
+    const bearer = { Authorization: `Bearer ${plaintext}` };
+
     // Bearer can read /home/summary (200).
-    const ok = await page.request.fetch("/api/v1/home/summary", {
-      headers: { Authorization: `Bearer ${plaintext}` },
-    });
+    const ok = await api.raw("GET", "/home/summary", { noCookie: true, headers: bearer });
     expect(ok.status()).toBe(200);
 
     // Bearer cannot hit /auth/me (403 - BEARER_DENY_TAGS).
-    const deniedAuth = await page.request.fetch("/api/v1/auth/me", {
-      headers: { Authorization: `Bearer ${plaintext}` },
-    });
+    const deniedAuth = await api.raw("GET", "/auth/me", { noCookie: true, headers: bearer });
     expect(deniedAuth.status()).toBe(403);
 
     // Bearer cannot mint agents in any project (needs agents:write).
-    const deniedScope = await page.request.fetch(
-      "/api/v1/projects/default/agents",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${plaintext}`,
-        },
-        data: JSON.stringify({ name: "should-not-mint" }),
-      },
-    );
+    const deniedScope = await api.raw("POST", "/projects/default/agents", {
+      noCookie: true,
+      headers: bearer,
+      body: { name: "should-not-mint" },
+    });
     expect(deniedScope.status()).toBe(403);
   });
 
-  test("10. revoke makes the key unauthenticated", async ({ api, page }) => {
+  test("10. revoke makes the key unauthenticated", async ({ api }) => {
     await api.delete(`/api-keys/${keyId}`);
-    const afterRevoke = await page.request.fetch("/api/v1/home/summary", {
+    const afterRevoke = await api.raw("GET", "/home/summary", {
+      noCookie: true,
       headers: { Authorization: `Bearer ${plaintext}` },
     });
     expect(afterRevoke.status()).toBe(401);

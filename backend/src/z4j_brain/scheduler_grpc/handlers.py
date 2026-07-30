@@ -1,6 +1,6 @@
 """Per-RPC handler implementations for the brain-side ``SchedulerService``.
 
-The brain implements five of the six RPCs declared in
+The brain implements every brain-side RPC declared in
 ``packages/z4j-scheduler/proto/scheduler.proto``:
 
 - :rpc:`ListSchedules` - server-streaming initial sync
@@ -9,8 +9,8 @@ The brain implements five of the six RPCs declared in
 - :rpc:`AcknowledgeFireResult` - unary; updates ``schedules.last_run_at``
 - :rpc:`Ping` - unary liveness
 
-The sixth RPC (:rpc:`TriggerSchedule`) lives on the scheduler side -
-brain is the gRPC client for that one.
+The reverse :rpc:`TriggerSchedule` RPC lives on the scheduler side; Brain is
+the gRPC client for that one.
 
 Per ``docs/SCHEDULER.md §13.2``, every state-changing RPC writes an
 audit row through the existing HMAC-chained ``audit_log``. Pure read
@@ -34,8 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -307,7 +307,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 if not rows:
                     break
                 for row in rows:
-                    yield _schedule_to_pb(row)
+                    yield _schedule_to_pb(row, include_current=False)
                 if len(rows) < page_size:
                     break
                 offset += page_size
@@ -795,7 +795,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         )
         return pb.ScheduleEvent(
             kind=kind,
-            schedule=_schedule_to_pb(row),
+            schedule=_schedule_to_pb(row, include_current=False),
             resume_token=row.updated_at.isoformat(),
         )
 
@@ -844,7 +844,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 events.append(
                     pb.ScheduleEvent(
                         kind=pb.ScheduleEvent.Kind.CREATED,
-                        schedule=_schedule_to_pb(row),
+                        schedule=_schedule_to_pb(row, include_current=False),
                         resume_token=row.updated_at.isoformat(),
                     ),
                 )
@@ -852,7 +852,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 events.append(
                     pb.ScheduleEvent(
                         kind=pb.ScheduleEvent.Kind.UPDATED,
-                        schedule=_schedule_to_pb(row),
+                        schedule=_schedule_to_pb(row, include_current=False),
                         resume_token=row.updated_at.isoformat(),
                     ),
                 )
@@ -871,6 +871,559 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         return events, new_snapshot
 
     # ------------------------------------------------------------------
+    # Boundary D current-protocol control plane
+    # ------------------------------------------------------------------
+
+    async def NegotiateSchedulerProtocol(  # noqa: N802
+        self,
+        request: pb.NegotiateSchedulerProtocolRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> pb.NegotiateSchedulerProtocolResponse:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlRepository,
+            ScheduleControlStateUnavailableError,
+        )
+        from z4j_brain.scheduler_grpc.protocol import (
+            capabilities_are_exact,
+            current_capabilities,
+        )
+
+        if not capabilities_are_exact(request.offered):
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "scheduler cadence/protocol tuple does not match this Brain",
+            )
+        async with self._db.session() as session:
+            try:
+                await ScheduleControlRepository(session).require_revision_state()
+            except (ScheduleControlStateUnavailableError, SQLAlchemyError):
+                await context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "Boundary D control activation is not complete",
+                )
+        return pb.NegotiateSchedulerProtocolResponse(
+            selected=current_capabilities(),
+        )
+
+    async def ListScheduleSnapshot(  # noqa: N802
+        self,
+        request: pb.ListScheduleSnapshotRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[pb.ScheduleSnapshotFrame]:
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlRepository,
+            ScheduleControlStateUnavailableError,
+        )
+        from z4j_brain.scheduler_grpc.binding import (
+            enforce_cn_project_binding,
+            filter_project_ids_by_binding,
+        )
+        from z4j_brain.scheduler_grpc.wire import (
+            SNAPSHOT_FORMAT_VERSION,
+            schedule_to_pb,
+            stable_snapshot_digest,
+        )
+
+        if request.snapshot_format_version != SNAPSHOT_FORMAT_VERSION:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "unsupported stable snapshot format",
+            )
+            return
+        project_id: UUID | None = None
+        allowed_project_ids: set[UUID] | None = None
+        if request.project_id:
+            project_id = await _bound_project_id(
+                request.project_id,
+                context=context,
+                bindings=self._settings.scheduler_grpc_cn_project_bindings,
+                db=self._db,
+                enforce=enforce_cn_project_binding,
+            )
+        else:
+            allowed_project_ids = await filter_project_ids_by_binding(
+                context=context,
+                bindings=self._settings.scheduler_grpc_cn_project_bindings,
+                db=self._db,
+            )
+        snapshot_id = uuid.uuid4()
+        async with self._db.session() as session:
+            try:
+                snapshot = await ScheduleControlRepository(session).stable_snapshot(
+                    project_id=project_id,
+                    allowed_project_ids=allowed_project_ids,
+                )
+            except ScheduleControlStateUnavailableError:
+                await context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "Boundary D control activation is not complete",
+                )
+                return
+            rows = [schedule_to_pb(row) for row in snapshot.rows]
+            digest = stable_snapshot_digest(
+                snapshot_id=snapshot_id,
+                project_id=project_id,
+                watermark=snapshot.watermark,
+                rows=rows,
+            )
+            yield pb.ScheduleSnapshotFrame(
+                header=pb.ScheduleSnapshotHeader(
+                    format_version=SNAPSHOT_FORMAT_VERSION,
+                    snapshot_id=str(snapshot_id),
+                    project_id=(str(project_id) if project_id is not None else ""),
+                ),
+            )
+            for row in rows:
+                yield pb.ScheduleSnapshotFrame(
+                    row=pb.ScheduleSnapshotRow(
+                        snapshot_id=str(snapshot_id),
+                        schedule=row,
+                    ),
+                )
+            yield pb.ScheduleSnapshotFrame(
+                complete=pb.ScheduleSnapshotComplete(
+                    format_version=SNAPSHOT_FORMAT_VERSION,
+                    snapshot_id=str(snapshot_id),
+                    project_id=(str(project_id) if project_id is not None else ""),
+                    watermark=snapshot.watermark,
+                    row_count=len(rows),
+                    digest=digest,
+                ),
+            )
+
+    async def WatchSchedulesV2(  # noqa: N802, PLR0911, PLR0912, PLR0915 - ordered stream state machine
+        self,
+        request: pb.WatchSchedulesV2Request,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[pb.ScheduleWatchFrame]:
+        from sqlalchemy import select
+
+        from z4j_brain.persistence.models import ScheduleChangeLog
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlStateUnavailableError,
+        )
+        from z4j_brain.scheduler_grpc.binding import (
+            enforce_cn_project_binding,
+            filter_project_ids_by_binding,
+        )
+        from z4j_brain.scheduler_grpc.protocol import CURRENT_REVISION_WATCH_VERSION
+        from z4j_brain.scheduler_grpc.wire import schedule_to_pb
+
+        if request.watch_format_version != CURRENT_REVISION_WATCH_VERSION:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "unsupported schedule Watch format",
+            )
+            return
+        if request.after_revision < 0:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "schedule Watch cursor cannot be negative",
+            )
+            return
+        project_id: UUID | None = None
+        allowed_project_ids: set[UUID] | None = None
+        if request.project_id:
+            project_id = await _bound_project_id(
+                request.project_id,
+                context=context,
+                bindings=self._settings.scheduler_grpc_cn_project_bindings,
+                db=self._db,
+                enforce=enforce_cn_project_binding,
+            )
+        else:
+            allowed_project_ids = await filter_project_ids_by_binding(
+                context=context,
+                bindings=self._settings.scheduler_grpc_cn_project_bindings,
+                db=self._db,
+            )
+        cursor = int(request.after_revision)
+        poll_seconds = float(self._settings.scheduler_grpc_watch_poll_seconds)
+        while not context.cancelled():
+            async with self._db.session() as session:
+                from z4j_brain.persistence.repositories.schedule_control import (
+                    ScheduleControlRepository,
+                )
+
+                repository = ScheduleControlRepository(session)
+                try:
+                    await repository.begin_stable_read()
+                    state = await repository.require_revision_state()
+                except ScheduleControlStateUnavailableError:
+                    await context.abort(
+                        grpc.StatusCode.UNAVAILABLE,
+                        "Boundary D control activation is not complete",
+                    )
+                    return
+                if cursor < state.change_log_pruned_through:
+                    await context.abort(
+                        grpc.StatusCode.OUT_OF_RANGE,
+                        "schedule Watch cursor is below retained history",
+                    )
+                    return
+                server_revision = int(state.current_revision)
+                result = await session.execute(
+                    select(ScheduleChangeLog)
+                    .where(
+                        ScheduleChangeLog.revision > cursor,
+                        ScheduleChangeLog.revision <= server_revision,
+                    )
+                    .order_by(ScheduleChangeLog.revision)
+                    .limit(500),
+                )
+                changes = list(result.scalars().all())
+
+            scanned_through: int | None = None
+            for change in changes:
+                revision = int(change.revision)
+                relevant = change.schedule_owner == _SCHEDULER_NAME and (
+                    (project_id is not None and change.project_id == project_id)
+                    or (
+                        project_id is None
+                        and (
+                            allowed_project_ids is None or change.project_id in allowed_project_ids
+                        )
+                    )
+                )
+                if not relevant:
+                    scanned_through = revision
+                    cursor = revision
+                    continue
+                if scanned_through is not None:
+                    yield pb.ScheduleWatchFrame(
+                        format_version=CURRENT_REVISION_WATCH_VERSION,
+                        scanned_through=pb.ScannedThrough(
+                            scanned_through_revision=scanned_through,
+                            server_revision=server_revision,
+                        ),
+                    )
+                    scanned_through = None
+                if change.change_kind == "upsert" and change.snapshot is not None:
+                    source = change.snapshot.get("schedule")
+                    if not isinstance(source, dict):
+                        await context.abort(
+                            grpc.StatusCode.DATA_LOSS,
+                            "schedule change log contains a malformed snapshot",
+                        )
+                        return
+                    envelope = pb.ScheduleChange(
+                        kind=pb.ScheduleChange.Kind.UPSERT,
+                        revision=revision,
+                        project_id=str(change.project_id),
+                        schedule=schedule_to_pb(source),
+                    )
+                elif change.change_kind == "delete" and change.snapshot is None:
+                    envelope = pb.ScheduleChange(
+                        kind=pb.ScheduleChange.Kind.TOMBSTONE,
+                        revision=revision,
+                        project_id=str(change.project_id),
+                        deleted_id=str(change.schedule_id),
+                    )
+                else:
+                    await context.abort(
+                        grpc.StatusCode.DATA_LOSS,
+                        "schedule change log contains a contradictory envelope",
+                    )
+                    return
+                yield pb.ScheduleWatchFrame(
+                    format_version=CURRENT_REVISION_WATCH_VERSION,
+                    change=envelope,
+                )
+                cursor = revision
+            if scanned_through is not None:
+                yield pb.ScheduleWatchFrame(
+                    format_version=CURRENT_REVISION_WATCH_VERSION,
+                    scanned_through=pb.ScannedThrough(
+                        scanned_through_revision=scanned_through,
+                        server_revision=server_revision,
+                    ),
+                )
+            if changes:
+                continue
+            try:
+                await asyncio.sleep(poll_seconds)
+            except asyncio.CancelledError:
+                return
+
+    async def GetScheduleState(  # noqa: N802
+        self,
+        request: pb.GetScheduleStateRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> pb.GetScheduleStateResponse:
+        from sqlalchemy import select
+
+        from z4j_brain.persistence.models import Schedule
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlRepository,
+            ScheduleControlStateUnavailableError,
+        )
+        from z4j_brain.scheduler_grpc.binding import enforce_cn_project_binding
+        from z4j_brain.scheduler_grpc.wire import schedule_to_pb
+
+        project_id = await _bound_project_id(
+            request.project_id,
+            context=context,
+            bindings=self._settings.scheduler_grpc_cn_project_bindings,
+            db=self._db,
+            enforce=enforce_cn_project_binding,
+        )
+        try:
+            schedule_id = UUID(request.schedule_id)
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "schedule_id is not a UUID",
+            )
+            return pb.GetScheduleStateResponse()
+        if request.minimum_observed_revision < 0:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "minimum observed revision cannot be negative",
+            )
+        async with self._db.session() as session:
+            try:
+                repository = ScheduleControlRepository(session)
+                await repository.begin_stable_read()
+                state = await repository.require_revision_state()
+            except ScheduleControlStateUnavailableError:
+                await context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "Boundary D control activation is not complete",
+                )
+                return pb.GetScheduleStateResponse()
+            if state.current_revision < request.minimum_observed_revision:
+                await context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "Brain has not reached the caller's observed revision",
+                )
+            result = await session.execute(
+                select(Schedule).where(
+                    Schedule.project_id == project_id,
+                    Schedule.id == schedule_id,
+                    Schedule.scheduler == _SCHEDULER_NAME,
+                ),
+            )
+            row = result.scalar_one_or_none()
+            if row is not None:
+                if not row.schedule_revision or (
+                    row.schedule_revision < request.minimum_observed_revision
+                ):
+                    await context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "schedule state is older than the caller's observation",
+                    )
+                return pb.GetScheduleStateResponse(
+                    observed_revision=row.schedule_revision,
+                    schedule=schedule_to_pb(row),
+                )
+            return pb.GetScheduleStateResponse(
+                observed_revision=state.current_revision,
+                absence=pb.ScheduleAbsence(
+                    project_id=str(project_id),
+                    schedule_id=str(schedule_id),
+                ),
+            )
+
+    async def QuarantineSchedule(  # noqa: N802
+        self,
+        request: pb.QuarantineScheduleRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> pb.QuarantineScheduleResponse:
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlRepository,
+        )
+        from z4j_brain.scheduler_grpc.binding import enforce_cn_project_binding
+
+        if not _is_current_protocol_epoch(request.scheduler_protocol_epoch):
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "unsupported scheduler protocol epoch",
+            )
+        project_id = await _bound_project_id(
+            request.project_id,
+            context=context,
+            bindings=self._settings.scheduler_grpc_cn_project_bindings,
+            db=self._db,
+            enforce=enforce_cn_project_binding,
+        )
+        try:
+            schedule_id = UUID(request.schedule_id)
+            token = UUID(request.observed_control_token)
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "schedule_id/control token is not a UUID",
+            )
+            return pb.QuarantineScheduleResponse()
+        async with self._db.session(write=True) as session:
+            from z4j_brain.persistence.repositories import AuditLogRepository
+
+            repository = ScheduleControlRepository(session)
+            state = await repository.require_revision_state()
+            try:
+                transition = await repository.quarantine(
+                    project_id=project_id,
+                    schedule_id=schedule_id,
+                    observed_control_token=token,
+                    reason_code=request.reason_code,
+                    detail=request.detail,
+                    occurred_at=datetime.now(UTC),
+                )
+            except ValueError as exc:
+                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+                return pb.QuarantineScheduleResponse()
+            if transition.outcome == "applied":
+                await self._audit.record(
+                    AuditLogRepository(session),
+                    action="schedule.quarantined",
+                    target_type="schedule",
+                    target_id=str(schedule_id),
+                    result="success",
+                    outcome="deny",
+                    project_id=project_id,
+                    metadata={
+                        "control_token": str(token),
+                        "reason_code": request.reason_code.strip(),
+                    },
+                )
+            await session.commit()
+            outcome = {
+                "applied": pb.QuarantineOutcome.QUARANTINE_APPLIED,
+                "already_applied": (pb.QuarantineOutcome.QUARANTINE_ALREADY_APPLIED),
+                "stale_control": pb.QuarantineOutcome.QUARANTINE_STALE_CONTROL,
+                "not_found": pb.QuarantineOutcome.QUARANTINE_NOT_FOUND,
+            }[transition.outcome]
+            observed_revision = (
+                int(transition.schedule.schedule_revision or 0)
+                if transition.schedule is not None
+                else int(state.current_revision)
+            )
+            return pb.QuarantineScheduleResponse(
+                outcome=outcome,
+                observed_revision=observed_revision,
+            )
+
+    async def AdvanceScheduleCursor(  # noqa: N802
+        self,
+        request: pb.AdvanceScheduleCursorRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> pb.AdvanceScheduleCursorResponse:
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlConflictError,
+            ScheduleControlRepository,
+        )
+        from z4j_brain.scheduler_grpc.binding import enforce_cn_project_binding
+
+        if not _is_current_protocol_epoch(request.scheduler_protocol_epoch):
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "unsupported scheduler protocol epoch",
+            )
+        project_id = await _bound_project_id(
+            request.project_id,
+            context=context,
+            bindings=self._settings.scheduler_grpc_cn_project_bindings,
+            db=self._db,
+            enforce=enforce_cn_project_binding,
+        )
+        try:
+            schedule_id = UUID(request.schedule_id)
+            token = UUID(request.observed_control_token)
+            expected_last = _pb_datetime(request.expected_last_run_at)
+            expected_next = _required_pb_datetime(
+                request.expected_next_run_at,
+                field="expected_next_run_at",
+            )
+            skipped_through = _required_pb_datetime(
+                request.skipped_through,
+                field="skipped_through",
+            )
+            prepared_next = _pb_datetime(request.prepared_next_run_at)
+        except ValueError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            return pb.AdvanceScheduleCursorResponse()
+
+        async with self._db.session(write=True) as session:
+            from z4j_brain.persistence.repositories import AuditLogRepository
+
+            try:
+                transition = await ScheduleControlRepository(
+                    session,
+                ).advance_cursor(
+                    project_id=project_id,
+                    schedule_id=schedule_id,
+                    observed_control_token=token,
+                    definition_digest=request.definition_digest,
+                    expected_revision=request.expected_schedule_revision,
+                    expected_last_run_at=expected_last,
+                    expected_next_run_at=expected_next,
+                    skipped_through=skipped_through,
+                    prepared_next_run_at=prepared_next,
+                    cadence_semantics_version=request.cadence_semantics_version,
+                    cadence_fingerprint=request.cadence_runtime_fingerprint,
+                    occurred_at=datetime.now(UTC),
+                )
+            except ScheduleControlConflictError as exc:
+                await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+                return pb.AdvanceScheduleCursorResponse()
+            if transition.disposition == "applied":
+                await self._audit.record(
+                    AuditLogRepository(session),
+                    action="schedule.cadence_skipped_no_work",
+                    target_type="schedule",
+                    target_id=str(schedule_id),
+                    result="success",
+                    outcome="allow",
+                    project_id=project_id,
+                    metadata={
+                        "control_token": str(token),
+                        "expected_revision": request.expected_schedule_revision,
+                        "skipped_through": skipped_through.isoformat(),
+                        "prepared_next_run_at": (
+                            prepared_next.isoformat() if prepared_next is not None else None
+                        ),
+                    },
+                )
+            await session.commit()
+
+            row = transition.schedule
+            if row is None:
+                return pb.AdvanceScheduleCursorResponse(
+                    disposition=(pb.CursorTransitionDisposition.CURSOR_STALE_CONTROL_REFRESH),
+                    error_code="schedule_not_found",
+                    error_message="schedule does not exist",
+                )
+            disposition = {
+                "applied": pb.CursorTransitionDisposition.CURSOR_APPLIED,
+                "idempotent": pb.CursorTransitionDisposition.CURSOR_IDEMPOTENT,
+                "slot_resolved_refresh": (
+                    pb.CursorTransitionDisposition.CURSOR_SLOT_RESOLVED_REFRESH
+                ),
+                "stale_control_refresh": (
+                    pb.CursorTransitionDisposition.CURSOR_STALE_CONTROL_REFRESH
+                ),
+                "cadence_semantics_mismatch": (
+                    pb.CursorTransitionDisposition.CURSOR_CADENCE_SEMANTICS_MISMATCH
+                ),
+            }[transition.disposition]
+            return pb.AdvanceScheduleCursorResponse(
+                disposition=disposition,
+                committed_revision=int(transition.committed_revision or 0),
+                committed_last_run_at=_pb_timestamp(
+                    row.last_run_at if transition.committed_revision is not None else None,
+                ),
+                committed_next_run_at=_pb_timestamp(
+                    row.next_run_at if transition.committed_revision is not None else None,
+                ),
+                live_control_token=str(row.control_token or ""),
+                live_revision=int(row.schedule_revision or 0),
+                live_last_run_at=_pb_timestamp(row.last_run_at),
+                live_next_run_at=_pb_timestamp(row.next_run_at),
+            )
+
+    # ------------------------------------------------------------------
     # FireSchedule
     # ------------------------------------------------------------------
 
@@ -886,6 +1439,22 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             return pb.FireScheduleResponse(
                 error_code="invalid_request",
                 error_message=str(exc),
+            )
+        # The fire_id's UUID VERSION is protocol-significant -- a cadence
+        # fire is uuid5 (v5, derive_fire_id) and a manual Trigger Now is uuid4
+        # (v4). The ack path classifies ``version != 5`` as manual, so an
+        # out-of-protocol version would be silently mis-classified. Reject any
+        # other version up front (defense-in-depth; the scheduler is a trusted
+        # peer, so this is unreachable via any in-tree path). A v5 that is
+        # actually manual is indistinguishable at the wire and is closed by the
+        # deferred proto ``manual`` flag, not here.
+        if fire_id.version not in (4, 5):
+            return pb.FireScheduleResponse(
+                error_code="invalid_request",
+                error_message=(
+                    f"fire_id UUID version {fire_id.version} is not supported "
+                    "(expected v4 manual or v5 cadence)"
+                ),
             )
 
         # A5: the operator who triggered this fire (empty for
@@ -926,6 +1495,40 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             )
             return pb.FireScheduleResponse()  # unreachable; abort raises
 
+        if request.scheduler_protocol_epoch:
+            return await self._fire_current_schedule(
+                request=request,
+                context=context,
+                schedule_id=schedule_id,
+                fire_id=fire_id,
+                cert_cn=cert_cn,
+            )
+
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlRepository,
+            ScheduleControlStateUnavailableError,
+        )
+
+        try:
+            async with self._db.session() as control_session:
+                control_active = await ScheduleControlRepository(
+                    control_session,
+                ).control_is_active()
+        except ScheduleControlStateUnavailableError:
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                error_code="schedule_control_unavailable",
+                error_message="durable schedule control evidence is unavailable",
+            )
+        if control_active:
+            return await self._fire_legacy_current_schedule(
+                request=request,
+                context=context,
+                schedule_id=schedule_id,
+                fire_id=fire_id,
+                cert_cn=cert_cn,
+            )
+
         from z4j_brain.persistence.repositories import (
             AuditLogRepository,
             CommandRepository,
@@ -943,6 +1546,14 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             if request.scheduled_for.seconds
             else datetime.now(UTC)
         )
+        # (Defensive): derive_fire_id ignores sub-second precision, so a
+        # fire_id identifies a whole-SECOND slot. Truncate the recorded
+        # scheduled_for to match, so the same fire_id can never be persisted with
+        # two divergent sub-second values (which would collide on the Postgres
+        # (fire_id, scheduled_for) composite key / make the SQLite upgrade lookup
+        # miss). Cadence recomputes are already microsecond=0; this only
+        # normalises the wall-clock fallback / manual path.
+        scheduled_for_dt = scheduled_for_dt.replace(microsecond=0)
 
         # Bound the number of in-flight FireSchedule handlers that
         # hold a DB session.
@@ -955,7 +1566,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         # fires queue here (callers are the scheduler subprocess,
         # which already retries on the GRPC client side).
         sem = _get_fire_schedule_semaphore()
-        async with sem, self._db.session() as session:
+        async with sem, self._db.session(write=True) as session:
             # Audit-fix H-2 (Apr 2026): take a row-level lock on the
             # schedule from the moment we read ``is_enabled`` until
             # commit. Without it, a concurrent dashboard
@@ -1205,6 +1816,35 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             # ack handler can also infer correlation from fire_id
             # alone via the commands table's idempotency_key.
             schedule.last_fire_id = fire_id  # type: ignore[attr-defined]
+            # Derive the fire-history status from the command's ACTUAL
+            # state, not an unconditional "delivered". ``issue()`` can RETURN a
+            # terminally-FAILED command (an idempotent re-fire of a fire whose
+            # earlier command failed returns that FAILED row without re-driving).
+            # Recording "delivered" for it is a lie the ack path would then upgrade
+            # to acked_success with a bumped run count. A FAILED command is recorded
+            # as a failed fire and returned as an error so the scheduler does not
+            # ack a phantom success.
+            from z4j_brain.persistence.enums import CommandStatus as _CmdStatus
+
+            if command.status == _CmdStatus.FAILED:
+                await ScheduleFireRepository(session).record(
+                    fire_id=fire_id,
+                    schedule_id=schedule.id,
+                    project_id=schedule.project_id,
+                    command_id=command.id,
+                    status="failed",
+                    scheduled_for=scheduled_for_dt,
+                    error_code="command_failed",
+                    error_message=_sanitize_error_message(command.error or "command failed"),
+                    triggered_by_user_id=triggered_by_user_id,
+                )
+                await session.commit()
+                return pb.FireScheduleResponse(
+                    error_code="command_failed",
+                    error_message=_sanitize_error_message(
+                        command.error or "command failed to deliver"
+                    ),
+                )
             # Phase 4: write the fire-history row with the
             # brain-assigned command_id. AcknowledgeFireResult will
             # update it later with the agent's outcome -- and it
@@ -1226,27 +1866,1051 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 command_id=str(command.id),
             )
 
+    async def _fire_legacy_current_schedule(  # noqa: PLR0911, PLR0912, PLR0915
+        self,
+        *,
+        request: pb.FireScheduleRequest,
+        context: grpc.aio.ServicerContext,
+        schedule_id: UUID,
+        fire_id: UUID,
+        cert_cn: str,
+    ) -> pb.FireScheduleResponse:
+        """Accept a tokenless cadence only through its explicit D grant."""
+
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from z4j_brain.persistence.enums import CommandStatus
+        from z4j_brain.persistence.models import Schedule
+        from z4j_brain.persistence.repositories import (
+            AuditLogRepository,
+            CommandRepository,
+            PendingFiresRepository,
+            ScheduleFireRepository,
+        )
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlConflictError,
+            ScheduleControlRepository,
+            ScheduleControlStateUnavailableError,
+        )
+        from z4j_brain.scheduler_grpc.binding import (
+            enforce_cn_project_binding,
+        )
+
+        if (
+            fire_id.version != 5
+            or request.triggered_by_user_id
+            or not request.HasField("scheduled_for")
+        ):
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_LEGACY_UPGRADE_REQUIRED),
+                error_code="scheduler_upgrade_required",
+                error_message=(
+                    "current schedule control accepts only explicitly "
+                    "granted tokenless cadence fires"
+                ),
+            )
+        try:
+            scheduled_for = _present_pb_datetime(
+                request.scheduled_for,
+            ).replace(microsecond=0)
+        except (ValueError, OverflowError) as exc:
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                error_code="invalid_legacy_fire",
+                error_message=(_sanitize_error_message(str(exc)) or "invalid scheduled_for"),
+            )
+
+        command_id: UUID | None = None
+        command_agent_id: UUID | None = None
+        command_payload: dict[str, Any] | None = None
+        buffered = False
+        should_deliver = False
+        transition = None
+        sem = _get_fire_schedule_semaphore()
+        try:
+            async with sem, self._db.session(write=True) as session:
+                schedule_result = await session.execute(
+                    select(Schedule)
+                    .where(
+                        Schedule.id == schedule_id,
+                        Schedule.scheduler == _SCHEDULER_NAME,
+                    )
+                    .with_for_update(),
+                )
+                schedule = schedule_result.scalar_one_or_none()
+                if schedule is None:
+                    if cert_cn:
+                        await self._rate_limiter.refund(cert_cn=cert_cn)
+                    return pb.FireScheduleResponse(
+                        disposition=(pb.FireDisposition.FIRE_STALE_CONTROL_REFRESH),
+                        error_code="schedule_not_found",
+                        error_message=f"schedule {schedule_id} not in brain",
+                    )
+                await enforce_cn_project_binding(
+                    context=context,
+                    project_id=schedule.project_id,
+                    bindings=(self._settings.scheduler_grpc_cn_project_bindings),
+                    db=self._db,
+                )
+                receipt_token = schedule.control_token
+                definition_digest = schedule.definition_digest
+                expected_revision = int(schedule.schedule_revision or 0)
+                expected_last_run_at = schedule.last_run_at
+                expected_next_run_at = schedule.next_run_at
+                if receipt_token is None or definition_digest is None:
+                    raise ScheduleControlStateUnavailableError(  # noqa: TRY301
+                        "legacy-compatible schedule lacks current identity",
+                    )
+
+                transition = await ScheduleControlRepository(
+                    session,
+                ).accept_legacy_fire_progress(
+                    project_id=schedule.project_id,
+                    schedule_id=schedule.id,
+                    fire_id=fire_id,
+                    scheduled_for=scheduled_for,
+                    occurred_at=datetime.now(UTC),
+                )
+                schedule = transition.schedule
+                assert schedule is not None
+                if transition.disposition == "slot_resolved_refresh":
+                    return pb.FireScheduleResponse(
+                        buffered=True,
+                        disposition=(pb.FireDisposition.FIRE_SLOT_RESOLVED_REFRESH),
+                        live_control_token=str(
+                            schedule.control_token or "",
+                        ),
+                        live_revision=int(
+                            schedule.schedule_revision or 0,
+                        ),
+                        live_last_run_at=_pb_timestamp(
+                            schedule.last_run_at,
+                        ),
+                        live_next_run_at=_pb_timestamp(
+                            schedule.next_run_at,
+                        ),
+                    )
+                if transition.disposition == "terminal_quarantined":
+                    return pb.FireScheduleResponse(
+                        disposition=(pb.FireDisposition.FIRE_TERMINAL_QUARANTINED),
+                        error_code="schedule_disabled",
+                        error_message=("cadence occurrence has an unresolved terminal hold"),
+                        live_control_token=str(
+                            schedule.control_token or "",
+                        ),
+                        live_revision=int(
+                            schedule.schedule_revision or 0,
+                        ),
+                    )
+                if transition.disposition == "schedule_disabled":
+                    if cert_cn:
+                        await self._rate_limiter.refund(cert_cn=cert_cn)
+                    return pb.FireScheduleResponse(
+                        disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                        error_code="schedule_disabled",
+                        error_message="schedule is disabled",
+                        live_control_token=str(
+                            schedule.control_token or "",
+                        ),
+                        live_revision=int(
+                            schedule.schedule_revision or 0,
+                        ),
+                    )
+                if transition.disposition == "legacy_upgrade_required":
+                    return pb.FireScheduleResponse(
+                        disposition=(pb.FireDisposition.FIRE_LEGACY_UPGRADE_REQUIRED),
+                        error_code="scheduler_upgrade_required",
+                        error_message=(
+                            "tokenless FireSchedule requires an explicit "
+                            "current-generation compatibility grant"
+                        ),
+                        live_control_token=str(
+                            schedule.control_token or "",
+                        ),
+                        live_revision=int(
+                            schedule.schedule_revision or 0,
+                        ),
+                        live_last_run_at=_pb_timestamp(
+                            schedule.last_run_at,
+                        ),
+                        live_next_run_at=_pb_timestamp(
+                            schedule.next_run_at,
+                        ),
+                    )
+                if transition.disposition == "legacy_operator_resolution_required":
+                    return pb.FireScheduleResponse(
+                        disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                        error_code="operator_resolution_required",
+                        error_message=(
+                            "legacy cadence evidence may have executed and "
+                            "requires explicit operator resolution"
+                        ),
+                        live_control_token=str(
+                            schedule.control_token or "",
+                        ),
+                        live_revision=int(
+                            schedule.schedule_revision or 0,
+                        ),
+                    )
+                if transition.disposition not in {
+                    "applied",
+                    "idempotent",
+                }:
+                    raise ScheduleControlStateUnavailableError(  # noqa: TRY301
+                        "legacy cadence acceptance returned an unknown state",
+                    )
+
+                commands = CommandRepository(session)
+                pending = PendingFiresRepository(session)
+                fires = ScheduleFireRepository(session)
+                existing_command = await commands.get_current_schedule_fire(
+                    schedule_id=schedule.id,
+                    fire_id=fire_id,
+                    receipt_control_token=receipt_token,
+                )
+                existing_pending = await pending.get_current(
+                    fire_id=fire_id,
+                    receipt_control_token=receipt_token,
+                )
+                if transition.disposition == "idempotent":
+                    if existing_command is None and existing_pending is None:
+                        return pb.FireScheduleResponse(
+                            buffered=True,
+                            disposition=(pb.FireDisposition.FIRE_SLOT_RESOLVED_REFRESH),
+                            live_control_token=str(
+                                schedule.control_token or "",
+                            ),
+                            live_revision=int(
+                                schedule.schedule_revision or 0,
+                            ),
+                            live_last_run_at=_pb_timestamp(
+                                schedule.last_run_at,
+                            ),
+                            live_next_run_at=_pb_timestamp(
+                                schedule.next_run_at,
+                            ),
+                        )
+                    if existing_command is not None and existing_pending is not None:
+                        raise ScheduleControlStateUnavailableError(  # noqa: TRY301
+                            "legacy acceptance has two durable work oracles",
+                        )
+                    if existing_command is not None:
+                        command_id = existing_command.id
+                        command_agent_id = existing_command.agent_id
+                        command_payload = existing_command.payload
+                        should_deliver = existing_command.status == CommandStatus.PENDING
+                    else:
+                        buffered = True
+                else:
+                    acceptance_revision = transition.acceptance_revision
+                    execution_fire_id = transition.execution_fire_id
+                    prepared_next_run_at = schedule.next_run_at
+                    if (
+                        acceptance_revision is None
+                        or execution_fire_id is None
+                        or expected_revision <= 0
+                        or expected_next_run_at is None
+                    ):
+                        raise ScheduleControlStateUnavailableError(  # noqa: TRY301
+                            "legacy acceptance did not allocate complete authority",
+                        )
+                    command_payload = {
+                        "schedule_id": str(schedule.id),
+                        "schedule_name": schedule.name,
+                        "task_name": schedule.task_name,
+                        "engine": schedule.engine,
+                        "queue": schedule.queue,
+                        "args": schedule.args,
+                        "kwargs": schedule.kwargs,
+                        "fire_id": str(execution_fire_id),
+                        "schedule_fire_id": str(fire_id),
+                        "scheduled_for": scheduled_for.isoformat(),
+                        "fired_at": _ts_iso(request.fired_at),
+                    }
+                    common = {
+                        "fire_id": fire_id,
+                        "schedule_id": schedule.id,
+                        "project_id": schedule.project_id,
+                        "scheduled_for": scheduled_for,
+                        "observed_control_token": None,
+                        "receipt_control_token": receipt_token,
+                        "acceptance_revision": acceptance_revision,
+                        "definition_digest": definition_digest,
+                        "expected_last_run_at": expected_last_run_at,
+                        "expected_next_run_at": expected_next_run_at,
+                        "prepared_next_run_at": prepared_next_run_at,
+                    }
+                    agent = await _pick_scheduler_agent_for_fire(
+                        session=session,
+                        schedule=schedule,
+                    )
+                    deadline = datetime.now(UTC) + timedelta(
+                        seconds=self._settings.command_timeout_seconds,
+                    )
+                    if agent is None:
+                        buffered = True
+                        await pending.buffer_current(
+                            engine=schedule.engine,
+                            payload=command_payload,
+                            expires_at=(
+                                datetime.now(UTC)
+                                + timedelta(
+                                    days=(self._settings.pending_fires_retention_days),
+                                )
+                            ),
+                            expected_schedule_revision=expected_revision,
+                            execution_fire_id=execution_fire_id,
+                            **common,
+                        )
+                    else:
+                        command, _created = await commands.insert_current_schedule_fire(
+                            agent_id=agent.id,
+                            payload=command_payload,
+                            timeout_at=deadline,
+                            initial_claim_deadline=deadline,
+                            expected_revision=expected_revision,
+                            execution_fire_id=execution_fire_id,
+                            **common,
+                        )
+                        command_id = command.id
+                        command_agent_id = agent.id
+                        should_deliver = command.status == CommandStatus.PENDING
+                    await fires.record_current(
+                        command_id=command_id,
+                        status=("buffered" if buffered else "accepted"),
+                        expected_schedule_revision=expected_revision,
+                        **common,
+                    )
+                    await self._audit.record(
+                        AuditLogRepository(session),
+                        action="schedule.fire.legacy_accepted",
+                        target_type="schedule",
+                        target_id=str(schedule.id),
+                        result="success",
+                        outcome="allow",
+                        project_id=schedule.project_id,
+                        metadata={
+                            "fire_id": str(fire_id),
+                            "command_id": (str(command_id) if command_id is not None else None),
+                            "receipt_control_token": str(
+                                receipt_token,
+                            ),
+                            "acceptance_revision": (acceptance_revision),
+                            "buffered": buffered,
+                        },
+                    )
+                    await session.commit()
+        except ScheduleControlConflictError as exc:
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                error_code="fire_conflict",
+                error_message=(_sanitize_error_message(str(exc)) or "legacy fire conflict"),
+            )
+        except ScheduleControlStateUnavailableError:
+            logger.exception(
+                "z4j.brain.scheduler_grpc: legacy FireSchedule authority failure",
+                extra={
+                    "schedule_id": str(schedule_id),
+                    "fire_id": str(fire_id),
+                },
+            )
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                error_code="schedule_control_unavailable",
+                error_message="durable schedule control evidence is unavailable",
+            )
+
+        if (
+            command_id is not None
+            and command_agent_id is not None
+            and command_payload is not None
+            and should_deliver
+        ):
+            await self._dispatcher.deliver_persisted(
+                command_id=command_id,
+                agent_id=command_agent_id,
+                action=_FIRE_ACTION,
+                payload=command_payload,
+            )
+        if command_id is not None:
+            return await self._classify_current_fire_command(
+                command_id=command_id,
+            )
+        assert transition is not None
+        schedule = transition.schedule
+        assert schedule is not None
+        return pb.FireScheduleResponse(
+            buffered=buffered,
+            disposition=pb.FireDisposition.FIRE_ACCEPTED,
+            acceptance_revision=int(
+                transition.acceptance_revision or 0,
+            ),
+            accepted_last_run_at=_pb_timestamp(scheduled_for),
+            accepted_next_run_at=_pb_timestamp(
+                schedule.next_run_at,
+            ),
+            live_control_token=str(schedule.control_token or ""),
+            live_revision=int(schedule.schedule_revision or 0),
+            live_last_run_at=_pb_timestamp(schedule.last_run_at),
+            live_next_run_at=_pb_timestamp(schedule.next_run_at),
+        )
+
+    async def _fire_current_schedule(  # noqa: PLR0911, PLR0912, PLR0915
+        self,
+        *,
+        request: pb.FireScheduleRequest,
+        context: grpc.aio.ServicerContext,
+        schedule_id: UUID,
+        fire_id: UUID,
+        cert_cn: str,
+    ) -> pb.FireScheduleResponse:
+        """Persist one receipt-bound cadence acceptance before delivery."""
+
+        from datetime import timedelta
+
+        from z4j_brain.domain.schedule_cadence import (
+            CADENCE_SEMANTICS_VERSION,
+            cadence_runtime_fingerprint,
+        )
+        from z4j_brain.persistence.enums import CommandStatus
+        from z4j_brain.persistence.repositories import (
+            AuditLogRepository,
+            CommandRepository,
+            PendingFiresRepository,
+            ScheduleFireRepository,
+        )
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlConflictError,
+            ScheduleControlRepository,
+            ScheduleControlStateUnavailableError,
+        )
+        from z4j_brain.scheduler_grpc.binding import (
+            enforce_cn_project_binding,
+        )
+        from z4j_brain.scheduler_grpc.protocol import CURRENT_PROTOCOL_EPOCH
+
+        if (
+            request.scheduler_protocol_epoch != CURRENT_PROTOCOL_EPOCH
+            or request.cadence_semantics_version != CADENCE_SEMANTICS_VERSION
+            or request.cadence_runtime_fingerprint != cadence_runtime_fingerprint()
+        ):
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_CADENCE_SEMANTICS_MISMATCH),
+                error_code="cadence_semantics_mismatch",
+                error_message="scheduler cadence/protocol tuple does not match Brain",
+            )
+        if (
+            fire_id.version != 5
+            or request.triggered_by_user_id
+            or not request.HasField("scheduled_for")
+            or not request.HasField("expected_next_run_at")
+            or request.expected_schedule_revision <= 0
+            or not request.definition_digest
+            or not request.observed_control_token
+        ):
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                error_code="invalid_current_fire",
+                error_message="current cadence fire lacks complete authority",
+            )
+        try:
+            observed_control_token = UUID(request.observed_control_token)
+            scheduled_for = _present_pb_datetime(request.scheduled_for)
+            expected_last_run_at = (
+                _present_pb_datetime(request.expected_last_run_at)
+                if request.HasField("expected_last_run_at")
+                else None
+            )
+            expected_next_run_at = _present_pb_datetime(
+                request.expected_next_run_at,
+            )
+            prepared_next_run_at = (
+                _present_pb_datetime(request.prepared_next_run_at)
+                if request.HasField("prepared_next_run_at")
+                else None
+            )
+        except (ValueError, OverflowError) as exc:
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                error_code="invalid_current_fire",
+                error_message=_sanitize_error_message(str(exc)) or "invalid timestamp",
+            )
+
+        command_id: UUID | None = None
+        command_agent_id: UUID | None = None
+        command_payload: dict[str, Any] | None = None
+        should_deliver = False
+        buffered = False
+        transition = None
+        sem = _get_fire_schedule_semaphore()
+        try:
+            async with sem, self._db.session(write=True) as session:
+                control = ScheduleControlRepository(session)
+                transition = await control.accept_current_fire_progress(
+                    project_id=None,
+                    schedule_id=schedule_id,
+                    fire_id=fire_id,
+                    scheduled_for=scheduled_for,
+                    observed_control_token=observed_control_token,
+                    definition_digest=request.definition_digest,
+                    expected_revision=request.expected_schedule_revision,
+                    expected_last_run_at=expected_last_run_at,
+                    expected_next_run_at=expected_next_run_at,
+                    prepared_next_run_at=prepared_next_run_at,
+                    cadence_semantics_version=request.cadence_semantics_version,
+                    cadence_fingerprint=request.cadence_runtime_fingerprint,
+                    occurred_at=datetime.now(UTC),
+                )
+                schedule = transition.schedule
+                if schedule is None:
+                    if cert_cn:
+                        await self._rate_limiter.refund(cert_cn=cert_cn)
+                    return pb.FireScheduleResponse(
+                        disposition=(pb.FireDisposition.FIRE_STALE_CONTROL_REFRESH),
+                        error_code="schedule_not_found",
+                        error_message="schedule does not exist",
+                    )
+                await enforce_cn_project_binding(
+                    context=context,
+                    project_id=schedule.project_id,
+                    bindings=self._settings.scheduler_grpc_cn_project_bindings,
+                    db=self._db,
+                )
+                refresh = _current_fire_refresh_response(transition)
+                if refresh is not None:
+                    return refresh
+
+                commands = CommandRepository(session)
+                pending = PendingFiresRepository(session)
+                fires = ScheduleFireRepository(session)
+                existing_command = await commands.get_current_schedule_fire(
+                    schedule_id=schedule.id,
+                    fire_id=fire_id,
+                    receipt_control_token=observed_control_token,
+                )
+                existing_pending = await pending.get_current(
+                    fire_id=fire_id,
+                    receipt_control_token=observed_control_token,
+                )
+                if transition.disposition == "idempotent":
+                    if existing_command is None and existing_pending is None:
+                        return pb.FireScheduleResponse(
+                            buffered=True,
+                            disposition=(pb.FireDisposition.FIRE_SLOT_RESOLVED_REFRESH),
+                            live_control_token=str(
+                                schedule.control_token or "",
+                            ),
+                            live_revision=int(
+                                schedule.schedule_revision or 0,
+                            ),
+                            live_last_run_at=_pb_timestamp(
+                                schedule.last_run_at,
+                            ),
+                            live_next_run_at=_pb_timestamp(
+                                schedule.next_run_at,
+                            ),
+                        )
+                    if existing_command is not None and existing_pending is not None:
+                        raise ScheduleControlStateUnavailableError(  # noqa: TRY301
+                            "accepted cadence slot has two durable work oracles",
+                        )
+                    if existing_command is not None:
+                        command_id = existing_command.id
+                        command_agent_id = existing_command.agent_id
+                        command_payload = existing_command.payload
+                        should_deliver = existing_command.status == CommandStatus.PENDING
+                    else:
+                        buffered = True
+                else:
+                    agent = await _pick_scheduler_agent_for_fire(
+                        session=session,
+                        schedule=schedule,
+                    )
+                    execution_fire_id = transition.execution_fire_id
+                    acceptance_revision = transition.acceptance_revision
+                    if execution_fire_id is None or acceptance_revision is None:
+                        raise ScheduleControlStateUnavailableError(  # noqa: TRY301
+                            "fire acceptance did not allocate complete authority",
+                        )
+                    command_payload = {
+                        "schedule_id": str(schedule.id),
+                        "schedule_name": schedule.name,
+                        "task_name": schedule.task_name,
+                        "engine": schedule.engine,
+                        "queue": schedule.queue,
+                        "args": schedule.args,
+                        "kwargs": schedule.kwargs,
+                        "fire_id": str(execution_fire_id),
+                        "schedule_fire_id": str(fire_id),
+                        "scheduled_for": scheduled_for.isoformat(),
+                        "fired_at": _ts_iso(request.fired_at),
+                    }
+                    common = {
+                        "fire_id": fire_id,
+                        "schedule_id": schedule.id,
+                        "project_id": schedule.project_id,
+                        "scheduled_for": scheduled_for,
+                        "observed_control_token": observed_control_token,
+                        "receipt_control_token": observed_control_token,
+                        "acceptance_revision": acceptance_revision,
+                        "definition_digest": request.definition_digest,
+                        "expected_last_run_at": expected_last_run_at,
+                        "expected_next_run_at": expected_next_run_at,
+                        "prepared_next_run_at": prepared_next_run_at,
+                    }
+                    if agent is None:
+                        buffered = True
+                        await pending.buffer_current(
+                            engine=schedule.engine,
+                            payload=command_payload,
+                            expires_at=(
+                                datetime.now(UTC)
+                                + timedelta(
+                                    days=self._settings.pending_fires_retention_days,
+                                )
+                            ),
+                            expected_schedule_revision=(request.expected_schedule_revision),
+                            execution_fire_id=execution_fire_id,
+                            **common,
+                        )
+                    else:
+                        command, _created = await commands.insert_current_schedule_fire(
+                            agent_id=agent.id,
+                            payload=command_payload,
+                            timeout_at=(
+                                datetime.now(UTC)
+                                + timedelta(
+                                    seconds=self._settings.command_timeout_seconds,
+                                )
+                            ),
+                            initial_claim_deadline=(
+                                datetime.now(UTC)
+                                + timedelta(
+                                    seconds=self._settings.command_timeout_seconds,
+                                )
+                            ),
+                            expected_revision=request.expected_schedule_revision,
+                            execution_fire_id=execution_fire_id,
+                            **common,
+                        )
+                        command_id = command.id
+                        command_agent_id = agent.id
+                        should_deliver = command.status == CommandStatus.PENDING
+                    await fires.record_current(
+                        command_id=command_id,
+                        status="buffered" if buffered else "accepted",
+                        expected_schedule_revision=(request.expected_schedule_revision),
+                        **common,
+                    )
+                    await self._audit.record(
+                        AuditLogRepository(session),
+                        action="schedule.fire.accepted",
+                        target_type="schedule",
+                        target_id=str(schedule.id),
+                        result="success",
+                        outcome="allow",
+                        project_id=schedule.project_id,
+                        metadata={
+                            "fire_id": str(fire_id),
+                            "command_id": (str(command_id) if command_id is not None else None),
+                            "receipt_control_token": str(
+                                observed_control_token,
+                            ),
+                            "acceptance_revision": acceptance_revision,
+                            "buffered": buffered,
+                        },
+                    )
+                    await session.commit()
+        except ScheduleControlConflictError as exc:
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                error_code="fire_conflict",
+                error_message=_sanitize_error_message(str(exc)) or "fire conflict",
+            )
+        except ScheduleControlStateUnavailableError:
+            logger.exception(
+                "z4j.brain.scheduler_grpc: current FireSchedule authority failure",
+                extra={"schedule_id": str(schedule_id), "fire_id": str(fire_id)},
+            )
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                error_code="schedule_control_unavailable",
+                error_message="durable schedule control evidence is unavailable",
+            )
+
+        if (
+            command_id is not None
+            and command_agent_id is not None
+            and command_payload is not None
+            and should_deliver
+        ):
+            await self._dispatcher.deliver_persisted(
+                command_id=command_id,
+                agent_id=command_agent_id,
+                action=_FIRE_ACTION,
+                payload=command_payload,
+            )
+        if command_id is not None:
+            return await self._classify_current_fire_command(
+                command_id=command_id,
+            )
+        assert transition is not None
+        schedule = transition.schedule
+        assert schedule is not None
+        return pb.FireScheduleResponse(
+            command_id=str(command_id or ""),
+            buffered=buffered,
+            disposition=pb.FireDisposition.FIRE_ACCEPTED,
+            acceptance_revision=int(transition.acceptance_revision or 0),
+            accepted_last_run_at=_pb_timestamp(scheduled_for),
+            accepted_next_run_at=_pb_timestamp(prepared_next_run_at),
+            live_control_token=str(schedule.control_token or ""),
+            live_revision=int(schedule.schedule_revision or 0),
+            live_last_run_at=_pb_timestamp(schedule.last_run_at),
+            live_next_run_at=_pb_timestamp(schedule.next_run_at),
+        )
+
+    async def _classify_current_fire_command(  # noqa: PLR0911
+        self,
+        *,
+        command_id: UUID,
+    ) -> pb.FireScheduleResponse:
+        """Apply the exhaustive current cadence replay table."""
+
+        from z4j_brain.persistence.repositories import AuditLogRepository
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlRepository,
+        )
+
+        async with self._db.session(write=True) as session:
+            transition = await ScheduleControlRepository(
+                session,
+            ).terminalize_current_fire(
+                command_id=command_id,
+                occurred_at=datetime.now(UTC),
+            )
+            schedule = transition.schedule
+            command = transition.command
+            if transition.hold_created:
+                assert schedule is not None
+                assert command is not None
+                await self._audit.record(
+                    AuditLogRepository(session),
+                    action="schedule.fire.terminal_hold",
+                    target_type="schedule",
+                    target_id=str(schedule.id),
+                    result="failed",
+                    outcome="failure",
+                    project_id=schedule.project_id,
+                    metadata={
+                        "command_id": str(command.id),
+                        "fire_id": str(command.schedule_fire_id),
+                        "terminal_status": command.status.value,
+                        "receipt_control_token": str(
+                            command.schedule_receipt_control_token,
+                        ),
+                        "acceptance_revision": (command.schedule_acceptance_revision),
+                    },
+                )
+                await session.commit()
+            if command is None:
+                return pb.FireScheduleResponse(
+                    disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                    error_code="fire_evidence_missing",
+                    error_message="accepted cadence command evidence is unavailable",
+                )
+            if transition.disposition == "terminal_quarantined":
+                assert schedule is not None
+                return _current_command_response(
+                    disposition=(pb.FireDisposition.FIRE_TERMINAL_QUARANTINED),
+                    schedule=schedule,
+                    command=command,
+                    error_code="schedule_disabled",
+                    error_message=(f"cadence command is terminal: {command.status.value}"),
+                )
+            if transition.disposition in {"pending", "dispatched", "completed"}:
+                assert schedule is not None
+                return _current_command_response(
+                    disposition=pb.FireDisposition.FIRE_ACCEPTED,
+                    schedule=schedule,
+                    command=command,
+                )
+            if transition.disposition == "slot_resolved_refresh":
+                if schedule is None:
+                    return pb.FireScheduleResponse(
+                        disposition=(pb.FireDisposition.FIRE_SLOT_RESOLVED_REFRESH),
+                        command_id=str(command.id),
+                        acceptance_revision=int(
+                            command.schedule_acceptance_revision or 0,
+                        ),
+                    )
+                return _current_command_response(
+                    disposition=(pb.FireDisposition.FIRE_SLOT_RESOLVED_REFRESH),
+                    schedule=schedule,
+                    command=command,
+                    error_code="slot_resolved",
+                    error_message="a later cadence transition already won",
+                )
+            if transition.disposition == "stale_control_refresh":
+                assert schedule is not None
+                return _current_command_response(
+                    disposition=(pb.FireDisposition.FIRE_STALE_CONTROL_REFRESH),
+                    schedule=schedule,
+                    command=command,
+                    error_code="stale_control",
+                    error_message="schedule control generation changed",
+                )
+            if transition.disposition == "legacy_operator_resolution_required":
+                assert schedule is not None
+                return _current_command_response(
+                    disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                    schedule=schedule,
+                    command=command,
+                    error_code="operator_resolution_required",
+                    error_message=(
+                        "legacy or incomplete cadence evidence requires operator resolution"
+                    ),
+                )
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                command_id=str(command.id),
+                error_code="fire_ambiguous",
+                error_message="cadence command state is unknown or malformed",
+            )
+
     # ------------------------------------------------------------------
     # AcknowledgeFireResult
     # ------------------------------------------------------------------
+
+    async def _acknowledge_current_fire_result(  # noqa: PLR0911, PLR0912, PLR0915
+        self,
+        *,
+        request: pb.AcknowledgeFireResultRequest,
+        context: grpc.aio.ServicerContext,
+        fire_id: UUID,
+    ) -> bool:
+        """Handle a Boundary-D scheduler receipt when current evidence exists.
+
+        Returns ``False`` only when neither the supplied command nor retained
+        fire history is current-protocol evidence, allowing the legacy handler
+        below to preserve its pre-activation behavior.
+        """
+
+        from sqlalchemy import select
+
+        from z4j_brain.domain.schedule_fire_authority import (
+            SCHEDULE_FIRE_PROTOCOL_MARKER,
+        )
+        from z4j_brain.persistence.models import Command, Schedule, ScheduleFire
+        from z4j_brain.persistence.repositories import (
+            AuditLogRepository,
+            ScheduleFireRepository,
+        )
+        from z4j_brain.scheduler_grpc.binding import (
+            enforce_cn_project_binding,
+        )
+
+        command_id: UUID | None = None
+        if request.command_id:
+            try:
+                command_id = UUID(request.command_id)
+            except ValueError as exc:
+                await context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    f"invalid command_id: {exc}",
+                )
+                return True
+
+        safe_error = _sanitize_error_message(request.error)
+        safe_error_code = _sanitize_error_message(
+            request.error,
+            max_chars=_ERROR_CODE_MAX_CHARS,
+        )
+        should_notify = False
+        notification: dict[str, Any] | None = None
+        async with self._db.session(write=True) as session:
+            command = await session.get(Command, command_id) if command_id is not None else None
+            marked_command = (
+                command is not None
+                and command.schedule_protocol_marker == SCHEDULE_FIRE_PROTOCOL_MARKER
+            )
+            current_command = (
+                marked_command
+                and command is not None
+                and command.schedule_receipt_control_token is not None
+            )
+            current_fires: list[ScheduleFire] = []
+            if not current_command:
+                result = await session.execute(
+                    select(ScheduleFire)
+                    .where(
+                        ScheduleFire.fire_id == fire_id,
+                        ScheduleFire.protocol_marker == SCHEDULE_FIRE_PROTOCOL_MARKER,
+                    )
+                    .limit(2),
+                )
+                current_fires = list(result.scalars())
+                if not current_fires:
+                    return False
+
+            if current_command:
+                assert command is not None
+                project_id = command.project_id
+                schedule_id = command.schedule_id
+                if schedule_id is None:
+                    await context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "current command lacks schedule identity",
+                    )
+                    return True
+                await enforce_cn_project_binding(
+                    context=context,
+                    project_id=project_id,
+                    bindings=(self._settings.scheduler_grpc_cn_project_bindings),
+                    db=self._db,
+                )
+            else:
+                if command_id is not None and not marked_command:
+                    await context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "command id does not identify this current fire",
+                    )
+                    return True
+                if len(current_fires) != 1:
+                    await context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "command-less current fire identity is ambiguous",
+                    )
+                    return True
+                fire = current_fires[0]
+                if command_id is not None and fire.command_id != command_id:
+                    await context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "command id does not match retained fire evidence",
+                    )
+                    return True
+                project_id = fire.project_id
+                schedule_id = fire.schedule_id
+                await enforce_cn_project_binding(
+                    context=context,
+                    project_id=project_id,
+                    bindings=(self._settings.scheduler_grpc_cn_project_bindings),
+                    db=self._db,
+                )
+
+            repository = ScheduleFireRepository(session)
+            try:
+                if current_command:
+                    assert command is not None
+                    fire, should_notify = await repository.acknowledge_current_command(
+                        command=command,
+                        fire_id=fire_id,
+                        status=request.status,
+                        new_task_id=request.new_task_id or None,
+                        error_code=safe_error_code,
+                        error_message=safe_error,
+                    )
+                elif fire.receipt_control_token is None:
+                    fire, should_notify = await repository.acknowledge_legacy_history(
+                        fire=fire,
+                        command_id=command_id,
+                        status=request.status,
+                        new_task_id=request.new_task_id or None,
+                        error_code=safe_error_code,
+                        error_message=safe_error,
+                    )
+                else:
+                    fire = current_fires[0]
+                    fire, should_notify = await repository.acknowledge_current_unbound(
+                        fire=fire,
+                        status=request.status,
+                        new_task_id=request.new_task_id or None,
+                        error_code=safe_error_code,
+                        error_message=safe_error,
+                    )
+            except ValueError as exc:
+                await context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    str(exc),
+                )
+                return True
+
+            schedule = await session.get(Schedule, schedule_id)
+            if schedule is not None:
+                notification = {
+                    "project_id": schedule.project_id,
+                    "name": schedule.name,
+                    "engine": schedule.engine,
+                    "queue": schedule.queue,
+                }
+            await self._audit.record(
+                AuditLogRepository(session),
+                action=(
+                    "schedule.ack.success" if request.status == "success" else "schedule.ack.failed"
+                ),
+                target_type="schedule",
+                target_id=str(schedule_id),
+                result="success",
+                outcome="allow",
+                project_id=project_id,
+                metadata={
+                    "fire_id": str(fire_id),
+                    "command_id": (str(command_id) if command_id is not None else None),
+                    "ack_status": request.status,
+                    "error": safe_error,
+                    "history_retained": fire is not None,
+                },
+            )
+            await session.commit()
+
+        if not should_notify or notification is None:
+            return True
+        try:
+            from z4j_brain.domain.notifications.service import (
+                NotificationService,
+            )
+
+            triggers = (
+                ["schedule.fire.succeeded"]
+                if request.status == "success"
+                else ["schedule.fire.failed", "schedule.task_failed"]
+            )
+            async with self._db.session() as notify_session:
+                service = NotificationService()
+                for trigger in triggers:
+                    await service.evaluate_and_dispatch(
+                        session=notify_session,
+                        project_id=notification["project_id"],
+                        trigger=trigger,
+                        task_id=str(fire_id),
+                        task_name=notification["name"],
+                        engine=notification["engine"],
+                        state=request.status,
+                        queue=notification["queue"],
+                        exception=safe_error,
+                    )
+                await notify_session.commit()
+        except Exception:
+            logger.exception(
+                "z4j.brain.scheduler_grpc: current schedule notification "
+                "dispatch failed for fire_id=%s (non-fatal)",
+                fire_id,
+            )
+        return True
 
     async def AcknowledgeFireResult(  # noqa: N802, PLR0915  gRPC method name; ack dispatch
         self,
         request: pb.AcknowledgeFireResultRequest,
         context: grpc.aio.ServicerContext,
     ) -> pb.AcknowledgeFireResultResponse:
-        """Update the schedule row to reflect a completed fire.
+        """Record the scheduler's best-effort FireSchedule receipt.
 
-        The scheduler calls this after it observes (or gives up
-        waiting for) the fire result. We update ``last_run_at``,
-        bump ``total_runs``, and clear ``last_fire_id`` to make
-        room for the next fire.
-
-        The scheduler also re-computes ``next_run_at`` and writes it
-        back here so the brain row stays accurate for dashboard
-        display - even though the scheduler is the authoritative
-        source for "what fires next", the brain shows it on the
-        schedule detail page.
+        Current receipt-bound fires commit cadence progress in the original
+        FireSchedule acceptance transaction.  Their later scheduler receipt is
+        history/audit/notification only.  The legacy branch retains the 1.7
+        schedule-projection behavior until Boundary-D activation fences it.
         """
         try:
             fire_id = UUID(request.fire_id)
@@ -1257,11 +2921,18 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             )
             return pb.AcknowledgeFireResultResponse()
 
-        from sqlalchemy import select, update
+        if await self._acknowledge_current_fire_result(
+            request=request,
+            context=context,
+            fire_id=fire_id,
+        ):
+            return pb.AcknowledgeFireResultResponse()
+
+        from sqlalchemy import case, or_, select, update
 
         from z4j_brain.persistence.models import Schedule, ScheduleFire
 
-        async with self._db.session() as session:
+        async with self._db.session(write=True) as session:
             # Authoritative correlation by
             # ``schedule_fires.fire_id`` (which is UNIQUE) instead
             # of ``Schedule.last_fire_id`` (which is a moving
@@ -1349,7 +3020,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             # fire_id. Duplicate acks (HA scheduler retry, network
             # duplicate) skip both to avoid two pages -- and a
             # double-counted total_runs -- for one fire.
-            _row, was_first_ack = await ScheduleFireRepository(
+            _row, should_notify, became_success = await ScheduleFireRepository(
                 session,
             ).acknowledge(
                 fire_id=fire_id,
@@ -1358,36 +3029,116 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 error_message=safe_error,
             )
 
-            # Advance the schedule's lifetime counters on the FIRST ack
-            # only. The atomic ``Schedule.total_runs + 1`` SQL increment
-            # prevents a lost-update race between acks of DISTINCT fires,
-            # but does NOTHING against a re-delivered ack of the SAME fire
-            # -- which would otherwise double-count total_runs and drift
-            # the lifetime counter high over days of HA retries. Gate it
-            # on was_first_ack.
-            if was_first_ack:
-                updates: dict[str, Any] = {
-                    "last_run_at": now,
-                    "updated_at": now,
-                }
-                if request.status == "success":
-                    updates["total_runs"] = Schedule.total_runs + 1
-                await session.execute(
-                    update(Schedule).where(Schedule.id == schedule.id).values(**updates),
-                )
-            # Conditionally clear ``last_fire_id`` only if it still points
-            # at THIS fire. Idempotent (the WHERE no-ops once cleared) so
-            # it is safe to run on a duplicate ack too; concurrently
-            # in-flight fires would otherwise have their pointer wiped by
-            # a late ack of an earlier fire.
-            await session.execute(
-                update(Schedule)
-                .where(
-                    Schedule.id == schedule.id,
-                    Schedule.last_fire_id == fire_id,
-                )
-                .values(last_fire_id=None),
+            # (+): touch the schedules row ONLY for a
+            # CADENCE (non-manual) SUCCESS ack that transitions the fire INTO
+            # acked_success. Then:
+            #
+            # - advance exactly once -- including a success ack that FOLLOWS a
+            #   failed ack of the same fire_id (dispatch-failure retry); a
+            #   duplicate success ack does not double-count (``became_success``).
+            # - RH5: the anchor is the fire's LOGICAL ``scheduled_for``, not the
+            #   ack wall-clock, so a cold restart reads a drift-free interval
+            #   anchor and does not skip un-acked backlog.
+            # - RH6: a MANUAL "Trigger Now" fire (``triggered_by_user_id`` set)
+            #   must NOT advance last_run_at -- one_shot/clocked treat ANY
+            #   last_fire_at as "already fired", so advancing it makes a manually
+            #   triggered FUTURE schedule look completed and it never fires on
+            #   its cadence. (A non-member trigger nulls the attribution and thus
+            #   still advances -- a narrow documented residual; the reliable close
+            #   is a proto ``manual`` flag, deferred until the pb2 can be
+            #   regenerated.)
+            # - RH7: a FAILED ack does not touch the schedules row AT ALL (not
+            #   even ``updated_at``, and not the last_fire_id clear), so it emits
+            #   NO schedules_notify echo. An echo would make an N-1 (1.7.0)
+            #   scheduler replace its cache wholesale and drop the failed slot; a
+            #   1.7.1 scheduler echo-merges, but emitting nothing is correct for
+            #   both. The failure is recorded on the schedule_fires row, the audit
+            #   trail, and the fire.failed notification -- none behind the trigger.
+            # Manual detection is attribution-INDEPENDENT via the fire_id
+            # UUID version. Cadence fires use derive_fire_id (uuid5, version 5); a
+            # manual "Trigger Now" uses a fresh uuid4 (version 4). So a manual fire
+            # is detected even when its user attribution was nulled (a non-member /
+            # global-admin trigger, ~handlers.py:1036); the triggered_by_user_id
+            # OR-clause is belt-and-suspenders. This closes the RH6 hole where a
+            # normal admin Trigger Now still advanced the cadence anchor and
+            # consumed a one_shot slot.
+            is_manual = _row is not None and (
+                _row.fire_id.version != 5 or _row.triggered_by_user_id is not None
             )
+            if request.status == "success" and became_success and _row is not None:
+                if is_manual:
+                    # A manual trigger IS a real run -- count it -- but
+                    # must NOT advance the cadence anchor (last_run_at), or a
+                    # manually-triggered FUTURE one_shot/clocked would look
+                    # already-fired. No last_fire_id clear (a later cadence fire
+                    # overwrites it; the ack correlates via fire_id).
+                    await session.execute(
+                        update(Schedule)
+                        .where(Schedule.id == schedule.id)
+                        .values(
+                            total_runs=Schedule.total_runs + 1,
+                            # Monotonic updated_at. Concurrent acks that
+                            # commit in reverse timestamp order must not regress
+                            # updated_at, or a WatchSchedules consumer keyed on it
+                            # could miss this counter-only change.
+                            updated_at=case(
+                                (
+                                    or_(
+                                        Schedule.updated_at.is_(None),
+                                        Schedule.updated_at < now,
+                                    ),
+                                    now,
+                                ),
+                                else_=Schedule.updated_at,
+                            ),
+                        ),
+                    )
+                else:
+                    # Cadence success.: last_run_at is MONOTONIC via CASE,
+                    # so a late ack of an EARLIER slot cannot regress the anchor
+                    # (and the interval cadence with it), while total_runs still
+                    # counts every distinct success.
+                    await session.execute(
+                        update(Schedule)
+                        .where(Schedule.id == schedule.id)
+                        .values(
+                            last_run_at=case(
+                                (
+                                    or_(
+                                        Schedule.last_run_at.is_(None),
+                                        Schedule.last_run_at < _row.scheduled_for,
+                                    ),
+                                    _row.scheduled_for,
+                                ),
+                                else_=Schedule.last_run_at,
+                            ),
+                            total_runs=Schedule.total_runs + 1,
+                            # Monotonic updated_at (see the manual branch).
+                            updated_at=case(
+                                (
+                                    or_(
+                                        Schedule.updated_at.is_(None),
+                                        Schedule.updated_at < now,
+                                    ),
+                                    now,
+                                ),
+                                else_=Schedule.updated_at,
+                            ),
+                            # Release last_fire_id in THIS same guarded
+                            # UPDATE (only if it still points at OUR fire; a
+                            # concurrent later fire keeps its pointer), instead of a
+                            # second statement. The old second UPDATE set only
+                            # last_fire_id, so SQLAlchemy's onupdate=func.now()
+                            # injected an UNGUARDED updated_at -- under Postgres
+                            # (tx-start now()) a concurrent reverse-commit ack could
+                            # regress updated_at and hide the change from a
+                            # WatchSchedules consumer keyed on it.
+                            last_fire_id=case(
+                                (Schedule.last_fire_id == fire_id, None),
+                                else_=Schedule.last_fire_id,
+                            ),
+                        ),
+                    )
 
             # Write an audit row for every ack. Without this,
             # the AcknowledgeFireResult handler would mutate
@@ -1464,18 +3215,31 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         # should block for. Best-effort - failures here must NOT
         # bubble up (the ack succeeded; missed notification is a
         # secondary concern).
-        # Skip notification fan-out
-        # for duplicate acks. Two acks for the same fire_id (HA
-        # scheduler retry, network duplicate) would otherwise
-        # produce two pages for the same fire.
-        if not was_first_ack:
+        # RM2/RL1: fan out at most once per fire, using the ATOMIC
+        # single-winner ``should_notify`` from acknowledge() (a success ack fans
+        # out iff it transitioned into acked_success -- announcing a
+        # failed->success recovery once; a failed ack fans out only on the FIRST
+        # ack). This replaces the racy ``was_first_ack`` read-then-check that
+        # could double-page two concurrent acks and that suppressed a genuine
+        # success-after-failure recovery.
+        if not should_notify:
             logger.info(
-                "z4j.brain.scheduler_grpc: duplicate ack for "
-                "fire_id=%s; skipping notification fan-out",
+                "z4j.brain.scheduler_grpc: ack for fire_id=%s is a duplicate / "
+                "non-transitioning; skipping notification fan-out",
                 fire_id,
             )
             return pb.AcknowledgeFireResultResponse()
 
+        # (KNOWN GAP, deferred): ``should_notify`` is the atomic
+        # single-winner already COMMITTED by acknowledge() above, but the fan-out
+        # below is a SEPARATE best-effort step. A crash after that commit and
+        # before the fan-out completes loses the notification with no retry --
+        # ``should_notify`` was already consumed, so a re-issued ack will not
+        # re-fire it. Closing this needs a transactional OUTBOX: persist the
+        # notification intent in the SAME transaction that claims the winner, then
+        # a relay worker delivers it at-least-once. That is a substantial feature
+        # (outbox table + relay + dedup) and is intentionally deferred, not an
+        # oversight; the current best-effort fan-out is the documented behavior.
         try:
             from z4j_brain.domain.notifications.service import (
                 NotificationService,
@@ -1526,13 +3290,29 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         request: pb.PingRequest,
         context: grpc.aio.ServicerContext,
     ) -> pb.PingResponse:
+        from sqlalchemy.exc import SQLAlchemyError
+
         from z4j_brain import __version__
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlRepository,
+            ScheduleControlStateUnavailableError,
+        )
+        from z4j_brain.scheduler_grpc.protocol import CURRENT_PROTOCOL_EPOCH
 
         ts = Timestamp()
         ts.FromDatetime(datetime.now(UTC))
+        protocol_epoch = 0
+        async with self._db.session() as session:
+            try:
+                await ScheduleControlRepository(session).require_revision_state()
+            except (ScheduleControlStateUnavailableError, SQLAlchemyError):
+                pass
+            else:
+                protocol_epoch = CURRENT_PROTOCOL_EPOCH
         return pb.PingResponse(
             brain_version=__version__,
             brain_time=ts,
+            scheduler_protocol_epoch=protocol_epoch,
         )
 
 
@@ -1541,47 +3321,149 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
 # =====================================================================
 
 
-def _schedule_to_pb(schedule: Schedule) -> pb.Schedule:
-    """Translate a SQLAlchemy ``Schedule`` row to its protobuf form."""
-    last_run = Timestamp()
-    if schedule.last_run_at is not None:
-        last_run.FromDatetime(schedule.last_run_at)
-    next_run = Timestamp()
-    if schedule.next_run_at is not None:
-        next_run.FromDatetime(schedule.next_run_at)
-
-    # JSONB columns may be dict/list - serialise to bytes for the
-    # protobuf ``bytes`` fields.
-    args_json = json.dumps(schedule.args or []).encode()
-    kwargs_json = json.dumps(schedule.kwargs or {}).encode()
-
-    # Optional fields added by the scheduler-columns migration may
-    # not be present on rows from a pre-migration brain (defensive
-    # ``getattr``).
-    catch_up = getattr(schedule, "catch_up", None) or "skip"
-    source = getattr(schedule, "source", None) or "dashboard"
-    source_hash = getattr(schedule, "source_hash", None) or ""
-
-    return pb.Schedule(
-        id=str(schedule.id),
-        project_id=str(schedule.project_id),
-        engine=schedule.engine,
-        name=schedule.name,
-        task_name=schedule.task_name,
-        kind=schedule.kind.value if hasattr(schedule.kind, "value") else str(schedule.kind),
-        expression=schedule.expression,
-        timezone=schedule.timezone or "UTC",
-        queue=schedule.queue or "",
-        args_json=args_json,
-        kwargs_json=kwargs_json,
-        is_enabled=bool(schedule.is_enabled),
-        catch_up=catch_up,
-        source=source,
-        last_run_at=last_run,
-        next_run_at=next_run,
-        total_runs=int(schedule.total_runs or 0),
-        source_hash=source_hash,
+async def _bound_project_id(
+    raw_project_id: str,
+    *,
+    context: grpc.aio.ServicerContext,
+    bindings: Any,
+    db: Any,
+    enforce: Any,
+) -> UUID:
+    try:
+        project_id = UUID(raw_project_id)
+    except ValueError as exc:
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "project_id is not a UUID",
+        )
+        raise AssertionError("context.abort unexpectedly returned") from exc
+    await enforce(
+        context=context,
+        project_id=project_id,
+        bindings=bindings,
+        db=db,
     )
+    return project_id
+
+
+def _is_current_protocol_epoch(value: int) -> bool:
+    from z4j_brain.scheduler_grpc.protocol import CURRENT_PROTOCOL_EPOCH
+
+    return value == CURRENT_PROTOCOL_EPOCH
+
+
+def _pb_datetime(value: Timestamp) -> datetime | None:
+    if value.seconds == 0 and value.nanos == 0:
+        return None
+    return datetime.fromtimestamp(
+        value.seconds + value.nanos / 1_000_000_000,
+        tz=UTC,
+    )
+
+
+def _present_pb_datetime(value: Timestamp) -> datetime:
+    """Decode a timestamp whose protobuf message presence was proved."""
+
+    return datetime.fromtimestamp(
+        value.seconds + value.nanos / 1_000_000_000,
+        tz=UTC,
+    )
+
+
+def _required_pb_datetime(value: Timestamp, *, field: str) -> datetime:
+    parsed = _pb_datetime(value)
+    if parsed is None:
+        raise ValueError(f"{field} is required")
+    return parsed
+
+
+def _pb_timestamp(value: datetime | None) -> Timestamp:
+    result = Timestamp()
+    if value is not None:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        result.FromDatetime(value.astimezone(UTC))
+    return result
+
+
+def _current_fire_refresh_response(transition: Any) -> pb.FireScheduleResponse | None:
+    if transition.disposition in {"applied", "idempotent"}:
+        return None
+    schedule = transition.schedule
+    if schedule is None:
+        return pb.FireScheduleResponse(
+            disposition=pb.FireDisposition.FIRE_STALE_CONTROL_REFRESH,
+            error_code="schedule_not_found",
+            error_message="schedule does not exist",
+        )
+    dispositions = {
+        "slot_resolved_refresh": (
+            pb.FireDisposition.FIRE_SLOT_RESOLVED_REFRESH,
+            "slot_resolved",
+            "cadence slot is already resolved",
+        ),
+        "stale_control_refresh": (
+            pb.FireDisposition.FIRE_STALE_CONTROL_REFRESH,
+            "stale_control",
+            "schedule control state changed",
+        ),
+        "cadence_semantics_mismatch": (
+            pb.FireDisposition.FIRE_CADENCE_SEMANTICS_MISMATCH,
+            "cadence_semantics_mismatch",
+            "scheduler cadence semantics do not match Brain",
+        ),
+    }
+    disposition, code, message = dispositions.get(
+        transition.disposition,
+        (
+            pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS,
+            "fire_ambiguous",
+            "fire acceptance could not be classified safely",
+        ),
+    )
+    return pb.FireScheduleResponse(
+        disposition=disposition,
+        error_code=code,
+        error_message=message,
+        live_control_token=str(schedule.control_token or ""),
+        live_revision=int(schedule.schedule_revision or 0),
+        live_last_run_at=_pb_timestamp(schedule.last_run_at),
+        live_next_run_at=_pb_timestamp(schedule.next_run_at),
+    )
+
+
+def _current_command_response(
+    *,
+    disposition: int,
+    schedule: Any,
+    command: Any,
+    error_code: str = "",
+    error_message: str = "",
+) -> pb.FireScheduleResponse:
+    return pb.FireScheduleResponse(
+        command_id=str(command.id),
+        disposition=disposition,
+        acceptance_revision=int(command.schedule_acceptance_revision or 0),
+        accepted_last_run_at=_pb_timestamp(command.schedule_scheduled_for),
+        accepted_next_run_at=_pb_timestamp(command.schedule_next_run_at),
+        live_control_token=str(schedule.control_token or ""),
+        live_revision=int(schedule.schedule_revision or 0),
+        live_last_run_at=_pb_timestamp(schedule.last_run_at),
+        live_next_run_at=_pb_timestamp(schedule.next_run_at),
+        error_code=error_code,
+        error_message=error_message,
+    )
+
+
+def _schedule_to_pb(
+    schedule: Schedule,
+    *,
+    include_current: bool = True,
+) -> pb.Schedule:
+    """Translate a SQLAlchemy ``Schedule`` row to its protobuf form."""
+    from z4j_brain.scheduler_grpc.wire import schedule_to_pb
+
+    return schedule_to_pb(schedule, include_current=include_current)
 
 
 def _ts_iso(ts: Timestamp) -> str:

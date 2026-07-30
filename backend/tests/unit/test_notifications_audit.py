@@ -15,8 +15,8 @@ handling privileged operations:
 - ``create_default`` / ``delete_default`` - templates that
   auto-materialise into every new member's preferences.
 
-Per CLAUDE.md §2.3: "every command execution must write to the
-audit log - no silent allows." These tests pin the fix.
+Invariant: every command execution must write to the audit log, with
+no silent allows. These tests pin the fix.
 """
 
 from __future__ import annotations
@@ -367,3 +367,61 @@ class TestEveryWriteRouteImportsAudit:
             assert "audit.record(" in handler_src, (
                 f"{handler.__name__} does not call audit.record - audit-Phase4-1 regression"
             )
+
+    def test_outbound_tests_commit_signed_intent_before_dispatch(self) -> None:
+        """Every test transport observes durable intent before outbound I/O."""
+        import inspect
+
+        from z4j_brain.api import notifications, user_notifications
+
+        cases = (
+            (
+                notifications.test_channel_config,
+                'action="notifications.channel.test_requested"',
+                "result = await _dispatch_test(",
+                'action="notifications.channel.test"',
+            ),
+            (
+                notifications.test_saved_channel,
+                'action="notifications.channel.test_requested"',
+                "result = await _dispatch_test(",
+                'action="notifications.channel.test"',
+            ),
+            (
+                user_notifications.test_user_channel_config,
+                'action="user_notifications.channel.test_requested"',
+                "result = await _dispatch_user_test(",
+                'action="user_notifications.channel.test"',
+            ),
+            (
+                user_notifications.test_saved_user_channel,
+                'action="user_notifications.channel.test_requested"',
+                "result = await _dispatch_user_test(",
+                'action="user_notifications.channel.test"',
+            ),
+        )
+        for handler, intent, dispatch, result in cases:
+            source = inspect.getsource(handler)
+            intent_at = source.index(intent)
+            commit_at = source.index("await db_session.commit()", intent_at)
+            dispatch_at = source.index(dispatch)
+            result_at = source.index(result, dispatch_at)
+            assert intent_at < commit_at < dispatch_at < result_at, (
+                f"{handler.__name__} must commit signed intent before dispatch "
+                "and record the result afterward"
+            )
+
+    def test_invitation_email_commits_signed_intent_before_send(self) -> None:
+        import inspect
+
+        from z4j_brain.api import invitations
+
+        source = inspect.getsource(invitations.mint_invitation)
+        intent_at = source.index('action="invitation.email_delivery_requested"')
+        commit_at = source.index("await db_session.commit()", intent_at)
+        dispatch_at = source.index("email_sent = await _try_send_invitation_email(")
+        result_at = source.index(
+            'action="invitation.email_delivery_result"',
+            dispatch_at,
+        )
+        assert intent_at < commit_at < dispatch_at < result_at

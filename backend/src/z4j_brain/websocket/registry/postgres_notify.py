@@ -2,8 +2,9 @@
 
 Multi-worker safe. Each worker:
 
-1. Holds a local map of ``{agent_id → WebSocket}`` for the agents
-   currently connected to THIS worker.
+1. Holds a local map of immutable session-generation handles for
+   the agents currently connected to THIS worker. Each handle binds
+   its socket to adapter-derived retry contracts.
 2. Owns a dedicated asyncpg connection that LISTENs on two channels:
    ``z4j_commands`` (cross-worker delivery) and ``z4j_heartbeat``
    (watchdog round-trip).
@@ -21,11 +22,12 @@ Multi-worker safe. Each worker:
    ``listener_max_age_seconds`` regardless. Belt-and-braces
    against silent NAT or proxy wedges.
 
-The ``deliver`` fast path is "agent is in my local map → push
-synchronously, skip NOTIFY entirely". The slow path is "publish a
-NOTIFY with just ``{command_id, agent_id}`` and let whichever
-worker has the agent pick it up". The notify payload is ~80 bytes
-- well under the 8000-byte cap.
+The ``deliver`` fast path selects one compatible local session and
+pushes synchronously, skipping NOTIFY entirely. The slow path
+publishes ``{command_id, agent_id, retry requirement}``; the
+receiving worker re-derives the requirement from the canonical
+command row before selecting one exact compatible generation. The
+payload remains well under Postgres's 8000-byte cap.
 
 The whole module is 1 file by design - production debuggers should
 be able to read it top to bottom in 10 minutes.
@@ -40,13 +42,14 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
 import structlog
 
 from z4j_brain.websocket.registry._protocol import (
     DeliveryResult,
+    SessionHandle,
     WorkerCapExceeded,
 )
 
@@ -128,18 +131,19 @@ class PostgresNotifyRegistry:
         # Per-worker identifier so we can distinguish our own
         # heartbeat round-trips from other workers'.
         self._worker_id: str = secrets.token_hex(8)
+        # Private durable-delivery authority. Unlike worker_id, this is a typed
+        # random identity copied into every immutable session handle and then
+        # into a claimed Boundary-D command.
+        self._registry_owner_id: UUID = uuid4()
 
         # Local connections map. Updated under ``_lock``.
-        # 1.2.0+: stores multiple WS per agent_id, keyed by
-        # worker_id. Legacy 1.1.x agents (no worker_id) live under
-        # the ``__legacy__`` sentinel slot - one such slot per
-        # agent_id, kicked on duplicate (preserving 1.1.x semantics
-        # for that single connection). Worker-aware agents land in
-        # their own slot keyed by their generated worker_id; the
-        # brain accepts as many concurrent connections as the
-        # operator's gunicorn / Celery / etc. workers spawn.
+        # Stores immutable session handles per agent_id, keyed by
+        # worker_id. Legacy agents (no worker_id) use the collision-
+        # proof ``None`` slot. Worker-aware agents land in their own
+        # generated worker_id slot; reconnect replaces the generation
+        # atomically and cannot inherit an earlier selection.
         self._lock = asyncio.Lock()
-        self._connections: dict[UUID, dict[str | None, WebSocket]] = {}
+        self._connections: dict[UUID, dict[str | None, SessionHandle]] = {}
         self._project_for_agent: dict[UUID, UUID] = {}
 
         # Watchdog state.
@@ -161,8 +165,10 @@ class PostgresNotifyRegistry:
         ws: WebSocket,
         worker_id: str | None = None,
         cap: int = 0,
-    ) -> None:
+        retry_contracts: dict[str, int] | None = None,
+    ) -> SessionHandle:
         slot: str | None = worker_id  # None = legacy 1.1.x slot
+        displaced: SessionHandle | None = None
         async with self._lock:
             workers = self._connections.setdefault(agent_id, {})
             # Cap check (1.2.1+): NEW slot creations only.
@@ -173,14 +179,34 @@ class PostgresNotifyRegistry:
                     cap=cap,
                 )
             existing = workers.get(slot)
-            if existing is not None and existing is not ws:
-                # Same (agent_id, worker_id) reconnecting (a worker
-                # process restarting, or a legacy-mode duplicate).
-                # Kick the old; accept the new.
-                with contextlib.suppress(Exception):
-                    await existing.close(code=4002)
-            workers[slot] = ws
+            if existing is not None and existing.websocket is not ws:
+                displaced = existing
+            handle = SessionHandle.create(
+                agent_id=agent_id,
+                worker_id=worker_id,
+                websocket=ws,
+                retry_contracts=retry_contracts,
+                registry_owner_id=self._registry_owner_id,
+            )
+            # Production Starlette WebSockets accept these immutable delivery
+            # coordinates.  Keep registration usable for opaque protocol-test
+            # sentinels that intentionally expose no attribute storage.
+            with contextlib.suppress(AttributeError, TypeError):
+                ws._z4j_registry_owner_id = handle.registry_owner_id  # type: ignore[attr-defined]
+                ws._z4j_session_generation = handle.generation  # type: ignore[attr-defined]
+                ws._z4j_agent_id = handle.agent_id  # type: ignore[attr-defined]
+
+                async def validate_registry_generation() -> bool:
+                    return await self._session_is_current(handle)
+
+                ws._z4j_validate_registry_generation = (  # type: ignore[attr-defined]
+                    validate_registry_generation
+                )
+            workers[slot] = handle
             self._project_for_agent[agent_id] = project_id
+        if displaced is not None:
+            with contextlib.suppress(Exception):
+                await displaced.websocket.close(code=4002)
         logger.info(
             "z4j registry: agent registered",
             agent_id=str(agent_id),
@@ -188,6 +214,18 @@ class PostgresNotifyRegistry:
             worker_id=self._worker_id,
             agent_worker_id=worker_id,
         )
+        return handle
+
+    async def _session_is_current(self, handle: SessionHandle) -> bool:
+        async with self._lock:
+            current = (self._connections.get(handle.agent_id) or {}).get(
+                handle.worker_id,
+            )
+            return (
+                current is handle
+                and current.registry_owner_id == handle.registry_owner_id
+                and current.generation == handle.generation
+            )
 
     async def unregister(
         self,
@@ -211,7 +249,7 @@ class PostgresNotifyRegistry:
                 last = True
             elif ws is not None:
                 current = workers.get(slot)
-                if current is not ws:
+                if current is None or current.websocket is not ws:
                     last = False
                 else:
                     workers.pop(slot, None)
@@ -287,9 +325,9 @@ class PostgresNotifyRegistry:
         if not workers:
             return 0
         closed = 0
-        for ws in list(workers.values()):
+        for handle in list(workers.values()):
             try:
-                await ws.close(code=4003)
+                await handle.websocket.close(code=4003)
                 closed += 1
             except Exception:  # noqa: S110  best-effort close of revoked agent connection
                 pass
@@ -321,6 +359,7 @@ class PostgresNotifyRegistry:
         *,
         command_id: UUID,
         agent_id: UUID,
+        required_retry_engine: str | None = None,
     ) -> DeliveryResult:
         # Fast path: I have the agent locally → push synchronously
         # and skip NOTIFY entirely. This is the common case in
@@ -331,18 +370,26 @@ class PostgresNotifyRegistry:
         # map, deliver to first-available. Future v1.3 work:
         # per-role routing (schedule.fire -> role=task workers,
         # config-update broadcast -> all role=web workers, etc.).
-        workers = self._connections.get(agent_id)
-        ws = next(iter(workers.values()), None) if workers else None
-        if ws is not None:
-            try:
-                ok = await self._deliver_local(command_id, ws)
-            except Exception:
-                logger.exception(
-                    "z4j registry: local deliver crashed",
-                    command_id=str(command_id),
-                    agent_id=str(agent_id),
-                )
-                ok = False
+        async with self._lock:
+            workers = self._connections.get(agent_id)
+            handle = next(
+                (
+                    candidate
+                    for candidate in (workers or {}).values()
+                    if candidate.supports_retry_engine(
+                        required_retry_engine,
+                    )
+                ),
+                None,
+            )
+        if handle is not None:
+            # The immutable selected handle is the authority. Release the map
+            # lock before database/network I/O so a reconnect cannot deadlock
+            # behind its own in-flight selected-generation send.
+            ok = await self._deliver_handle(
+                command_id=command_id,
+                handle=handle,
+            )
             return DeliveryResult(
                 delivered_locally=ok,
                 notified_cluster=False,
@@ -353,19 +400,139 @@ class PostgresNotifyRegistry:
         # know which worker holds the agent; some other worker may
         # pick it up, or none may, in which case the
         # CommandTimeoutWorker eventually flips the row.
-        await self._publish_command_notify(command_id, agent_id)
+        await self._publish_command_notify(
+            command_id,
+            agent_id,
+            required_retry_engine=required_retry_engine,
+        )
         return DeliveryResult(
             delivered_locally=False,
             notified_cluster=True,
             agent_was_known=False,
         )
 
+    async def deliver_exact(
+        self,
+        *,
+        command_id: UUID,
+        session: SessionHandle,
+    ) -> bool:
+        async with self._lock:
+            current = (self._connections.get(session.agent_id) or {}).get(
+                session.worker_id,
+            )
+            if (
+                current is not session
+                or current.registry_owner_id != session.registry_owner_id
+                or current.generation != session.generation
+            ):
+                return False
+            handle = current
+        return await self._deliver_handle(
+            command_id=command_id,
+            handle=handle,
+        )
+
+    async def deliver_frozen(
+        self,
+        *,
+        command_id: UUID,
+        agent_id: UUID,
+        registry_owner_id: UUID,
+        session_generation: str,
+    ) -> bool:
+        async with self._lock:
+            handle = next(
+                (
+                    candidate
+                    for candidate in (self._connections.get(agent_id) or {}).values()
+                    if candidate.registry_owner_id == registry_owner_id
+                    and str(candidate.generation) == session_generation
+                ),
+                None,
+            )
+        if handle is not None:
+            return await self._deliver_handle(
+                command_id=command_id,
+                handle=handle,
+            )
+        await self._publish_command_notify(
+            command_id,
+            agent_id,
+            frozen_registry_owner_id=registry_owner_id,
+            frozen_session_generation=session_generation,
+        )
+        return True
+
+    async def _deliver_handle(
+        self,
+        *,
+        command_id: UUID,
+        handle: SessionHandle,
+    ) -> bool:
+        try:
+            return await self._deliver_local(
+                command_id,
+                handle.websocket,
+            )
+        except Exception:
+            logger.exception(
+                "z4j registry: local deliver crashed",
+                command_id=str(command_id),
+                agent_id=str(handle.agent_id),
+            )
+            return False
+
+    async def select_session(
+        self,
+        *,
+        agent_id: UUID,
+        required_retry_engine: str | None = None,
+    ) -> SessionHandle | None:
+        async with self._lock:
+            workers = self._connections.get(agent_id)
+            if not workers:
+                return None
+            return next(
+                (
+                    handle
+                    for handle in workers.values()
+                    if handle.supports_retry_engine(required_retry_engine)
+                ),
+                None,
+            )
+
+    async def select_project_session(
+        self,
+        *,
+        project_id: UUID,
+        required_retry_engine: str,
+    ) -> SessionHandle | None:
+        """Return one exact compatible generation owned by this replica."""
+
+        async with self._lock:
+            for agent_id in sorted(self._connections, key=str):
+                if self._project_for_agent.get(agent_id) != project_id:
+                    continue
+                for worker_id in sorted(
+                    self._connections[agent_id],
+                    key=lambda value: "" if value is None else value,
+                ):
+                    handle = self._connections[agent_id][worker_id]
+                    if handle.supports_retry_engine(required_retry_engine):
+                        return handle
+        return None
+
     async def _publish_command_notify(
         self,
         command_id: UUID,
         agent_id: UUID,
+        *,
+        required_retry_engine: str | None = None,
+        frozen_registry_owner_id: UUID | None = None,
+        frozen_session_generation: str | None = None,
     ) -> None:
-        """Fire ``NOTIFY z4j_commands, '{c, a}'``.
+        """Fire ``NOTIFY z4j_commands, '{c, a, r?}'``.
 
         Uses the SQLAlchemy session because the payload is small
         and the SQLAlchemy session participates in the request's
@@ -374,10 +541,18 @@ class PostgresNotifyRegistry:
         """
         from sqlalchemy import text
 
-        payload = json.dumps(
-            {"c": str(command_id), "a": str(agent_id)},
-            separators=(",", ":"),
-        )
+        body: dict[str, object] = {
+            "c": str(command_id),
+            "a": str(agent_id),
+        }
+        if required_retry_engine is not None:
+            body["r"] = {"e": required_retry_engine, "v": 1}
+        if frozen_registry_owner_id is not None and frozen_session_generation is not None:
+            body["f"] = {
+                "o": str(frozen_registry_owner_id),
+                "g": frozen_session_generation,
+            }
+        payload = json.dumps(body, separators=(",", ":"))
         async with self._db.session() as session:
             await session.execute(
                 text("SELECT pg_notify(:channel, :payload)"),
@@ -434,9 +609,9 @@ class PostgresNotifyRegistry:
         self._reconcile_task = None
         async with self._lock:
             for workers in list(self._connections.values()):
-                for ws in list(workers.values()):
+                for handle in list(workers.values()):
                     with contextlib.suppress(Exception):
-                        await ws.close(code=1001)
+                        await handle.websocket.close(code=1001)
             self._connections.clear()
             self._project_for_agent.clear()
 
@@ -595,6 +770,38 @@ class PostgresNotifyRegistry:
             data = json.loads(payload)
             command_id = UUID(data["c"])
             agent_id = UUID(data["a"])
+            raw_requirement = data.get("r")
+            if raw_requirement is None:
+                notified_retry_engine = None
+            elif (
+                isinstance(raw_requirement, dict)
+                and raw_requirement.get("v") == 1
+                and isinstance(raw_requirement.get("e"), str)
+            ):
+                notified_retry_engine = raw_requirement["e"]
+            else:
+                logger.warning(
+                    "z4j registry: malformed notify retry requirement, ignoring",
+                    payload_len=len(payload),
+                )
+                return
+            raw_frozen = data.get("f")
+            if raw_frozen is None:
+                frozen_owner_id = None
+                frozen_generation = None
+            elif (
+                isinstance(raw_frozen, dict)
+                and isinstance(raw_frozen.get("g"), str)
+                and 0 < len(raw_frozen["g"]) <= 200
+            ):
+                frozen_owner_id = UUID(str(raw_frozen["o"]))
+                frozen_generation = raw_frozen["g"]
+            else:
+                logger.warning(
+                    "z4j registry: malformed frozen notify authority, ignoring",
+                    payload_len=len(payload),
+                )
+                return
         except (ValueError, KeyError, TypeError):
             logger.warning(
                 "z4j registry: malformed notify payload, ignoring",
@@ -606,7 +813,13 @@ class PostgresNotifyRegistry:
             return  # not for us
 
         task = asyncio.create_task(
-            self._dispatch_notified_command(command_id, agent_id),
+            self._dispatch_notified_command(
+                command_id,
+                agent_id,
+                notified_retry_engine=notified_retry_engine,
+                frozen_registry_owner_id=frozen_owner_id,
+                frozen_session_generation=frozen_generation,
+            ),
             name="z4j-registry-dispatch",
         )
         task.add_done_callback(_log_task_exception)
@@ -667,17 +880,89 @@ class PostgresNotifyRegistry:
         self,
         command_id: UUID,
         agent_id: UUID,
+        *,
+        notified_retry_engine: str | None = None,
+        frozen_registry_owner_id: UUID | None = None,
+        frozen_session_generation: str | None = None,
     ) -> None:
-        """Pick up a notified command and push it to the local WS."""
-        # 1.2.0: pick first-available worker. v1.3 will support
-        # role-based routing by inspecting the command's target_role
-        # (if any) against each worker's declared role.
-        workers = self._connections.get(agent_id)
-        ws = next(iter(workers.values()), None) if workers else None
-        if ws is None:
+        """Pick up a notified command and push it to one exact session."""
+        from sqlalchemy import select
+
+        from z4j_brain.domain.retry_contract import required_retry_engine
+        from z4j_brain.persistence.models import Command
+
+        # The row is authoritative. Deriving again also makes an old brain's
+        # pre-1.8 NOTIFY fail closed when a current listener receives it.
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(
+                    Command.agent_id,
+                    Command.action,
+                    Command.payload,
+                    Command.delivery_registry_owner_id,
+                    Command.delivery_session_generation,
+                ).where(Command.id == command_id)
+            )
+            row = result.one_or_none()
+        if row is None or row.agent_id != agent_id:
+            return
+        required_engine = required_retry_engine(row.action, row.payload)
+        if notified_retry_engine is not None and notified_retry_engine != required_engine:
+            logger.warning(
+                "z4j registry: notify retry requirement mismatched command",
+                command_id=str(command_id),
+                notified_engine=notified_retry_engine,
+                command_engine=required_engine,
+            )
+            return
+        frozen = frozen_registry_owner_id is not None and frozen_session_generation is not None
+        if frozen:
+            payload_owner = (
+                str(row.payload.get("registry_owner_id") or "")
+                if isinstance(row.payload, dict)
+                else ""
+            )
+            payload_generation = (
+                str(row.payload.get("session_generation") or "")
+                if isinstance(row.payload, dict)
+                else ""
+            )
+            row_authority_matches = (
+                row.delivery_registry_owner_id == frozen_registry_owner_id
+                and row.delivery_session_generation == frozen_session_generation
+            ) or (
+                row.action
+                in {
+                    "schedule.external.activate",
+                    "schedule.external.control",
+                }
+                and payload_owner == str(frozen_registry_owner_id)
+                and payload_generation == frozen_session_generation
+            )
+            if not row_authority_matches:
+                return
+            async with self._lock:
+                handle = next(
+                    (
+                        candidate
+                        for candidate in (self._connections.get(agent_id) or {}).values()
+                        if candidate.registry_owner_id == frozen_registry_owner_id
+                        and str(candidate.generation) == frozen_session_generation
+                    ),
+                    None,
+                )
+        else:
+            handle = await self.select_session(
+                agent_id=agent_id,
+                required_retry_engine=required_engine,
+            )
+        if handle is None:
             return  # agent disconnected between notify and dispatch
         try:
-            await self._deliver_local(command_id, ws)
+            await self.deliver_exact(
+                command_id=command_id,
+                session=handle,
+            )
         except Exception:
             logger.exception(
                 "z4j registry: notified deliver crashed",
@@ -718,33 +1003,98 @@ class PostgresNotifyRegistry:
         twice cannot double-deliver.
         """
         async with self._lock:
-            agent_ids = list(self._connections.keys())
+            connections = {
+                agent_id: tuple(handles.values()) for agent_id, handles in self._connections.items()
+            }
+        agent_ids = list(connections)
         if not agent_ids:
             return
 
-        from sqlalchemy import select
+        from sqlalchemy import and_, or_, select
 
+        from z4j_brain.domain.retry_contract import (
+            RETRY_FAMILY_ACTIONS,
+            required_retry_engine,
+        )
         from z4j_brain.persistence.enums import CommandStatus
         from z4j_brain.persistence.models import Command
 
+        agents_by_retry_engine: dict[str, set[UUID]] = {}
+        for agent_id, handles in connections.items():
+            for handle in handles:
+                for engine, version in handle.retry_contracts:
+                    if version == 1:
+                        agents_by_retry_engine.setdefault(engine, set()).add(agent_id)
+        eligible_conditions = [
+            ~Command.action.in_(RETRY_FAMILY_ACTIONS),
+            *(
+                or_(
+                    and_(
+                        Command.action == "retry_task",
+                        Command.agent_id.in_(supported_agents),
+                        Command.payload["engine"].as_string() == engine,
+                    ),
+                    and_(
+                        Command.action == "bulk_retry",
+                        Command.agent_id.in_(supported_agents),
+                        Command.payload["filter"]["engine"].as_string() == engine,
+                    ),
+                )
+                for engine, supported_agents in agents_by_retry_engine.items()
+            ),
+        ]
         async with self._db.session() as session:
             result = await session.execute(
-                select(Command.id, Command.agent_id)
+                select(
+                    Command.id,
+                    Command.agent_id,
+                    Command.action,
+                    Command.payload,
+                )
                 .where(
                     Command.status == CommandStatus.PENDING,
                     Command.agent_id.in_(agent_ids),
+                    or_(*eligible_conditions),
                 )
                 .limit(500),
             )
             rows = result.all()
 
-        for command_id, agent_id in rows:
-            workers = self._connections.get(agent_id)
-            ws = next(iter(workers.values()), None) if workers else None
-            if ws is None:
+        for command_id, agent_id, action, payload in rows:
+            if action in {
+                "schedule.external.activate",
+                "schedule.external.control",
+            } and isinstance(payload, dict):
+                try:
+                    owner_id = UUID(str(payload["registry_owner_id"]))
+                    generation = str(payload["session_generation"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                async with self._lock:
+                    handle = next(
+                        (
+                            candidate
+                            for candidate in (self._connections.get(agent_id) or {}).values()
+                            if candidate.registry_owner_id == owner_id
+                            and str(candidate.generation) == generation
+                        ),
+                        None,
+                    )
+            else:
+                handle = await self.select_session(
+                    agent_id=agent_id,
+                    required_retry_engine=required_retry_engine(
+                        action,
+                        payload,
+                    ),
+                )
+            if handle is None:
                 continue
             try:
-                await self._deliver_local(command_id, ws)
+                await self.deliver_exact(
+                    command_id=command_id,
+                    session=handle,
+                )
             except Exception:
                 logger.exception(
                     "z4j registry: reconcile deliver crashed",

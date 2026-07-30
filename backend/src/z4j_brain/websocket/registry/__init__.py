@@ -11,7 +11,11 @@ lazily to avoid ModuleNotFoundError in SQLite-only deployments.
 
 from __future__ import annotations
 
-from z4j_brain.websocket.registry._protocol import BrainRegistry, DeliveryResult
+from z4j_brain.websocket.registry._protocol import (
+    BrainRegistry,
+    DeliveryResult,
+    SessionHandle,
+)
 from z4j_brain.websocket.registry.local import LocalRegistry
 
 
@@ -31,4 +35,5 @@ __all__ = [
     "DeliveryResult",
     "LocalRegistry",
     "PostgresNotifyRegistry",
+    "SessionHandle",
 ]

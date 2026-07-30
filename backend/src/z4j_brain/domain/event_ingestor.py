@@ -32,6 +32,10 @@ from uuid import UUID, uuid4, uuid5
 import structlog
 from z4j_core.models.event import EventKind
 from z4j_core.redaction import RedactionEngine
+from z4j_core.schedule_external import (
+    EXTERNAL_SCHEDULE_PROTOCOL_VERSION,
+    ExternalScheduleProtocolError,
+)
 
 from z4j_brain.persistence.enums import (
     TERMINAL_TASK_STATES,
@@ -219,7 +223,7 @@ _TRANSIENT_DRIVER_CACHE_ERRORS: frozenset[str] = frozenset(
 #: (not the bare XX000 code) so a GENERIC XX000 -- a corrupt index or real
 #: backend fault, which never heals -- still classifies PERMANENT rather than
 #: looping the agent forever (external round-9 re-review: dropping bare XX000
-#: silently lost events across a type-recreation migration, reopening R8-H1).
+#: silently lost events across a type-recreation migration, reopening).
 _STALE_TYPE_CACHE_SIGNATURE = "cache lookup failed for type"
 
 
@@ -291,10 +295,10 @@ def _is_transient_db_error(exc: BaseException) -> bool:
       is NOT permanent here -- it is a brain-side schema / SQL / privilege
       problem (a rolling-migration column gap, a bad grant), not event
       content, so it classifies TRANSIENT (see below); it was moved out of
-      this permanent set in R8-H2.
+      this permanent set in.
     * TRANSIENT: ``OperationalError`` (locks, connection resets) /
       ``InterfaceError`` / ``TimeoutError`` (pool) / ``ProgrammingError``
-      (brain-side schema/SQL/privilege, R8-H2) / a ``PendingRollbackError``
+      (brain-side schema/SQL/privilege) / a ``PendingRollbackError``
       (a mid-transaction connection invalidation), an invalidated connection,
       low-level ``ConnectionError`` / ``OSError``, and a lock/deadlock matched
       by message. A no-SQLSTATE ``OperationalError`` is the one carve-out:
@@ -302,7 +306,7 @@ def _is_transient_db_error(exc: BaseException) -> bool:
       ``OperationalError`` for DETERMINISTIC conditions (``no such column``
       after a bad migration, ``too many SQL variables``, a syntax error),
       which recur identically and must NOT loop the ack-withhold forever
-      (R9), so a recognised deterministic-SQLite signature is PERMANENT.
+      so a recognised deterministic-SQLite signature is PERMANENT.
 
     The UNKNOWN case (no SQLSTATE, no isinstance match) defaults to
     PERMANENT: it is almost always a non-DB deterministic bug, and the
@@ -353,7 +357,7 @@ def _is_transient_db_error(exc: BaseException) -> bool:
     # ProgrammingError is NOT: it is a brain-side schema / SQL / privilege
     # problem (missing column during a rolling migration, etc.), so it is
     # TRANSIENT (heals on the deploy, or loops-without-loss observably rather
-    # than silently dropping every event, R8-H2) -- handled in the transient
+    # than silently dropping every event) -- handled in the transient
     # group below.
     if isinstance(exc, (IntegrityError, DataError)):
         return False
@@ -364,12 +368,12 @@ def _is_transient_db_error(exc: BaseException) -> bool:
     if isinstance(exc, OperationalError) and _looks_like_permanent_sqlite_error(exc):
         return False
     # OperationalError / InterfaceError / pool TimeoutError / ProgrammingError
-    # (brain-side schema/SQL, R8-H2), low-level ConnectionError / OSError
+    # (brain-side schema/SQL), low-level ConnectionError / OSError
     # (builtin TimeoutError is an OSError subclass), an invalidated DBAPI
     # connection, or a PendingRollbackError (a poisoned outer commit -- under a
     # live connection every permanent error rolls its savepoint back cleanly
     # and commit succeeds, so a PendingRollbackError means the connection was
-    # invalidated mid-transaction, which self-heals on a fresh session, R8-H2)
+    # invalidated mid-transaction, which self-heals on a fresh session)
     # are all transient (infrastructure or self-healing) failures. A GENERIC
     # InvalidRequestError (real API misuse) is NOT here -- only the
     # PendingRollbackError subtype is carved out.
@@ -468,7 +472,7 @@ def _looks_like_deadlock(exc: BaseException) -> bool:
 # ALWAYS wins over a non-terminal state regardless of timestamp;
 # within the same tier the monotonic-timestamp guard applies.
 # Canonical definition lives in ``z4j_brain.persistence.enums`` so
-# this guard and ``TaskRepository.apply_reconciled_state`` (R3 H1)
+# this guard and ``TaskRepository.apply_reconciled_state``
 # share one notion of "terminal".
 _TERMINAL_TASK_STATES = TERMINAL_TASK_STATES
 
@@ -480,6 +484,19 @@ _STATE_FOR_KIND: dict[EventKind, TaskState | None] = {
     EventKind.TASK_RETRIED: TaskState.RETRY,
     EventKind.TASK_REVOKED: TaskState.REVOKED,
 }
+
+_LEGACY_SCHEDULE_EVENT_KINDS = frozenset(
+    {
+        EventKind.SCHEDULE_SNAPSHOT.value,
+        EventKind.SCHEDULE_CREATED.value,
+        EventKind.SCHEDULE_UPDATED.value,
+        EventKind.SCHEDULE_DELETED.value,
+    },
+)
+
+
+class _ScheduleUpgradeRequiredError(RuntimeError):
+    """An unsequenced schedule emitter cannot cross active Boundary D."""
 
 
 class BatchIngestResult:
@@ -497,6 +514,11 @@ class BatchIngestResult:
     silently dropped while the agent, seeing a durable ack, evicts its
     only copy (permanent data loss).
 
+    ``upgrade_required`` means an active Boundary-D brain rejected a legacy
+    unsequenced schedule projection. The batch is not fully durable and must
+    remain unacknowledged, but the transport reports a typed fatal upgrade
+    requirement instead of treating it as a self-healing database retry.
+
     ``pending_metrics`` are deferred Prometheus increments (the label set
     already resolved -- including the Crit-1 cardinality cap -- so only the
     ``.inc()`` / ``.observe()`` remains). The caller emits them AFTER the outer
@@ -504,21 +526,29 @@ class BatchIngestResult:
     row that was never actually persisted (round-9 external LOW).
     """
 
-    __slots__ = ("new_events", "pending_metrics", "transient_skips")
+    __slots__ = (
+        "new_events",
+        "pending_metrics",
+        "transient_skips",
+        "upgrade_required",
+    )
 
     def __init__(
         self,
         new_events: list[dict[str, Any]],
         transient_skips: int,
         pending_metrics: list[Callable[[], None]] | None = None,
+        *,
+        upgrade_required: bool = False,
     ) -> None:
         self.new_events = new_events
         self.transient_skips = transient_skips
         self.pending_metrics: list[Callable[[], None]] = pending_metrics or []
+        self.upgrade_required = upgrade_required
 
     @property
     def fully_durable(self) -> bool:
-        return self.transient_skips == 0
+        return self.transient_skips == 0 and not self.upgrade_required
 
     def emit_metrics(self) -> None:
         """Emit the deferred Prometheus increments. Call AFTER a successful
@@ -541,7 +571,7 @@ class EventIngestor:
     def __init__(self, redaction: RedactionEngine) -> None:
         self._redaction = redaction
 
-    async def ingest_batch(
+    async def ingest_batch(  # noqa: PLR0912  per-event durability classification
         self,
         *,
         events: list[dict[str, Any]],
@@ -587,8 +617,13 @@ class EventIngestor:
         # Events dropped from THIS commit because of a transient infra
         # error (deadlock/operational after the per-event retry). A
         # non-zero count means the batch is not fully durable and the
-        # caller must NOT ack it, so the agent re-sends (R6-panel-HIGH).
+        # caller must NOT ack it, so the agent re-sends (-panel-HIGH).
         transient_skips = 0
+        # Boundary D rejects only the legacy schedule projection surface.
+        # The batch remains unconfirmed and receives a typed upgrade response;
+        # unrelated events already committed in the same batch safely dedupe
+        # when the upgraded agent replays it.
+        upgrade_required = False
         # Accumulator for worker upserts. Key is (engine, name);
         # value is the latest occurred_at observed for that worker
         # in this batch. We pick max so a stale event late in the
@@ -641,6 +676,15 @@ class EventIngestor:
                             queues_seen=queues_seen,
                             pending_metrics=pending_metrics,
                         )
+                except _ScheduleUpgradeRequiredError:
+                    upgrade_required = True
+                    logger.warning(
+                        "z4j event_ingestor: unsequenced schedule event "
+                        "requires an upgraded scheduler adapter",
+                        project_id=str(project_id),
+                        agent_id=str(agent_id),
+                    )
+                    break
                 except Exception as exc:
                     # ``begin_nested`` already rolled this event's
                     # savepoint back, so the parent transaction is intact
@@ -695,9 +739,10 @@ class EventIngestor:
                     if event_max is None:
                         # Per-event ingest skipped (bad envelope, dup, etc.)
                         break
-                    inserted, occurred_at = event_max
+                    inserted, occurred_at, retry_required = event_max
                     if inserted:
                         new_events.append(raw_event)
+                    transient_skips += int(retry_required)
                     if batch_max_occurred_at is None or occurred_at > batch_max_occurred_at:
                         batch_max_occurred_at = occurred_at
                     break
@@ -744,6 +789,7 @@ class EventIngestor:
             new_events=new_events,
             transient_skips=transient_skips,
             pending_metrics=pending_metrics,
+            upgrade_required=upgrade_required,
         )
 
     async def _best_effort_side_write(
@@ -824,7 +870,7 @@ class EventIngestor:
                 # swallows the error, ``ingest_batch`` would return normally
                 # and the caller's ``session.commit()`` would then silently
                 # roll back every already-ingested event while the batch is
-                # acked as durable (R9: observability-only worker contention
+                # acked as durable (observability-only worker contention
                 # must never destroy deliverable events). The savepoint here
                 # confines any per-row failure so the event rows survive.
                 try:
@@ -857,10 +903,10 @@ class EventIngestor:
         worker_seen: dict[tuple[str, str], datetime],
         queues_seen: set[tuple[str, str]] | None = None,
         pending_metrics: list[Callable[[], None]] | None = None,
-    ) -> tuple[bool, datetime] | None:
+    ) -> tuple[bool, datetime, bool] | None:
         """Ingest one event.
 
-        Returns ``(inserted, occurred_at)`` on success and ``None``
+        Returns ``(inserted, occurred_at, retry_required)`` on success and ``None``
         when the event was rejected before insert (bad envelope,
         unparseable payload, etc.). ``inserted`` is True only when
         a new row landed in the partitioned events table; replays
@@ -882,9 +928,26 @@ class EventIngestor:
         task_id = str(scrubbed.get("task_id", "")).strip()
         occurred_at_raw = scrubbed.get("occurred_at")
         data = scrubbed.get("data") or {}
+        external_projection_present = isinstance(data, dict) and "external_projection" in data
+        external_snapshot_frame_present = (
+            isinstance(data, dict) and "external_snapshot_frame" in data
+        )
+        sequenced_external_present = external_projection_present or external_snapshot_frame_present
 
         if not engine or not kind_value:
             return None
+
+        if not sequenced_external_present and kind_value in _LEGACY_SCHEDULE_EVENT_KINDS:
+            from z4j_brain.persistence.repositories.schedule_control import (
+                ScheduleControlRepository,
+            )
+
+            if await ScheduleControlRepository(
+                task_repo.session,
+            ).control_is_active():
+                raise _ScheduleUpgradeRequiredError(
+                    "unsequenced schedule event is disabled after Boundary D activation",
+                )
 
         try:
             kind = EventKind(kind_value)
@@ -931,7 +994,7 @@ class EventIngestor:
         # Heartbeats / agent_status frames have no task_id and stay on the
         # legacy agent-id key so per-agent freshness is preserved.
         #
-        # ACCEPTED-TRADEOFF (Codex round-2 Finding 3, documented not fixed):
+        # ACCEPTED-TRADEOFF:
         # second-precision conflates two identities -- "logical event" and
         # "fan-out duplicate" -- so it has two residual failure modes:
         #   (a) two GENUINELY distinct same-(task,kind) events inside one
@@ -993,7 +1056,7 @@ class EventIngestor:
         # propagating write -- the task projection upsert -- that rolls back
         # this event's per-event savepoint does not leave the counter
         # incremented for a row that was un-inserted and will be re-sent
-        # (R8-L1 double-count).)
+        # )
 
         # 2) Touch the queue if mentioned.
         # Defer the touch when a batch-level dedup set was supplied; the
@@ -1034,7 +1097,7 @@ class EventIngestor:
         # traceback / fingerprint), which are written UNCONDITIONALLY while
         # only the state column is monotonic-guarded, so a replay of an OLD
         # failure after a NEWER one would rewind those fields to the stale
-        # value (R8-M3). Skipping re-projection for duplicates fixes that;
+        # value. Skipping re-projection for duplicates fixes that;
         # ``inserted`` and ``occurred_at`` are still returned unchanged so the
         # batch heartbeat / durability accounting is unaffected.
         if inserted and task_id and kind != EventKind.UNKNOWN:
@@ -1066,6 +1129,30 @@ class EventIngestor:
                 pending_metrics=pending_metrics,
             )
 
+        retry_required = False
+        if external_projection_present and external_snapshot_frame_present:
+            raise ExternalScheduleProtocolError(
+                "external event carries two projection envelope forms",
+            )
+        if external_snapshot_frame_present:
+            retry_required = await self._project_external_snapshot_frame(
+                project_id=project_id,
+                engine=engine,
+                kind_value=kind_value,
+                data=data,
+                occurred_at=occurred_at,
+                task_repo=task_repo,
+            )
+        elif external_projection_present:
+            retry_required = await self._project_external_schedule(
+                project_id=project_id,
+                engine=engine,
+                kind_value=kind_value,
+                data=data,
+                occurred_at=occurred_at,
+                task_repo=task_repo,
+            )
+
         # 5b) Snapshot reconciliation. The agent emits
         # ``schedule.snapshot`` at boot, on its periodic timer, and on
         # demand from a ``schedule.resync`` command. The data carries
@@ -1075,24 +1162,38 @@ class EventIngestor:
         # 1.3.3 to close the gap where existing celery-beat /
         # rq-scheduler / apscheduler schedules were invisible until
         # they were edited (signal-based only).
-        # Gated on ``inserted`` (R8-M3): a dedup'd duplicate snapshot already
+        # Gated on ``inserted``: a dedup'd duplicate snapshot already
         # reconciled on its first delivery; re-running a STALE snapshot would
         # 3-way-diff-delete a schedule that a newer snapshot added (replay of
         # [A] after [A,B] deletes B). A genuinely-needed re-reconcile still
         # lands via the next periodic snapshot (distinct event_id, inserted).
-        if inserted and kind_value == EventKind.SCHEDULE_SNAPSHOT.value:
+        if (
+            not sequenced_external_present
+            and inserted
+            and kind_value == EventKind.SCHEDULE_SNAPSHOT.value
+        ):
             schedules_in = data.get("schedules") if isinstance(data, dict) else None
             scheduler_name = (
                 str(data.get("scheduler") or engine) if isinstance(data, dict) else engine
             )
             if isinstance(schedules_in, list):
                 try:
+                    from z4j_brain.domain.schedule_authority import (
+                        validate_external_schedule_projection,
+                    )
                     from z4j_brain.persistence.repositories import (
                         ScheduleRepository,
                     )
 
+                    validate_external_schedule_projection(
+                        outer_owner=engine,
+                        rows=(raw for raw in schedules_in if isinstance(raw, dict)),
+                    )
+                    validate_external_schedule_projection(
+                        outer_owner=scheduler_name,
+                    )
                     schedule_repo = ScheduleRepository(task_repo.session)
-                    # Own savepoint (R8-H3): a TRANSIENT error here (deadlock /
+                    # Own savepoint: a TRANSIENT error here (deadlock /
                     # lock timeout) must roll back ONLY this best-effort
                     # reconcile, not leave the per-event savepoint aborted so
                     # its RELEASE surfaces a permanent-looking 25P02 that
@@ -1121,20 +1222,32 @@ class EventIngestor:
                     )
 
         # 5) Project schedule events onto the schedules table. Gated on
-        # ``inserted`` (R8-M3): a dedup'd duplicate already upserted on its
+        # ``inserted``: a dedup'd duplicate already upserted on its
         # first delivery, so re-applying it is at best a no-op and at worst
         # rewinds a schedule row to a stale snapshot.
-        if inserted and kind_value in (
-            EventKind.SCHEDULE_CREATED.value,
-            EventKind.SCHEDULE_UPDATED.value,
+        if (
+            not sequenced_external_present
+            and inserted
+            and kind_value
+            in (
+                EventKind.SCHEDULE_CREATED.value,
+                EventKind.SCHEDULE_UPDATED.value,
+            )
         ):
             schedule_data = data.get("schedule") if isinstance(data, dict) else None
             if isinstance(schedule_data, dict):
                 try:
+                    from z4j_brain.domain.schedule_authority import (
+                        validate_external_schedule_projection,
+                    )
                     from z4j_brain.persistence.repositories import (
                         ScheduleRepository,
                     )
 
+                    validate_external_schedule_projection(
+                        outer_owner=engine,
+                        rows=(schedule_data,),
+                    )
                     # Inject the engine + scheduler names from the
                     # outer Event envelope - the inner schedule
                     # payload doesn't carry them (and if it did, the
@@ -1148,7 +1261,7 @@ class EventIngestor:
                     enriched.setdefault("scheduler", engine)
 
                     schedule_repo = ScheduleRepository(task_repo.session)
-                    # Own savepoint (R8-H3): a transient error here must not
+                    # Own savepoint: a transient error here must not
                     # abort the per-event savepoint and surface as a
                     # permanent-looking 25P02 that drops-and-acks the event.
                     async with task_repo.session.begin_nested():
@@ -1166,8 +1279,8 @@ class EventIngestor:
         # the only un-swallowed propagating writes), but the ``.inc()`` is
         # DEFERRED into ``pending_metrics`` and emitted by the caller only after
         # the OUTER commit succeeds -- so a transient rollback + re-send does
-        # not double-count a row that never persisted (R6-F3 gated on
-        # ``inserted``; R8-L1 ordered it last; round-9 defers it past commit).
+        # not double-count a row that never persisted (gated on
+        # ``inserted``; ordered it last; round-9 defers it past commit).
         # Best-effort: a metric-registry hiccup must not break ingestion.
         if inserted and pending_metrics is not None:
             try:
@@ -1184,7 +1297,287 @@ class EventIngestor:
 
                 record_swallowed("event_ingestor", "counter_inc")
 
-        return (inserted, occurred_at)
+        return (inserted, occurred_at, retry_required)
+
+    async def _project_external_snapshot_frame(
+        self,
+        *,
+        project_id: UUID,
+        engine: str,
+        kind_value: str,
+        data: dict[str, Any],
+        occurred_at: datetime,
+        task_repo: TaskRepository,
+    ) -> bool:
+        """Durably stage one bounded stable-snapshot frame."""
+
+        body = data.get("external_snapshot_frame")
+        frame_digest = data.get("frame_digest")
+        if not isinstance(body, dict) or not isinstance(frame_digest, str):
+            raise ExternalScheduleProtocolError(
+                "external snapshot frame envelope is malformed",
+            )
+        required_fields = {
+            "protocol_version",
+            "stream_id",
+            "epoch_uuid",
+            "epoch_number",
+            "sequence",
+            "owner",
+            "source_scope",
+            "adapter_instance_id",
+            "snapshot_id",
+            "frame_kind",
+            "frame_index",
+            "frame_count",
+            "row_count",
+            "snapshot_digest",
+            "stable_source",
+            "schedules",
+        }
+        if set(body) != required_fields:
+            raise ExternalScheduleProtocolError(
+                "external snapshot frame fields are not the closed protocol vocabulary",
+            )
+        if body["protocol_version"] != EXTERNAL_SCHEDULE_PROTOCOL_VERSION:
+            raise ExternalScheduleProtocolError(
+                "external snapshot frame protocol version is unsupported",
+            )
+        if kind_value != EventKind.SCHEDULE_SNAPSHOT.value or body["owner"] != engine:
+            raise ExternalScheduleProtocolError(
+                "external snapshot frame differs from the event envelope",
+            )
+        integer_fields = (
+            "epoch_number",
+            "sequence",
+            "frame_index",
+            "frame_count",
+            "row_count",
+        )
+        if (
+            any(
+                not isinstance(body[field], int) or isinstance(body[field], bool)
+                for field in integer_fields
+            )
+            or not isinstance(body["stable_source"], bool)
+            or not isinstance(body["schedules"], list)
+            or not all(isinstance(row, dict) for row in body["schedules"])
+            or not all(
+                isinstance(body[field], str)
+                for field in (
+                    "owner",
+                    "source_scope",
+                    "adapter_instance_id",
+                    "frame_kind",
+                    "snapshot_digest",
+                )
+            )
+        ):
+            raise ExternalScheduleProtocolError(
+                "external snapshot frame field types are invalid",
+            )
+        try:
+            stream_id = UUID(str(body["stream_id"]))
+            epoch_uuid = UUID(str(body["epoch_uuid"]))
+            snapshot_id = UUID(str(body["snapshot_id"]))
+        except ValueError as exc:
+            raise ExternalScheduleProtocolError(
+                "external snapshot frame UUID is invalid",
+            ) from exc
+
+        from z4j_brain.persistence.repositories.schedule_external import (
+            ScheduleExternalRepository,
+        )
+
+        transition = await ScheduleExternalRepository(
+            task_repo.session,
+        ).stage_snapshot_frame(
+            project_id=project_id,
+            stream_id=stream_id,
+            epoch_uuid=epoch_uuid,
+            epoch_number=body["epoch_number"],
+            sequence=body["sequence"],
+            owner=body["owner"],
+            source_scope=body["source_scope"],
+            adapter_instance_id=body["adapter_instance_id"],
+            snapshot_id=snapshot_id,
+            frame_kind=body["frame_kind"],
+            frame_index=body["frame_index"],
+            frame_count=body["frame_count"],
+            row_count=body["row_count"],
+            snapshot_digest=body["snapshot_digest"],
+            frame_digest=frame_digest,
+            stable_source=body["stable_source"],
+            schedules=body["schedules"],
+            occurred_at=occurred_at,
+        )
+        if transition.disposition in {
+            "applied",
+            "exact_replay",
+            "staged",
+        }:
+            return False
+        if transition.disposition in {
+            "sequence_gap",
+            "snapshot_incomplete",
+        }:
+            logger.warning(
+                "z4j event_ingestor: external stable snapshot is incomplete; withholding frame ack",
+                project_id=str(project_id),
+                stream_id=str(stream_id),
+                epoch_uuid=str(epoch_uuid),
+                sequence=body["sequence"],
+                disposition=transition.disposition,
+            )
+            return True
+        logger.warning(
+            "z4j event_ingestor: external snapshot frame rejected",
+            project_id=str(project_id),
+            stream_id=str(stream_id),
+            epoch_uuid=str(epoch_uuid),
+            sequence=body["sequence"],
+            disposition=transition.disposition,
+        )
+        return False
+
+    async def _project_external_schedule(
+        self,
+        *,
+        project_id: UUID,
+        engine: str,
+        kind_value: str,
+        data: dict[str, Any],
+        occurred_at: datetime,
+        task_repo: TaskRepository,
+    ) -> bool:
+        """Apply a canonical sequenced projection; return whether to retry."""
+        body = data.get("external_projection")
+        digest = data.get("payload_digest")
+        if not isinstance(body, dict) or not isinstance(digest, str):
+            raise ExternalScheduleProtocolError(
+                "external projection envelope is malformed",
+            )
+        required_fields = {
+            "protocol_version",
+            "stream_id",
+            "epoch_uuid",
+            "epoch_number",
+            "sequence",
+            "kind",
+            "owner",
+            "source_scope",
+            "adapter_instance_id",
+            "complete",
+            "stable_source",
+            "operation_id",
+            "schedules",
+            "deleted_source_keys",
+        }
+        if set(body) != required_fields:
+            raise ExternalScheduleProtocolError(
+                "external projection fields are not the closed protocol vocabulary",
+            )
+        if body["protocol_version"] != EXTERNAL_SCHEDULE_PROTOCOL_VERSION:
+            raise ExternalScheduleProtocolError(
+                "external projection protocol version is unsupported",
+            )
+        if body["owner"] != engine:
+            raise ExternalScheduleProtocolError(
+                "external projection owner differs from the event engine",
+            )
+        kind_map = {
+            EventKind.SCHEDULE_SNAPSHOT.value: "snapshot",
+            EventKind.SCHEDULE_CREATED.value: "created",
+            EventKind.SCHEDULE_UPDATED.value: "updated",
+            EventKind.SCHEDULE_DELETED.value: "deleted",
+        }
+        expected_kind = (
+            "control"
+            if (
+                kind_value == EventKind.SCHEDULE_UPDATED.value
+                and body["kind"] == "control"
+                and body["operation_id"] is not None
+            )
+            else kind_map.get(kind_value)
+        )
+        if expected_kind is None or body["kind"] != expected_kind:
+            raise ExternalScheduleProtocolError(
+                "external projection kind differs from the event kind",
+            )
+        if (body["kind"] == "control") != (body["operation_id"] is not None):
+            raise ExternalScheduleProtocolError(
+                "external control kind and operation identity are inconsistent",
+            )
+        if (
+            not isinstance(body["epoch_number"], int)
+            or isinstance(body["epoch_number"], bool)
+            or not isinstance(body["sequence"], int)
+            or isinstance(body["sequence"], bool)
+            or not isinstance(body["complete"], bool)
+            or not isinstance(body["stable_source"], bool)
+            or not isinstance(body["schedules"], list)
+            or not all(isinstance(row, dict) for row in body["schedules"])
+            or not isinstance(body["deleted_source_keys"], list)
+            or not all(isinstance(value, str) for value in body["deleted_source_keys"])
+        ):
+            raise ExternalScheduleProtocolError(
+                "external projection field types are invalid",
+            )
+        try:
+            stream_id = UUID(str(body["stream_id"]))
+            epoch_uuid = UUID(str(body["epoch_uuid"]))
+            operation_id = (
+                UUID(str(body["operation_id"])) if body["operation_id"] is not None else None
+            )
+        except ValueError as exc:
+            raise ExternalScheduleProtocolError(
+                "external projection UUID is invalid",
+            ) from exc
+
+        from z4j_brain.persistence.repositories.schedule_external import (
+            ScheduleExternalRepository,
+        )
+
+        transition = await ScheduleExternalRepository(
+            task_repo.session,
+        ).apply_projection(
+            project_id=project_id,
+            stream_id=stream_id,
+            epoch_uuid=epoch_uuid,
+            epoch_number=body["epoch_number"],
+            sequence=body["sequence"],
+            kind=body["kind"],
+            owner=body["owner"],
+            source_scope=str(body["source_scope"]),
+            adapter_instance_id=str(body["adapter_instance_id"]),
+            schedules=body["schedules"],
+            deleted_source_keys=body["deleted_source_keys"],
+            complete=body["complete"],
+            stable_source=body["stable_source"],
+            payload_digest=digest,
+            operation_id=operation_id,
+            occurred_at=occurred_at,
+        )
+        if transition.disposition in {"applied", "exact_replay"}:
+            return False
+        if transition.disposition == "sequence_gap":
+            logger.warning(
+                "z4j event_ingestor: external schedule sequence gap; withholding batch ack",
+                project_id=str(project_id),
+                stream_id=str(stream_id),
+                epoch_uuid=str(epoch_uuid),
+                sequence=body["sequence"],
+            )
+            return True
+        logger.warning(
+            "z4j event_ingestor: external schedule projection rejected",
+            project_id=str(project_id),
+            stream_id=str(stream_id),
+            epoch_uuid=str(epoch_uuid),
+            sequence=body["sequence"],
+            disposition=transition.disposition,
+        )
+        return False
 
     async def _project_task(  # noqa: PLR0912, PLR0915  task projection pipeline
         self,
@@ -1207,8 +1600,8 @@ class EventIngestor:
         Prometheus task counters are gated on ``inserted`` so a re-
         delivered terminal event -- e.g. a withheld-ack batch re-sent
         after a transient skip, whose committed events dedup on replay --
-        does not double-count task throughput (R7-LOW, same rule as the
-        ingest counter's R6-F3 gate).
+        does not double-count task throughput (same rule as the
+        ingest counter's gate).
         """
         # Resolve priority from event data. The agent includes it
         # if the task has ``@z4j_meta(priority="critical")`` etc.
@@ -1389,7 +1782,7 @@ class EventIngestor:
                     "last_failed_at": occurred_at,
                     "exception": _coerce_str(data.get("exception")),
                     "traceback": _coerce_str(data.get("traceback")),
-                    # R4 fingerprint from the FULL scrubbed exception +
+                    # Fingerprint from the FULL scrubbed exception +
                     # traceback (``fingerprint_from_data``), set on failure
                     # and kept across a later recovery (TASK_SUCCEEDED does
                     # not clear it) so the Issues view can show recovered
@@ -1428,7 +1821,7 @@ class EventIngestor:
         # Prometheus task metrics for terminal states, emitted AFTER the
         # upsert so a transient upsert failure that rolls back this event's
         # per-event savepoint does not leave the counter incremented for a
-        # projection that did not persist and will be re-sent (R8-L1).
+        # projection that did not persist and will be re-sent.
         #
         # v1.6 Round 3 Crit-1: task_name is an attacker-controlled string
         # from the agent. Without a cap a malicious agent can emit unbounded
@@ -1439,9 +1832,9 @@ class EventIngestor:
         # literal sentinel ``_METRIC_TASK_NAME_OVERFLOW``. The audit / task
         # tables still record the original task_name in full.
         #
-        # ``inserted`` is always True here post-R8-M3 (a duplicate is not
+        # ``inserted`` is always True here post- (a duplicate is not
         # projected), but the gate is kept defensively: a re-delivered
-        # terminal event must never re-count task throughput (R7-LOW).
+        # terminal event must never re-count task throughput.
         if inserted and pending_metrics is not None:
             try:
                 from z4j_brain.api.metrics import (
@@ -1511,7 +1904,7 @@ class EventIngestor:
         if candidate == task_id:
             return None  # self-loop; meaningless
         try:
-            # Own savepoint (R8-H3): a transient error on this read-only
+            # Own savepoint: a transient error on this read-only
             # lookup must roll back only itself, not abort the per-event
             # savepoint so its RELEASE surfaces a permanent-looking 25P02
             # that drops-and-acks the whole event.
@@ -1575,7 +1968,7 @@ def _task_latest_lifecycle_at(task: Any) -> datetime | None:
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)  # noqa: PLW2901  normalized in-loop
         # Clamp future-dated lifecycle timestamps - a legacy row
-        # (pre-R5) may have future stamps that would otherwise
+        # (pre-) may have future stamps that would otherwise
         # freeze the state column against any legitimate event.
         ts = min(ts, now)  # noqa: PLW2901  normalized in-loop
         if newest is None or ts > newest:
@@ -1601,7 +1994,7 @@ def _coerce_event_id(value: Any) -> UUID | None:
     integer value. Anything else returns ``None`` so the caller
     can fall back to minting a fresh id with a logged warning.
 
-    Tightened in R3 (finding H2) - the previous version accepted
+    Tightened in (finding H2) - the previous version accepted
     nil UUIDs and arbitrary versions, letting an attacker pin
     collision attempts at well-known ids.
     """

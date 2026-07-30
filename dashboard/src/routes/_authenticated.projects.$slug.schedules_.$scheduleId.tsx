@@ -219,7 +219,7 @@ function ScheduleMetadataCard({
             </span>
           </Field>
           <Field label="Priority">
-            <TaskPriorityBadge priority={schedule.priority} compact />
+            <TaskPriorityBadge priority={schedule.priority} />
           </Field>
           <Field label="Source">
             <SourceBadge source={schedule.source} />

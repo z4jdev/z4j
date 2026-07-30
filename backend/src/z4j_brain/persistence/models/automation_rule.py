@@ -15,11 +15,10 @@ Design notes:
 - The condition / action / circuit-breaker CONFIG lives in JSONB
   columns; the circuit-breaker STATE (rolling-window counter + tripped
   flag) lives in dedicated columns maintained atomically by the action
-  executor (Cluster R2).
+  executor.
 - ``trigger`` is a plain string (not a native enum) so adding a trigger
   needs no migration -- the same convention as ``schedule_fires.status``
-  and the notification-vocabulary columns.
-"""
+  and the notification-vocabulary columns."""
 
 from __future__ import annotations
 
@@ -83,7 +82,7 @@ class AutomationRule(PKMixin, TimestampsMixin, Base):
         server_default="{}",
     )
     #: Ordered list of action specs, gated by the target adapter's
-    #: capabilities at execution time (Cluster R2).
+    #: capabilities at execution time.
     actions: Mapped[list[Any]] = mapped_column(
         jsonb(),
         nullable=False,

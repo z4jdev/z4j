@@ -1,4 +1,4 @@
-"""AutomationRule model round-trip + defaults + unique name (R1)."""
+"""AutomationRule model round-trip + defaults + unique name."""
 
 from __future__ import annotations
 

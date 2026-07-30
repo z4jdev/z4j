@@ -45,12 +45,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from alembic import op
-
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models.agent_status_history import (
     AgentStatusHistory,
 )
-
 
 # ---------------------------------------------------------------------------
 # Alembic revision identifiers

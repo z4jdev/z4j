@@ -45,9 +45,24 @@ _PERMISSIONS_POLICY: str = (
     "usb=(), accelerometer=(), gyroscope=(), magnetometer=()"
 )
 
+# The dashboard intentionally keeps CSP3 ``script-src`` and
+# ``style-src-elem`` closed to arbitrary inline content.  Its three
+# deterministic first-party blocks therefore need exact hashes:
+#
+# * the tiny pre-paint theme bootstrap in dashboard/dist/index.html;
+# * Sonner's empty staging ``<style>`` element; and
+# * Sonner 2.0.7's bundled toast stylesheet.
+#
+# These are content hashes, not ``'unsafe-inline'`` exceptions.  A dependency
+# or dashboard change that alters any block must fail the production-browser
+# console gate and be reviewed before this allow-list changes.
+_DASHBOARD_THEME_SCRIPT_HASH = "'sha256-2cJQDKeqj1kRCTjHw3lNQZ7VwMSo8xGux8twgDsEuRs='"
+_DASHBOARD_SONNER_EMPTY_STYLE_HASH = "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='"
+_DASHBOARD_SONNER_STYLE_HASH = "'sha256-CIxDM5jnsGiKqXs2v7NKCY5MzdR9gu6TtiMJrDw29AY='"
+
 _BASE_CSP: str = (
     "default-src 'self'; "
-    "script-src 'self'; "
+    f"script-src 'self' {_DASHBOARD_THEME_SCRIPT_HASH}; "
     # CSP3 split: ``style-src-elem`` governs ``<style>`` blocks
     # and ``<link rel=stylesheet>`` (the high-impact CSS-
     # injection vector for data exfiltration via attribute
@@ -63,7 +78,8 @@ _BASE_CSP: str = (
     # permissive so older browsers (that don't understand the
     # -elem / -attr split) keep functioning.
     "style-src 'self' 'unsafe-inline'; "
-    "style-src-elem 'self'; "
+    f"style-src-elem 'self' {_DASHBOARD_SONNER_EMPTY_STYLE_HASH} "
+    f"{_DASHBOARD_SONNER_STYLE_HASH}; "
     "style-src-attr 'unsafe-inline'; "
     "img-src 'self' data:; "
     "font-src 'self'; "
@@ -135,7 +151,16 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
         headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
 
-        path = request.url.path
+        # Scope path, not ``request.url``. This middleware is registered last
+        # and therefore runs OUTERMOST, ahead of HostValidationMiddleware, so
+        # it sees the client-supplied Host header before anything has vetted
+        # it. ``request.url`` rebuilds a URL from that header and parses it
+        # with ``urlsplit``, which Python 3.14 made raise ``ValueError:
+        # Invalid IPv6 URL`` on exactly the malformed hosts host validation
+        # exists to reject. Reading the path here turned an attacker-controlled
+        # header into an unhandled exception instead of the clean 400 the
+        # inner middleware was about to return.
+        path = request.scope.get("path", "")
         if path.startswith("/setup") or path.startswith("/api/v1/setup"):
             headers["Referrer-Policy"] = "no-referrer"
         else:

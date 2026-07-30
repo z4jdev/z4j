@@ -87,7 +87,7 @@ async def db(engine) -> DatabaseManager:
 
 
 class _FakeRegistry:
-    async def deliver(self, *, command_id, agent_id) -> DeliveryResult:
+    async def deliver(self, *, command_id, agent_id, required_retry_engine=None) -> DeliveryResult:
         return DeliveryResult(
             delivered_locally=False,
             notified_cluster=True,
@@ -347,7 +347,7 @@ class TestOfflineDetection:
         settings: Settings,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # R3-M4: the worker SELECTs candidates in one session and claims
+        # The worker SELECTs candidates in one session and claims
         # in another. An agent that reconnects in that gap (state back to
         # online, heartbeat anchor advanced) must NOT be minted a claim
         # row or a durable offline alert -- the conditional claim sees
@@ -387,7 +387,7 @@ class TestOfflineDetection:
         settings: Settings,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # R3-M4 variant: the agent bounced in the gap (reconnected, then
+        # Variant: the agent bounced in the gap (reconnected, then
         # died again) -- still offline at claim time but on a NEW anchor.
         # The stale-anchor claim must insert nothing; the CURRENT episode
         # alerts on a later sweep under its own anchor.
@@ -489,7 +489,7 @@ class TestOfflineClaimRetention:
         db: DatabaseManager,
         settings: Settings,
     ) -> None:
-        # R3-L1: an agent down for 40 days was alerted once; its claim is
+        # An agent down for 40 days was alerted once; its claim is
         # now past the 30-day retention window but the outage is UNCHANGED
         # (still offline, same heartbeat anchor). The prune must keep the
         # claim, and later sweeps must not re-alert the same episode.
@@ -763,7 +763,7 @@ async def _reconcile_result(
     dispatcher, exactly as the frame router does."""
     async with db.session() as s:
         commands = CommandRepository(s)
-        cmd = await commands.insert(
+        cmd, _ = await commands.insert(
             project_id=project_id,
             agent_id=agent_id,
             issued_by=None,
@@ -879,7 +879,7 @@ class TestOrphanedEmission:
         db: DatabaseManager,
         settings: Settings,
     ) -> None:
-        # R3 H1: pre-fix, a late "pending" probe response overwrote a
+        # Pre-fix, a late "pending" probe response overwrote a
         # terminal task back to PENDING (finished_at retained), and the
         # next terminal response then looked like a fresh correction,
         # firing task.orphaned a second time (duplicate destructive

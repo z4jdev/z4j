@@ -11,10 +11,9 @@ introduced in Round 5 plus one UX bug:
   wrapped in try/except like the other three v1.6 surfaces, so any
   registration failure would take the lifespan down.
 - The activity feed rendered user-scoped audit rows (the caller's
-  own MFA / password-change rows surfaced by the R5 G fix) under
+  own MFA / password-change rows surfaced by the G fix) under
   the "brain-wide" label, which is a category lie: those rows are
-  user-personal, not system-wide.
-"""
+  user-personal, not system-wide."""
 
 from __future__ import annotations
 
@@ -42,7 +41,7 @@ class TestAuditForwarderQueueDepth:
             webhook_url="https://x.example/i",
             hmac_secret=b"x" * 32,
         )
-        # Pre-R6 fix: queue_depth was indented outside the class so
+        # Pre- fix: queue_depth was indented outside the class so
         # hasattr returned False; the lifespan registration line
         # crashed the brain on boot.
         assert hasattr(fwd, "queue_depth")
@@ -107,7 +106,7 @@ class TestInmemorySubsystemRegistrationGuards:
         window = text[max(0, idx - 300) : idx + 200]
         assert "try:" in window, (
             "audit_forwarder registration MUST be wrapped in try/except "
-            "to match the other three v1.6 surfaces (R6 SHIP-STOPPER 2)"
+            "to match the other three v1.6 surfaces (SHIP-STOPPER 2)"
         )
 
 
@@ -117,10 +116,10 @@ class TestInmemorySubsystemRegistrationGuards:
 
 
 class TestActivityFeedPersonalBadge:
-    """The R5 G fix widened the non-admin filter to include the
+    """The G fix widened the non-admin filter to include the
     caller's user-scoped rows (project_id IS NULL AND user_id ==
     caller). The dashboard rendered those rows under the "brain-wide"
-    label, which lies about the scope. R6 fix: branch on whether
+    label, which lies about the scope. fix: branch on whether
     user_id matches the caller, render "personal" instead."""
 
     def test_dashboard_branches_on_user_id_for_personal_badge(
@@ -150,7 +149,7 @@ class TestActivityFeedPersonalBadge:
 
 
 class TestAuditForwarderRealTransport:
-    """The R2 ship-stopper happened because every audit-forwarder
+    """The ship-stopper happened because every audit-forwarder
     test monkeypatched ``_post`` entirely, bypassing the broken
     ``timeout`` kwarg. These tests exercise the FULL
     ``_send_one`` -> ``_post`` -> httpx pipeline so a future
@@ -264,7 +263,7 @@ class TestAuditForwarderRealTransport:
             "HMAC mismatch -- the brain's signing diverged from the doc'd <timestamp>.<body> shape"
         )
 
-        # 5) Per-call timeout reached the transport (R2 ship-stopper
+        # 5) Per-call timeout reached the transport (ship-stopper
         # class: a future regression that drops the timeout would
         # see this assertion fail).
         t = captured.get("timeout_extension")

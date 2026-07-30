@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.7.0"
+version = "1.8.0"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -65,7 +65,7 @@ classifiers = [
 #   pip install z4j-celery            # SDK + Celery adapter only
 #
 dependencies = [
-    "z4j-core>=1.7.0,<2",
+    "z4j-core>=1.8.0,<2",
     # Server runtime (was in z4j-brain pre-1.4.0).
     "fastapi>=0.136",
     # 1.6.5 (audit R4-M1): explicit Starlette floor for
@@ -117,14 +117,14 @@ dependencies = [
     # owners raise their own floors past the advisory ceilings.
     "aiohttp>=3.14.0",
     "pyjwt>=2.13.0",
-    # 1.7 (A4 misfire detection): the brain-side MisfireDetector worker
-    # computes each enabled schedule's expected next fire from its
-    # cadence to catch schedules the (possibly-dead) scheduler failed
-    # to fire on time. croniter is the same cron engine z4j-scheduler
-    # already uses (packages/z4j-scheduler depends on croniter>=3.0),
-    # so behaviour is consistent across the fire path and the
-    # misfire-detection path. Pure-Python, ~100 KB, no native deps.
-    "croniter>=3.0",
+    # Boundary D: the Brain validates every prepared successor using an
+    # independent implementation.  These exact pins are the complete
+    # cadence-affecting closure and intentionally match z4j-scheduler.
+    "croniter==6.2.2",
+    "python-dateutil==2.9.0.post0",
+    "six==1.17.0",
+    "astral==3.2",
+    "tzdata==2026.1",
 ]
 
 [project.optional-dependencies]
@@ -132,27 +132,34 @@ dependencies = [
 # Engine adapter extras. Each pulls the engine adapter and its
 # companion scheduler (if any) in one shot -- the 95% case.
 # ------------------------------------------------------------------
-celery = ["z4j-celery>=1.7.0,<2", "z4j-celerybeat>=1.7.0,<2"]
-django = ["z4j-django>=1.7.0,<2"]
-flask = ["z4j-flask>=1.7.0,<2"]
-fastapi = ["z4j-fastapi>=1.7.0,<2"]
+celery = ["z4j-celery>=1.8.0,<2", "z4j-celerybeat>=1.8.0,<2"]
+django = ["z4j-django>=1.8.0,<2"]
+flask = ["z4j-flask>=1.8.0,<2"]
+fastapi = ["z4j-fastapi>=1.8.0,<2"]
 # Intra-z4j floor policy: extras track the release-wave version so
 # a mixed-version install cannot be assembled through the umbrella
 # (R9 H-2 precedent: a stale z4j-rq paired with a newer z4j-bare
 # dispatcher re-opened the R8 H-1 pickle RCE).
-rq = ["z4j-rq>=1.7.0,<2", "z4j-rqscheduler>=1.7.0,<2"]
-dramatiq = ["z4j-dramatiq>=1.7.0,<2"]
-huey = ["z4j-huey>=1.7.0,<2", "z4j-hueyperiodic>=1.7.0,<2"]
-arq = ["z4j-arq>=1.7.0,<2", "z4j-arqcron>=1.7.0,<2"]
-taskiq = ["z4j-taskiq>=1.7.0,<2", "z4j-taskiqscheduler>=1.7.0,<2"]
-apscheduler = ["z4j-apscheduler>=1.7.0,<2"]
-bare = ["z4j-bare>=1.7.0,<2"]
+rq = ["z4j-rq>=1.8.0,<2", "z4j-rqscheduler>=1.8.0,<2"]
+dramatiq = ["z4j-dramatiq>=1.8.0,<2"]
+huey = ["z4j-huey>=1.8.0,<2", "z4j-hueyperiodic>=1.8.0,<2"]
+arq = ["z4j-arq>=1.8.0,<2", "z4j-arqcron>=1.8.0,<2"]
+taskiq = ["z4j-taskiq>=1.8.0,<2", "z4j-taskiqscheduler>=1.8.0,<2"]
+apscheduler = ["z4j-apscheduler>=1.8.0,<2"]
+bare = ["z4j-bare>=1.8.0,<2"]
 
 # ------------------------------------------------------------------
-# Postgres backend (asyncpg). Was z4j-brain[postgres] pre-1.4.0;
+# Postgres backend (asyncpg for the application; psycopg/libpq for
+# route-pinned restore ceremonies). Was z4j-brain[postgres] pre-1.4.0;
 # now lives directly here since z4j IS the brain.
 # ------------------------------------------------------------------
-postgres = ["asyncpg>=0.31"]
+postgres = [
+    "asyncpg>=0.31",
+    # Restore/rollback ceremonies require libpq's separate host + hostaddr
+    # inputs so routing stays pinned while verify-full still validates the
+    # configured DNS hostname.
+    "psycopg[binary]>=3.3.3",
+]
 
 # ------------------------------------------------------------------
 # Optional error capture via Sentry. Activate with Z4J_SENTRY_DSN
@@ -275,8 +282,26 @@ include = [
   "LICENSE",
   "SECURITY.md",
   "pyproject.toml",
+  "Dockerfile",
+  ".dockerignore",
   "docker-compose.yml",
   "docker-compose.postgres.yml",
   "docker-compose.caddy.yml",
+  "deploy",
   ".env.example",
 ]
+
+# The compose kit must build before the coordinated 1.8.0 package wave exists
+# on PyPI. Bundle the matching Apache-2.0 z4j-core and z4j-scheduler sources in
+# the sdist's Docker deployment payload only; the z4j wheel remains unchanged.
+[tool.hatch.build.targets.sdist.force-include]
+"../z4j-core/pyproject.toml" = "docker/vendor/z4j-core/pyproject.toml"
+"../z4j-core/README.md" = "docker/vendor/z4j-core/README.md"
+"../z4j-core/LICENSE" = "docker/vendor/z4j-core/LICENSE"
+"../z4j-core/src/z4j_core" = "docker/vendor/z4j-core/src/z4j_core"
+"../z4j-scheduler/pyproject.toml" = "docker/vendor/z4j-scheduler/pyproject.toml"
+"../z4j-scheduler/README.md" = "docker/vendor/z4j-scheduler/README.md"
+"../z4j-scheduler/CHANGELOG.md" = "docker/vendor/z4j-scheduler/CHANGELOG.md"
+"../z4j-scheduler/LICENSE" = "docker/vendor/z4j-scheduler/LICENSE"
+"../z4j-scheduler/proto" = "docker/vendor/z4j-scheduler/proto"
+"../z4j-scheduler/src/z4j_scheduler" = "docker/vendor/z4j-scheduler/src/z4j_scheduler"

@@ -1,0 +1,166 @@
+{
+  "z4j_home": "/var/lib/z4j",
+  "settings": [
+    {
+      "name": "agent_offline_timeout_seconds",
+      "value": "90",
+      "source": "default",
+      "is_secret": false,
+      "description": "Seconds without a heartbeat before an agent is marked offline."
+    },
+    {
+      "name": "allowed_hosts",
+      "value": "['demo.z4j.dev']",
+      "source": "config.env",
+      "is_secret": false,
+      "description": "Host header allow-list. Required in production."
+    },
+    {
+      "name": "audit_chain_secret",
+      "value": "***",
+      "source": "secret.env",
+      "is_secret": true,
+      "description": "Independent HMAC key for the authenticated audit chain."
+    },
+    {
+      "name": "audit_retention_days",
+      "value": "90",
+      "source": "default",
+      "is_secret": false,
+      "description": "Days of audit-log history kept before the retention sweep removes rows."
+    },
+    {
+      "name": "audit_webhook_url",
+      "value": "None",
+      "source": "default",
+      "is_secret": false,
+      "description": "Optional write-only webhook that receives each signed audit head."
+    },
+    {
+      "name": "bind_host",
+      "value": "0.0.0.0",
+      "source": "env",
+      "is_secret": false,
+      "description": "Interface the brain's HTTP server binds to."
+    },
+    {
+      "name": "bind_port",
+      "value": "7700",
+      "source": "default",
+      "is_secret": false,
+      "description": "Port the brain's HTTP server binds to."
+    },
+    {
+      "name": "command_timeout_seconds",
+      "value": "60",
+      "source": "default",
+      "is_secret": false,
+      "description": "Seconds a dispatched command may stay unacknowledged before it times out."
+    },
+    {
+      "name": "cors_origins",
+      "value": "[]",
+      "source": "default",
+      "is_secret": false,
+      "description": "Origins allowed to call the API cross-site. Empty means same-origin only."
+    },
+    {
+      "name": "database_url",
+      "value": "***",
+      "source": "env",
+      "is_secret": true,
+      "description": "SQLAlchemy async database URL. Masked because it carries credentials."
+    },
+    {
+      "name": "embedded_scheduler",
+      "value": "False",
+      "source": "default",
+      "is_secret": false,
+      "description": "Run z4j-scheduler as a supervised subprocess inside the brain."
+    },
+    {
+      "name": "environment",
+      "value": "production",
+      "source": "env",
+      "is_secret": false,
+      "description": "Security posture. 'production' requires TLS and an explicit host allow-list."
+    },
+    {
+      "name": "event_retention_days",
+      "value": "30",
+      "source": "default",
+      "is_secret": false,
+      "description": "Days of task/event history kept before the retention sweep removes rows."
+    },
+    {
+      "name": "log_json",
+      "value": "True",
+      "source": "config.env",
+      "is_secret": false,
+      "description": "Emit structured JSON logs instead of human-readable console lines."
+    },
+    {
+      "name": "log_level",
+      "value": "INFO",
+      "source": "env",
+      "is_secret": false,
+      "description": "Root log level for the brain process."
+    },
+    {
+      "name": "public_url",
+      "value": "https://demo.z4j.dev",
+      "source": "env",
+      "is_secret": false,
+      "description": "Externally reachable base URL. Used for setup links and cookie scoping."
+    },
+    {
+      "name": "rate_limit_per_minute",
+      "value": "600",
+      "source": "default",
+      "is_secret": false,
+      "description": "Per-IP request ceiling enforced by the rate-limit middleware."
+    },
+    {
+      "name": "registry_backend",
+      "value": "postgres_notify",
+      "source": "config.env",
+      "is_secret": false,
+      "description": "Agent-registry backend. 'postgres_notify' supports multi-process brains."
+    },
+    {
+      "name": "require_db_ssl",
+      "value": "True",
+      "source": "default",
+      "is_secret": false,
+      "description": "Refuse to start unless the database connection negotiates TLS."
+    },
+    {
+      "name": "scheduler_grpc_bind_port",
+      "value": "7701",
+      "source": "default",
+      "is_secret": false,
+      "description": "Port the scheduler-facing gRPC service binds to."
+    },
+    {
+      "name": "scheduler_grpc_enabled",
+      "value": "True",
+      "source": "config.env",
+      "is_secret": false,
+      "description": "Serve the gRPC endpoint that z4j-scheduler connects to."
+    },
+    {
+      "name": "secret",
+      "value": "***",
+      "source": "secret.env",
+      "is_secret": true,
+      "description": "Master signing key. Derives session, agent and per-project secrets."
+    },
+    {
+      "name": "session_lifetime_hours",
+      "value": "24",
+      "source": "default",
+      "is_secret": false,
+      "description": "How long a signed-in session stays valid before re-authentication."
+    }
+  ]
+}

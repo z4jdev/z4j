@@ -7,7 +7,7 @@
       "user_id": "00000000-0000-4000-8000-000000000001",
       "action": "task.failed",
       "target_type": "task",
-      "target_id": "celery-task-d4f2a91c",
+      "target_id": "d99c42a6-6b76-5058-a0b5-c3c861c4f801",
       "result": "success",
       "outcome": "allow",
       "metadata": {
@@ -61,7 +61,7 @@
       "outcome": "allow",
       "metadata": {
         "action": "retry",
-        "task_id": "celery-task-d4f2a91c",
+        "task_id": "d99c42a6-6b76-5058-a0b5-c3c861c4f801",
         "by_user": "ops@example.com"
       },
       "source_ip": "203.0.113.42",

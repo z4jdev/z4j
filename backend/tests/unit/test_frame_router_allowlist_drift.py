@@ -1,4 +1,4 @@
-"""R7-H1 / R8 cross-package drift detector.
+"""Cross-package drift detector.
 
 The brain re-applies the SAME worker_conf allowlist as defense in
 depth before persisting heartbeat payloads to the Postgres JSONB
@@ -17,8 +17,7 @@ in any brain-only CI lane that does not install ``z4j-celery``.
 That keeps the package-dependency direction one-way (brain does NOT
 depend on the celery adapter) while still failing loudly in the
 polyrepo dev environment + the all-engines docker e2e where both
-packages are present.
-"""
+packages are present."""
 
 from __future__ import annotations
 
@@ -40,7 +39,7 @@ class TestWorkerConfAllowlistDrift:
         only_in_adapter = ADAPTER_SET - BRAIN_SET
         only_in_brain = BRAIN_SET - ADAPTER_SET
         assert not only_in_adapter, (
-            "R7-H1 DRIFT: keys live in z4j-celery adapter allowlist but "
+            " DRIFT: keys live in z4j-celery adapter allowlist but "
             "are missing from the brain twin. The adapter would ship them; "
             "the brain would drop them, so operators silently lose "
             f"visibility on these tuning knobs: {sorted(only_in_adapter)}. "
@@ -48,7 +47,7 @@ class TestWorkerConfAllowlistDrift:
             "z4j_brain.websocket.frame_router."
         )
         assert not only_in_brain, (
-            "R7-H1 DRIFT: keys live in the brain twin but are missing "
+            " DRIFT: keys live in the brain twin but are missing "
             "from the z4j-celery adapter source. The adapter would strip "
             "them before shipping (so they never arrive from celery), but "
             "the brain would accept them if some OTHER adapter sent them, "

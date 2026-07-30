@@ -1,0 +1,51 @@
+{
+  "items": [
+    {
+      "fingerprint": "1829a1b2c3d4e5f6a0b1c2d3e4f50617",
+      "status": "ongoing",
+      "occurrences": 19,
+      "open_count": 7,
+      "recovered_count": 12,
+      "first_seen_offset_s": -54000,
+      "last_seen_offset_s": -300,
+      "engine_count": 1,
+      "engines": [
+        "arq"
+      ],
+      "sample_exception": "aiohttp.ClientResponseError: 429 Too Many Requests",
+      "sample_task_name": "sync.pull_crm_contacts"
+    },
+    {
+      "fingerprint": "29a1b2c3d4e5f6a0b1c2d3e4f5061728",
+      "status": "recovered",
+      "occurrences": 11,
+      "open_count": 0,
+      "recovered_count": 11,
+      "first_seen_offset_s": -79200,
+      "last_seen_offset_s": -22800,
+      "engine_count": 2,
+      "engines": [
+        "arq",
+        "celery"
+      ],
+      "sample_exception": "asyncio.TimeoutError",
+      "sample_task_name": "ml.score_batch"
+    },
+    {
+      "fingerprint": "9a1b2c3d4e5f6a0b1c2d3e4f506172839",
+      "status": "ongoing",
+      "occurrences": 5,
+      "open_count": 1,
+      "recovered_count": 4,
+      "first_seen_offset_s": -10800,
+      "last_seen_offset_s": -2460,
+      "engine_count": 1,
+      "engines": [
+        "arq"
+      ],
+      "sample_exception": "pydantic.ValidationError: 2 validation errors for WebhookPayload",
+      "sample_task_name": "webhooks.ingest"
+    }
+  ],
+  "next_cursor": null
+}

@@ -36,6 +36,8 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy import text
 
+from z4j_brain.schema_transition import SCHEMA_TRANSITION_ADVISORY_LOCK_KEY
+
 if TYPE_CHECKING:
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.settings import Settings
@@ -87,7 +89,7 @@ class ScheduleFiresPartitionWorker:
                 async with self._db.session() as session:
                     await self._prime(session)
                     await session.execute(
-                        text(
+                        text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
                             f"CREATE TABLE IF NOT EXISTS {name} "
                             f"PARTITION OF schedule_fires "
                             f"FOR VALUES FROM ('{start}') TO ('{end}')",
@@ -103,6 +105,7 @@ class ScheduleFiresPartitionWorker:
         cutoff = today - timedelta(days=self._retention_days)
         try:
             async with self._db.session() as session:
+                await self._prime(session)
                 result = await session.execute(
                     text(
                         "SELECT c.relname FROM pg_inherits i "
@@ -134,9 +137,39 @@ class ScheduleFiresPartitionWorker:
             try:
                 async with self._db.session() as session:
                     await self._prime(session)
+                    legacy_probe_sql = f"""
+                        SELECT EXISTS (
+                          SELECT 1 FROM {name} AS fire
+                          WHERE fire.receipt_control_token IS NULL
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM schedule_occurrence_resolutions AS resolution
+                            WHERE resolution.schedule_id = fire.schedule_id
+                            AND resolution.fire_id = fire.fire_id
+                            AND resolution.scheduled_for = fire.scheduled_for
+                          )
+                        )
+                    """  # noqa: S608  catalog-derived partition name
+                    has_unresolved_legacy = (
+                        await session.execute(
+                            text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                                legacy_probe_sql,
+                            ),
+                        )
+                    ).scalar()
+                    if has_unresolved_legacy:
+                        logger.warning(
+                            "z4j schedule_fires partition: refusing drop of %s; "
+                            "it contains unresolved receipt-NULL legacy evidence",
+                            name,
+                        )
+                        await session.commit()
+                        continue
                     max_scheduled = (
                         await session.execute(
-                            text(f"SELECT max(scheduled_for) FROM {name}"),  # noqa: S608  internal partition name, not user input
+                            text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                                f"SELECT max(scheduled_for) FROM {name}",  # noqa: S608  internal partition name, not user input
+                            ),
                         )
                     ).scalar()
                     if max_scheduled is not None and max_scheduled.date() >= cutoff:
@@ -149,7 +182,11 @@ class ScheduleFiresPartitionWorker:
                         )
                         await session.commit()
                         continue
-                    await session.execute(text(f"DROP TABLE IF EXISTS {name}"))
+                    await session.execute(
+                        text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                            f"DROP TABLE IF EXISTS {name}",
+                        ),
+                    )
                     await session.commit()
                 dropped += 1
             except Exception as exc:
@@ -187,6 +224,10 @@ class ScheduleFiresPartitionWorker:
         # UTC ``scheduled_for`` timestamptz on a non-UTC server.
         await session.execute(text("SET LOCAL lock_timeout = '2s'"))
         await session.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": SCHEMA_TRANSITION_ADVISORY_LOCK_KEY},
+        )
 
     @staticmethod
     def _record_op_failure(op: str, name: str, exc: Exception) -> None:

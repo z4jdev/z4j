@@ -101,7 +101,7 @@ class Task(PKMixin, TimestampsMixin, Base):
     result: Mapped[Any | None] = mapped_column(jsonb(), nullable=True)
     exception: Mapped[str | None] = mapped_column(Text, nullable=True)
     traceback: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: Stable failure fingerprint (R4): set when the task transitions to
+    #: Stable failure fingerprint: set when the task transitions to
     #: FAILURE from the exception + traceback, kept across a later recovery
     #: (so the Issues view can show recovered issues). Groups the same
     #: logical failure across runs + engines. NULL for tasks that never
@@ -176,7 +176,7 @@ class Task(PKMixin, TimestampsMixin, Base):
         Index("ix_tasks_project_name", "project_id", "name"),
         Index("ix_tasks_project_queue", "project_id", "queue"),
         Index("ix_tasks_project_finished", "project_id", "finished_at"),
-        # R4 Issues: aggregate failures by fingerprint per project.
+        # Issues: aggregate failures by fingerprint per project.
         Index("ix_tasks_project_fingerprint", "project_id", "fingerprint"),
         # Postgres-only indexes (GIN on jsonb_path_ops, GIN on tsvector,
         # partial idx on parent/root) are added in the migration as

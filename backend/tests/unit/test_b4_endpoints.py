@@ -290,6 +290,9 @@ class TestCommandsRouter:
                 scheduler_adapters=[],
                 capabilities={},
                 state=AgentState.OFFLINE,
+                # Attest, so this test still exercises the OFFLINE path
+                # (503) rather than being short-circuited by the retry gate.
+                agent_metadata={"runtime_features": ["retry_by_reference"]},
             )
             s.add(agent)
             await s.commit()
@@ -306,6 +309,59 @@ class TestCommandsRouter:
         )
         # Local registry returns delivered_locally=False +
         # notified_cluster=False + agent_was_known=False → 503.
+        assert r.status_code == 503
+
+    async def test_retry_task_refused_when_only_session_is_unattested(
+        self,
+        brain_app,
+        client,
+        settings: Settings,
+        seeded,
+    ) -> None:
+        # Boundary A: a sticky Agent-row value is not authority. Register an
+        # old session without an adapter contract; it must not receive a retry.
+        async with brain_app.state.db.session() as s:
+            agent = Agent(
+                project_id=seeded["project_id"],
+                name="old-runtime",
+                token_hash=hash_agent_token(
+                    plaintext="x2",
+                    secret=settings.secret.get_secret_value().encode("utf-8"),
+                ),
+                protocol_version="1",
+                framework_adapter="bare",
+                engine_adapters=["celery"],
+                scheduler_adapters=[],
+                capabilities={},
+                state=AgentState.ONLINE,
+                # A stale positive is deliberate: session proof must win.
+                agent_metadata={"runtime_features": ["retry_by_reference"]},
+            )
+            s.add(agent)
+            await s.commit()
+            agent_id = agent.id
+
+        class OldWS:
+            async def close(self, code: int = 1000) -> None:
+                pass
+
+        await brain_app.state.brain_registry.register(
+            project_id=seeded["project_id"],
+            agent_id=agent_id,
+            ws=OldWS(),
+            worker_id="old",
+            retry_contracts={},
+        )
+
+        r = await client.post(
+            "/api/v1/projects/default/commands/retry-task",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={
+                "agent_id": str(agent_id),
+                "engine": "celery",
+                "task_id": "task-001",
+            },
+        )
         assert r.status_code == 503
 
     async def test_retry_task_with_online_agent(
@@ -331,6 +387,9 @@ class TestCommandsRouter:
                 scheduler_adapters=[],
                 capabilities={},
                 state=AgentState.ONLINE,
+                # The retry gate refuses an agent that has not attested the
+                # safe retry contract, so a retry fixture must attest.
+                agent_metadata={"runtime_features": ["retry_by_reference"]},
             )
             s.add(agent)
             await s.commit()
@@ -363,6 +422,7 @@ class TestCommandsRouter:
             project_id=seeded["project_id"],
             agent_id=agent_id,
             ws=fake_ws,
+            retry_contracts={"celery": 1},
         )
 
         r = await client.post(

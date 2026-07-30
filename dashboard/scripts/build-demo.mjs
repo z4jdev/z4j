@@ -68,6 +68,15 @@ const result = spawnSync(
     "--outDir",
     "dist-demo",
     "--emptyOutDir",
+    // Emit hashed assets under /static/ rather than the default
+    // /assets/. Cloudflare pinned SPA-fallback HTML under several
+    // /assets/ URLs with `immutable, max-age=31536000` (see the
+    // _redirects comment below), and a poisoned entry at that TTL
+    // cannot be outrun by redeploying - the URL has to change.
+    // Moving the namespace once retires every poisoned key at the
+    // edge. Demo build only; the production build is untouched.
+    "--assetsDir",
+    "static",
   ],
   {
     cwd: dashboardRoot,
@@ -140,9 +149,27 @@ if (hasDataTree) {
 // NOT pick them up -- only the demo build does, which is the only
 // place SPA fallback makes sense (production serves the SPA via
 // FastAPI, which has its own catch-all).
+// A request for a hashed asset that does not exist must 404, NOT fall
+// through to the SPA shell.
+//
+// With only the catch-all below, a miss under /assets/ returned
+// index.html with `200 text/html`. Combined with the
+// `/assets/* -> immutable, max-age=31536000` rule in _headers, Cloudflare
+// then pinned that HTML at the edge, under that asset URL, FOR A YEAR.
+// That is exactly what took demo.z4j.dev down: a browser requested a
+// chunk during the upload window before it existed, the fallback HTML
+// got cached against the browser-shaped request variant, and every
+// later visitor got HTML where a module was expected:
+//   "Expected a JavaScript-or-Wasm module script but the server
+//    responded with a MIME type of ''"
+// Plain curl hit a different cache variant and looked healthy, which is
+// what made it so hard to see.
+//
+// Returning 404 for a missing asset keeps the failure loud, local and
+// uncacheable-as-a-module.
 await writeFile(
   resolve(dashboardRoot, "dist-demo/_redirects"),
-  "/*    /index.html   200\n",
+  ["/static/*    /index.html   404", "/*    /index.html   200", ""].join("\n"),
 );
 // Defense-in-depth CSP for the demo build. The mock-fetch
 // interceptor + WebSocket short-circuit already prevent any
@@ -173,12 +200,51 @@ await writeFile(
 // Compute SHA256 of every inline <script> in dist-demo/index.html.
 // Vite typically emits at most one (the theme-flicker shim). This
 // loop tolerates multiple in case future template changes add more.
-const indexHtml = await readFile(
-  resolve(dashboardRoot, "dist-demo/index.html"),
-  "utf8",
+// Opt every script tag out of Cloudflare Rocket Loader BEFORE the CSP
+// hashes are computed.
+//
+// Rocket Loader is a zone-level Cloudflare setting. When it is on it
+// rewrites the HTML at the edge: it turns
+//   <script type="module" src="...">
+// into
+//   <script type="<token>-module" src="...">
+// and injects its own loader. A module script whose type has been
+// rewritten is never executed as a module, so the SPA never mounts -
+// the page renders completely blank with NO console error, because no
+// application code ever ran. It also mutates the inline theme script,
+// which invalidates the sha256 in the CSP below and gets that script
+// blocked as well.
+//
+// This bit us on demo.z4j.dev: the same build worked on
+// *.pages.dev (which bypasses zone settings) and was blank on the
+// custom domain. ``data-cfasync="false"`` is Cloudflare's documented
+// opt-out and Rocket Loader leaves those tags untouched, so the build
+// is self-defending regardless of how the zone is configured.
+const indexHtmlPath = resolve(dashboardRoot, "dist-demo/index.html");
+const rawIndexHtml = await readFile(indexHtmlPath, "utf8");
+let cfasyncAdded = 0;
+const guardedIndexHtml = rawIndexHtml.replace(
+  /<script(?![^>]*\bdata-cfasync=)([^>]*)>/g,
+  (_match, attrs) => {
+    cfasyncAdded += 1;
+    return `<script data-cfasync="false"${attrs}>`;
+  },
 );
+if (guardedIndexHtml !== rawIndexHtml) {
+  await writeFile(indexHtmlPath, guardedIndexHtml, "utf8");
+}
+console.log(
+  `[build:demo] added data-cfasync="false" to ${cfasyncAdded} script tag(s) (Rocket Loader opt-out)`,
+);
+
+const indexHtml = guardedIndexHtml;
 const inlineScriptHashes = [];
-const inlineScriptRe = /<script>([\s\S]*?)<\/script>/g;
+// Match any INLINE script (one with no ``src``), regardless of the other
+// attributes it carries. This used to be the literal `<script>` with no
+// attributes at all, which silently produced ZERO hashes the moment the
+// Rocket Loader opt-out above added ``data-cfasync`` to the tag - and a
+// CSP with no hash blocks the inline theme script outright.
+const inlineScriptRe = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g;
 let inlineMatch;
 while ((inlineMatch = inlineScriptRe.exec(indexHtml)) !== null) {
   const sha = createHash("sha256").update(inlineMatch[1]).digest("base64");
@@ -204,7 +270,7 @@ const csp = [
 await writeFile(
   resolve(dashboardRoot, "dist-demo/_headers"),
   [
-    "/assets/*",
+    "/static/*",
     "  Cache-Control: public, max-age=31536000, immutable",
     "",
     "/demo-data/*",

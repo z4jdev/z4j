@@ -23,6 +23,7 @@
  */
 import { Link, useParams, useRouterState } from "@tanstack/react-router";
 import {
+  Bug,
   ClipboardList,
   Cpu,
   History,
@@ -65,6 +66,7 @@ function buildNav(
   const items: NavItem[] = [
     { label: "Overview", to: `/projects/${slug}`, icon: LayoutDashboard },
     { label: "Tasks", to: `/projects/${slug}/tasks`, icon: ClipboardList },
+    { label: "Issues", to: `/projects/${slug}/issues`, icon: Bug },
     { label: "Trends", to: `/projects/${slug}/trends`, icon: LineChart },
     { label: "Workers", to: `/projects/${slug}/workers`, icon: Cpu },
     { label: "Queues", to: `/projects/${slug}/queues`, icon: Layers },

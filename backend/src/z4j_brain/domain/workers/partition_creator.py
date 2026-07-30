@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy import text
 
+from z4j_brain.schema_transition import SCHEMA_TRANSITION_ADVISORY_LOCK_KEY
+
 if TYPE_CHECKING:
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.settings import Settings
@@ -94,6 +96,10 @@ class PartitionCreatorWorker:
             # Postgres ``lock_timeout`` is per-session; the
             # setting clears at session close.
             await session.execute(text("SET LOCAL lock_timeout = '2s'"))
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_id)"),
+                {"lock_id": SCHEMA_TRANSITION_ADVISORY_LOCK_KEY},
+            )
 
             # Create partitions for today + lookahead.
             created = 0
@@ -116,7 +122,7 @@ class PartitionCreatorWorker:
                     # savepoint.
                     async with session.begin_nested():
                         await session.execute(
-                            text(
+                            text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
                                 f"CREATE TABLE IF NOT EXISTS {partition_name} "
                                 f"PARTITION OF events "
                                 f"FOR VALUES FROM ('{range_start}') "
@@ -199,7 +205,9 @@ class PartitionCreatorWorker:
                     try:
                         max_occurred = (
                             await session.execute(
-                                text(f"SELECT max(occurred_at) FROM {partition_name}"),  # noqa: S608  internal partition name, not user input
+                                text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                                    f"SELECT max(occurred_at) FROM {partition_name}",  # noqa: S608  internal partition name, not user input
+                                ),
                             )
                         ).scalar()
                     except Exception:
@@ -225,7 +233,9 @@ class PartitionCreatorWorker:
                         )
                         continue
                     await session.execute(
-                        text(f"DROP TABLE IF EXISTS {partition_name}"),
+                        text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                            f"DROP TABLE IF EXISTS {partition_name}",
+                        ),
                     )
                     dropped += 1
 

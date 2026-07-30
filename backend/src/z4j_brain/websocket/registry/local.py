@@ -6,9 +6,9 @@ this as the production backend - it does not route across worker
 processes, so commands issued from worker A targeting an agent on
 worker B silently disappear.
 
-The implementation is a thin wrapper around a single ``dict``
-keyed by ``agent_id``. Concurrent register/unregister is safe via
-an :class:`asyncio.Lock`; the dict itself is single-task-owned.
+The implementation stores immutable connection-generation handles
+under ``(agent_id, worker_id)``. Concurrent register/unregister and
+contract-aware selection are safe via an :class:`asyncio.Lock`.
 """
 
 from __future__ import annotations
@@ -17,12 +17,13 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 
 from z4j_brain.websocket.registry._protocol import (
     DeliveryResult,
+    SessionHandle,
     WorkerCapExceeded,
 )
 
@@ -53,16 +54,18 @@ LocalDeliverCallback = Callable[[UUID, "WebSocket"], Awaitable[bool]]
 class LocalRegistry:
     """Single-process registry for tests + single-worker dev mode.
 
-    1.2.0+: tracks multiple WebSockets per agent_id, keyed by
-    worker_id. Legacy 1.1.x clients (worker_id=None) use ``None``
-    as their dict key (1.2.1+ - earlier patches used a string
-    sentinel that could collide with attacker-chosen worker_ids).
+    Tracks multiple immutable session generations per agent_id,
+    keyed by worker_id. Legacy 1.1.x clients (worker_id=None) use
+    ``None`` as their dict key (1.2.1+ - earlier patches used a
+    string sentinel that could collide with attacker-chosen
+    worker_ids).
     """
 
     def __init__(self, *, deliver_local: LocalDeliverCallback) -> None:
         self._lock = asyncio.Lock()
-        # agent_id -> {worker_id (or None for legacy): WebSocket}
-        self._connections: dict[UUID, dict[str | None, WebSocket]] = {}
+        self._registry_owner_id = uuid4()
+        # agent_id -> {worker_id (or None): immutable session generation}
+        self._connections: dict[UUID, dict[str | None, SessionHandle]] = {}
         self._project_for_agent: dict[UUID, UUID] = {}
         self._deliver_local = deliver_local
 
@@ -78,8 +81,10 @@ class LocalRegistry:
         ws: WebSocket,
         worker_id: str | None = None,
         cap: int = 0,
-    ) -> None:
+        retry_contracts: dict[str, int] | None = None,
+    ) -> SessionHandle:
         slot: str | None = worker_id  # None = legacy 1.1.x slot
+        displaced: SessionHandle | None = None
         async with self._lock:
             workers = self._connections.setdefault(agent_id, {})
             # Cap check (1.2.1+): only counts NEW slot creations.
@@ -93,13 +98,39 @@ class LocalRegistry:
                     cap=cap,
                 )
             existing = workers.get(slot)
-            if existing is not None and existing is not ws:
-                # Same (agent_id, worker_id) reconnecting (or a
-                # legacy-mode duplicate). Kick the old.
-                with contextlib.suppress(Exception):
-                    await existing.close(code=4002)
-            workers[slot] = ws
+            if existing is not None and existing.websocket is not ws:
+                displaced = existing
+            handle = SessionHandle.create(
+                agent_id=agent_id,
+                worker_id=worker_id,
+                websocket=ws,
+                retry_contracts=retry_contracts,
+                registry_owner_id=self._registry_owner_id,
+            )
+            # Starlette WebSocket instances carry these immutable delivery
+            # coordinates into the app callback.  Registry protocol tests and
+            # embedders may supply opaque sentinel objects with no ``__dict__``;
+            # registration/selection must not fail merely because no physical
+            # delivery can be attempted through such a sentinel.
+            with contextlib.suppress(AttributeError, TypeError):
+                ws._z4j_registry_owner_id = handle.registry_owner_id  # type: ignore[attr-defined]
+                ws._z4j_session_generation = handle.generation  # type: ignore[attr-defined]
+                ws._z4j_agent_id = handle.agent_id  # type: ignore[attr-defined]
+
+                async def validate_registry_generation() -> bool:
+                    return await self._session_is_current(handle)
+
+                ws._z4j_validate_registry_generation = (  # type: ignore[attr-defined]
+                    validate_registry_generation
+                )
+            workers[slot] = handle
             self._project_for_agent[agent_id] = project_id
+        # The replacement is authoritative before any fallible socket close,
+        # and the map mutex is never held across network I/O.
+        if displaced is not None:
+            with contextlib.suppress(Exception):
+                await displaced.websocket.close(code=4002)
+        return handle
 
     async def unregister(
         self,
@@ -124,7 +155,7 @@ class LocalRegistry:
                 return True
             if ws is not None:
                 current = workers.get(slot)
-                if current is not ws:
+                if current is None or current.websocket is not ws:
                     # The new connection has already replaced this one;
                     # leave the registry entry intact. Other workers
                     # may be present, so the agent isn't offline.
@@ -141,39 +172,168 @@ class LocalRegistry:
         workers = self._connections.get(agent_id)
         return bool(workers)
 
+    async def _session_is_current(self, handle: SessionHandle) -> bool:
+        async with self._lock:
+            current = (self._connections.get(handle.agent_id) or {}).get(
+                handle.worker_id,
+            )
+            return (
+                current is handle
+                and current.registry_owner_id == handle.registry_owner_id
+                and current.generation == handle.generation
+            )
+
     async def deliver(
         self,
         *,
         command_id: UUID,
         agent_id: UUID,
+        required_retry_engine: str | None = None,
     ) -> DeliveryResult:
-        workers = self._connections.get(agent_id)
-        if not workers:
-            return DeliveryResult(
-                delivered_locally=False,
-                notified_cluster=False,
-                agent_was_known=False,
+        async with self._lock:
+            workers = self._connections.get(agent_id)
+            handle = next(
+                (
+                    candidate
+                    for candidate in (workers or {}).values()
+                    if candidate.supports_retry_engine(
+                        required_retry_engine,
+                    )
+                ),
+                None,
             )
-        # Pick any worker - first-available semantics. Future:
-        # per-role routing (deliver schedule.fire to role=task,
-        # config-update to role=web, etc.). For 1.2.0 we stay
-        # role-agnostic; commands flow to whichever worker the
-        # registry iteration yields first.
-        ws = next(iter(workers.values()))
-        try:
-            ok = await self._deliver_local(command_id, ws)
-        except Exception:
-            logger.exception(
-                "z4j local registry deliver crashed",
-                command_id=str(command_id),
-                agent_id=str(agent_id),
-            )
-            ok = False
+            if handle is None:
+                return DeliveryResult(
+                    delivered_locally=False,
+                    notified_cluster=False,
+                    agent_was_known=bool(workers),
+                )
+        # The immutable handle is the delivery authority. Never hold the
+        # registry lock across database or network I/O: a reconnect may need
+        # that lock while the selected generation's send is in flight. The
+        # callback receives only this handle's socket and is never retargeted.
+        ok = await self._deliver_handle(
+            command_id=command_id,
+            handle=handle,
+        )
         return DeliveryResult(
             delivered_locally=ok,
             notified_cluster=False,
             agent_was_known=True,
         )
+
+    async def deliver_exact(
+        self,
+        *,
+        command_id: UUID,
+        session: SessionHandle,
+    ) -> bool:
+        async with self._lock:
+            current = (self._connections.get(session.agent_id) or {}).get(
+                session.worker_id,
+            )
+            if (
+                current is not session
+                or current.registry_owner_id != session.registry_owner_id
+                or current.generation != session.generation
+            ):
+                return False
+            handle = current
+        # Retain only the immutable selected handle. The callback performs the
+        # just-before-send generation validation attached at registration.
+        return await self._deliver_handle(
+            command_id=command_id,
+            handle=handle,
+        )
+
+    async def deliver_frozen(
+        self,
+        *,
+        command_id: UUID,
+        agent_id: UUID,
+        registry_owner_id: UUID,
+        session_generation: str,
+    ) -> bool:
+        async with self._lock:
+            handle = next(
+                (
+                    candidate
+                    for candidate in (self._connections.get(agent_id) or {}).values()
+                    if candidate.registry_owner_id == registry_owner_id
+                    and str(candidate.generation) == session_generation
+                ),
+                None,
+            )
+            if handle is None:
+                return False
+        return await self._deliver_handle(
+            command_id=command_id,
+            handle=handle,
+        )
+
+    async def _deliver_handle(
+        self,
+        *,
+        command_id: UUID,
+        handle: SessionHandle,
+    ) -> bool:
+        try:
+            return await self._deliver_local(
+                command_id,
+                handle.websocket,
+            )
+        except Exception:
+            # A callback failure must collapse to "not delivered" even when
+            # the process console cannot encode the rendered traceback (for
+            # example under a legacy Windows code page). Logging is
+            # diagnostic and must never become the delivery outcome.
+            with contextlib.suppress(Exception):
+                logger.exception(
+                    "z4j local registry deliver crashed",
+                    command_id=str(command_id),
+                    agent_id=str(handle.agent_id),
+                )
+            return False
+
+    async def select_session(
+        self,
+        *,
+        agent_id: UUID,
+        required_retry_engine: str | None = None,
+    ) -> SessionHandle | None:
+        async with self._lock:
+            workers = self._connections.get(agent_id)
+            if not workers:
+                return None
+            return next(
+                (
+                    handle
+                    for handle in workers.values()
+                    if handle.supports_retry_engine(required_retry_engine)
+                ),
+                None,
+            )
+
+    async def select_project_session(
+        self,
+        *,
+        project_id: UUID,
+        required_retry_engine: str,
+    ) -> SessionHandle | None:
+        """Return one immutable compatible generation in this project."""
+
+        async with self._lock:
+            for agent_id in sorted(self._connections, key=str):
+                if self._project_for_agent.get(agent_id) != project_id:
+                    continue
+                for worker_id in sorted(
+                    self._connections[agent_id],
+                    key=lambda value: "" if value is None else value,
+                ):
+                    handle = self._connections[agent_id][worker_id]
+                    if handle.supports_retry_engine(required_retry_engine):
+                        return handle
+        return None
 
     async def kick(self, agent_id: UUID) -> int:
         """Close every WebSocket for ``agent_id`` and drop the entry.
@@ -193,9 +353,9 @@ class LocalRegistry:
         if not workers:
             return 0
         closed = 0
-        for ws in list(workers.values()):
+        for handle in list(workers.values()):
             try:
-                await ws.close(code=4003)
+                await handle.websocket.close(code=4003)
                 closed += 1
             except Exception:  # noqa: S110  best-effort close of revoked agent connection
                 # Connection may already be torn down; tolerate.
@@ -239,9 +399,9 @@ class LocalRegistry:
     async def stop(self) -> None:
         async with self._lock:
             for workers in list(self._connections.values()):
-                for ws in list(workers.values()):
+                for handle in list(workers.values()):
                     with contextlib.suppress(Exception):
-                        await ws.close(code=1001)
+                        await handle.websocket.close(code=1001)
             self._connections.clear()
             self._project_for_agent.clear()
 

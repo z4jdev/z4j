@@ -369,7 +369,7 @@ class TestDetection:
         settings: Settings,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Codex round-2 Finding 1: schedule.misfired automation raising AFTER
+        # schedule.misfired automation raising AFTER
         # the detection audit commits must NOT release the durable claim
         # (which would re-audit the same episode next sweep). The audit is
         # written exactly once; the claim is held.
@@ -511,7 +511,7 @@ class TestDedup:
 
 
 class _FakeRegistry:
-    async def deliver(self, *, command_id, agent_id) -> DeliveryResult:
+    async def deliver(self, *, command_id, agent_id, required_retry_engine=None) -> DeliveryResult:
         return DeliveryResult(
             delivered_locally=False,
             notified_cluster=True,

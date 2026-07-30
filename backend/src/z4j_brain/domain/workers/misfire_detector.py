@@ -400,7 +400,7 @@ class MisfireDetector:
 
         lateness = (now - expected).total_seconds()
         last_run = _as_utc(schedule.last_run_at)
-        async with self._db.session() as session:
+        async with self._db.session(write=True) as session:
             await self._audit.record(
                 AuditLogRepository(session),
                 action="scheduler.misfire_detected",
@@ -503,7 +503,7 @@ class MisfireDetector:
             audit=self._audit,
             runner=AutomationActionRunner(dispatcher=self._dispatcher),
         )
-        async with self._db.session() as session:
+        async with self._db.session(write=True) as session:
             await executor.run_matching(
                 session=session,
                 rules_repo=AutomationRuleRepository(session),

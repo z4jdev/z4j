@@ -1,10 +1,9 @@
-"""Tests for failure fingerprinting (R4).
+"""Tests for failure fingerprinting.
 
 The load-bearing property: the SAME logical failure across runs -- with
 different memory addresses, uuids, object reprs, and numeric ids in the
 message -- collapses to ONE fingerprint, while genuinely different failures
-(different exception class or different call site) stay distinct.
-"""
+(different exception class or different call site) stay distinct."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Real automation ``ActionRunner`` (Cluster R2 wiring).
+"""Real automation ``ActionRunner``.
 
 Executes a firing rule's actions against the live brain:
 
@@ -16,8 +16,7 @@ Executes a firing rule's actions against the live brain:
 Capability enforcement is agent-side: the agent's dispatcher fails closed
 on an action its engine adapter does not advertise, and the failed
 ``command_result`` is audited by the command dispatcher. Brain-side
-pre-gating is a follow-up.
-"""
+pre-gating is a follow-up."""
 
 from __future__ import annotations
 
@@ -27,6 +26,7 @@ from uuid import UUID
 import structlog
 
 from z4j_brain.domain.policy_engine import role_rank
+from z4j_brain.domain.retry_contract import engine_is_native_retry
 from z4j_brain.errors import AgentOfflineError
 from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.persistence.models.notification import (
@@ -146,6 +146,24 @@ class AutomationActionRunner:
             )
             if task is not None:
                 payload["task_name"] = task.name
+            # RH1 (direction 1): an auto-retry of a POLYFILL engine is lowered to
+            # submit_task on the agent, which needs concrete arguments -- but the
+            # brain stores them REDACTED and the automation path supplies NO
+            # operator overrides. There is therefore no safe way to auto-retry a
+            # polyfill engine (it would re-run with empty / wrong inputs on any
+            # runtime), so refuse statically. Native engines retry by reference
+            # off the broker and need no overrides. This does not depend on a
+            # negotiated runtime capability -- the criterion is the (absent)
+            # overrides, which the agent-side dispatcher fails closed on too.
+            if not engine_is_native_retry(engine):
+                logger.warning(
+                    "z4j automation: retry skipped -- engine %s has no native "
+                    "retry and an automation rule supplies no operator "
+                    "overrides, so a safe re-submit is impossible (rule %s)",
+                    engine,
+                    rule.name,
+                )
+                return "polyfill_retry_needs_overrides"
 
         try:
             await self._dispatcher.issue(

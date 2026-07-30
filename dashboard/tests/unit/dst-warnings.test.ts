@@ -20,27 +20,21 @@
  * year that would go stale.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { computeDstWarning } from "@/lib/dst-warnings";
 
 describe("computeDstWarning", () => {
   it("returns null for non-cron kinds", () => {
-    expect(
-      computeDstWarning("interval", "60s", "America/New_York"),
-    ).toBeNull();
+    expect(computeDstWarning("interval", "60s", "America/New_York")).toBeNull();
     expect(
       computeDstWarning("one_shot", "2026-12-25T09:00:00Z", "Europe/Berlin"),
     ).toBeNull();
   });
 
   it("returns null for UTC", () => {
-    expect(
-      computeDstWarning("cron", "0 2 * * *", "UTC"),
-    ).toBeNull();
-    expect(
-      computeDstWarning("cron", "0 2 * * *", "Etc/UTC"),
-    ).toBeNull();
+    expect(computeDstWarning("cron", "0 2 * * *", "UTC")).toBeNull();
+    expect(computeDstWarning("cron", "0 2 * * *", "Etc/UTC")).toBeNull();
   });
 
   it("returns null for timezones that do not observe DST", () => {
@@ -49,9 +43,43 @@ describe("computeDstWarning", () => {
       computeDstWarning("cron", "0 2 * * *", "America/Phoenix"),
     ).toBeNull();
     // Tokyo never observes DST.
-    expect(
-      computeDstWarning("cron", "0 2 * * *", "Asia/Tokyo"),
-    ).toBeNull();
+    expect(computeDstWarning("cron", "0 2 * * *", "Asia/Tokyo")).toBeNull();
+  });
+
+  it("reuses timezone formatters across the year scan", async () => {
+    vi.resetModules();
+    const RealDateTimeFormat = Intl.DateTimeFormat;
+    let constructorCalls = 0;
+    function CountingDateTimeFormat(
+      this: Intl.DateTimeFormat,
+      locales?: Intl.LocalesArgument,
+      options?: Intl.DateTimeFormatOptions,
+    ): Intl.DateTimeFormat {
+      constructorCalls += 1;
+      return new RealDateTimeFormat(locales, options);
+    }
+    Object.defineProperty(CountingDateTimeFormat, "supportedLocalesOf", {
+      value: RealDateTimeFormat.supportedLocalesOf.bind(RealDateTimeFormat),
+    });
+    Object.defineProperty(Intl, "DateTimeFormat", {
+      configurable: true,
+      value: CountingDateTimeFormat,
+    });
+
+    let warning;
+    try {
+      const { computeDstWarning: computeWithFreshCache } =
+        await import("@/lib/dst-warnings");
+      warning = computeWithFreshCache("cron", "0 2 * * *", "America/Phoenix");
+    } finally {
+      Object.defineProperty(Intl, "DateTimeFormat", {
+        configurable: true,
+        value: RealDateTimeFormat,
+      });
+    }
+
+    expect(warning).toBeNull();
+    expect(constructorCalls).toBe(2);
   });
 
   it("warns on fall-back duplicate for US Eastern", () => {
@@ -106,12 +134,8 @@ describe("computeDstWarning", () => {
   it("returns null on a malformed cron expression", () => {
     // Defensive: don't throw on garbage. The form's validator
     // catches malformed input separately.
-    expect(
-      computeDstWarning("cron", "not a cron", "Europe/Berlin"),
-    ).toBeNull();
-    expect(
-      computeDstWarning("cron", "* * *", "Europe/Berlin"),
-    ).toBeNull();
+    expect(computeDstWarning("cron", "not a cron", "Europe/Berlin")).toBeNull();
+    expect(computeDstWarning("cron", "* * *", "Europe/Berlin")).toBeNull();
   });
 
   it("returns null on an empty timezone", () => {

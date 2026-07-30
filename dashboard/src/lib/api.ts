@@ -30,11 +30,12 @@ const API_BASE = "/api/v1";
 // in unit tests can swap the implementation after this module has
 // already been imported. Production behaviour is identical -- the
 // arrow still resolves to globalThis.fetch on every invocation.
-const fetchImpl: typeof fetch = import.meta.env.VITE_Z4J_DEMO_MODE === "true"
-  ? // The dynamic import is awaited at module load via a top-level
-    // await; Vite supports this for ES module targets.
-    (await import("./api.demo")).demoFetch
-  : ((input, init) => fetch(input, init)) as typeof fetch;
+const fetchImpl: typeof fetch =
+  import.meta.env.VITE_Z4J_DEMO_MODE === "true"
+    ? // The dynamic import is awaited at module load via a top-level
+      // await; Vite supports this for ES module targets.
+      (await import("./api.demo")).demoFetch
+    : (((input, init) => fetch(input, init)) as typeof fetch);
 
 const CSRF_COOKIE_NAMES = ["__Host-z4j_csrf", "z4j_csrf"];
 const CSRF_HEADER = "X-CSRF-Token";
@@ -54,21 +55,62 @@ export class ApiError extends Error {
 
   constructor(
     status: number,
-    envelope: ErrorEnvelope | { message?: string },
+    envelope: ErrorEnvelope | { message?: string; detail?: unknown },
   ) {
-    super(envelope.message ?? `request failed (${status})`);
+    const normalized = normalizeErrorEnvelope(envelope);
+    super(normalized.message ?? `request failed (${status})`);
     this.name = "ApiError";
     this.status = status;
-    if ("error" in envelope) {
-      this.code = envelope.error;
-      this.details = envelope.details ?? {};
-      this.requestId = envelope.request_id ?? null;
-    } else {
-      this.code = "unknown";
-      this.details = {};
-      this.requestId = null;
-    }
+    this.code = normalized.code;
+    this.details = normalized.details;
+    this.requestId = normalized.requestId;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeErrorEnvelope(
+  envelope: ErrorEnvelope | { message?: string; detail?: unknown },
+): {
+  message?: string;
+  code: string;
+  details: Record<string, unknown>;
+  requestId: string | null;
+} {
+  const outer: Record<string, unknown> = isRecord(envelope) ? envelope : {};
+  const candidate =
+    typeof outer.error === "string"
+      ? outer
+      : isRecord(outer.detail)
+        ? outer.detail
+        : outer;
+  if (typeof candidate.error !== "string") {
+    return {
+      message: typeof outer.message === "string" ? outer.message : undefined,
+      code: "unknown",
+      details: {},
+      requestId: null,
+    };
+  }
+  const details = isRecord(candidate.details)
+    ? { ...candidate.details }
+    : Object.fromEntries(
+        Object.entries(candidate).filter(
+          ([key]) => !["error", "message", "request_id"].includes(key),
+        ),
+      );
+  return {
+    message:
+      typeof candidate.message === "string"
+        ? candidate.message
+        : candidate.error,
+    code: candidate.error,
+    details,
+    requestId:
+      typeof candidate.request_id === "string" ? candidate.request_id : null,
+  };
 }
 
 function getCookie(name: string): string | null {
@@ -97,6 +139,8 @@ interface ApiCallOptions {
   body?: unknown;
   signal?: AbortSignal;
   query?: Record<string, string | number | boolean | null | undefined>;
+  /** Observe response metadata such as a durable resource Location. */
+  onResponse?: (response: Response) => void;
   /**
    * Internal flag - set automatically when we are inside a single
    * CSRF-rotation retry. Callers must never set this themselves.
@@ -161,15 +205,16 @@ export async function apiCall<T>(
       method,
       headers,
       credentials: "include",
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      body:
+        options.body !== undefined ? JSON.stringify(options.body) : undefined,
       signal: options.signal,
     });
+    options.onResponse?.(response);
   } catch (err) {
     // Network errors: no internet, DNS failure, CORS blocked, aborted.
     throw new ApiError(0, {
       error: "network_error",
-      message:
-        err instanceof Error ? err.message : "Network request failed",
+      message: err instanceof Error ? err.message : "Network request failed",
     });
   }
 
@@ -196,8 +241,7 @@ export async function apiCall<T>(
 
   if (!response.ok) {
     const envelope = (parsed ?? { message: response.statusText }) as
-      | ErrorEnvelope
-      | { message?: string };
+      ErrorEnvelope | { message?: string };
     if (
       response.status === 403 &&
       method !== "GET" &&
@@ -228,6 +272,22 @@ export const api = {
   },
   post<T>(path: string, body?: unknown): Promise<T> {
     return apiCall<T>(path, { method: "POST", body });
+  },
+  async postResource<T>(
+    path: string,
+    body?: unknown,
+    onLocation?: (location: string) => void,
+  ): Promise<{ data: T; location: string | null }> {
+    let location: string | null = null;
+    const data = await apiCall<T>(path, {
+      method: "POST",
+      body,
+      onResponse: (response) => {
+        location = response.headers.get("Location");
+        if (location !== null) onLocation?.(location);
+      },
+    });
+    return { data, location };
   },
   patch<T>(path: string, body?: unknown): Promise<T> {
     return apiCall<T>(path, { method: "PATCH", body });

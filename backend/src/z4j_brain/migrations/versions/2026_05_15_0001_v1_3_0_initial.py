@@ -162,6 +162,373 @@ $$ LANGUAGE plpgsql;
 """
 
 
+_POST_1_3_0_TABLES: frozenset[str] = frozenset(
+    {
+        "agent_status_history",
+        "audit_chain_preparation",
+        "audit_chain_state",
+        "bulk_retry_request_children",
+        "bulk_retry_requests",
+        "schedule_revision_state",
+        "schedule_change_log",
+        "schedule_terminal_holds",
+        "schedule_occurrence_resolutions",
+        "schedule_external_control_operations",
+        "schedule_external_epoch_allocator",
+        "schedule_external_projections",
+        "schedule_external_snapshot_frames",
+        "schedule_external_stream_epochs",
+        "schedule_external_streams",
+        "schedule_owner_cutovers",
+    }
+)
+
+_HISTORICAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "audit_log": (
+        "project_id",
+        "user_id",
+        "api_key_id",
+        "action",
+        "target_type",
+        "target_id",
+        "result",
+        "metadata",
+        "source_ip",
+        "user_agent",
+        "occurred_at",
+        "outcome",
+        "event_id",
+        "row_hmac",
+        "prev_row_hmac",
+        "id",
+    ),
+    "commands": (
+        "project_id",
+        "issued_by",
+        "agent_id",
+        "action",
+        "target_type",
+        "target_id",
+        "payload",
+        "idempotency_key",
+        "status",
+        "result",
+        "error",
+        "issued_at",
+        "dispatched_at",
+        "completed_at",
+        "timeout_at",
+        "source_ip",
+        "id",
+    ),
+    "pending_fires": (
+        "id",
+        "fire_id",
+        "schedule_id",
+        "project_id",
+        "engine",
+        "payload",
+        "scheduled_for",
+        "enqueued_at",
+        "expires_at",
+    ),
+    "schedule_fires": (
+        "id",
+        "fire_id",
+        "schedule_id",
+        "project_id",
+        "command_id",
+        "triggered_by_user_id",
+        "status",
+        "scheduled_for",
+        "fired_at",
+        "acked_at",
+        "latency_ms",
+        "error_code",
+        "error_message",
+    ),
+    "schedules": (
+        "project_id",
+        "engine",
+        "scheduler",
+        "name",
+        "task_name",
+        "kind",
+        "expression",
+        "timezone",
+        "queue",
+        "priority",
+        "args",
+        "kwargs",
+        "is_enabled",
+        "last_run_at",
+        "next_run_at",
+        "total_runs",
+        "external_id",
+        "catch_up",
+        "source",
+        "source_hash",
+        "last_fire_id",
+        "id",
+        "created_at",
+        "updated_at",
+    ),
+}
+
+_HISTORICAL_INITIAL_TABLE_ORDER: tuple[str, ...] = (
+    "extension_store",
+    "feature_flags",
+    "first_boot_tokens",
+    "projects",
+    "scheduler_rate_buckets",
+    "users",
+    "z4j_meta",
+    "agents",
+    "api_keys",
+    "audit_log",
+    "automation_firing_outbox",
+    "automation_rules",
+    "export_jobs",
+    "invitations",
+    "memberships",
+    "mfa_recovery_codes",
+    "notification_channels",
+    "password_reset_tokens",
+    "project_config",
+    "project_default_subscriptions",
+    "queues",
+    "saved_views",
+    "schedules",
+    "sessions",
+    "tasks",
+    "trusted_devices",
+    "user_channels",
+    "user_preferences",
+    "user_subscriptions",
+    "workers",
+    "agent_offline_alerts",
+    "agent_workers",
+    "commands",
+    "events",
+    "misfire_alerts",
+    "notification_deliveries",
+    "pending_fires",
+    "task_annotations",
+    "user_notifications",
+    "schedule_fires",
+)
+
+
+def _copy_historical_columns(
+    table_name: str,
+) -> list[sa.Column[object]]:
+    source = Base.metadata.tables[table_name]
+    return [
+        source.c[column_name]._copy()
+        for column_name in _HISTORICAL_TABLE_COLUMNS[table_name]
+    ]
+
+
+def _historical_initial_metadata() -> sa.MetaData:
+    """Freeze the real 1.3-era shape instead of replaying live 1.8 models."""
+
+    metadata = sa.MetaData(
+        naming_convention=Base.metadata.naming_convention,
+    )
+    # The frozen tables need their FK targets present in this private metadata
+    # for SQLAlchemy resolution.  These three declarations are name/type
+    # placeholders only; upgrade() never creates them from this metadata.
+    for table_name in ("projects", "users", "agents"):
+        source = Base.metadata.tables[table_name]
+        sa.Table(
+            table_name,
+            metadata,
+            source.c.id._copy(),
+        )
+
+    audit_log = sa.Table(
+        "audit_log",
+        metadata,
+        *_copy_historical_columns("audit_log"),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_audit_log_project_id_projects",
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_audit_log_user_id_users",
+            ondelete="SET NULL",
+        ),
+    )
+    sa.Index(
+        "ix_audit_log_action_occurred",
+        audit_log.c.action,
+        audit_log.c.occurred_at,
+    )
+    sa.Index(
+        "ix_audit_log_api_key_id",
+        audit_log.c.api_key_id,
+        sqlite_where=sa.text("api_key_id IS NOT NULL"),
+        postgresql_where=sa.text("api_key_id IS NOT NULL"),
+    )
+    sa.Index("ix_audit_log_occurred_at", audit_log.c.occurred_at)
+    sa.Index(
+        "ix_audit_log_project_occurred",
+        audit_log.c.project_id,
+        audit_log.c.occurred_at,
+    )
+    sa.Index(
+        "ix_audit_log_user_occurred",
+        audit_log.c.user_id,
+        audit_log.c.occurred_at,
+    )
+    sa.Index(
+        "ux_audit_log_prev_row_hmac",
+        audit_log.c.prev_row_hmac,
+        unique=True,
+        sqlite_where=sa.text("prev_row_hmac IS NOT NULL"),
+        postgresql_where=sa.text("prev_row_hmac IS NOT NULL"),
+    )
+
+    commands = sa.Table(
+        "commands",
+        metadata,
+        *_copy_historical_columns("commands"),
+        sa.UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_commands_project_idempotency_key",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_commands_project_id_projects",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["issued_by"],
+            ["users.id"],
+            name="fk_commands_issued_by_users",
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["agent_id"],
+            ["agents.id"],
+            name="fk_commands_agent_id_agents",
+            ondelete="SET NULL",
+        ),
+    )
+    sa.Index(
+        "ix_commands_project_status_issued",
+        commands.c.project_id,
+        commands.c.status,
+        commands.c.issued_at,
+    )
+    sa.Index("ix_commands_timeout_at", commands.c.timeout_at)
+    sa.Index(
+        "ix_commands_issued_by_at",
+        commands.c.issued_by,
+        commands.c.issued_at,
+    )
+
+    pending_fires = sa.Table(
+        "pending_fires",
+        metadata,
+        *_copy_historical_columns("pending_fires"),
+        sa.UniqueConstraint(
+            "fire_id",
+            name="uq_pending_fires_fire_id",
+        ),
+        sa.ForeignKeyConstraint(
+            ["schedule_id"],
+            ["schedules.id"],
+            name="fk_pending_fires_schedule_id_schedules",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_pending_fires_project_id_projects",
+            ondelete="CASCADE",
+        ),
+    )
+    sa.Index(
+        "ix_pending_fires_replay",
+        pending_fires.c.project_id,
+        pending_fires.c.engine,
+        pending_fires.c.scheduled_for,
+    )
+    sa.Index("ix_pending_fires_expires", pending_fires.c.expires_at)
+
+    schedule_fires = sa.Table(
+        "schedule_fires",
+        metadata,
+        *_copy_historical_columns("schedule_fires"),
+        sa.UniqueConstraint(
+            "fire_id",
+            name="uq_schedule_fires_fire_id",
+        ),
+        sa.ForeignKeyConstraint(
+            ["schedule_id"],
+            ["schedules.id"],
+            name="fk_schedule_fires_schedule_id_schedules",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_schedule_fires_project_id_projects",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["command_id"],
+            ["commands.id"],
+            name="fk_schedule_fires_command_id_commands",
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["triggered_by_user_id"],
+            ["users.id"],
+            name="fk_schedule_fires_triggered_by_user_id_users",
+            ondelete="SET NULL",
+        ),
+    )
+    sa.Index(
+        "ix_schedule_fires_schedule_recent",
+        schedule_fires.c.schedule_id,
+        schedule_fires.c.fired_at,
+    )
+    sa.Index(
+        "ix_schedule_fires_circuit_breaker",
+        schedule_fires.c.schedule_id,
+        schedule_fires.c.status,
+        schedule_fires.c.fired_at,
+    )
+
+    schedules = sa.Table(
+        "schedules",
+        metadata,
+        *_copy_historical_columns("schedules"),
+        sa.UniqueConstraint(
+            "project_id",
+            "scheduler",
+            "name",
+            name="uq_schedules_project_scheduler_name",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_schedules_project_id_projects",
+            ondelete="CASCADE",
+        ),
+    )
+    sa.Index("ix_schedules_project_id", schedules.c.project_id)
+    return metadata
+
+
 # ---------------------------------------------------------------------------
 # upgrade() / downgrade()
 # ---------------------------------------------------------------------------
@@ -175,25 +542,28 @@ def upgrade() -> None:
     if is_postgres:
         _install_extensions()
 
-    # ORM model is the source of truth, it captures every table,
-    # column, single + multi-column index declared via
-    # ``__table_args__``, and FK constraint. SQLAlchemy emits the
-    # right CREATE TABLE per dialect.
-    #
-    # 1.5+ note: tables introduced by later migrations are excluded
-    # from this initial create. ``Base.metadata`` accumulates every
-    # model registered in the ORM tree (including future-version
-    # additions that ship in the same brain code), so we filter
-    # explicitly to keep the 1.3.0 baseline true to its name. The
-    # 1.5 ``agent_status_history`` migration creates that table
-    # additively. See ``2026_05_20_0002_v1_5_agent_status_history.py``.
-    _post_1_3_0_tables: frozenset[str] = frozenset(
-        {
-            "agent_status_history",
-        }
-    )
-    initial_tables = [t for t in Base.metadata.sorted_tables if t.name not in _post_1_3_0_tables]
-    Base.metadata.create_all(bind=bind, tables=initial_tables)
+    # Unchanged 1.3-era tables retain their ORM definitions. Tables whose
+    # models evolved in 1.8 are emitted from the frozen historical definitions
+    # above, and later tables are absent entirely. This keeps replay of the
+    # historical chain equal to the immutable shipped 1.7 schema instead of
+    # teaching old revisions today's columns, constraints, or indexes.
+    historical = _historical_initial_metadata()
+    for table_name in _HISTORICAL_INITIAL_TABLE_ORDER:
+        if table_name in _POST_1_3_0_TABLES:
+            continue
+        table = (
+            historical.tables[table_name]
+            if table_name in _HISTORICAL_TABLE_COLUMNS
+            else Base.metadata.tables[table_name]
+        )
+        table.create(bind=bind, checkfirst=True)
+
+    # Invocation-local evidence for Boundary F's genuinely fresh path.  It is
+    # deliberately not inferred later from an empty audit table or from shapes
+    # that current Base.metadata precreated.  If the process crashes before F
+    # activation, the marker disappears and the safe recovery is the explicit
+    # ambiguity ceremony rather than silently blessing an existing empty DB.
+    op.get_context().config.attributes["z4j_fresh_schema_bootstrap"] = True
 
     if is_postgres:
         _install_postgres_only_features(bind)
@@ -228,6 +598,13 @@ def downgrade() -> None:
     # exactly correct.
     cascade = " CASCADE" if is_postgres else ""
     for table_name in (
+        # Current Base.metadata may precreate these inert Boundary-D shapes
+        # during a fresh historical-chain run.  Before D activation they carry
+        # no authority and the old reversible prefix must still remove them.
+        "schedule_occurrence_resolutions",
+        "schedule_terminal_holds",
+        "schedule_change_log",
+        "schedule_revision_state",
         "schedule_fires",
         "alert_events",
         "task_annotations",
@@ -264,11 +641,19 @@ def downgrade() -> None:
         "first_boot_tokens",
         "feature_flags",
     ):
-        op.execute(sa.text(f"DROP TABLE IF EXISTS {table_name}{cascade}"))
+        op.execute(
+            sa.text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                f"DROP TABLE IF EXISTS {table_name}{cascade}",
+            ),
+        )
 
     if is_postgres:
         for enum_name in _SQL_ENUM_NAMES:
-            op.execute(sa.text(f"DROP TYPE IF EXISTS {enum_name}"))
+            op.execute(
+                sa.text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                    f"DROP TYPE IF EXISTS {enum_name}",
+                ),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +710,7 @@ def _install_postgres_only_features(
     #   not a UUID.
     #
     # If a future model adds a uuid id column, append to this tuple.
-    _UUID_ID_TABLES: tuple[str, ...] = (
+    uuid_id_tables: tuple[str, ...] = (
         "agent_workers",
         "agents",
         "alert_events",
@@ -363,11 +748,11 @@ def _install_postgres_only_features(
         "workers",
         "z4j_meta",
     )
-    for table in _UUID_ID_TABLES:
+    for table in uuid_id_tables:
         # ``IF EXISTS`` so a future split-out (table moved to its
         # own optional extension) doesn't break the migration.
         op.execute(
-            sa.text(
+            sa.text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
                 f"ALTER TABLE IF EXISTS {table} ALTER COLUMN id SET DEFAULT gen_random_uuid()",
             ),
         )
@@ -521,7 +906,7 @@ def _install_events_partitioning() -> None:
 
     # Pre-create N daily partitions starting today.
     op.execute(
-        sa.text(
+        sa.text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
             "DO $$ "
             "DECLARE d DATE; "
             "BEGIN "
@@ -653,7 +1038,11 @@ def _drop_postgres_only_indexes() -> None:
         # case an operator is rolling back from an old install.
         "ix_events_envelope_gin",
     ):
-        op.execute(sa.text(f"DROP INDEX IF EXISTS {idx}"))
+        op.execute(
+            sa.text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                f"DROP INDEX IF EXISTS {idx}",
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

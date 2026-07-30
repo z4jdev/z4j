@@ -80,6 +80,47 @@ function serveJson(file: string) {
 }
 
 /**
+ * Issues intercept. Unlike the other project resources this one honors
+ * the endpoint's query params (the real backend filters server-side, so
+ * the Issues page sends `status` / `engine` / `hours` and renders the
+ * response as-is). Serving the raw file regardless of params made the
+ * page's Ongoing / Recovered filter buttons no-ops in demo mode.
+ */
+async function serveIssues(req: Request, project: string): Promise<Response> {
+  const raw = await serveJson(`projects/${project}/issues.json`)();
+  if (!raw.ok) return raw;
+  const payload = (await raw.json()) as {
+    items: Array<{
+      status: string;
+      engines: string[];
+      last_seen: string | null;
+    }>;
+    next_cursor: string | null;
+  };
+  const params = new URL(req.url).searchParams;
+  const status = params.get("status");
+  const engine = params.get("engine");
+  const hours = Number(params.get("hours"));
+  let items = payload.items;
+  if (status === "ongoing" || status === "recovered") {
+    items = items.filter((i) => i.status === status);
+  }
+  if (engine) {
+    items = items.filter((i) => i.engines.includes(engine));
+  }
+  if (Number.isFinite(hours) && hours > 0) {
+    const cutoff = Date.now() - hours * 3600_000;
+    items = items.filter(
+      (i) => i.last_seen !== null && Date.parse(i.last_seen) >= cutoff,
+    );
+  }
+  return new Response(
+    JSON.stringify({ items, next_cursor: payload.next_cursor }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+/**
  * Login intercept. Accepts ANY input and returns success because
  * the form is pre-filled with `demo@example.com / demo`, but a
  * curious visitor might edit the values; the friendliest UX is to
@@ -125,6 +166,7 @@ const ROUTES: RouteHandler[] = [
   { method: "POST", pattern: /^\/api\/v1\/auth\/login$/, handler: handleLogin },
   { method: "POST", pattern: /^\/api\/v1\/auth\/logout$/, handler: handleLogout },
   { method: "GET", pattern: /^\/api\/v1\/auth\/me$/, handler: serveJson("auth/me.json") },
+  { method: "GET", pattern: /^\/api\/v1\/auth\/sessions$/, handler: serveJson("auth/sessions.json") },
 
   // MFA / trust shell (Settings > Security). The demo admin is already
   // enrolled, so the Security tab renders the "MFA is on" panel with a
@@ -165,6 +207,24 @@ const ROUTES: RouteHandler[] = [
   // content instead of an empty header.
   { method: "GET", pattern: /^\/api\/v1\/schedulers$/, handler: serveJson("system/schedulers.json") },
 
+  // Settings > Users (admin). Without this the page renders the
+  // QueryError card instead of the user table, which is the single
+  // most-visited admin surface after Projects.
+  { method: "GET", pattern: /^\/api\/v1\/users$/, handler: serveJson("admin/users.json") },
+
+  // Settings > API Keys. The scopes catalogue is a separate call made
+  // by the create dialog; it is anchored ahead of the list route only
+  // for readability - both patterns are `$`-anchored so match order
+  // cannot matter.
+  { method: "GET", pattern: /^\/api\/v1\/api-keys\/scopes$/, handler: serveJson("admin/api-keys-scopes.json") },
+  { method: "GET", pattern: /^\/api\/v1\/api-keys$/, handler: serveJson("admin/api-keys.json") },
+
+  // Settings > Runtime config. Mirrors `z4j config show`: every
+  // effective Settings field with the source it resolved from.
+  // Secrets are served pre-masked as "***" exactly as the real
+  // endpoint renders them - the demo never carries a secret value.
+  { method: "GET", pattern: /^\/api\/v1\/admin\/settings$/, handler: serveJson("admin/settings.json") },
+
   // Home (landing dashboard for the global view)
   { method: "GET", pattern: /^\/api\/v1\/home\/summary$/, handler: serveJson("home/summary.json") },
   { method: "GET", pattern: /^\/api\/v1\/home\/recent-failures/, handler: serveJson("home/recent-failures.json") },
@@ -196,6 +256,18 @@ const ROUTES: RouteHandler[] = [
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/tasks/,
     handler: (_req, match) => serveJson(`projects/${match[1]}/tasks.json`)(),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/issues/,
+    handler: (req, match) => serveIssues(req, match[1]),
+  },
+  {
+    // MUST precede the general /schedules route (first match wins) so
+    // /schedules/misfires resolves to misfires.json, not schedules.json.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/schedules\/misfires/,
+    handler: (_req, match) => serveJson(`projects/${match[1]}/misfires.json`)(),
   },
   {
     method: "GET",
