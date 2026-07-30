@@ -99,9 +99,17 @@ RUN set -eux; \
             "/build/z4j/docker/vendor/z4j-scheduler"; \
     else \
         test -n "${Z4J_RESOLVED_VERSION}"; \
+        # Track the brain's MINOR line, not its exact patch. An exact pin
+        # makes the image unbuildable for any release that does not
+        # republish the whole fleet: a flagship-only patch leaves
+        # z4j-scheduler==<that patch> nonexistent on the index, and the
+        # build fails at the last step with nothing wrong in the code.
+        # The scheduler is compatible across a minor by contract, so
+        # ~=X.Y.0 resolves the newest published patch of the same line.
+        Z4J_SCHEDULER_LINE="$(printf '%s' "${Z4J_RESOLVED_VERSION}" | cut -d. -f1-2).0"; \
         pip install --no-cache-dir \
             "/build/z4j[postgres,scheduler-grpc]" \
-            "z4j-scheduler==${Z4J_RESOLVED_VERSION}"; \
+            "z4j-scheduler~=${Z4J_SCHEDULER_LINE}"; \
     fi; \
     SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])"); \
     find "${SITE_PACKAGES}" -type d -name '__pycache__' -prune -exec rm -rf {} +; \
