@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -25,6 +26,7 @@ def settings() -> Settings:
         argon2_memory_cost=8192,
         login_min_duration_ms=10,
         first_boot_attempts_per_ip=3,
+        first_boot_token_ttl_seconds=123,
     )
 
 
@@ -198,7 +200,11 @@ class TestComplete:
         s = await client.get("/api/v1/setup/status")
         assert s.json() == {"first_boot": False}
 
-    async def test_invalid_token_410(self, client, fresh_token) -> None:
+    async def test_invalid_token_404_names_live_recovery_command(
+        self,
+        client,
+        fresh_token,
+    ) -> None:
         r = await client.post(
             "/api/v1/setup/complete",
             json={
@@ -209,6 +215,57 @@ class TestComplete:
         )
         # Service raises NotFoundError → 404 in our error map.
         assert r.status_code == 404
+        assert "z4j reset-setup" in r.text
+        assert "z4j-brain reset-setup" not in r.text
+
+    async def test_audit_backed_attempt_budget_does_not_claim_restart_clears_it(
+        self,
+        client,
+        fresh_token,
+        settings,
+    ) -> None:
+        payload = {
+            "token": f"{fresh_token}x",
+            "email": "admin@example.com",
+            "password": "correct horse battery staple 9",
+        }
+        for _ in range(settings.first_boot_attempts_per_ip):
+            assert (await client.post("/api/v1/setup/complete", json=payload)).status_code == 404
+
+        blocked = await client.post("/api/v1/setup/complete", json=payload)
+
+        assert blocked.status_code == 429
+        assert "Restarting the brain or minting another token does not reset" in blocked.text
+
+    async def test_expired_token_reports_the_configured_lifetime(
+        self,
+        client,
+        brain_app,
+        fresh_token,
+        settings,
+    ) -> None:
+        from sqlalchemy import select
+        from z4j_brain.persistence.models import FirstBootToken
+
+        async with brain_app.state.db.session() as session:
+            row = (await session.execute(select(FirstBootToken))).scalar_one()
+            row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/setup/complete",
+            json={
+                "token": fresh_token,
+                "email": "admin@example.com",
+                "password": "correct horse battery staple 9",
+            },
+        )
+
+        assert response.status_code == 404
+        assert (
+            f"configured lifetime: {settings.first_boot_token_ttl_seconds} seconds" in response.text
+        )
+        assert "15-minute lifetime" not in response.text
 
     async def test_double_consumption_blocked(
         self,

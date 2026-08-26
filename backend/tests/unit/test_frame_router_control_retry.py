@@ -26,8 +26,22 @@ pytestmark = pytest.mark.asyncio
 
 
 class _FakeSession:
+    bind = type("_FakeBind", (), {"dialect": type("_FakeDialect", (), {"name": "sqlite"})()})()
+
+    async def execute(self, _statement: object) -> _FakeResult:
+        # ``_run_control_persist`` now revalidates the established agent in
+        # the same transaction as the ack/result write.  Return a live-row
+        # sentinel so these retry tests still reach the persist callback they
+        # are intended to exercise.
+        return _FakeResult()
+
     async def commit(self) -> None:  # pragma: no cover - trivial
         return None
+
+
+class _FakeResult:
+    def scalar_one_or_none(self) -> object:
+        return object()
 
 
 class _FakeDb:

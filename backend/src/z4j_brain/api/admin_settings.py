@@ -30,6 +30,7 @@ Auth: requires :func:`require_admin`, the same dep
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends
@@ -119,6 +120,7 @@ _SECRET_NAME_SUFFIXES: tuple[str, ...] = (
 )
 _SECRET_NAME_EXACT: frozenset[str] = frozenset(
     {
+        "database_url",
         "secret",
         "password",
         "token",
@@ -138,7 +140,7 @@ def _normalize_source(raw_source: str) -> str:
     ``"default"`` / ``"config.env"`` / ``"secret.env"`` / ``".env"``
     as-is.
     """
-    if raw_source.startswith("env"):
+    if raw_source.startswith(("env", "runtime/CLI")):
         return "env"
     return raw_source
 
@@ -157,10 +159,12 @@ def _render_value(value: Any, *, is_secret: bool) -> str:
         return "***"
     if value is None:
         return ""
-    if isinstance(value, list) and not value:
-        return "[]"
-    if isinstance(value, dict) and not value:
-        return "{}"
+    if isinstance(value, (list, dict)):
+        # The dashboard's "Copy current as .env" action must emit values the
+        # startup decoder can consume. Python repr uses single quotes for
+        # strings, which is not JSON and makes composite settings fail at the
+        # next restart.
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return str(value)
 
 

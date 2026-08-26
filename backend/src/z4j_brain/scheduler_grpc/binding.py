@@ -9,20 +9,16 @@ about. For multi-tenant deployments that's a real authorization gap.
 
 This module narrows that authority. Operators populate
 ``Z4J_SCHEDULER_GRPC_CN_PROJECT_BINDINGS`` with a CN → list-of-slugs
-map; each handler that has a project context (FireSchedule,
-AcknowledgeFireResult, ListSchedules, WatchSchedules) calls
-:func:`enforce_cn_project_binding` after resolving the request's
-project. A bound CN whose request targets an unbound project is
-rejected with ``PERMISSION_DENIED``.
+map. Project-scoped list, watch, fire, receipt, recovery, quarantine and cursor
+transition handlers enforce that map after resolving the request's project. A
+bound CN whose request targets an unbound project is rejected with
+``PERMISSION_DENIED``.
 
 CNs absent from the binding map keep their legacy cross-project
 authority - the binding is opt-in per-cert so a single configuration
 change doesn't break fleet-wide schedulers.
 
-Project lookup is by ``project_id`` (UUID) → ``slug``. Slug
-resolution caches at process scope because slugs are immutable in
-practice; if an operator renames a project the cache is bounded by
-process lifetime.
+Project lookup is by ``project_id`` (UUID) → ``slug`` for each check.
 """
 
 from __future__ import annotations

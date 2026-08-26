@@ -8,17 +8,17 @@ Privacy posture (1.3.4 design):
   ``sites/_shared/packages.ts`` at brain release time. This file
   is loaded at startup and used for every comparison by default.
   No network call. Air-gapped friendly.
-- An operator can click *Settings -> Check for updates* to fetch
+- An operator can click *Settings -> System -> Check for updates* to fetch
   a fresher snapshot from GitHub
   (``https://raw.githubusercontent.com/z4jdev/z4j/main/versions.json``).
-  This is the ONLY case where the brain reaches out, and it's
-  always operator-initiated. Result is cached in process memory
-  so subsequent comparisons use the fresh data until the next
+  This is the only version-check network request and is always
+  operator-initiated. (Other configured features, such as notification
+  delivery, can make their own outbound requests.) The result is cached in
+  process memory so subsequent comparisons use the fresh data until the next
   restart.
 - Operators who want zero outbound HTTP can set
-  ``Z4J_VERSION_CHECK_URL`` empty; the dashboard hides the
-  *Check for updates* button entirely and the bundled snapshot
-  is the source of truth.
+  ``Z4J_VERSION_CHECK_URL`` empty; the dashboard disables the
+  *Check for updates* button and keeps using the bundled snapshot.
 - Air-gapped operators with an internal mirror set
   ``Z4J_VERSION_CHECK_URL=https://internal-mirror/versions.json``.
 
@@ -27,6 +27,7 @@ There is no automatic background polling. There is no telemetry.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -42,18 +43,21 @@ logger = structlog.get_logger("z4j.brain.version_check")
 _BUNDLED_PATH = Path(__file__).resolve().parent.parent / "data" / "versions.json"
 """Resolves to ``z4j_brain/data/versions.json`` once installed."""
 
-#: Strict SemVer + optional pre-release tail. Matches the format
-#: every z4j package emits: ``MAJOR.MINOR.PATCH`` plus an optional
-#: ``-pre.N`` / ``rc1`` style suffix. We only care about the three
-#: numeric components for ordering; the suffix is informational.
-#: Pre-release tail must start with a letter or ``-``. Forbidding a
-#: leading ``.`` rejects malformed 4-part inputs like ``1.3.0.0``
-#: instead of silently parsing them as ``1.3.0`` with pre=".0" (which
-#: would then rank EQUAL to the 3-part version under ``core_tuple``,
-#: causing a 4-part agent to be wrongly badged ``current``).
+#: SemVer 2.0.0 identifiers. Numeric core and pre-release identifiers reject
+#: leading zeroes; build identifiers may contain them. A pre-release always
+#: starts with ``-`` and build metadata with ``+``.
+_SEMVER_NUMERIC_IDENTIFIER = r"(?:0|[1-9]\d*)"
+_SEMVER_NONNUMERIC_IDENTIFIER = r"(?:[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+_SEMVER_PRERELEASE_IDENTIFIER = rf"(?:{_SEMVER_NUMERIC_IDENTIFIER}|{_SEMVER_NONNUMERIC_IDENTIFIER})"
+_SEMVER_BUILD_IDENTIFIER = r"[0-9A-Za-z-]+"
 _SEMVER_RE = re.compile(
-    r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
-    r"(?P<pre>(?:[a-z-][a-z0-9.+-]*)?)$",
+    rf"^(?P<major>{_SEMVER_NUMERIC_IDENTIFIER})\."
+    rf"(?P<minor>{_SEMVER_NUMERIC_IDENTIFIER})\."
+    rf"(?P<patch>{_SEMVER_NUMERIC_IDENTIFIER})"
+    rf"(?:-(?P<pre>{_SEMVER_PRERELEASE_IDENTIFIER}"
+    rf"(?:\.{_SEMVER_PRERELEASE_IDENTIFIER})*))?"
+    rf"(?:\+(?P<build>{_SEMVER_BUILD_IDENTIFIER}"
+    rf"(?:\.{_SEMVER_BUILD_IDENTIFIER})*))?$",
 )
 
 
@@ -74,13 +78,14 @@ class ParsedVersion:
     minor: int
     patch: int
     pre: str = ""
+    build: str = ""
 
     @classmethod
     def parse(cls, raw: str) -> ParsedVersion | None:
         """Return parsed parts, or ``None`` if ``raw`` is unparseable."""
         if not raw or not isinstance(raw, str):
             return None
-        m = _SEMVER_RE.match(raw.strip())
+        m = _SEMVER_RE.fullmatch(raw)
         if m is None:
             return None
         return cls(
@@ -88,21 +93,58 @@ class ParsedVersion:
             minor=int(m.group("minor")),
             patch=int(m.group("patch")),
             pre=m.group("pre") or "",
+            build=m.group("build") or "",
         )
 
     def __str__(self) -> str:
-        return f"{self.major}.{self.minor}.{self.patch}{self.pre}"
+        rendered = f"{self.major}.{self.minor}.{self.patch}"
+        if self.pre:
+            rendered += f"-{self.pre}"
+        if self.build:
+            rendered += f"+{self.build}"
+        return rendered
 
     def core_tuple(self) -> tuple[int, int, int]:
-        """Comparison key on the numeric trio only.
+        """The numeric core, useful to compatibility callers.
 
-        We deliberately ignore pre-release suffixes when ranking:
-        an operator running ``1.3.0`` against a snapshot of
-        ``1.3.0rc1`` is *current* in the operationally relevant sense.
-        Pre-release semantics aren't worth a TODO list of edge cases
-        when the simpler rule works for every release we ship.
+        This is not a complete SemVer ordering key because pre-release
+        identifiers require component-wise numeric/string comparison. Use
+        :meth:`compare_precedence` when release precedence matters.
         """
         return (self.major, self.minor, self.patch)
+
+    def compare_precedence(self, other: ParsedVersion) -> int:  # noqa: PLR0911
+        """Return ``-1``, ``0``, or ``1`` by SemVer 2.0.0 precedence.
+
+        Build metadata is intentionally ignored, as required by SemVer.
+        Numeric pre-release identifiers compare numerically and sort before
+        non-numeric identifiers; a release without a pre-release component
+        sorts after every pre-release of the same numeric core.
+        """
+        if self.core_tuple() != other.core_tuple():
+            return -1 if self.core_tuple() < other.core_tuple() else 1
+        if self.pre == other.pre:
+            return 0
+        if not self.pre:
+            return 1
+        if not other.pre:
+            return -1
+
+        mine = self.pre.split(".")
+        theirs = other.pre.split(".")
+        for left, right in zip(mine, theirs, strict=False):
+            if left == right:
+                continue
+            left_numeric = left.isdigit()
+            right_numeric = right.isdigit()
+            if left_numeric and right_numeric:
+                return -1 if int(left) < int(right) else 1
+            if left_numeric != right_numeric:
+                return -1 if left_numeric else 1
+            return -1 if left < right else 1
+        if len(mine) == len(theirs):
+            return 0
+        return -1 if len(mine) < len(theirs) else 1
 
 
 @dataclass
@@ -116,15 +158,23 @@ class VersionsSnapshot:
     packages: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> VersionsSnapshot:
+    def from_dict(cls, raw: Any) -> VersionsSnapshot:
         """Validate + parse a JSON dict into a snapshot.
 
         Tolerant of unknown extra fields (we may add them in a
         future schema_version 2 without breaking older brains) but
         strict about the required ones.
         """
+        if not isinstance(raw, dict):
+            raise ValueError(  # noqa: TRY004  ValueError is this module's validation-error contract
+                f"versions.json: root must be a JSON object (got {type(raw).__name__})",
+            )
         schema_version = raw.get("schema_version")
-        if not isinstance(schema_version, int) or schema_version < 1:
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version < 1
+        ):
             raise ValueError(
                 f"versions.json: missing or invalid schema_version (got {schema_version!r})",
             )
@@ -195,7 +245,7 @@ def load_bundled() -> VersionsSnapshot:
         return _empty_snapshot()
     try:
         raw = json.loads(_BUNDLED_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         logger.exception(
             "z4j: bundled versions.json unreadable",
             error=str(exc),
@@ -236,11 +286,12 @@ def compare(  # noqa: PLR0911  version-status dispatch
       version is unparseable, or the snapshot doesn't list this
       package.
     - ``incompatible`` - major version differs (e.g. ``1.x`` agent,
-      ``2.x`` snapshot). This is the only RED badge.
+      ``2.x`` snapshot).
     - ``newer_than_known`` - agent's version > snapshot's latest.
       Suggests the operator's brain itself is stale.
-    - ``outdated`` - agent < snapshot, same major. Yellow badge.
-    - ``current`` - agent == snapshot. Green / no badge.
+    - ``outdated`` - agent < snapshot, same major.
+    - ``current`` - equal SemVer precedence. Build metadata does not affect
+      precedence, while a pre-release ranks below the corresponding release.
     """
     if not agent_version:
         return "unknown"
@@ -252,11 +303,10 @@ def compare(  # noqa: PLR0911  version-status dispatch
         return "unknown"
     if parsed_agent.major != parsed_snap.major:
         return "incompatible"
-    a = parsed_agent.core_tuple()
-    s = parsed_snap.core_tuple()
-    if a == s:
+    ordering = parsed_agent.compare_precedence(parsed_snap)
+    if ordering == 0:
         return "current"
-    if a > s:
+    if ordering > 0:
         return "newer_than_known"
     return "outdated"
 
@@ -275,7 +325,7 @@ def compare(  # noqa: PLR0911  version-status dispatch
 _ALLOWED_SCHEME = "https://"
 
 _FETCH_TIMEOUT_SECONDS = 10.0
-"""Hard cap on how long the brain waits for the remote fetch.
+"""Wall-clock cap on the complete remote fetch.
 
 Tuned for the GitHub raw fetch (typically <500ms), with enough
 headroom that a slow internal mirror doesn't cause the operator's
@@ -286,10 +336,13 @@ gets a clear error; they can retry.
 _MAX_RESPONSE_BYTES = 256 * 1024
 """Hard cap on the bytes we accept from the remote.
 
-The expected payload is ~2KB (20 packages, JSON). 256KB gives a
-1000x headroom for future schema growth without exposing the brain
+The expected payload is small. 256KB gives ample headroom for future schema
+growth without exposing the brain
 to a hostile mirror that ships a 10MB JSON to OOM the validator.
 """
+
+_STREAM_CHUNK_BYTES = 64 * 1024
+"""Maximum decoded chunk requested from the HTTP client."""
 
 
 @dataclass(frozen=True)
@@ -299,6 +352,45 @@ class RefreshResult:
     snapshot: VersionsSnapshot
     fetched_from: str
     fetched_at: datetime
+
+
+async def _read_remote_body(url: str, *, http_client: Any) -> bytes:
+    """Stream one response into a byte buffer that never exceeds the cap."""
+    async with http_client.stream(
+        "GET",
+        url,
+        timeout=_FETCH_TIMEOUT_SECONDS,
+        # No auth headers: the canonical URL is public. Sending an
+        # Authorization header would leak whatever was configured
+        # to GitHub or the mirror.
+        headers={"Accept": "application/json"},
+        follow_redirects=False,
+    ) as response:
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"version-check fetch returned HTTP {response.status_code} from {url!r}",
+            )
+        content_length = response.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                declared_size = None
+            if declared_size is not None and declared_size > _MAX_RESPONSE_BYTES:
+                raise RuntimeError(
+                    "version-check response too large: declared "
+                    f"{declared_size} bytes > cap {_MAX_RESPONSE_BYTES}",
+                )
+
+        body = bytearray()
+        async for chunk in response.aiter_bytes(chunk_size=_STREAM_CHUNK_BYTES):
+            if len(body) + len(chunk) > _MAX_RESPONSE_BYTES:
+                raise RuntimeError(
+                    "version-check response too large: streamed bytes "
+                    f"exceed cap {_MAX_RESPONSE_BYTES}",
+                )
+            body.extend(chunk)
+    return bytes(body)
 
 
 async def fetch_remote(
@@ -314,8 +406,9 @@ async def fetch_remote(
     - URL doesn't start with ``https://``: ``ValueError``.
     - HTTP status != 200: ``RuntimeError`` with status code.
     - Response > ``_MAX_RESPONSE_BYTES``: ``RuntimeError``.
-    - Response not valid JSON: ``RuntimeError``.
+    - Response not valid UTF-8 JSON: ``RuntimeError``.
     - JSON fails snapshot validation: ``RuntimeError``.
+    - Timeout or transport failure: ``RuntimeError``.
 
     The caller (the API endpoint) maps these to a user-facing
     error toast; the brain's cached snapshot is unchanged when
@@ -328,26 +421,28 @@ async def fetch_remote(
             f"Z4J_VERSION_CHECK_URL must use https:// (got {url!r})",
         )
 
-    response = await http_client.get(
-        url,
-        timeout=_FETCH_TIMEOUT_SECONDS,
-        # No auth headers: the canonical URL is public. Sending an
-        # Authorization header would leak whatever was configured
-        # to GitHub or the mirror.
-        headers={"Accept": "application/json"},
-        follow_redirects=False,
-    )
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"version-check fetch returned HTTP {response.status_code} from {url!r}",
-        )
-    body = response.content
-    if len(body) > _MAX_RESPONSE_BYTES:
-        raise RuntimeError(
-            f"version-check response too large: {len(body)} bytes > cap {_MAX_RESPONSE_BYTES}",
-        )
     try:
-        raw = json.loads(body)
+        async with asyncio.timeout(_FETCH_TIMEOUT_SECONDS):
+            body = await _read_remote_body(url, http_client=http_client)
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"version-check fetch timed out after {_FETCH_TIMEOUT_SECONDS:g} seconds",
+        ) from exc
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"version-check fetch failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            f"version-check response is not valid UTF-8: {exc}",
+        ) from exc
+    try:
+        raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise RuntimeError(
             f"version-check response is not JSON: {exc}",

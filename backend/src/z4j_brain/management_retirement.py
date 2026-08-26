@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from z4j_brain.configuration import (
     capture_configuration,
@@ -44,7 +43,10 @@ from z4j_brain.domain.audit_chain import (
 from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.domain.audit_verifier import verify_active_audit_generation
 from z4j_brain.management_reset import release_manifest_digest
-from z4j_brain.persistence.database import DatabaseManager
+from z4j_brain.persistence.database import (
+    DatabaseManager,
+    create_async_engine_from_url,
+)
 from z4j_brain.persistence.models import AuditChainState
 from z4j_brain.persistence.repositories import AuditLogRepository
 from z4j_brain.secret_store import (
@@ -759,7 +761,7 @@ def _packaged_authority(
 async def _authenticated_state_payload(
     settings: Settings,
 ) -> dict[str, Any]:
-    engine = create_async_engine(settings.database_url)
+    engine = create_async_engine_from_url(settings.database_url)
     database = DatabaseManager(engine)
     try:
         async with database.session(write=True) as session:
@@ -1086,7 +1088,7 @@ async def _install_recovery_binding(
         )
     current_secret = secrets[0]
     _, keyring = build_audit_keyring(current_secret, secrets[1:])
-    engine = create_async_engine(settings.database_url)
+    engine = create_async_engine_from_url(settings.database_url)
     database = DatabaseManager(engine)
     try:
         async with database.session(write=True) as session:
@@ -1392,7 +1394,7 @@ async def _transition_destruction_binding(
         )
     current_secret = secrets[0]
     _, keyring = build_audit_keyring(current_secret, secrets[1:])
-    engine = create_async_engine(settings.database_url)
+    engine = create_async_engine_from_url(settings.database_url)
     database = DatabaseManager(engine)
     try:
         async with database.session(write=True) as session:
@@ -1490,7 +1492,7 @@ async def _read_authenticated_binding(
             "replacement installation lacks its audit key",
         )
     _, keyring = build_audit_keyring(secrets[0], secrets[1:])
-    engine = create_async_engine(settings.database_url)
+    engine = create_async_engine_from_url(settings.database_url)
     database = DatabaseManager(engine)
     try:
         async with database.session(write=True) as session:

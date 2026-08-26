@@ -18,6 +18,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from freezegun import freeze_time
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from z4j_brain.main import create_app
@@ -25,6 +27,7 @@ from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import AgentState, CommandStatus
 from z4j_brain.persistence.models import Agent, Command, Project
+from z4j_brain.persistence.repositories import CommandRepository
 from z4j_brain.settings import Settings
 from z4j_brain.websocket.auth import hash_agent_token
 from z4j_core.transport import CURRENT_PROTOCOL
@@ -72,6 +75,11 @@ async def ids(settings: Settings, brain_app) -> dict[str, uuid.UUID]:
     agent_id = uuid.uuid4()
     async with brain_app.state.db.session() as s:
         s.add(Project(id=project_id, slug="h2", name="H2"))
+        # The production SQLite runtime now enforces foreign keys on every
+        # connection.  Flush the parent explicitly because this fixture does
+        # not attach the Agent through an ORM relationship that would order
+        # the two INSERTs for us.
+        await s.flush()
         s.add(
             Agent(
                 id=agent_id,
@@ -142,11 +150,79 @@ async def test_dispatched_fire_recovered_when_lease_elapses_mid_wait(brain_app, 
 async def test_fresh_dispatched_fire_not_resent_within_lease(brain_app, ids, client):
     # A fire DISPATCHED now, polled with wait=0: still inside the lease window, so
     # it must NOT be re-sent (guards against re-sending on every poll).
-    await _insert_dispatched_fire(brain_app, ids, dispatched_at=datetime.now(UTC))
-    r = await client.get(
+    # Freeze the wall clock shared by the insert and the production cutoff so
+    # host scheduling cannot turn this fresh row into a legitimately expired
+    # one. Keep asyncio's loop clock real so request scheduling remains unmodified.
+    with freeze_time("2026-08-13T12:00:00Z", real_asyncio=True):
+        await _insert_dispatched_fire(brain_app, ids, dispatched_at=datetime.now(UTC))
+        r = await client.get(
+            "/api/v1/agent/commands",
+            params={"wait": 0, "max_frames": 10},
+            headers={"Authorization": f"Bearer {AGENT_TOKEN}"},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["frames"] == []
+
+
+async def test_delayed_stale_selection_cannot_claim_new_generation(
+    brain_app,
+    ids,
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Old enough for the 1s lease, but still inside the 60s recovery window.
+    selected_generation = datetime.now(UTC) - timedelta(seconds=30)
+    command_id = await _insert_dispatched_fire(
+        brain_app,
+        ids,
+        dispatched_at=selected_generation,
+    )
+    advanced_generation = selected_generation + timedelta(seconds=1)
+    real_claim = CommandRepository.claim_redispatch
+    observed: list[datetime | None] = []
+
+    async def advance_between_selection_and_claim(
+        repository: CommandRepository,
+        claim_command_id: uuid.UUID,
+        *,
+        min_interval_seconds: float,
+        expected_dispatched_at: datetime | None = None,
+    ) -> bool:
+        observed.append(expected_dispatched_at)
+        await repository.session.execute(
+            update(Command)
+            .where(Command.id == claim_command_id)
+            .values(dispatched_at=advanced_generation)
+            .execution_options(synchronize_session=False),
+        )
+        # Model a different replica's committed winner before this delayed
+        # caller reaches its CAS.
+        await repository.session.commit()
+        return await real_claim(
+            repository,
+            claim_command_id,
+            min_interval_seconds=min_interval_seconds,
+            expected_dispatched_at=expected_dispatched_at,
+        )
+
+    monkeypatch.setattr(
+        CommandRepository,
+        "claim_redispatch",
+        advance_between_selection_and_claim,
+    )
+
+    response = await client.get(
         "/api/v1/agent/commands",
         params={"wait": 0, "max_frames": 10},
         headers={"Authorization": f"Bearer {AGENT_TOKEN}"},
     )
-    assert r.status_code == 200, r.text
-    assert r.json()["frames"] == []
+
+    assert response.status_code == 200, response.text
+    assert response.json()["frames"] == []
+    assert len(observed) == 1
+    assert observed[0] is not None
+    assert observed[0].replace(tzinfo=UTC) == selected_generation
+    async with brain_app.state.db.session() as session:
+        command = await session.get(Command, command_id)
+        assert command is not None
+        assert command.dispatched_at == advanced_generation.replace(tzinfo=None)

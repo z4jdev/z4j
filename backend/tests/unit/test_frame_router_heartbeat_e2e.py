@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -34,8 +34,8 @@ from sqlalchemy.orm import sessionmaker
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
-from z4j_brain.persistence.models import Agent, Project, Worker
-from z4j_brain.websocket.frame_router import FrameRouter
+from z4j_brain.persistence.models import Agent, Project, Queue, Worker
+from z4j_brain.websocket.frame_router import FrameOutcome, FrameRouter
 from z4j_core.transport.frames import HeartbeatFrame, HeartbeatPayload
 
 
@@ -239,9 +239,115 @@ class TestFrameRouterHeartbeatE2E:
                 "must collapse them to one"
             )
 
+    async def test_queue_observations_use_frame_source_time_and_never_rewind(
+        self,
+        db_manager: DatabaseManager,
+        project_and_agent: tuple[uuid.UUID, uuid.UUID],
+    ) -> None:
+        """Depth and worker-announced queue touches share signed frame time."""
+        project_id, agent_id = project_and_agent
+        fresh_observed = datetime.now(UTC)
+        stale_observed = fresh_observed - timedelta(seconds=1)
+        worker_details = json.dumps(
+            {
+                "celery@queue-clock": {
+                    "stats": {"pool": {"max-concurrency": 1}},
+                    "active_queues": [{"name": "worker-only"}],
+                },
+            },
+        )
+        fresh_frame = HeartbeatFrame(
+            id=str(uuid.uuid4()),
+            ts=fresh_observed,
+            payload=HeartbeatPayload(
+                last_flush_at=fresh_observed,
+                adapter_health={
+                    "celery.queue_depths": json.dumps({"critical": 29}),
+                    "celery.worker_details": worker_details,
+                },
+            ),
+        )
+        stale_frame = HeartbeatFrame(
+            id=str(uuid.uuid4()),
+            ts=stale_observed,
+            payload=HeartbeatPayload(
+                last_flush_at=stale_observed,
+                adapter_health={
+                    "celery.queue_depths": json.dumps({"critical": 11}),
+                },
+            ),
+        )
+        router = FrameRouter(
+            db=db_manager,
+            ingestor=None,
+            dispatcher=None,
+            project_id=project_id,
+            agent_id=agent_id,
+            dashboard_hub=None,
+            worker_id=None,
+        )
+
+        await router._handle_heartbeat(fresh_frame)
+        await router._handle_heartbeat(stale_frame)
+
+        factory = sessionmaker(
+            db_manager._engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        async with factory() as session:
+            queues = {
+                row.name: row for row in (await session.execute(select(Queue))).scalars().all()
+            }
+        critical = queues["critical"]
+        worker_only = queues["worker-only"]
+        assert critical.pending_count == 29
+        assert critical.last_seen_at is not None
+        assert critical.last_seen_at.replace(tzinfo=UTC) == fresh_observed
+        assert worker_only.last_seen_at is not None
+        assert worker_only.last_seen_at.replace(tzinfo=UTC) == fresh_observed
+
+    async def test_revoked_agent_heartbeat_is_rejected_without_derived_rows(
+        self,
+        db_manager: DatabaseManager,
+        project_and_agent: tuple[uuid.UUID, uuid.UUID],
+        heartbeat_frame: HeartbeatFrame,
+    ) -> None:
+        """A committed revoke is authoritative even if its WS kick failed."""
+        project_id, agent_id = project_and_agent
+
+        async with db_manager.session(write=True) as session:
+            agent = await session.get(Agent, agent_id)
+            assert agent is not None
+            agent.revoked_at = datetime.now(UTC)
+            await session.commit()
+
+        router = FrameRouter(
+            db=db_manager,
+            ingestor=None,
+            dispatcher=None,
+            project_id=project_id,
+            agent_id=agent_id,
+            dashboard_hub=None,
+            worker_id=None,
+        )
+
+        outcome = await router.dispatch(heartbeat_frame)
+
+        assert outcome is FrameOutcome.REVOKED
+        async with db_manager.session() as session:
+            workers = (await session.execute(select(Worker))).scalars().all()
+            queues = (await session.execute(select(Queue))).scalars().all()
+            agent = await session.get(Agent, agent_id)
+
+        assert workers == []
+        assert queues == []
+        assert agent is not None
+        assert agent.last_seen_at is None
+
 
 # ---------------------------------------------------------------------------
-# Round-7 audit: defense-in-depth allowlist at brain side
+# Defense-in-depth allowlist at brain side
 # ---------------------------------------------------------------------------
 
 
@@ -308,8 +414,8 @@ def malicious_heartbeat_frame() -> HeartbeatFrame:
 
 
 @pytest.mark.asyncio
-class TestFrameRouterConfScrubR7H1:
-    """Defense-in-depth: brain MUST allowlist-filter the conf
+class TestFrameRouterConfScrub:
+    """Defense in depth: brain MUST allowlist-filter the conf
     sub-object even when a (broken or malicious) adapter ships
     credentialed keys.
 
@@ -370,7 +476,7 @@ class TestFrameRouterConfScrubR7H1:
                 "beat_schedule",
             ):
                 assert forbidden not in persisted_conf, (
-                    f": brain persisted {forbidden!r} into "
+                    f"brain persisted {forbidden!r} into "
                     "workers.metadata.conf; ProjectRole.VIEWER would "
                     "read it via GET /api/v1/projects/{slug}/workers/{worker_id}"
                 )
@@ -386,7 +492,7 @@ class TestFrameRouterConfScrubR7H1:
                 "LEAKED_AWS_SECRET",
             ):
                 assert needle not in persisted_blob, (
-                    f": {needle!r} leaked into the persisted worker_metadata "
+                    f"{needle!r} leaked into the persisted worker_metadata "
                     "JSON blob despite the structural strip"
                 )
 
@@ -395,3 +501,308 @@ class TestFrameRouterConfScrubR7H1:
             assert persisted_conf.get("task_serializer") == "json"
             assert persisted_conf.get("worker_concurrency") == 2
             assert persisted_conf.get("timezone") == "UTC"
+
+
+def _partial_worker_details_payload() -> str:
+    """The same worker, from a round where most inspect broadcasts timed out.
+
+    ``get_worker_details`` builds its result one broadcast at a time and only
+    records a key for the ones that answered, so this is what a real agent
+    emits when the stats reply arrives and the queue, task-list and config
+    replies do not.
+    """
+    return json.dumps(
+        {
+            "celery@picker_django": {
+                "stats": {"pid": 100},
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_heartbeat_that_collected_less_does_not_erase_what_was_collected(
+    db_manager: DatabaseManager,
+    project_and_agent: tuple[uuid.UUID, uuid.UUID],
+    heartbeat_frame: HeartbeatFrame,
+) -> None:
+    """A broadcast that went unanswered is not a worker with nothing.
+
+    Each field in a worker's report comes from its own Celery inspect
+    broadcast with its own timeout, so a heartbeat routinely carries some of
+    them and not the rest. Writing the missing ones out as empty results made
+    every such heartbeat blank a live worker's queue list, running-task count
+    and configuration, and the dashboard flapped at whatever rate the
+    broadcasts happened to time out.
+    """
+    project_id, agent_id = project_and_agent
+    router = FrameRouter(
+        db=db_manager,
+        ingestor=None,
+        dispatcher=None,
+        project_id=project_id,
+        agent_id=agent_id,
+        dashboard_hub=None,
+        worker_id=None,
+    )
+
+    await router._handle_heartbeat(heartbeat_frame)
+
+    partial = heartbeat_frame.model_copy(deep=True)
+    partial.payload.adapter_health["celery.worker_details"] = _partial_worker_details_payload()
+    await router._handle_heartbeat(partial)
+
+    factory = sessionmaker(
+        db_manager._engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    async with factory() as s:
+        worker = (
+            await s.execute(select(Worker).where(Worker.project_id == project_id))
+        ).scalar_one()
+
+    assert sorted(worker.queues or []) == ["celery", "high_priority"], (
+        "the queue list a previous heartbeat established was cleared by a "
+        "heartbeat whose active_queues broadcast did not answer"
+    )
+    assert worker.active_tasks == 1
+    assert worker.concurrency == 4
+    assert worker.load_average == [0.5, 0.7, 0.8]
+    assert worker.worker_metadata["active_queues"] == [
+        {"name": "celery"},
+        {"name": "high_priority"},
+    ]
+    assert worker.worker_metadata["registered"] == [
+        "myapp.tasks.add",
+        "myapp.tasks.send_email",
+    ]
+    assert worker.worker_metadata["active"] == [
+        {"id": "task-1", "name": "myapp.tasks.add"},
+    ]
+    # The report that DID answer is still applied, merged onto the rest.
+    assert worker.worker_metadata["stats"]["pid"] == 100
+    assert worker.worker_metadata["stats"]["rusage"] == {"utime": 12.3, "stime": 4.5}
+
+
+# ---------------------------------------------------------------------------
+# A heartbeat describes several workers at once, and they do not answer alike
+# ---------------------------------------------------------------------------
+
+
+def _mixed_worker_details_payload(rich: str, quiet: str) -> str:
+    """Two workers in one round: one answered every broadcast, one answered none.
+
+    Not a contrived pairing. Every field is its own Celery inspect broadcast
+    with its own timeout, and the broadcasts are per worker, so a fleet where
+    one worker is busy or slow produces exactly this on a routine round.
+    """
+    return json.dumps(
+        {
+            rich: {
+                "stats": {
+                    "pool": {"max-concurrency": 4, "processes": [101, 102, 103, 104]},
+                    "loadavg": [0.5, 0.7, 0.8],
+                    "pid": 100,
+                },
+                "active": [{"id": "task-1", "name": "myapp.tasks.add"}],
+                "active_queues": [{"name": "celery"}],
+                "registered": ["myapp.tasks.add"],
+                "conf": {"task_serializer": "json"},
+            },
+            quiet: {},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("rich", "quiet"),
+    [
+        # The batch is sorted by conflict key before it is written, so which
+        # of the two decides the statement's shape is decided by the worker
+        # NAMES, which no caller here chooses. Both ways round.
+        pytest.param("celery@aaa-full", "celery@zzz-silent", id="reporting-worker-first"),
+        pytest.param("celery@zzz-full", "celery@aaa-silent", id="silent-worker-first"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_one_worker_answering_nothing_does_not_cost_the_other_its_report(
+    db_manager: DatabaseManager,
+    project_and_agent: tuple[uuid.UUID, uuid.UUID],
+    heartbeat_frame: HeartbeatFrame,
+    rich: str,
+    quiet: str,
+) -> None:
+    """Both rows land, and the one that reported keeps what it reported.
+
+    The two failures this covers are opposite and both total: with the
+    reporting worker first the statement cannot be compiled and neither row
+    lands at all, and with the silent worker first the columns only the
+    reporting worker carries leave the statement, so both rows land stripped.
+    """
+    project_id, agent_id = project_and_agent
+    router = FrameRouter(
+        db=db_manager,
+        ingestor=None,
+        dispatcher=None,
+        project_id=project_id,
+        agent_id=agent_id,
+        dashboard_hub=None,
+        worker_id=None,
+    )
+
+    mixed = heartbeat_frame.model_copy(deep=True)
+    mixed.payload.adapter_health["celery.worker_details"] = _mixed_worker_details_payload(
+        rich,
+        quiet,
+    )
+    await router._handle_heartbeat(mixed)
+
+    factory = sessionmaker(db_manager._engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        landed = {
+            w.name: w
+            for w in (await s.execute(select(Worker).where(Worker.project_id == project_id)))
+            .scalars()
+            .all()
+        }
+
+    assert set(landed) == {rich, quiet}, (
+        f"expected both workers from one heartbeat, got {sorted(landed)}; a "
+        "batch whose rows carry different columns must not cost the round"
+    )
+    reporting = landed[rich]
+    assert reporting.concurrency == 4, (
+        "the reporting worker's pool size did not land; the column was "
+        "dropped from the statement because a sibling row did not carry it"
+    )
+    assert reporting.pid == 100
+    assert reporting.active_tasks == 1
+    assert sorted(reporting.queues or []) == ["celery"]
+    assert reporting.load_average == [0.5, 0.7, 0.8]
+    assert reporting.worker_metadata["registered"] == ["myapp.tasks.add"]
+    # The silent worker is recorded as seen and nothing more.
+    assert landed[quiet].concurrency is None
+    assert landed[quiet].worker_metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_a_bulk_write_that_fails_any_way_at_all_falls_back_per_row(
+    db_manager: DatabaseManager,
+    project_and_agent: tuple[uuid.UUID, uuid.UUID],
+    heartbeat_frame: HeartbeatFrame,
+    monkeypatch,
+) -> None:
+    """The fallback is for the batch, not for one exception class.
+
+    The bulk statement has more than one way to fail: it deadlocks, it can be
+    asked to express rows one statement cannot express, and an agent-supplied
+    worker name can violate a column bound. Only the first of those is an
+    ``OperationalError``. A fallback that names it catches the fault it was
+    written for and lets every other one take the whole batch, on a path that
+    runs every ten seconds per agent.
+
+    The fault is injected at the bulk repository call because that is the
+    collaborator that fails in production; everything below it here is the
+    real per-row write, which is what has to be shown still landing the row.
+    """
+    from sqlalchemy.exc import CompileError
+    from z4j_brain.persistence.repositories import WorkerRepository
+
+    async def _refuse(self, rows):
+        raise CompileError("this batch is not expressible as one statement")
+
+    monkeypatch.setattr(WorkerRepository, "upsert_from_events_bulk", _refuse)
+
+    project_id, agent_id = project_and_agent
+    router = FrameRouter(
+        db=db_manager,
+        ingestor=None,
+        dispatcher=None,
+        project_id=project_id,
+        agent_id=agent_id,
+        dashboard_hub=None,
+        worker_id=None,
+    )
+
+    await router._handle_heartbeat(heartbeat_frame)
+
+    factory = sessionmaker(db_manager._engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        workers = list(
+            (await s.execute(select(Worker).where(Worker.project_id == project_id))).scalars().all()
+        )
+
+    assert len(workers) == 1, (
+        "the heartbeat's worker rows were lost when the bulk statement failed "
+        "with something other than a deadlock; the per-row fallback did not run"
+    )
+    assert workers[0].name == "celery@picker_django"
+    assert workers[0].concurrency == 4
+    assert workers[0].worker_metadata["registered"] == [
+        "myapp.tasks.add",
+        "myapp.tasks.send_email",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_worker_that_answered_last_round_keeps_what_it_reported(
+    db_manager: DatabaseManager,
+    project_and_agent: tuple[uuid.UUID, uuid.UUID],
+    heartbeat_frame: HeartbeatFrame,
+) -> None:
+    """The sequence a real fleet produces, and the flapping it caused.
+
+    Which worker answers is not stable across rounds. A round where worker A
+    answers and B does not is followed by one where B answers and A does not,
+    and if the columns only one of them carried are written out for both, the
+    dashboard shows each worker's pool size, queue list and configuration
+    appearing and disappearing at whatever rate the broadcasts time out.
+    """
+    first, second = "celery@aaa-one", "celery@zzz-two"
+    project_id, agent_id = project_and_agent
+    router = FrameRouter(
+        db=db_manager,
+        ingestor=None,
+        dispatcher=None,
+        project_id=project_id,
+        agent_id=agent_id,
+        dashboard_hub=None,
+        worker_id=None,
+    )
+
+    # Round one: the first worker answers, the second does not.
+    round_one = heartbeat_frame.model_copy(deep=True)
+    round_one.payload.adapter_health["celery.worker_details"] = _mixed_worker_details_payload(
+        first,
+        second,
+    )
+    await router._handle_heartbeat(round_one)
+
+    # Round two: the other way round.
+    round_two = heartbeat_frame.model_copy(deep=True)
+    round_two.payload.adapter_health["celery.worker_details"] = _mixed_worker_details_payload(
+        second,
+        first,
+    )
+    await router._handle_heartbeat(round_two)
+
+    factory = sessionmaker(db_manager._engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        landed = {
+            w.name: w
+            for w in (await s.execute(select(Worker).where(Worker.project_id == project_id)))
+            .scalars()
+            .all()
+        }
+
+    for name in (first, second):
+        worker = landed[name]
+        assert worker.concurrency == 4, (
+            f"{name} lost the pool size it reported; a round it did not answer "
+            "wrote a sibling row's absent value over it"
+        )
+        assert worker.pid == 100
+        assert sorted(worker.queues or []) == ["celery"]
+        assert worker.worker_metadata["registered"] == ["myapp.tasks.add"]
+        assert worker.load_average == [0.5, 0.7, 0.8]

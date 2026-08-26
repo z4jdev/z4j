@@ -64,6 +64,12 @@ compat = {
     "downgrade_to": None,
 }
 
+#: Declares to ``env.py`` that this revision will not be undone, so a whole
+#: downgrade run planned through it is refused before its first step executes.
+#: Without that, a destructive step stacked above here commits, and is lost,
+#: while the operator is being told the rollback was refused.
+DOWNGRADE_REFUSED = "refusing downgrade below Boundary F while authenticated audit state exists"
+
 _PREPARATION = "audit_chain_preparation"
 _STATE = "audit_chain_state"
 _AUDIT = "audit_log"
@@ -740,6 +746,4 @@ def upgrade() -> None:  # noqa: PLR0912, PLR0915  atomic activation ceremony
 
 
 def downgrade() -> None:
-    raise CommandError(
-        "refusing downgrade below Boundary F while authenticated audit state exists",
-    )
+    raise CommandError(DOWNGRADE_REFUSED)

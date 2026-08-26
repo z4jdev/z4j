@@ -10,10 +10,10 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.util import CommandError
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
 from z4j_brain.domain.bulk_retry import canonicalize_request
-from z4j_brain.persistence.models import BulkRetryRequest, Project
+from z4j_brain.persistence.models import BulkRetryRequest
 from z4j_brain.secret_store import protect_secret_store_directory
 
 
@@ -79,7 +79,16 @@ def test_downgrade_refuses_while_any_durable_parent_exists(
     project_id = uuid.uuid4()
     try:
         with Session(engine) as session:
-            session.add(Project(id=project_id, slug="rollback-fence", name="Fence"))
+            session.execute(
+                text(
+                    "INSERT INTO projects (id, slug, name) VALUES (:id, :slug, :name)",
+                ),
+                {
+                    "id": project_id.hex,
+                    "slug": "rollback-fence",
+                    "name": "Fence",
+                },
+            )
             session.commit()
             session.add(
                 BulkRetryRequest(

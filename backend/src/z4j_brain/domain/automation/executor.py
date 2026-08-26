@@ -25,10 +25,14 @@ Governance rules enforced here:
 
 from __future__ import annotations
 
-from datetime import UTC
-from typing import Any, Protocol
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 from z4j_brain.domain.automation.evaluator import (
     DESTRUCTIVE_ACTIONS,
@@ -36,7 +40,10 @@ from z4j_brain.domain.automation.evaluator import (
     NOTIFY_ACTIONS,
     matching_rules,
 )
-from z4j_brain.persistence.repositories.automation_rule import CircuitDecision
+from z4j_brain.persistence.repositories.automation_rule import (
+    CircuitDecision,
+    dispatch_candidate,
+)
 
 logger = structlog.get_logger("z4j.brain.automation.executor")
 
@@ -52,7 +59,11 @@ def _record_swallowed_automation() -> None:
         logger.debug("z4j automation: record_swallowed unavailable")
 
 
-def _within_coalesce_window(last_notify_at: Any, now: Any, window_seconds: int) -> bool:
+def _within_coalesce_window(
+    last_notify_at: datetime | None,
+    now: datetime,
+    window_seconds: int,
+) -> bool:
     """True if ``last_notify_at`` is within ``window_seconds`` before ``now``.
 
     Normalises a possibly-naive (SQLite) ``last_notify_at`` to UTC so the
@@ -63,6 +74,73 @@ def _within_coalesce_window(last_notify_at: Any, now: Any, window_seconds: int) 
     if last_notify_at.tzinfo is None:
         last_notify_at = last_notify_at.replace(tzinfo=UTC)
     return (now - last_notify_at).total_seconds() < window_seconds
+
+
+async def _rollback_quietly(session: Any) -> None:
+    """Roll back on a path that has already lost the rule.
+
+    A rollback raises when the session is poisoned badly enough that even
+    ending it fails, which is precisely when this runs. Letting that out
+    would replace one skipped rule with an aborted fan-out: the siblings that
+    per-rule isolation exists to protect would be the ones paying.
+    """
+    try:
+        await session.rollback()
+    except Exception:
+        logger.exception("z4j automation: rolling back a failed rule also failed")
+
+
+@asynccontextmanager
+async def _rule_write_unit(
+    session: Any,
+    audit_log: Any,
+    rule_id: Any,
+) -> AsyncIterator[bool]:
+    """One rule's entire transaction: reserve the writer, then end it.
+
+    A rule's commit ends the write unit it ran in, and on SQLite that also
+    ends the ``BEGIN IMMEDIATE`` reservation the audit chain requires before
+    the unit's first read. Every rule after the first therefore has to take
+    the reservation again, BEFORE its claim reads anything: an ordinary
+    read-first transaction is refused at the audit append, which happens
+    after the rule's actions have already run, so the firing is rolled back
+    with its side effects already out the door and no forensic row behind
+    them.
+
+    Reservation, commit, and rollback live in one block so an edit cannot
+    move the commit somewhere the matching reservation does not follow.
+
+    Yields whether the writer was reserved; a caller that gets False must run
+    nothing for this rule. Taking the reservation inside the block that also
+    handles failure meant a refused reservation (a lock timeout, a busy
+    SQLite writer, a connection that died between rules) returned from the
+    generator before its yield, and ``asynccontextmanager`` turns that into
+    ``RuntimeError: generator didn't yield`` raised out of ``__aenter__``.
+    That lands OUTSIDE the block, so it aborted the sibling loop and dropped
+    every remaining rule in the fan-out, under a message that names a
+    contextlib invariant rather than anything an operator can act on.
+    """
+    try:
+        await audit_log.require_sqlite_immediate_write_unit()
+    except Exception:
+        logger.exception(
+            "z4j automation: rule could not reserve its write unit; skipped",
+            rule_id=str(rule_id),
+        )
+        await _rollback_quietly(session)
+        _record_swallowed_automation()
+        yield False
+        return
+    try:
+        yield True
+        await session.commit()
+    except Exception:
+        logger.exception(
+            "z4j automation: rule dispatch failed; rolled back",
+            rule_id=str(rule_id),
+        )
+        await _rollback_quietly(session)
+        _record_swallowed_automation()
 
 
 def _record_notify_coalesced(project_id: Any) -> None:
@@ -127,44 +205,51 @@ class AutomationExecutor:
         A rolled-back rule is surfaced as a swallowed-error metric so the
         drop is observable, never silent.
         """
+        # The fan-out owns its write units, including the first one: this
+        # method reads before it writes, and every caller reaches it from a
+        # different place in its own transaction. Reserving here means the
+        # rule load below is inside the unit that the first rule's audit
+        # append will be asked to join, whatever the caller did beforehand.
+        await audit_log.require_sqlite_immediate_write_unit()
         rules = await rules_repo.list_enabled_for_trigger(
             project_id=project_id,
             trigger=trigger,
         )
-        # Snapshot the matching rules' ids while the ORM objects are still
-        # fresh. A per-rule rollback below EXPIRES every persistent object
+        # Snapshot matching rules' complete execution configurations while
+        # the ORM objects are still fresh. A per-rule rollback below EXPIRES
+        # every persistent object
         # in the session (SQLAlchemy 2.0 rollback semantics), so reading
         # ``rule.id`` off a pre-fetched object on a LATER iteration would
         # trigger an implicit lazy-load outside the async greenlet
         # (MissingGreenlet) and cascade-fail the rest of the batch. We
-        # instead carry plain ids and operate only on the fresh row that
-        # ``claim_execution`` re-loads under its FOR UPDATE lock.
-        matched_ids = [rule.id for rule in matching_rules(rules, trigger, fields)]
-        for rule_id in matched_ids:
-            try:
+        # instead carry immutable plain-data tokens. ``claim_execution``
+        # locks both the rule and project, then refuses the token if a
+        # disable, kill-switch flip, or configuration edit occurred after
+        # this condition match.
+        candidates = [dispatch_candidate(rule) for rule in matching_rules(rules, trigger, fields)]
+        for candidate in candidates:
+            async with _rule_write_unit(session, audit_log, candidate.rule_id) as reserved:
+                if not reserved:
+                    continue  # this rule lost its writer; its siblings have not
                 decision, rule = await rules_repo.claim_execution(
-                    rule_id=rule_id,
-                    now=now,
+                    candidate=candidate,
                 )
-                if rule is None:
-                    continue  # rule was deleted between load and claim
+                if decision == CircuitDecision.STALE or rule is None:
+                    # The authoritative state no longer matches what was
+                    # evaluated. Never combine old conditions with new
+                    # actions, and never run through a late kill switch.
+                    continue
                 await self._run_one(
                     audit_log,
                     session,
                     rule,
                     fields,
                     decision,
+                    rules_repo=rules_repo,
+                    candidate=candidate,
                     now=now,
                     notify_coalesce_seconds=notify_coalesce_seconds,
                 )
-                await session.commit()
-            except Exception:
-                logger.exception(
-                    "z4j automation: rule dispatch failed; rolled back",
-                    rule_id=str(rule_id),
-                )
-                await session.rollback()
-                _record_swallowed_automation()
 
     async def _run_one(
         self,
@@ -174,6 +259,8 @@ class AutomationExecutor:
         fields: dict[str, Any],
         decision: CircuitDecision,
         *,
+        rules_repo: Any = None,
+        candidate: Any = None,
         now: Any = None,
         notify_coalesce_seconds: int = 0,
     ) -> None:
@@ -218,7 +305,21 @@ class AutomationExecutor:
         # window. Fully-atomic command+fired auditing would require
         # issue() to defer its commit (delivery depends on the committed
         # row) -- deferred rather than restructure the shared dispatcher.
-        for action_spec in rule.actions or []:
+        for action_index, action_spec in enumerate(list(rule.actions or [])):
+            if action_index and rules_repo is not None and candidate is not None:
+                # CommandDispatcher.issue commits the durable command before
+                # delivery. That is intentionally safe for the command, but it
+                # releases this rule/project lock. Reacquire authority before
+                # every later action so a disable, edit, or kill-switch flip
+                # that committed in the gap stops the remainder of the rule.
+                # Preserve this transaction's own notify-coalesce timestamp
+                # and pending side effects before populate_existing refreshes
+                # the row during revalidation (DatabaseManager disables
+                # autoflush deliberately).
+                await session.flush()
+                rule = await rules_repo.revalidate_execution(candidate)
+                if rule is None:
+                    return
             action_type = action_spec.get("type") if isinstance(action_spec, dict) else None
             outcome = await self._decide_and_run(
                 session,

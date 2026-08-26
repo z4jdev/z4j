@@ -1,5 +1,98 @@
 # Changelog
 
+## 1.9.0 (2026-08-25)
+
+* **Dashboard dependency refresh:** The bundled dashboard is rebuilt against
+  current stable frontend dependencies (TanStack Query, react-hook-form,
+  ESLint, Testing Library user-event, jsdom) and the repository-wide pnpm
+  release authority moves to 11.24.0. `pnpm audit` reports no known
+  vulnerabilities in this tree. TypeScript stays on the 5.9 line: 7.0 is
+  available and both the production build and the type check pass on it, but
+  typescript-eslint does not support TypeScript 7 yet, so adopting it would
+  mean shipping with linting switched off.
+* **Dependency security floors:** Fresh installs now refuse vulnerable
+  cryptography (<50.0.0), protobuf (<6.33.5), and optional Sentry SDK
+  (<2.8.0) releases. The test extra requires pytest 9.1.1 or newer within
+  the supported pytest 9 line.
+* **Upgrade sequence:** Take a backup, stop every 1.8 brain process, run
+  `z4j migrate upgrade head`, and then start only 1.9 processes. This is not a
+  rolling upgrade: Kubernetes' default `RollingUpdate` can overlap old and new
+  processes even at `replicas: 1`, so use `strategy: { type: Recreate }` and
+  turn off `Z4J_AUTO_MIGRATE` on runtime replicas. The five-revision chain adds
+  `schedules.overlap_policy`, `schedules.paused_at`, and `agents.revoked_at`,
+  deduplicates and enforces one legacy NULL-worker slot per agent, installs
+  exact rolling-window admissions and monotonic configuration epochs, preserves
+  notification delivery owners after subscription deletion, and adds the audit
+  action-prefix index; `overlap_policy` is groundwork and only `allow` is
+  accepted in 1.9.
+* **Rollback:** A 1.9 database cannot be started directly with the ordinary
+  1.8.2 image: pre-existing rows carry the Python 3.14.6 cadence fingerprint
+  and 1.9-created rows carry Python 3.14.7. Stop every Brain and scheduler
+  executor, then use the exact 1.9 candidate carrier to run the two-phase
+  `z4j migrate prepare-runtime-rollback` ceremony. It binds a human quiescence
+  challenge to the complete row set and the separately published
+  `1.8.2-py3.14.7-rollback-1.9.0` compatibility image. Consume that image only
+  by the finalized index digest in the signed release receipt; mutable
+  `1.8.2`, `1.8`, and `latest` tags are forbidden. Preparation restamps every
+  reserved row through authenticated Boundary-D revisions, recomputes target
+  cursors from retained legitimate anchors, and preserves definitions, control
+  tokens, execution counters, and fire evidence. Externally owned rows remain
+  on their legitimate external repository upsert/promotion path. Only after
+  preparation succeeds may the exact 1.9 carrier run
+  `z4j migrate downgrade v1_8_schedule_cursor_repair`, after which unchanged
+  1.8.2 code runs from the compatibility digest. The migration environment
+  checks every state-dependent preflight before the first downgrade revision.
+  It refuses an unfinalized compatibility manifest, any post-preparation row
+  change, paused or quarantined schedules, any agent tombstone, or a delivery
+  retaining its owner only through `recipient_user_id` after subscription
+  deletion. Resume paused schedules; export or clear those delivery rows, or
+  restore a backup from before the subscription deletion. Revocation destroys
+  the original token hash, so a database containing a tombstone must be
+  replaced from the backup taken before that revocation. Offline `--sql`
+  across these live-state guards fails closed.
+  When the checks pass, exact automation admissions are conservatively collapsed
+  into the legacy aggregate breaker state. The daily stale-agent worker can
+  create tombstones automatically after
+  `Z4J_AGENT_STALE_PRUNE_DAYS` (30 days by default); set it to `0` before the
+  upgrade if that automatic behavior is unwanted.
+* **Schedule controls and diagnostics:** Pause and resume now provide an
+  incident hold distinct from destructive disable and enable. Schedules owned
+  by an external scheduler are refused because z4j cannot enforce their hold.
+  This release also adds authenticated per-subsystem deep health, worker
+  configuration lint, and opt-in scheduled audit-chain verification.
+* **PostgreSQL liveness:** `Z4J_DATABASE_POOL_SIZE` and
+  `Z4J_DATABASE_MAX_OVERFLOW` are configurable. Startup refuses a configured
+  total below the derived floor of one connection per leader-gated worker, one
+  for an enabled embedded scheduler, and one spare; the default configuration's
+  floor is four. This is a deadlock-prevention floor, not a sizing
+  recommendation.
+* **Backup and restore:** A backup from 1.8 can be restored, migrated, and
+  finalized under 1.9. New SQLite backups are created owner-only on POSIX and
+  refuse an existing destination; audit older backups and rotate API keys and
+  sessions if a world-readable copy was exposed. PostgreSQL backups previously
+  taken on Windows may be truncated, so take a fresh backup after upgrading and
+  confirm `pg_restore --list` reads it. On Windows, place PostgreSQL client
+  binaries in an owner-private directory first on `PATH`.
+* **Adapter capability safety:** Celery no longer advertises the unsafe
+  `requeue_dead_letter` action; direct calls fail without publishing. Dramatiq
+  no longer advertises operations that stock Dramatiq cannot satisfy safely,
+  rq-scheduler no longer advertises an `enable` operation that cannot restore a
+  removed definition, and TaskIQ rejects unsupported non-default queue, ETA,
+  and priority overrides instead of silently ignoring them. TaskIQ broker and
+  custom schedule-source operations now require the correct owner event loop
+  and fail closed when it is unavailable.
+* **Environment security:** Only the exact value `dev` selects relaxed behavior.
+  Other `Z4J_ENVIRONMENT` and `Z4J_SCHEDULER_ENVIRONMENT` values now take the
+  production path, including authenticated metrics, protected scheduler gRPC,
+  production cookies and host validation, and fail-fast scheduler-listener
+  startup.
+* **Reliability:** Schedule fires now submit the locally computed cadence
+  identity, preventing dependency or Python patch changes from stalling every
+  existing schedule. Unsupported agents back off instead of reconnecting
+  forever, paused schedules no longer generate false misfire incidents, audit
+  verification cannot omit unexamined rows, and failed restores are refused
+  before they strand the startup fence.
+
 ## 1.8.0 (2026-07-23)
 
 * **Retry safety**: adapter proof is bound to the exact worker session that receives a retry; sticky per-agent metadata and automation can no longer authorize a different old worker, and coordinated 1.8.0 package floors prevent the reverse old-runtime/current-adapter pairing.
@@ -18,7 +111,7 @@
 
 ## 1.7.0 (2026-07-11)
 
-* **Automation rule engine**: governed per-project rules (notify / retry / cancel) with a rolling-window circuit breaker, per-project kill switch, dry-run mode, and an HMAC-chained audit of every firing; destructive actions require ADMIN plus fresh MFA, re-verified at fire time. New dashboard Automation area.
+* **Automation rule engine**: governed per-project rules (notify / retry / cancel) with a rolling-window circuit breaker, per-project kill switch, dry-run mode, and an HMAC-chained audit of every firing; destructive rules require ADMIN, browser-session mutations require fresh MFA, bearer-authenticated callers follow API-key authority, and fire time rechecks the creator's current ADMIN membership. New dashboard Automation area.
 * **Issues** (failure fingerprinting), **brain-side misfire detection**, **per-operator fire attribution**, a **durable automation firing outbox**, and Postgres RANGE-partitioning of the fire-history table.
 * Purge confirmation is now a keyed HMAC derived from the project secret and verified server-side.
 * The long-poll routes advertise the canonical agent/project UUIDs (`X-Z4J-Agent-Id` / `X-Z4J-Project-Id` response headers) so a slug-configured agent can bind the correct frame-HMAC identity; pre-1.7 the long-poll transport could never pass frame verification.

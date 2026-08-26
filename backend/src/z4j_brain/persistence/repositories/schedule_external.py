@@ -30,6 +30,7 @@ from z4j_brain.domain.schedule_cadence import (
 from z4j_brain.domain.schedule_definition import schedule_definition_digest
 from z4j_brain.persistence.enums import CommandStatus, ScheduleKind, TaskPriority
 from z4j_brain.persistence.models import (
+    Agent,
     Command,
     Project,
     Schedule,
@@ -51,6 +52,8 @@ from z4j_brain.persistence.models.schedule_external import (
 )
 from z4j_brain.persistence.repositories.schedule_control import (
     ScheduleControlRepository,
+    operator_hold_in_force,
+    schedule_is_quarantined,
     schedule_snapshot,
 )
 from z4j_brain.persistence.schedule_external_guard import (
@@ -262,6 +265,14 @@ def _cutover_projection(
     *,
     source_key: str,
 ) -> dict[str, Any]:
+    """Seal the definition the target adapter is being handed.
+
+    ``is_enabled`` is copied as stored rather than reduced through the hold
+    states, because the cutover refuses every row where those two differ. If
+    that gate is ever relaxed, this becomes the line that tells a foreign
+    scheduler to run something an operator stopped.
+    """
+
     fields = (
         "engine",
         "scheduler",
@@ -1231,11 +1242,13 @@ class ScheduleExternalRepository:
                 .limit(1),
             )
         ).scalar_one_or_none()
-        if unresolved_hold is not None or any(
-            row.quarantine_control_token is not None
-            and row.quarantine_control_token == row.control_token
-            for row in rows
-        ):
+        # Quarantine only, deliberately, where the cutover to an external
+        # owner refuses on either hold. Adoption is the direction that makes a
+        # hold meaningful again: the row lands under an owner that honours it
+        # and an operator who can lift it, so the hold travels with the row
+        # instead of blocking the move. An unrepaired definition has no such
+        # story and must be resolved before this brain starts firing it.
+        if unresolved_hold is not None or any(schedule_is_quarantined(row) for row in rows):
             return ExternalOwnerCutoverTransition(
                 "unresolved_schedule_state",
                 None,
@@ -1855,10 +1868,17 @@ class ScheduleExternalRepository:
                 None,
             )
         for row in rows:
-            if (
-                row.quarantine_control_token is not None
-                and row.quarantine_control_token == row.control_token
-            ):
+            # Both operator holds block the move, for the same reason from
+            # opposite ends. A quarantine is a definition nobody has repaired,
+            # and handing it to another scheduler hands over the unrepaired
+            # definition. A hold is only meaningful while this brain owns the
+            # cadence: the target adapter runs its own clock and has no
+            # channel to be told to stop, so cutting over either releases the
+            # hold silently or strands it, leaving a timestamp on a row that
+            # can no longer be resumed because resuming is refused for a
+            # foreign owner. Refusing until the operator resolves it is the
+            # same answer the schema downgrade gives, and for the same reason.
+            if operator_hold_in_force(row):
                 return ExternalOwnerCutoverTransition(
                     "unresolved_schedule_state",
                     None,
@@ -2288,7 +2308,7 @@ class ScheduleExternalRepository:
             command,
         )
 
-    async def apply_control_result(
+    async def apply_control_result(  # noqa: PLR0911 - explicit protocol dispositions
         self,
         *,
         command_id: uuid.UUID,
@@ -2303,7 +2323,21 @@ class ScheduleExternalRepository:
         delivery_claim_token: str | None,
         occurred_at: datetime,
     ) -> ExternalControlReceiptTransition:
-        """Apply one exact result; only a projection may mutate schedule truth."""
+        """Apply one exact agent result; only projection may mutate truth.
+
+        Agent results are limited to ``success`` and ``failed``. ``TIMEOUT`` is
+        applied only by :meth:`expire_claimed_control` after the brain-owned
+        deadline; accepting it from the wire would let an agent manufacture a
+        timer outcome.
+        """
+
+        if status not in ("success", "failed"):
+            return ExternalControlReceiptTransition(
+                "invalid_status",
+                None,
+                None,
+                None,
+            )
 
         stream, operation, command = await self._lock_control_command(
             command_id=command_id,
@@ -2382,7 +2416,7 @@ class ScheduleExternalRepository:
                 sequence=(operation.reserved_sequence or operation.expected_accepted_sequence + 1),
                 payload_digest=operation.desired_projection_digest,
             )
-        command.status = CommandStatus.TIMEOUT if status == "timeout" else CommandStatus.FAILED
+        command.status = CommandStatus.FAILED
         command.result = result_payload
         command.error = (error or "external schedule control failed")[:1024]
         command.completed_at = now
@@ -2699,6 +2733,30 @@ class ScheduleExternalRepository:
         from z4j_brain.persistence.repositories.commands import (
             CommandRepository,
         )
+
+        # The stream records which established generation used to own the
+        # scheduler, but it is not itself revocation authority. Lock the live
+        # agent only after the stream and schedule (the established lock order)
+        # and immediately before command insertion. Otherwise a failed
+        # best-effort socket kick could enqueue fresh control work for a
+        # committed tombstone.
+        executor = (
+            await self.session.execute(
+                select(Agent)
+                .where(
+                    Agent.id == stream.executor_agent_id,
+                    Agent.project_id == project_id,
+                    Agent.revoked_at.is_(None),
+                )
+                .with_for_update(),
+            )
+        ).scalar_one_or_none()
+        if executor is None:
+            return ExternalControlPlan(
+                "stream_not_executable",
+                stream,
+                schedule,
+            )
 
         operation_id = uuid.uuid4()
         payload = {

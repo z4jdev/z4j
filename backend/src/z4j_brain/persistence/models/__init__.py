@@ -27,6 +27,9 @@ from z4j_brain.persistence.models.automation_firing_outbox import (
     AutomationFiringOutbox,
 )
 from z4j_brain.persistence.models.automation_rule import AutomationRule
+from z4j_brain.persistence.models.automation_rule_admission import (
+    AutomationRuleAdmission,
+)
 from z4j_brain.persistence.models.bulk_retry_request import (
     BulkRetryControlState,
     BulkRetryDeliveryState,
@@ -100,6 +103,7 @@ __all__ = [
     "AuditLog",
     "AutomationFiringOutbox",
     "AutomationRule",
+    "AutomationRuleAdmission",
     "BulkRetryControlState",
     "BulkRetryDeliveryState",
     "BulkRetryOutcome",

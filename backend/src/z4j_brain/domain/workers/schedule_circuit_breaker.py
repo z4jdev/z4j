@@ -8,13 +8,12 @@ watches the recent fire history; once a schedule racks up
 the worker:
 
 1. Disables the schedule (``is_enabled=False``) so the scheduler
-   stops ticking it. The WatchSchedules push will deliver the
-   change to the scheduler within ~100ms.
+   stops ticking it. PostgreSQL wakes the legacy watch stream via
+   LISTEN/NOTIFY; SQLite observes it on the configured poll interval.
 2. Writes an audit row naming the schedule and the streak length
    so security ops can see "this got auto-disabled" instead of
    silent state drift.
-3. Emits a ``schedule.fire.failed`` notification (Phase 4 step 5
-   wires the dispatcher to fire one).
+3. Emits a ``schedule.fire.failed`` notification.
 
 The worker only acts on streaks of CONSECUTIVE failures. A
 schedule that fails 4 times then succeeds doesn't trip - the

@@ -1,9 +1,9 @@
-"""Brain configuration via :mod:`pydantic_settings`.
+"""Validated brain configuration.
 
-Twelve-factor: every value is sourced from an environment variable
-prefixed ``Z4J_`` or, in development, from a ``.env`` file at the
-process working directory. Missing required values cause startup to
-fail fast with a Pydantic ``ValidationError``.
+Normal entry points capture ``secret.env``, ``config.env``, ``.env`` and
+``Z4J_*`` process variables once, in that precedence order, then construct
+this frozen model from the resulting snapshot. ``Settings`` deliberately
+does not reopen dotenv paths. Missing required values fail at construction.
 
 This module is intentionally framework-free below the FastAPI layer:
 ``Settings`` is just a frozen dataclass-like object passed into the
@@ -17,6 +17,11 @@ from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from z4j_brain.postgres_tls import (
+    PostgresTLSConfigurationError,
+    parse_asyncpg_tls_options,
+)
 
 
 class ConfigError(ValueError):
@@ -41,11 +46,11 @@ class Settings(BaseSettings):
     Pydantic error at startup instead of obscure failures later.
 
     Attributes:
-        database_url: Async SQLAlchemy URL,
-            e.g. ``postgresql+asyncpg://user:pw@host/db``.
-        secret: Master HMAC signing key. Used for command signatures
-            and any HMAC-based identifier the brain mints. Must be
-            at least 32 bytes.
+        database_url: Async SQLAlchemy URL for PostgreSQL/asyncpg or
+            SQLite/aiosqlite.
+        secret: Master application key used for agent credentials,
+            project frame-signing derivation, stored-TOTP encryption,
+            and legacy authenticated state. Must be at least 32 bytes.
         session_secret: Independent secret used to sign session
             cookies. Separate from ``secret`` so a session-cookie
             compromise does not extend to command signing.
@@ -58,33 +63,40 @@ class Settings(BaseSettings):
         log_level: stdlib logging level name.
         log_json: Emit logs as JSON when True, console-friendly when
             False (development).
-        environment: Free-form environment label
-            (``production``, ``staging``, ``dev``).
+        environment: Environment label. Exactly ``dev`` enables
+            development relaxations; every other value gets the
+            production security posture.
         event_retention_days: How long raw events live before
             partition pruning.
         audit_retention_days: How long audit-log rows live.
-        command_timeout_seconds: Pending commands older than this
-            are marked timed-out by the background worker.
+        command_timeout_seconds: Pending or dispatched commands older
+            than this are marked timed-out by the background worker.
         agent_offline_timeout_seconds: Heartbeats older than this
             mark the agent offline.
         agent_offline_alert_grace_seconds: Extra grace past the
             offline timeout before the offline episode is alerted
             (audit row + worker.offline rules + agent.offline
             subscriptions).
-        ratelimit_commands_per_minute: Per-project upper bound for
-            command issuance.
-        ratelimit_events_per_second: Per-project upper bound for
-            event ingestion.
+        ratelimit_commands_per_minute: Reserved compatibility setting;
+            no runtime command limiter currently reads it.
+        ratelimit_events_per_second: Reserved compatibility setting;
+            no runtime event limiter currently reads it.
         max_payload_size_bytes: Maximum REST request body size.
-        max_ws_frame_bytes: Maximum inbound WebSocket frame size.
+        max_ws_frame_bytes: Compatibility WebSocket frame-size cap. The
+            effective inbound cap is the smaller of this and
+            ``ws_max_frame_bytes``.
         metrics_enabled: Expose ``/metrics`` Prometheus scrape endpoint.
-        session_duration_seconds: Lifetime of a dashboard session
-            cookie.
+        session_absolute_lifetime_seconds: Hard lifetime of a normal
+            dashboard session.
+        session_idle_timeout_seconds: Sliding idle timeout for a normal
+            dashboard session.
+        session_remember_me_lifetime_seconds: Hard lifetime of an
+            opted-in remembered session, which bypasses the idle timeout.
         argon2_time_cost: argon2id time cost parameter.
         argon2_memory_cost: argon2id memory cost (KiB).
         argon2_parallelism: argon2id parallelism parameter.
         first_boot_token_ttl_seconds: How long the one-time setup
-            token printed to stdout remains valid.
+            token printed to stderr remains valid.
         dashboard_dist: Filesystem path to the built dashboard
             assets that will be mounted at ``/``.
     """
@@ -122,7 +134,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     database_url: str = Field(
         ...,
-        description="postgresql+asyncpg:// async SQLAlchemy URL",
+        description=("Async SQLAlchemy URL using postgresql+asyncpg:// or sqlite+aiosqlite://"),
     )
     secret: SecretStr = Field(
         ...,
@@ -132,17 +144,50 @@ class Settings(BaseSettings):
     #: previously-active master HMAC secrets accepted DURING a rotation
     #: window. The brain signs new tokens with ``secret`` only, but
     #: accepts a verification match against ``secret`` OR any of these
-    #: previous values. This lets operators rotate ``Z4J_SECRET``
-    #: without invalidating every agent token + session cookie at
-    #: once: rotate, redeploy, wait for agents to re-mint, then drop
-    #: ``Z4J_PREVIOUS_SECRETS`` from the env. Empty (default) = no
-    #: rotation in progress.
+    #: previous values.
+    #:
+    #: SCOPE, and it is narrower than it looks: this list covers the agent
+    #: bearer lookup, decryption of stored TOTP secrets, and legacy audit-row
+    #: and prune-watermark verification used by pre-activation compatibility
+    #: and the activation/reseal tools. It does NOT cover API-key hashes,
+    #: outstanding invitation or password-reset tokens, or frame signing. The
+    #: per-project key handed to ``FrameSigner`` and ``FrameVerifier`` comes
+    #: from ``derive_project_secret(secret, project_id)`` using the CURRENT
+    #: master alone, on both transports, with no fallback loop.
+    #:
+    #: Rotating ``Z4J_SECRET`` therefore requires re-credentialing every
+    #: agent regardless of this list, and the list does nothing to help
+    #: with that: minting a replacement needs a user session, CSRF, an MFA
+    #: step-up and project-admin authority, so an agent can never
+    #: re-credential itself.
+    #:
+    #: WHEN IT IS SAFE TO DROP THIS, which is NOT when the agents are
+    #: done: stored TOTP secrets are encrypted under a key derived from the
+    #: master and are re-encrypted under the new one only after that user
+    #: successfully verifies a TOTP code. A trusted-device login or recovery-
+    #: code login does not re-wrap the stored secret. There is no bulk
+    #: re-wrap. Keep this value until every MFA-enrolled user has completed a
+    #: successful TOTP verification since the rotation, reset MFA, or
+    #: re-enrolled. Also complete and verify any outstanding legacy audit
+    #: activation or reseal work before retirement. Dropping it sooner orphans
+    #: dormant users' TOTP enrolments, and the symptom is an opaque 500 on MFA
+    #: verify rather than a readable error. Recoverable three ways: put the old
+    #: value back and restart every brain process (so keep it in the secret
+    #: store rather than destroying it), sign in with a recovery code
+    #: (argon2id, master-independent) and re-enrol, or run ``z4j reset-mfa
+    #: <email>``.
+    #: Empty (default) = no rotation in progress.
     previous_secrets: SecretStr | None = Field(
         default=None,
         description=(
-            "Comma-separated previous master secrets accepted during "
-            "rotation. Each entry must be >=32 bytes. Drop after agents "
-            "re-mint."
+            "Comma-separated previous master secrets accepted for agent "
+            "bearer verification, stored TOTP decryption, and legacy audit "
+            "verification and activation/reseal during rotation. "
+            "Does NOT cover API keys, invitation or password-reset tokens, "
+            "or frame signing. Keep until every MFA enrolment has completed "
+            "a successful TOTP verification since rotation, been reset, or "
+            "been re-enrolled, and any legacy audit transition is verified. "
+            "Each entry must be >=32 bytes."
         ),
     )
     session_secret: SecretStr = Field(
@@ -190,6 +235,24 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     event_retention_days: int = Field(default=30, ge=1, le=3650)
     audit_retention_days: int = Field(default=90, ge=1, le=3650)
+    #: Verify the audit chain on a schedule rather than only on demand.
+    #:
+    #: Off by default. Verification takes a share lock and walks every
+    #: retained row, so an operator who has not asked for it should not pay
+    #: for it. Turning it on is what converts "the chain verified when
+    #: somebody last checked" into a continuous record, which is the form a
+    #: compliance audit actually wants.
+    audit_chain_verify_enabled: bool = False
+    #: Cadence for the scheduled verification. Daily by default: frequent
+    #: enough that tampering is caught within a reporting window, rare
+    #: enough that the walk is not a recurring load problem. The floor is
+    #: 15 minutes because anything tighter is a self-inflicted denial of
+    #: service on a large chain rather than a better guarantee.
+    audit_chain_verify_interval_seconds: int = Field(
+        default=86_400,
+        ge=900,
+        le=604_800,
+    )
     #: Periodic sweeper cadence for the audit-log retention task
     #: (1.2.2+). Default 1h is enough to keep up with even the
     #: noisiest brain (~1M rows/day). Operators worried about
@@ -257,12 +320,23 @@ class Settings(BaseSettings):
         ge=0,
         le=86_400,
     )
-    #: Delete agent rows that have been offline for more than this
-    #: many days. Keeps the Agents page tidy after removed
-    #: containers. Set to 0 to disable pruning (useful for long
-    #: audit retention windows; rely on the ``state=offline`` badge
-    #: instead).
-    agent_stale_prune_days: int = Field(default=30, ge=0, le=3650)
+    #: Soft-revoke live agent rows that have been offline for more than this
+    #: many days. The row and all historical references are retained, but its
+    #: bearer token is invalidated and normal fleet lists hide it. Set to 0 to
+    #: disable.
+    #: A hygiene-created tombstone has the same rollback consequence as an
+    #: operator revoke: downgrade past the revocation-column migration refuses
+    #: while it exists.
+    agent_stale_prune_days: int = Field(
+        default=30,
+        ge=0,
+        le=3650,
+        description=(
+            "Days before an offline live agent is automatically soft-revoked; "
+            "0 disables. The durable tombstone invalidates its token, is hidden "
+            "from live inventory, and blocks downgrade past the revocation schema."
+        ),
+    )
 
     #: Source URL for the operator-initiated *Check for updates* button
     #: in Settings -> System (1.3.4+). The brain ships with a bundled
@@ -294,14 +368,35 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Rate limiting
     # ------------------------------------------------------------------
-    ratelimit_commands_per_minute: int = Field(default=100, ge=1)
-    ratelimit_events_per_second: int = Field(default=10_000, ge=1)
+    ratelimit_commands_per_minute: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "Reserved compatibility setting; command issuance is not currently "
+            "rate-limited from this value. Do not rely on it as a security boundary."
+        ),
+    )
+    ratelimit_events_per_second: int = Field(
+        default=10_000,
+        ge=1,
+        description=(
+            "Reserved compatibility setting; event ingestion is not currently "
+            "rate-limited from this value. Do not rely on it as a security boundary."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Safety limits
     # ------------------------------------------------------------------
     max_payload_size_bytes: int = Field(default=8_192, ge=128)
-    max_ws_frame_bytes: int = Field(default=1_048_576, ge=1024)
+    max_ws_frame_bytes: int = Field(
+        default=1_048_576,
+        ge=1024,
+        description=(
+            "Compatibility cap for inbound WebSocket frames. The effective "
+            "gateway cap is the smaller of this and ws_max_frame_bytes."
+        ),
+    )
     #: Upper bound on the admin project listing endpoints
     #: (``/api/v1/projects`` and the Home dashboard). Raise this for
     #: tenants with more projects than the default ceiling; keep it
@@ -418,15 +513,17 @@ class Settings(BaseSettings):
     metrics_enabled: bool = True
     #: Bearer token that must be presented as
     #: ``Authorization: Bearer <token>`` to fetch ``/metrics``.
-    #: As of 1.0.13 the CLI auto-mints this on first boot (persisted to
-    #: ``~/.z4j/secret.env``) and the endpoint is fail-secure: unset +
-    #: :attr:`metrics_public` False returns 401. Operators who need
-    #: unauthenticated scrape (trusted LAN, sidecar Prometheus) must
-    #: set :attr:`metrics_public` explicitly.
+    #: As of 1.0.13 a fresh packaged SQLite bootstrap auto-mints this
+    #: (persisted to ``~/.z4j/secret.env``). Other deployments configure it
+    #: explicitly. The endpoint is fail-secure: unset +
+    #: :attr:`metrics_public` False returns 401. Operators who need an
+    #: unauthenticated scrape (trusted LAN, sidecar Prometheus) must set
+    #: :attr:`metrics_public` explicitly.
     metrics_auth_token: SecretStr | None = None
     #: Explicit opt-in to unauthenticated ``/metrics``. Default False
-    #: (fail-secure). When True, the bearer-token check is skipped and
-    #: the brain logs a loud WARNING at startup naming the risk.
+    #: (fail-secure). When True and metrics_enabled is also True, the
+    #: bearer-token check is skipped and the brain logs a loud WARNING at
+    #: startup naming the risk. It does not remount a disabled endpoint.
     #: Set via ``Z4J_METRICS_PUBLIC=1``. Reverse of the pre-1.0.13
     #: default - see :func:`z4j_brain.api.metrics._check_metrics_auth`
     #: for the policy rationale.
@@ -618,14 +715,25 @@ class Settings(BaseSettings):
     #: Default 30 days; the idle timeout is also bypassed for
     #: remembered sessions so a homelab operator who pokes the
     #: dashboard once a week is not kicked back to the login screen.
+    #: The 1.x schema infers this choice from the stored session duration
+    #: rather than persisting a flag. Keep this value comfortably greater
+    #: than ``session_absolute_lifetime_seconds`` and avoid changing either
+    #: lifetime until existing sessions have expired; otherwise a normal
+    #: session can be mistaken for remembered and bypass the idle timeout.
     session_remember_me_lifetime_seconds: int = Field(
         default=2_592_000,
         ge=60,
+        description=(
+            "Hard lifetime of a remembered session. The 1.x schema infers "
+            "remembered status from stored duration, so keep this comfortably "
+            "greater than session_absolute_lifetime_seconds and do not change "
+            "either lifetime while sessions minted under the old values remain live."
+        ),
     )
-    #: When True, the resolved client user-agent at session-issue time
-    #: is enforced on every subsequent request - change of UA voids
-    #: the session. Default OFF: too many false positives on mobile
-    #: networks and behind corporate proxies.
+    #: When True, the client user-agent captured at session issue is checked
+    #: on each session-authenticated REST request and dashboard WebSocket
+    #: connect. A mismatch durably revokes the session. Default OFF because
+    #: browser/app updates and user-agent rewriting can create false positives.
     session_pin_user_agent: bool = False
 
     #: SameSite attribute on the session cookie.
@@ -656,12 +764,32 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     login_lockout_threshold: int = Field(default=10, ge=3, le=100)
     login_lockout_duration_seconds: int = Field(default=900, ge=60, le=86_400)
-    login_backoff_base_seconds: float = Field(default=0.5, ge=0.0, le=10.0)
-    login_backoff_max_seconds: float = Field(default=5.0, ge=0.0, le=60.0)
-    #: Minimum total response time for ``/auth/login`` (success OR
-    #: failure). Held by ``await asyncio.sleep`` so DB-query, argon2,
-    #: and cache-hit/miss variance cannot be exploited as a timing
-    #: oracle for username enumeration.
+    # Kept for configuration compatibility only. Account-dependent backoff was
+    # removed because its differing delay exposed an account-existence timing
+    # oracle. The uniform response floor and IP/account limits are the live
+    # controls.
+    login_backoff_base_seconds: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=10.0,
+        description=(
+            "Deprecated compatibility value; no login path reads it. "
+            "Use login_min_duration_ms for the uniform response floor."
+        ),
+    )
+    login_backoff_max_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        description=(
+            "Deprecated compatibility value; no login path reads it. "
+            "Use login_min_duration_ms for the uniform response floor."
+        ),
+    )
+    #: Minimum timing floor applied by the login service after password
+    #: verification and before account-dependent bookkeeping. It reduces
+    #: short-path variance but does not make the full request constant-time;
+    #: later database work can still exceed the floor.
     login_min_duration_ms: int = Field(default=300, ge=0, le=2000)
     #: When True, structured logs at ``z4j.brain.auth`` carry the
     #: attempted email on failed login. Always recorded in the audit
@@ -760,12 +888,19 @@ class Settings(BaseSettings):
     #: trust. Empty list = trust no proxies (audit logs use the raw
     #: socket peer address). Defaults are dev-only.
     trusted_proxies: list[str] = Field(default_factory=list)
-    #: Per-request handler wall-clock budget. Handlers exceeding this
-    #: are cancelled and the response becomes a 504 + audit row.
-    request_timeout_seconds: int = Field(default=30, ge=1, le=600)
-    #: Strict-Transport-Security max-age. Only emitted when
-    #: ``environment="production"`` AND ``public_url`` starts with
-    #: ``https://``.
+    #: Reserved compatibility setting. There is no process-wide request
+    #: cancellation middleware; individual I/O paths carry their own deadlines.
+    request_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=600,
+        description=(
+            "Reserved compatibility setting; there is no global handler timeout "
+            "or automatic 504 based on this value."
+        ),
+    )
+    #: Strict-Transport-Security max-age. Emitted for every non-``dev``
+    #: environment when ``public_url`` starts with ``https://``.
     hsts_max_age_seconds: int = Field(default=31_536_000, ge=0)
     #: ESCAPE HATCH FOR INTERNAL TEST FIXTURES ONLY. When True,
     #: skips the production-mode "public_url must use https://"
@@ -828,10 +963,17 @@ class Settings(BaseSettings):
     #: Lower bound is 1s so integration tests can drive a fast
     #: sweep; production deployments should leave the default of 30s.
     registry_reconcile_interval_seconds: int = Field(default=30, ge=1, le=600)
-    #: Maximum inbound WebSocket frame size from agents. Frames
-    #: larger than this kill the connection. 1 MiB is well above
-    #: any legitimate event_batch shape.
-    ws_max_frame_bytes: int = Field(default=1_048_576, ge=8192, le=33_554_432)
+    #: Primary inbound WebSocket frame-size cap. ``max_ws_frame_bytes`` is
+    #: retained for configuration compatibility, and the smaller value wins.
+    ws_max_frame_bytes: int = Field(
+        default=1_048_576,
+        ge=8192,
+        le=33_554_432,
+        description=(
+            "Primary inbound WebSocket frame-size cap. The effective gateway "
+            "cap is the smaller of this and max_ws_frame_bytes."
+        ),
+    )
     #: Maximum number of concurrent worker connections accepted
     #: per agent_id (1.2.1+, repurposed from a dead pre-1.2.0
     #: setting that was never read in code). Default 64 covers the
@@ -1206,19 +1348,19 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
-    # TriggerSchedule client - brain calls scheduler.TriggerSchedule
+    # TriggerSchedule client - retired
     # ------------------------------------------------------------------
-    #: When set, the dashboard's "fire now" route on a
-    #: z4j-scheduler-managed schedule routes through the scheduler
-    #: rather than dispatching directly. Format: ``host:port``,
-    #: typically ``scheduler:7802``. Leave unset to keep the v1
-    #: direct-dispatch path.
+    #: Inert. Sending an operator trigger out to z4j-scheduler and back
+    #: was an earlier design: a scheduler cannot carry one, because it
+    #: cannot see a hold and is not the authority on whether a schedule
+    #: may run. The Brain dispatches "fire now" itself in every
+    #: configuration, and nothing reads these four settings, so setting
+    #: them changes no behaviour. They remain only so an existing
+    #: deployment that still supplies them starts rather than failing
+    #: validation; unset them.
     scheduler_trigger_url: str | None = None
-    #: Brain's client cert presented to the scheduler. Required when
-    #: ``scheduler_trigger_url`` is set.
     scheduler_trigger_tls_cert: str | None = None
     scheduler_trigger_tls_key: str | None = None
-    #: CA bundle used to validate the scheduler's server cert.
     scheduler_trigger_tls_ca: str | None = None
 
     # ------------------------------------------------------------------
@@ -1419,8 +1561,100 @@ class Settings(BaseSettings):
         super().__init__(**values)
         self._enforce_security_invariants()
 
-    def _enforce_security_invariants(self) -> None:  # noqa: PLR0912  cross-field security checks
+    @property
+    def is_dev(self) -> bool:
+        """Whether this process runs with development relaxations. Exactly ``dev``.
+
+        One definition, because the near-miss keeps costing us. Every security
+        decision in the brain is meant to read "dev relaxes, everything else is
+        production", but three of them were written as ``== "production"``
+        instead, which inverts it for any other label: a deployment tagged
+        ``staging`` got production cookies, production host validation and
+        production startup invariants, and then silently lost HSTS, kept a
+        soft-fail on a scheduler-gRPC startup failure, and was told by
+        ``z4j doctor`` that it was in dev mode.
+
+        Compare against this rather than against a literal, and a new
+        environment label cannot quietly land somewhere in between.
+        """
+        return self.environment == "dev"
+
+    @property
+    def effective_ws_max_frame_bytes(self) -> int:
+        """Single frame-size limit used by the gateway and retry planner."""
+        return min(self.max_ws_frame_bytes, self.ws_max_frame_bytes)
+
+    def leader_gated_worker_names(self) -> tuple[str, ...]:
+        """The background workers this configuration starts behind a leader lock.
+
+        Each of these holds a SESSION-scoped advisory lock on a connection of
+        its own for the whole of its tick, and does the tick's work on a
+        second connection. The lock ids are per worker, so they do not
+        serialise each other: every one of them can be holding at the same
+        instant, and at boot every one of them is, because the supervisor
+        spawns them together and each runs its first tick immediately.
+
+        Listed here rather than counted in ``main`` because the pool floor is
+        a construction-time question and importing the app assembly to answer
+        it would invert the dependency. What keeps the two in step is a test
+        that reads the worker set ``create_app`` actually builds and requires
+        it to match this, in both directions.
+
+        ``embedded_scheduler`` implies the scheduler workers: ``create_app``
+        forces ``scheduler_grpc_enabled`` on a copy of these settings, and
+        that copy does not re-run validation, so the implication has to be
+        applied here or the floor is derived from a set smaller than the one
+        that starts.
+        """
+        names = [
+            "reconciliation_worker",
+            "partition_creator_worker",
+            "automation_outbox_drain_worker",
+        ]
+        if self.audit_chain_verify_enabled:
+            names.append("audit_chain_verifier_worker")
+        if self.scheduler_grpc_enabled or self.embedded_scheduler:
+            names.extend(
+                (
+                    "pending_fires_replay_worker",
+                    "schedule_circuit_breaker_worker",
+                    "schedule_fires_prune_worker",
+                    "schedule_fires_partition_worker",
+                ),
+            )
+            if self.scheduler_misfire_sweep_seconds > 0:
+                names.append("misfire_detector_worker")
+        return tuple(names)
+
+    def minimum_postgres_pool_total(self) -> int:
+        """The smallest ``pool_size + max_overflow`` that cannot deadlock at boot.
+
+        One connection per lock a worker can be holding at the same instant,
+        plus one for work to happen on. The plus-one is what makes it a floor
+        rather than a deadlock: with every lock held and nothing spare, each
+        worker is waiting for a connection that only another worker can
+        release, and none of them will, because releasing it is what they are
+        waiting to do. With one spare they proceed one at a time.
+
+        This is a liveness bound and not a sizing recommendation. A brain
+        running at it has nothing left for a request.
+        """
+        holders = len(self.leader_gated_worker_names())
+        if self.embedded_scheduler:
+            # Session-scoped and claimed for the whole process, because the
+            # lock belongs to its physical connection and cannot be handed
+            # back while the subprocess it guards is alive.
+            holders += 1
+        return holders + 1
+
+    def _enforce_security_invariants(  # noqa: PLR0912, PLR0915  cross-field security checks
+        self,
+    ) -> None:
         """Cross-field security checks. See :meth:`__init__`."""
+        # Exactly ``dev``, and every message below says so. A near miss like
+        # ``development`` is treated as production, which is the safe direction
+        # but a baffling one to debug: the operator believes they are in dev
+        # mode and reads an error telling them dev mode would have allowed it.
         is_dev = self.environment == "dev"
 
         # The only supported keyless shape is a development/pre-activation
@@ -1429,9 +1663,35 @@ class Settings(BaseSettings):
         # explicitly.  AuditService independently refuses its v2 signer path
         # without this key, so changing environment after construction cannot
         # create a fallback to Z4J_SECRET.
+        # The pool has to fit the workers this configuration STARTS, not one
+        # of them. The lock no-ops on SQLite, which is single-writer, so this
+        # only binds where it is real. Refusing at construction turns a silent
+        # permanent stall into a startup error that names the fix.
+        floor = self.minimum_postgres_pool_total()
+        if (
+            self.database_url.startswith("postgresql")
+            and (self.database_pool_size + self.database_max_overflow) < floor
+        ):
+            gated = len(self.leader_gated_worker_names())
+            lease = (
+                ", plus one held for the life of the process by the embedded "
+                "scheduler's singleton lease"
+                if self.embedded_scheduler
+                else ""
+            )
+            raise ConfigError(
+                f"database_pool_size + database_max_overflow must be at least "
+                f"{floor} on PostgreSQL: this configuration starts {gated} "
+                f"leader-gated background workers at once and each holds an "
+                f"advisory-lock connection while it works on a second one"
+                f"{lease}, so a smaller total lets them take every connection "
+                f"and then all wait for one, on every tick, forever",
+            )
+
         if not is_dev and self.audit_chain_secret is None:
             raise ConfigError(
-                "audit_chain_secret is required outside development; set "
+                "audit_chain_secret is required unless Z4J_ENVIRONMENT is exactly "
+                '"dev"; set '
                 "Z4J_AUDIT_CHAIN_SECRET to an independent >=32-byte random key",
             )
         if self.audit_chain_secret is not None:
@@ -1481,7 +1741,7 @@ class Settings(BaseSettings):
         # Production: allowed_hosts must be explicit.
         if not is_dev and not self.allowed_hosts:
             raise ConfigError(
-                "allowed_hosts must be set in non-dev environments "
+                'allowed_hosts must be set unless Z4J_ENVIRONMENT is exactly "dev" '
                 "(host header is not validated otherwise)",
             )
 
@@ -1499,7 +1759,7 @@ class Settings(BaseSettings):
             and not self.allow_http_public_url
         ):
             raise ConfigError(
-                "public_url must use https:// in non-dev environments. "
+                'public_url must use https:// unless Z4J_ENVIRONMENT is exactly "dev". '
                 "If this is an internal-network test environment, set "
                 "Z4J_ALLOW_HTTP_PUBLIC_URL=true to opt in (logged + "
                 "audited).",
@@ -1525,22 +1785,23 @@ class Settings(BaseSettings):
                 "public_url must start with http:// or https://",
             )
 
-        # Database: require SSL for production Postgres URLs.
+        # Database: validate the asyncpg/libpq TLS bridge for every Postgres
+        # URL, then require a non-fallback TLS mode in production.
+        try:
+            tls_options = parse_asyncpg_tls_options(self.database_url)
+        except PostgresTLSConfigurationError as exc:
+            raise ConfigError(f"database_url TLS configuration is invalid: {exc}") from exc
         if (
             self.require_db_ssl
             and not is_dev
             and self.database_url.startswith("postgresql+asyncpg://")
         ):
-            url_lower = self.database_url.lower()
-            if "sslmode=disable" in url_lower:
+            strict_modes = {"require", "verify-ca", "verify-full"}
+            if tls_options.mode not in strict_modes:
                 raise ConfigError(
-                    "database_url has sslmode=disable which is not "
-                    "permitted when require_db_ssl is True",
-                )
-            if "sslmode=" not in url_lower:
-                raise ConfigError(
-                    "database_url must include sslmode=require (or "
-                    "stricter) when require_db_ssl is True",
+                    "database_url must include exactly one sslmode set to "
+                    "require, verify-ca, or verify-full when require_db_ssl "
+                    "is True",
                 )
 
         # Audit forwarder: URL without an HMAC secret would leave

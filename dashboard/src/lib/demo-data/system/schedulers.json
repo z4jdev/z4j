@@ -13,7 +13,7 @@
         "brain_grpc_url": "brain:50051",
         "projects": "tasks.example.com",
         "ready": true,
-        "schedules_loaded": 14,
+        "schedules_loaded": 8,
         "subsystems": {
           "brain_client_connected": true,
           "cache_initial_sync_complete": true,
@@ -32,7 +32,7 @@
         "brain_grpc_url": "brain:50051",
         "projects": "tasks.example.com",
         "ready": true,
-        "schedules_loaded": 14,
+        "schedules_loaded": 8,
         "subsystems": {
           "brain_client_connected": true,
           "cache_initial_sync_complete": true,

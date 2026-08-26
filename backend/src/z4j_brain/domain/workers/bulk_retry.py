@@ -84,7 +84,7 @@ class BulkRetryCoordinator:
 
     async def _send_one(self, parent_id: UUID) -> bool:
         from z4j_brain.persistence.repositories import BulkRetryRequestRepository
-        from z4j_brain.websocket.gateway import deliver_command_frame
+        from z4j_brain.websocket.gateway import deliver_command_frame_with_authority
 
         async with self._db.session() as session:
             repository = BulkRetryRequestRepository(session)
@@ -132,14 +132,29 @@ class BulkRetryCoordinator:
             if command is None:
                 continue
             try:
-                await deliver_command_frame(
+                delivered = await deliver_command_frame_with_authority(
+                    db=self._db,
                     websocket=handle.websocket,
                     settings=self._settings,
                     command=command,
                 )
+                if not delivered:
+                    # The authority lock proves no bytes were sent, but the
+                    # bulk claim is intentionally irreversible. Keep it bound
+                    # to this episode and let normal expiry/reconciliation
+                    # classify the unobserved result; never retarget or revert.
+                    logger.error(
+                        "z4j bulk retry send refused after irreversible claim "
+                        "because its agent was revoked",
+                        parent_id=str(parent_id),
+                        child_id=str(child.id),
+                        command_id=str(command.id),
+                        generation=str(handle.generation),
+                    )
             except Exception:
-                # The irreversible claim is intentional.  We cannot know whether
-                # bytes crossed the boundary, so never retarget or return PENDING.
+                # Unlike a False authority result, a socket exception is
+                # ambiguous: bytes may have crossed the boundary. The claim is
+                # still irreversible, so never retarget or return PENDING.
                 logger.exception(
                     "z4j bulk retry send failed after irreversible claim",
                     parent_id=str(parent_id),

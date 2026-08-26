@@ -7,13 +7,21 @@ roll up as expected.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
-from z4j_brain.api.trends import _bucket_expr
+from z4j_brain.api.trends import (
+    TrendBucket,
+    _bucket_expr,
+    _normalize_bucket_timestamp,
+    get_trends,
+)
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import TaskState
@@ -85,3 +93,94 @@ async def test_bucket_expr_groups_tasks_by_hour(engine):
     assert len(rows) == 3
     buckets = {str(r[0]) for r in rows}
     assert len(buckets) == 2  # two distinct hour buckets
+
+
+@pytest.mark.asyncio
+async def test_sqlite_response_uses_utc_timestamp_and_non_null_runtime_weight(engine):
+    """SQLite response timestamps and exact combined averages match the contract."""
+    bucket_start = (datetime.now(UTC) - timedelta(hours=2)).replace(
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    async with AsyncSession(engine) as session:
+        project = Project(slug="proj", name="Proj")
+        session.add(project)
+        await session.commit()
+        await session.refresh(project)
+        project_id = project.id
+
+        # SQLite's AVG for SUCCESS is not exactly representable as a float:
+        # (1 * 6 + 55) / 7. Reconstructing the sum with AVG * COUNT can round
+        # below 64 and truncate the combined average to 7 instead of 8.
+        for index, (state, runtime_ms) in enumerate(
+            [(TaskState.SUCCESS, 1)] * 6
+            + [
+                (TaskState.SUCCESS, 55),
+                (TaskState.FAILURE, 3),
+                (TaskState.FAILURE, None),
+            ],
+        ):
+            session.add(
+                Task(
+                    project_id=project_id,
+                    engine="celery",
+                    task_id=f"weighted-{index}",
+                    name="myapp.tasks.weighted",
+                    state=state,
+                    finished_at=bucket_start + timedelta(minutes=index),
+                    runtime_ms=runtime_ms,
+                ),
+            )
+        # Keep division in the integer domain too: converting this runtime to
+        # binary float would silently lose one millisecond.
+        large_runtime = 2**53 + 1
+        session.add(
+            Task(
+                project_id=project_id,
+                engine="celery",
+                task_id="large-runtime",
+                name="myapp.tasks.weighted",
+                state=TaskState.SUCCESS,
+                finished_at=bucket_start + timedelta(hours=1),
+                runtime_ms=large_runtime,
+            ),
+        )
+        await session.commit()
+
+        project_record = SimpleNamespace(id=project_id, is_active=True)
+        projects = SimpleNamespace(get_by_slug=AsyncMock(return_value=project_record))
+        response = await get_trends(
+            slug="proj",
+            window="24h",
+            bucket="1h",
+            user=SimpleNamespace(id=uuid.uuid4(), is_admin=True),
+            memberships=SimpleNamespace(),
+            projects=projects,
+            db_session=session,
+        )
+
+    assert len(response.series) == 2
+    result = response.series[0]
+    assert result.t == bucket_start
+    assert result.t.tzinfo is UTC
+    assert response.model_dump(mode="json")["series"][0]["t"] == bucket_start.isoformat().replace(
+        "+00:00",
+        "Z",
+    )
+    assert result.success == 7
+    assert result.failure == 2
+    assert result.total == 9
+    assert result.avg_runtime_ms == 8
+    assert response.series[1].avg_runtime_ms == large_runtime
+
+
+def test_postgresql_shape_timestamp_is_normalized_to_utc():
+    """A PostgreSQL-shaped aware datetime is serialized in the same UTC form."""
+    pg_value = datetime.fromisoformat("2026-04-15T14:00:00+02:00")
+
+    result = _normalize_bucket_timestamp(pg_value)
+
+    assert result == datetime(2026, 4, 15, 12, 0, tzinfo=UTC)
+    assert result.tzinfo is UTC
+    assert TrendBucket(t=result).model_dump(mode="json")["t"] == "2026-04-15T12:00:00Z"

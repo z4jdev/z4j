@@ -85,6 +85,12 @@ compat = {
     "downgrade_to": None,
 }
 
+#: Declares to ``env.py`` that this revision will not be undone, so a whole
+#: downgrade run planned through it is refused before its first step executes.
+#: Without that, a destructive step stacked above here commits, and is lost,
+#: while the operator is being told the rollback was refused.
+DOWNGRADE_REFUSED = "refusing downgrade below Boundary D while schedule authority exists"
+
 _STATE_ID = "schedule-revision"
 _ACTIVATION_ACTION = "schedule.control_migration_activated"
 _ACTIVATION_TARGET = "schedule_control"
@@ -752,6 +758,30 @@ def _migration_schedule_values(
     return values, manifest
 
 
+
+
+def _existing_schedule_columns(bind: sa.engine.Connection) -> list[sa.Column]:
+    """ORM columns for ``schedules`` that actually exist in the database.
+
+    Two failure modes have to be avoided at once here.
+
+    ``select(Schedule.__table__)`` emits every column the LIVE ORM model has
+    today, so a later release adding a column breaks THIS revision: the
+    upgrade reaches it before the column exists and dies on "no such column"
+    in a migration unrelated to the new feature.
+
+    Reflecting the table instead fixes that and breaks binding, because
+    reflection returns generic SQL types and loses the type decorators that
+    convert a Python ``UUID`` on the way in. The parameter then fails with
+    "type 'UUID' is not supported".
+
+    So: keep the ORM columns, which carry the types, and filter them to the
+    ones the database actually has at this point in the chain.
+    """
+    present = {column["name"] for column in sa.inspect(bind).get_columns("schedules")}
+    return [column for column in Schedule.__table__.c if column.name in present]
+
+
 def _backfill_schedules(
     bind: sa.engine.Connection,
     *,
@@ -760,7 +790,7 @@ def _backfill_schedules(
     table = Schedule.__table__
     rows = (
         bind.execute(
-            sa.select(table).order_by(table.c.id),
+            sa.select(*_existing_schedule_columns(bind)).order_by(table.c.id),
         )
         .mappings()
         .all()
@@ -830,7 +860,7 @@ def _backfill_external_authority(
     schedule_table = Schedule.__table__
     rows = (
         bind.execute(
-            sa.select(schedule_table)
+            sa.select(*_existing_schedule_columns(bind))
             .where(schedule_table.c.scheduler != "z4j-scheduler")
             .order_by(
                 schedule_table.c.project_id,
@@ -7518,6 +7548,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise CommandError(
-        "refusing downgrade below Boundary D while schedule authority exists",
-    )
+    raise CommandError(DOWNGRADE_REFUSED)

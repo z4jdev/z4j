@@ -6,6 +6,7 @@ import secrets
 import time
 
 import pytest
+from argon2 import PasswordHasher as Argon2PasswordHasher
 from z4j_brain.auth.passwords import PasswordError, PasswordHasher
 from z4j_brain.settings import Settings
 
@@ -115,6 +116,54 @@ class TestNeedsRehash:
         hasher: PasswordHasher,
     ) -> None:
         assert hasher.needs_rehash("not-a-real-hash") is True
+
+    def test_stronger_stored_parameters_are_never_downgraded(
+        self,
+        hasher: PasswordHasher,
+    ) -> None:
+        stronger = Argon2PasswordHasher(
+            time_cost=2,
+            memory_cost=16_384,
+            parallelism=4,
+            hash_len=64,
+            salt_len=32,
+        ).hash("stronger password 9")
+
+        assert hasher.verify(stronger, "stronger password 9") is True
+        assert hasher.needs_rehash(stronger) is False
+
+    def test_incomparable_profile_does_not_downgrade_stronger_dimension(
+        self,
+        hasher: PasswordHasher,
+    ) -> None:
+        # The configured test hasher raises memory versus this stored hash but
+        # lowers its time cost. Rehashing would be an upgrade in one dimension
+        # and a downgrade in another, so automatic login migration must stop.
+        incomparable = Argon2PasswordHasher(
+            time_cost=2,
+            memory_cost=4096,
+            parallelism=4,
+            hash_len=32,
+            salt_len=16,
+        ).hash("incomparable password 9")
+
+        assert hasher.verify(incomparable, "incomparable password 9") is True
+        assert hasher.needs_rehash(incomparable) is False
+
+    def test_uniformly_weaker_profile_is_upgraded(
+        self,
+        hasher: PasswordHasher,
+    ) -> None:
+        weaker = Argon2PasswordHasher(
+            time_cost=1,
+            memory_cost=4096,
+            parallelism=1,
+            hash_len=16,
+            salt_len=8,
+        ).hash("weaker password 9")
+
+        assert hasher.verify(weaker, "weaker password 9") is True
+        assert hasher.needs_rehash(weaker) is True
 
 
 class TestPolicy:

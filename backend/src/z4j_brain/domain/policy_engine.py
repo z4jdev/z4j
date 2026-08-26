@@ -19,17 +19,15 @@ from typing import TYPE_CHECKING
 from z4j_brain.errors import AuthorizationError, NotFoundError
 from z4j_brain.persistence.enums import ProjectRole
 
-# Mirrors ``_SLUG_RE`` in ``api/projects.py`` (the creation-side
-# validator): one alnum, then 1..48 alnum/hyphen, then one alnum.
-# Any slug that doesn't match this shape cannot possibly exist in
-# the database - the CHECK constraint on ``projects.slug``
-# (migration ``2026_04_15_0001-initial_schema``) rejects it. We
-# short-circuit here to avoid a DB round-trip AND to avoid
-# shipping control bytes (notably NUL ``0x00``) into the
+# Mirrors ``_SLUG_RE`` in ``api/projects.py`` (the public creation/update
+# validator): one alnum, then 1..48 alnum/hyphen, then one alnum. The database
+# constraint is deliberately broader and is not the authority for URL input.
+# We short-circuit non-canonical public slugs here to avoid a DB round-trip and
+# avoid shipping control bytes (notably NUL ``0x00``) into the
 # ``asyncpg`` driver, which raises ``CharacterNotInRepertoireError``
 # and produces a generic HTTP 500 instead of the clean 404 the
 # caller deserves (e.g. ``GET /projects/default%00b/tasks``).
-_SLUG_SAFE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$")
+_SLUG_SAFE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$")
 
 if TYPE_CHECKING:
     from z4j_brain.persistence.models import Membership, Project, User
@@ -71,7 +69,7 @@ class PolicyEngine:
         and no pollution of the ``error``-level log with
         attacker-triggerable stack traces.
         """
-        if not _SLUG_SAFE_RE.match(slug):
+        if _SLUG_SAFE_RE.fullmatch(slug) is None:
             raise NotFoundError(
                 f"project {slug!r} not found",
                 details={"slug": slug},

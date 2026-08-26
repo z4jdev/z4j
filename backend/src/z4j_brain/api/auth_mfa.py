@@ -1,9 +1,9 @@
 """MFA enrollment, verification, disable, recovery-code regenerate.
 
-Five POST endpoints under ``/auth/mfa``. All require an authenticated
-session (``Depends(get_current_user)``); the verify endpoint is the
-one that flips ``sessions.mfa_verified_at`` so the sensitive-action
-gate (phase 5) starts treating the caller as "MFA-fresh".
+The POST endpoints under ``/auth/mfa`` require an authenticated
+session (``Depends(get_current_user)``). Successful verification and
+enrollment completion stamp ``sessions.mfa_verified_at`` so the
+sensitive-action gate treats the caller as "MFA-fresh".
 
 In-progress enrollment is tracked directly on the user row:
 
@@ -15,9 +15,11 @@ In-progress enrollment is tracked directly on the user row:
     -> no MFA
 
 This avoids a separate ephemeral store and survives a brain restart
-mid-flow. The ``enroll-start`` endpoint deliberately clears any
-already-enrolled state, so an attacker who steals a session cannot
-race the legitimate user to "freeze" their MFA mid-enrollment.
+mid-flow. ``enroll-start`` conditionally replaces the exact state observed
+by the request, so a concurrent start or completion cannot silently make a
+returned secret stale. Re-enrollment of an already-enrolled user first
+requires a fresh second-factor verification; a password-only stolen session
+cannot replace the factor.
 
 See ``docs/MFA-DESIGN.md`` for the full design + threat model.
 """
@@ -25,11 +27,12 @@ See ``docs/MFA-DESIGN.md`` for the full design + threat model.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select, update
 
 from z4j_brain.api.deps import (
     enforce_fresh_mfa,
@@ -79,10 +82,11 @@ from z4j_brain.errors import (
 )
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from z4j_brain.persistence.models import Session as SessionRow
-    from z4j_brain.persistence.models import User
+    from z4j_brain.persistence.models import TrustedDevice, User
     from z4j_brain.persistence.repositories import (
         AuditLogRepository,
         MfaRecoveryCodeRepository,
@@ -136,8 +140,9 @@ class VerifyRequest(BaseModel):
         default=False,
         description=(
             "If True, the brain mints a ``z4j_mfa_trust`` cookie "
-            "bound to the device so subsequent logins from this "
-            "browser skip the MFA second step until the cookie "
+            "whose hash is stored in a server-side row scoped to the "
+            "user. A later login presenting that cookie skips the MFA "
+            "second step until the cookie or server row "
             "expires (default 30 days; configurable via "
             "``Z4J_MFA_REMEMBER_DEVICE_DAYS``)."
         ),
@@ -241,6 +246,138 @@ def _mfa_lockout_active(user: User) -> bool:
     return locked_until_aware > datetime.now(UTC)
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Return an aware UTC datetime for either database representation.
+
+    PostgreSQL returns timezone-aware values for ``DateTime(timezone=True)``;
+    SQLite returns naive values even for that declaration. Keeping this
+    normalization in one helper prevents cap/list comparisons from raising
+    when the backend is SQLite.
+    """
+    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def _serialize_mfa_security_state(
+    db_session: AsyncSession,
+    user_id: UUID,
+) -> None:
+    """Acquire the cross-dialect write fence for one user's MFA state.
+
+    PostgreSQL uses ``SELECT ... FOR UPDATE``. SQLite mutation requests already
+    start with ``BEGIN IMMEDIATE`` before dependency reads; direct callers that
+    lack that request marker use a no-op ``UPDATE`` to acquire the same writer
+    authority. Verify and recovery-code regeneration hold the fence through
+    commit/rollback, so neither can read or replace a code set while the other
+    is using it.
+    """
+    from z4j_brain.persistence.models import User as UserRow
+
+    dialect = db_session.get_bind().dialect.name
+    if dialect == "sqlite" and not db_session.sync_session.info.get(
+        "z4j_sqlite_immediate",
+    ):
+        update_result = cast(
+            "CursorResult[Any]",
+            await db_session.execute(
+                update(UserRow).where(UserRow.id == user_id).values(id=UserRow.id),
+            ),
+        )
+        found = int(update_result.rowcount or 0) == 1
+    else:
+        lock_result = await db_session.execute(
+            select(UserRow.id).where(UserRow.id == user_id).with_for_update(of=UserRow),
+        )
+        found = lock_result.scalar_one_or_none() is not None
+    if not found:
+        raise AuthenticationError("authenticated user no longer exists")
+
+
+async def _replace_mfa_with_pending(
+    db_session: AsyncSession,
+    *,
+    user_id: UUID,
+    observed_secret_encrypted: bytes | None,
+    observed_enrolled_at: datetime | None,
+    new_secret_encrypted: bytes,
+) -> bool:
+    """Start enrollment only if the exact observed MFA state is current."""
+    from z4j_brain.persistence.models import User as UserRow
+
+    secret_predicate = (
+        UserRow.mfa_secret_encrypted.is_(None)
+        if observed_secret_encrypted is None
+        else UserRow.mfa_secret_encrypted == observed_secret_encrypted
+    )
+    enrolled_predicate = (
+        UserRow.mfa_enrolled_at.is_(None)
+        if observed_enrolled_at is None
+        else UserRow.mfa_enrolled_at == observed_enrolled_at
+    )
+    result = cast(
+        "CursorResult[Any]",
+        await db_session.execute(
+            update(UserRow)
+            .where(
+                UserRow.id == user_id,
+                secret_predicate,
+                enrolled_predicate,
+            )
+            .values(
+                mfa_secret_encrypted=new_secret_encrypted,
+                mfa_enrolled_at=None,
+                updated_at=datetime.now(UTC),
+            ),
+        ),
+    )
+    return int(result.rowcount or 0) == 1
+
+
+async def _activate_pending_enrollment(
+    db_session: AsyncSession,
+    *,
+    user_id: UUID,
+    pending_secret_encrypted: bytes,
+    stored_secret_encrypted: bytes,
+    enrolled_at: datetime,
+) -> bool:
+    """Activate one exact pending secret; only one concurrent caller wins."""
+    from z4j_brain.persistence.models import User as UserRow
+
+    result = cast(
+        "CursorResult[Any]",
+        await db_session.execute(
+            update(UserRow)
+            .where(
+                UserRow.id == user_id,
+                UserRow.mfa_secret_encrypted == pending_secret_encrypted,
+                UserRow.mfa_enrolled_at.is_(None),
+            )
+            .values(
+                mfa_secret_encrypted=stored_secret_encrypted,
+                mfa_enrolled_at=enrolled_at,
+                updated_at=datetime.now(UTC),
+            ),
+        ),
+    )
+    return int(result.rowcount or 0) == 1
+
+
+def _trusted_device_is_current(
+    row: TrustedDevice,
+    *,
+    inbound_hash: str | None,
+    now: datetime,
+) -> bool:
+    """Match the cookie only to a currently active trusted-device row."""
+    if inbound_hash is None:
+        return False
+    return (
+        row.revoked_at is None
+        and _as_utc(row.expires_at) > now
+        and row.cookie_id_hash == inbound_hash
+    )
+
+
 async def _reject_if_mfa_locked(
     *,
     user: User,
@@ -295,7 +432,6 @@ async def _reject_if_mfa_locked(
 async def enroll_start(
     user: User = Depends(get_current_user),
     session_row: SessionRow = Depends(get_current_session),
-    users: UserRepository = Depends(get_user_repo),
     recovery_codes_repo: MfaRecoveryCodeRepository = Depends(
         get_mfa_recovery_codes_repo,
     ),
@@ -309,8 +445,10 @@ async def enroll_start(
     Generates a fresh TOTP secret, encrypts it with the brain master
     secret, persists it on the user row with ``mfa_enrolled_at=NULL``
     (pending state), and returns the base32 form + the otpauth URL.
-    Any prior MFA state for the user is cleared in the same
-    transaction so a fresh start cannot be raced by a stale flow.
+    Any prior MFA state for the user is cleared in the same transaction.
+    The state change is conditional on the exact secret/enrollment state this
+    request observed, so concurrent starts and completions have one database-
+    selected winner instead of returning mutually inconsistent secrets.
     """
     # Re-enrolling wipes the victim's existing TOTP secret + recovery codes
     # and rebinds MFA to whatever device completes the flow -- as sensitive
@@ -329,7 +467,9 @@ async def enroll_start(
     # secret + codes. The audit row distinguishes the two so an
     # attacker who hijacks a session and resets MFA mid-flow leaves
     # a clearly different event behind. (1.6.0 audit High-2.)
-    was_enrolled = user.mfa_secret_encrypted is not None and user.mfa_enrolled_at is not None
+    observed_secret = user.mfa_secret_encrypted
+    observed_enrolled_at = user.mfa_enrolled_at
+    was_enrolled = observed_secret is not None and observed_enrolled_at is not None
 
     secret = generate_totp_secret()
     blob = encrypt_totp_secret(
@@ -337,13 +477,24 @@ async def enroll_start(
         master_secret=_master_secret_bytes(settings),
         user_id=user.id,
     )
-    # Clear recovery codes from any prior enrollment.
+    # Claim the exact observed state before touching recovery codes. If a
+    # concurrent start/complete/disable changed either MFA column, this stale
+    # request must not overwrite it or return a secret that is already dead.
+    if not await _replace_mfa_with_pending(
+        db_session,
+        user_id=user.id,
+        observed_secret_encrypted=observed_secret,
+        observed_enrolled_at=observed_enrolled_at,
+        new_secret_encrypted=blob,
+    ):
+        raise ConflictError(
+            "MFA enrollment changed concurrently; restart the enrollment flow",
+            details={"reason": "enrollment_state_changed"},
+        )
+
+    # Clear recovery codes from any prior enrollment only after winning the
+    # state transition; rollback restores both sides if a later write fails.
     await recovery_codes_repo.delete_all_for_user(user.id)
-    await users.set_mfa_state(
-        user.id,
-        secret_encrypted=blob,
-        enrolled_at=None,
-    )
 
     from z4j_brain.domain.audit_service import AuditService
 
@@ -420,6 +571,7 @@ async def enroll_complete(
             "MFA is already enabled; disable it first to re-enroll",
             details={"reason": "already_enrolled"},
         )
+    pending_secret_encrypted = user.mfa_secret_encrypted
 
     # Per-account MFA lockout gate (NIST 800-63B 5.2.2). enroll-complete
     # verifies a 6-digit code against the pending secret, so it is a
@@ -463,12 +615,9 @@ async def enroll_complete(
             details={"reason": "wrong_totp"},
         )
 
-    # Good code: clear the failed-MFA counter/lock (Fix 1).
-    await users.reset_mfa_failures(user.id)
-
     # Optionally re-encrypt with the current key if the prior blob
     # was wrapped under a rotated-out Z4J_SECRET.
-    blob: bytes = user.mfa_secret_encrypted
+    blob: bytes = pending_secret_encrypted
     if needs_rewrite:
         blob = encrypt_totp_secret(
             plaintext_secret,
@@ -477,11 +626,23 @@ async def enroll_complete(
         )
 
     now = datetime.now(UTC)
-    await users.set_mfa_state(
-        user.id,
-        secret_encrypted=blob,
+    # Atomically claim this exact pending secret. Two concurrent completes,
+    # or a complete racing a restart, can never both proceed to recovery-code
+    # creation. The loser has no side effects and must restart from fresh state.
+    if not await _activate_pending_enrollment(
+        db_session,
+        user_id=user.id,
+        pending_secret_encrypted=pending_secret_encrypted,
+        stored_secret_encrypted=blob,
         enrolled_at=now,
-    )
+    ):
+        raise ConflictError(
+            "MFA enrollment changed concurrently; restart the enrollment flow",
+            details={"reason": "enrollment_state_changed"},
+        )
+
+    # Good code and successful state claim: clear the failed-MFA counter/lock.
+    await users.reset_mfa_failures(user.id)
     # New secret => fresh TOTP counter space. Reset the anti-replay
     # high-water mark to NULL (rather than consuming this code's counter)
     # so the FIRST post-enroll code is not pre-rejected by a stale mark
@@ -553,12 +714,6 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
     sensitive-action gate accepts the caller. On a recovery-code
     success the code is consumed in the same transaction.
     """
-    if user.mfa_secret_encrypted is None or user.mfa_enrolled_at is None:
-        raise ConflictError(
-            "MFA is not enabled for this user",
-            details={"reason": "mfa_not_enrolled"},
-        )
-
     # Per-account MFA lockout gate (NIST 800-63B 5.2.2). Refuse further
     # attempts -- TOTP or recovery code -- while the account is locked
     # after too many wrong codes; a successful verification below clears
@@ -566,6 +721,17 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
     from z4j_brain.persistence.repositories import UserRepository
 
     users = UserRepository(db_session)
+    # Shared cross-dialect fence with recovery-code regeneration. Acquire it
+    # before reading either factor's mutable state and hold it through commit,
+    # so regeneration cannot replace a set underneath a verifier (and vice
+    # versa). It also serializes TOTP anti-replay claims for this user.
+    await _serialize_mfa_security_state(db_session, user.id)
+    await db_session.refresh(user)
+    if user.mfa_secret_encrypted is None or user.mfa_enrolled_at is None:
+        raise ConflictError(
+            "MFA is not enabled for this user",
+            details={"reason": "mfa_not_enrolled"},
+        )
     await _reject_if_mfa_locked(
         user=user,
         audit_log=audit_log,
@@ -593,10 +759,10 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
         # lives in the user's set of N codes. (1.6.0 audit High-1.)
         rows = await recovery_codes_repo.list_unused_for_user(user.id)
         if not rows:
-            # Burn one argon2 cycle so the "no codes left" response
-            # time matches the "codes present" path. Without this,
-            # an attacker can distinguish enrolled-but-out-of-codes
-            # from enrolled-with-codes via timing.
+            # Burn one argon2 cycle so the "no codes left" path does not
+            # expose a zero-work shortcut. This removes the largest timing
+            # discontinuity, but does not claim to equalize the cost of an
+            # arbitrary configured set of recovery codes.
             # (1.6.0 round-2 audit High-2.)
             burn_one_argon2_cycle()
         match = None
@@ -731,13 +897,9 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
     # "Remember this device" cookie + server-side trust row.
     trust_metadata: dict[str, object] = {}
     if body.remember_device:
-        # Take the user lock BEFORE the count check so two concurrent
-        # verifies cannot both pass the count, both revoke (or skip),
-        # and both create a fresh row, blowing past the cap. The lock
-        # is held until commit / rollback; under SQLite it is a no-op
-        # (per-process serialisation is sufficient there). (1.6.0
-        # round-2 audit High-1.)
-        await users.lock_for_password_change(user.id)
+        # The shared user write fence above is still held. It serializes the
+        # cap check and create on both PostgreSQL and SQLite, so concurrent
+        # verifies cannot both pass the count and exceed the cap.
         # Enforce a per-user cap on active trust rows. If the user is
         # already at the cap, revoke the oldest active row to make
         # room. This bounds the blast radius of a stolen session that
@@ -749,9 +911,11 @@ async def verify(  # noqa: PLR0912, PLR0915  MFA verify branches over factor typ
             oldest = None
             now = datetime.now(UTC)
             for row in existing:
-                if row.revoked_at is not None or row.expires_at <= now:
+                if row.revoked_at is not None or _as_utc(row.expires_at) <= now:
                     continue
-                if oldest is None or row.last_seen_at < oldest.last_seen_at:
+                if oldest is None or _as_utc(row.last_seen_at) < _as_utc(
+                    oldest.last_seen_at,
+                ):
                     oldest = row
             if oldest is not None:
                 await trusted_devices.revoke(
@@ -859,6 +1023,11 @@ async def disable(
     """
     from z4j_brain.auth.passwords import PasswordHasher
 
+    # Share the user-state fence with verify/regenerate, then refresh the
+    # dependency-loaded row. A concurrent restart or regeneration cannot make
+    # this request verify one state and disable another.
+    await _serialize_mfa_security_state(db_session, user.id)
+    await db_session.refresh(user)
     if user.mfa_secret_encrypted is None or user.mfa_enrolled_at is None:
         raise ConflictError(
             "MFA is not enabled for this user",
@@ -980,7 +1149,6 @@ async def disable(
 )
 async def regenerate_recovery_codes(
     user: User = Depends(get_current_user),
-    users: UserRepository = Depends(get_user_repo),
     recovery_codes_repo: MfaRecoveryCodeRepository = Depends(
         get_mfa_recovery_codes_repo,
     ),
@@ -991,22 +1159,21 @@ async def regenerate_recovery_codes(
 ) -> RegenerateResponse:
     """Replace every recovery code with a fresh set.
 
-    No code required as input -- the act of being able to call this
-    endpoint (authenticated session) plus the future sensitive-action
-    gate (phase 5) is the protection. Existing codes are deleted
-    atomically with the insert of the new ones.
+    No code is required in this request: ``require_fresh_mfa`` admits only a
+    cookie session with a recent second-factor verification. Existing codes
+    are deleted atomically with insertion of the new set.
     """
+    # This is the same effective write fence acquired by /verify. It is a row
+    # lock on PostgreSQL and a serialized-writer fence on SQLite, so a verify
+    # cannot scan/consume the old set while it is being replaced and two
+    # regenerations cannot interleave. Held through commit/rollback.
+    await _serialize_mfa_security_state(db_session, user.id)
+    await db_session.refresh(user)
     if user.mfa_secret_encrypted is None or user.mfa_enrolled_at is None:
         raise ConflictError(
             "MFA is not enabled for this user",
             details={"reason": "mfa_not_enrolled"},
         )
-
-    # Serialise against concurrent verify / regenerate on the same user.
-    # Without the row lock, a verify reading the old code set can race
-    # the regenerate's delete+insert and end up consuming a stale row,
-    # or two parallel regenerates can leak code rows. (1.6.0 Critical-2.)
-    await users.lock_for_password_change(user.id)
 
     plaintext_codes = generate_recovery_codes(
         settings.mfa_recovery_code_count,
@@ -1061,9 +1228,10 @@ class MfaStatusResponse(BaseModel):
         description=(
             "End of the enrollment grace window; None until the "
             "grace clock has been started by a login that observed "
-            "the policy. A deadline in the past means every endpoint "
-            "outside the enrollment flow answers 403 with error code "
-            "mfa_enrollment_required."
+            "the policy. After the deadline, non-exempt endpoints "
+            "answer 403 with error code mfa_enrollment_required; "
+            "status, whoami, logout, enroll-start, and enroll-complete "
+            "remain reachable so the user can enroll or leave."
         ),
     )
 
@@ -1113,8 +1281,8 @@ class TrustedDevicePublic(BaseModel):
     is_current: bool = Field(
         description=(
             "True iff the inbound z4j_mfa_trust cookie matches this "
-            "device row. Used by the dashboard to label the row "
-            "'this device' in the list."
+            "device row and the row is unrevoked and unexpired. Used "
+            "by the dashboard to label the active row 'this device'."
         ),
     )
 
@@ -1148,6 +1316,7 @@ async def list_trusted_devices(
     inbound_hash = hash_cookie_id(inbound) if inbound else None
 
     rows = await trusted_devices.list_for_user(user.id)
+    now = datetime.now(UTC)
     return [
         TrustedDevicePublic(
             id=r.id,
@@ -1156,7 +1325,11 @@ async def list_trusted_devices(
             last_seen_at=r.last_seen_at,
             expires_at=r.expires_at,
             revoked_at=r.revoked_at,
-            is_current=inbound_hash is not None and r.cookie_id_hash == inbound_hash,
+            is_current=_trusted_device_is_current(
+                r,
+                inbound_hash=inbound_hash,
+                now=now,
+            ),
         )
         for r in rows
     ]
@@ -1197,6 +1370,10 @@ async def trust_current_device(
     )
     from z4j_brain.domain.audit_service import AuditService
 
+    # Serialize with verify/regenerate/disable before trusting either the
+    # dependency-loaded MFA state or the active-row/cap reads below.
+    await _serialize_mfa_security_state(db_session, user.id)
+    await db_session.refresh(user)
     if user.mfa_secret_encrypted is None or user.mfa_enrolled_at is None:
         raise ConflictError(
             "MFA is not enabled for this user",
@@ -1226,20 +1403,19 @@ async def trust_current_device(
                 is_current=True,
             )
 
-    # Mirror the per-user cap logic from the verify endpoint so the
-    # two paths cannot produce different shapes of state.
-    from z4j_brain.persistence.repositories import UserRepository
-
-    await UserRepository(db_session).lock_for_password_change(user.id)
+    # Mirror the per-user cap logic from the verify endpoint so the two paths
+    # cannot produce different shapes of state. The shared fence is still held.
     active_count = await trusted_devices.count_active_for_user(user.id)
     if active_count >= settings.mfa_trusted_devices_max_per_user:
         existing_rows = await trusted_devices.list_for_user(user.id)
         oldest = None
         now = datetime.now(UTC)
         for row in existing_rows:
-            if row.revoked_at is not None or row.expires_at <= now:
+            if row.revoked_at is not None or _as_utc(row.expires_at) <= now:
                 continue
-            if oldest is None or row.last_seen_at < oldest.last_seen_at:
+            if oldest is None or _as_utc(row.last_seen_at) < _as_utc(
+                oldest.last_seen_at,
+            ):
                 oldest = row
         if oldest is not None:
             await trusted_devices.revoke(
@@ -1436,6 +1612,7 @@ async def rename_trusted_device(
         cookie_name(environment=settings.environment),
     )
     inbound_hash = hash_cookie_id(inbound) if inbound else None
+    now = datetime.now(UTC)
     return TrustedDevicePublic(
         id=target.id,
         label=target.label,
@@ -1443,7 +1620,11 @@ async def rename_trusted_device(
         last_seen_at=target.last_seen_at,
         expires_at=target.expires_at,
         revoked_at=target.revoked_at,
-        is_current=inbound_hash is not None and target.cookie_id_hash == inbound_hash,
+        is_current=_trusted_device_is_current(
+            target,
+            inbound_hash=inbound_hash,
+            now=now,
+        ),
     )
 
 

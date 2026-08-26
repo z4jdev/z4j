@@ -1,100 +1,107 @@
-"""Regression: Bearer auth must not crash when the API key's
-``expires_at`` column comes back naive (SQLite TIMESTAMP round-trip
-loses tzinfo), even though we stored a tz-aware value."""
+"""Bearer-auth expiry regression tests.
+
+These tests execute the production dependency.  In particular, the naive
+datetime case models SQLite's TIMESTAMP round-trip instead of copying the
+comparison into a test helper.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
+from starlette.requests import Request
+from z4j_brain.api import deps
+from z4j_brain.errors import AuthenticationError
+from z4j_brain.persistence.repositories import UserRepository
+from z4j_brain.persistence.repositories.api_keys import ApiKeyRepository
 
 
-class _FakeKey:
-    """Minimal stand-in for ``ApiKey`` with the only two fields the
-    auth path reads during expiry check."""
-
-    def __init__(self, *, expires_at):
-        self.revoked_at = None
-        self.expires_at = expires_at
-
-
-def _check_expires(row: _FakeKey) -> str | None:
-    """Re-implements the expiry branch of ``_resolve_bearer_user``
-    (``api/deps.py``) so we can unit-test the tz-coercion without a
-    full FastAPI + DB fixture. Returns ``None`` when the key is
-    still valid, or the AuthenticationError reason otherwise.
-    """
-    from datetime import UTC as _UTC
-    from datetime import datetime as _dt
-
-    now = _dt.now(_UTC)
-    if row.revoked_at is not None:
-        return "revoked"
-    expires_at = row.expires_at
-    if expires_at is not None:
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=_UTC)
-        if expires_at <= now:
-            return "expired"
-    return None
+def _bearer_request() -> Request:
+    token = "z4k_" + ("a" * 40)
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [(b"authorization", f"Bearer {token}".encode())],
+            "client": ("127.0.0.1", 1234),
+            "route": SimpleNamespace(tags=["tasks"]),
+        },
+    )
 
 
-class TestExpiresAtTzCoercion:
-    """Aware + naive future-dated ``expires_at`` must both pass."""
-
-    def test_aware_future_accepted(self) -> None:
-        row = _FakeKey(expires_at=datetime.now(UTC) + timedelta(days=30))
-        assert _check_expires(row) is None
-
-    def test_naive_future_accepted(self) -> None:
-        """SQLite round-trip - naive datetime treated as UTC."""
-        row = _FakeKey(
-            expires_at=(datetime.now(UTC) + timedelta(days=30)).replace(
-                tzinfo=None,
-            ),
-        )
-        assert _check_expires(row) is None
-
-    def test_naive_past_rejected(self) -> None:
-        row = _FakeKey(
-            expires_at=(datetime.now(UTC) - timedelta(days=1)).replace(
-                tzinfo=None,
-            ),
-        )
-        assert _check_expires(row) == "expired"
-
-    def test_aware_past_rejected(self) -> None:
-        row = _FakeKey(expires_at=datetime.now(UTC) - timedelta(days=1))
-        assert _check_expires(row) == "expired"
-
-    def test_no_expiry_accepted(self) -> None:
-        row = _FakeKey(expires_at=None)
-        assert _check_expires(row) is None
-
-    def test_naive_comparison_would_crash_without_coercion(self) -> None:
-        """Documents the pre- bug: raw aware-vs-naive compare
-        raises ``TypeError``. If the coercion is ever removed from
-        the real auth path, _this_ test still passes (it runs the
-        new logic) but the real auth handler would regress. The
-        test captures the intent so a reviewer spots the coupling."""
-        naive = (datetime.now(UTC) + timedelta(days=1)).replace(tzinfo=None)
-        aware = datetime.now(UTC)
-        with pytest.raises(TypeError):
-            # This is the raw comparison the old code did.
-            _ = naive <= aware
+def _key(*, expires_at: datetime | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        user_id=uuid4(),
+        revoked_at=None,
+        expires_at=expires_at,
+        scopes=["tasks:read"],
+        project_id=None,
+    )
 
 
-class TestAuthDepsActualImplementationCoerces:
-    """Pin the real auth path - read the module source and confirm
-    the ``expires_at.replace(tzinfo=UTC)`` coercion is there."""
+@pytest.mark.asyncio
+@pytest.mark.parametrize("naive", [False, True], ids=["aware", "sqlite-naive"])
+async def test_future_expiry_authenticates_through_production_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    brain_settings,
+    naive: bool,
+) -> None:
+    expires_at = datetime.now(UTC) + timedelta(days=30)
+    if naive:
+        expires_at = expires_at.replace(tzinfo=None)
+    key = _key(expires_at=expires_at)
+    user = SimpleNamespace(id=key.user_id, is_active=True)
+    get_key = AsyncMock(return_value=key)
+    get_user = AsyncMock(return_value=user)
+    monkeypatch.setattr(ApiKeyRepository, "get_by_hash", get_key)
+    monkeypatch.setattr(UserRepository, "get", get_user)
 
-    def test_deps_source_has_tz_coercion(self) -> None:
-        import inspect
+    request = _bearer_request()
+    resolved = await deps._resolve_bearer_user(request, brain_settings, object())
 
-        from z4j_brain.api import deps
+    assert resolved is user
+    assert request.state.api_key is key
+    assert request.state.auth_kind == "api_key"
+    get_key.assert_awaited_once()
+    get_user.assert_awaited_once_with(key.user_id)
 
-        src = inspect.getsource(deps._resolve_bearer_user)
-        assert "expires_at.replace(tzinfo=UTC)" in src or ("expires_at.replace(tzinfo=" in src), (
-            " regression: _resolve_bearer_user must coerce a naive "
-            "expires_at to UTC before comparing to datetime.now(UTC)"
-        )
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("naive", [False, True], ids=["aware", "sqlite-naive"])
+async def test_past_expiry_is_rejected_by_production_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    brain_settings,
+    naive: bool,
+) -> None:
+    expires_at = datetime.now(UTC) - timedelta(days=1)
+    if naive:
+        expires_at = expires_at.replace(tzinfo=None)
+    key = _key(expires_at=expires_at)
+    get_user = AsyncMock()
+    monkeypatch.setattr(ApiKeyRepository, "get_by_hash", AsyncMock(return_value=key))
+    monkeypatch.setattr(UserRepository, "get", get_user)
+
+    with pytest.raises(AuthenticationError) as caught:
+        await deps._resolve_bearer_user(_bearer_request(), brain_settings, object())
+
+    assert caught.value.details == {"reason": "expired"}
+    get_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_expiry_authenticates_through_production_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    brain_settings,
+) -> None:
+    key = _key(expires_at=None)
+    user = SimpleNamespace(id=key.user_id, is_active=True)
+    monkeypatch.setattr(ApiKeyRepository, "get_by_hash", AsyncMock(return_value=key))
+    monkeypatch.setattr(UserRepository, "get", AsyncMock(return_value=user))
+
+    assert await deps._resolve_bearer_user(_bearer_request(), brain_settings, object()) is user

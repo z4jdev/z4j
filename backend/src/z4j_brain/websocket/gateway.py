@@ -25,6 +25,7 @@ Close codes:
   reconnect-storm. See ``CLOSE_VERSION_SKEW``.
 - ``4429`` - agent connect rate limit exceeded
 - ``4002`` - replaced by a newer connection from the same agent
+- ``4003`` - agent revoked after the connection authenticated
 - ``1000`` - clean shutdown
 - ``1011`` - internal server error
 """
@@ -67,8 +68,9 @@ from z4j_brain.domain.retry_contract import (
     retry_contracts_from_capabilities,
 )
 from z4j_brain.domain.version_check import ParsedVersion
+from z4j_brain.persistence.agent_authority import local_agent_authority
 from z4j_brain.websocket.auth import resolve_agent_by_bearer
-from z4j_brain.websocket.frame_router import FrameRouter
+from z4j_brain.websocket.frame_router import FrameOutcome, FrameRouter
 
 if TYPE_CHECKING:
     from z4j_brain.domain import CommandDispatcher, EventIngestor
@@ -81,6 +83,11 @@ if TYPE_CHECKING:
 from z4j_brain.websocket.registry._protocol import WorkerCapExceeded
 
 logger = structlog.get_logger("z4j.brain.gateway")
+
+# Holding revocation authority through a socket send is intentional. Keep the
+# PostgreSQL row-lock / SQLite process-local mutex window bounded even if the
+# peer stops reading. SQLite must never hold a database transaction here.
+_COMMAND_AUTHORITY_SEND_TIMEOUT_SECONDS = 5.0
 
 router = APIRouter(tags=["gateway"])
 
@@ -241,7 +248,7 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
     try:
         first_frame = await _recv_frame(
             websocket,
-            max_bytes=settings.ws_max_frame_bytes,
+            max_bytes=settings.effective_ws_max_frame_bytes,
         )
     except (WebSocketDisconnect, ConnectionError, _BadFrameError):
         await _safe_close(websocket, code=4400)
@@ -326,6 +333,19 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
             # map below and binds it to the immutable registry session.
             runtime_features=list(getattr(first_frame.payload, "runtime_features", []) or []),
         )
+        if connect_at is None:
+            # Authentication and promotion are separate transactions. An
+            # operator may revoke the token after the bearer lookup but before
+            # this UPDATE. mark_online predicates revoked_at IS NULL, so losing
+            # that race must terminate the handshake before hello_ack or
+            # registry registration can resurrect the tombstone.
+            await db_session.rollback()
+            logger.info(
+                "z4j gateway: agent revoked during handshake",
+                agent_id=str(agent_id),
+            )
+            await _safe_close(websocket, code=4401)
+            return
         await db_session.commit()
 
     # Notify dashboards that an agent transitioned to online.
@@ -349,7 +369,7 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
             project_id=str(project_id),
             session_id=str(session_id),
             heartbeat_interval_seconds=10,
-            max_frame_size_bytes=settings.ws_max_frame_bytes,
+            max_frame_size_bytes=settings.effective_ws_max_frame_bytes,
         ),
     )
     try:
@@ -442,6 +462,26 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
             new_worker_id=agent_worker_id,
         )
         await _safe_close(websocket, code=4429)
+        return
+
+    # Close the second half of the revoke/connect race. If revocation commits
+    # after mark_online but before registry.register, the revoke endpoint's
+    # kick cannot see this socket yet. Once registered, recheck the durable
+    # live predicate: either this check observes the tombstone and unregisters
+    # us, or a later revoke observes the registered socket and kicks it.
+    async with db.session() as db_session:
+        still_live = await AgentRepository(db_session).get_live(agent_id)
+    if still_live is None:
+        await registry.unregister(
+            agent_id,
+            ws=websocket,
+            worker_id=agent_worker_id,
+        )
+        logger.info(
+            "z4j gateway: agent revoked while registering",
+            agent_id=str(agent_id),
+        )
+        await _safe_close(websocket, code=4003)
         return
 
     frame_router = FrameRouter(
@@ -577,7 +617,22 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
             while True:
                 frame = await ingest_queue.get()
                 try:
-                    await frame_router.dispatch(frame)
+                    outcome = await frame_router.dispatch(frame)
+                    if outcome is FrameOutcome.REVOKED:
+                        logger.info(
+                            "z4j gateway: established agent session revoked",
+                            agent_id=str(agent_id),
+                        )
+                        # Remove delivery authority before the best-effort
+                        # close. If close itself fails, the stale socket must
+                        # still be absent from outbound registry selection.
+                        await registry.unregister(
+                            agent_id,
+                            ws=websocket,
+                            worker_id=agent_worker_id,
+                        )
+                        await _safe_close(websocket, code=4003)
+                        return
                 finally:
                     ingest_queue.task_done()
 
@@ -614,7 +669,7 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
                     frame = await asyncio.wait_for(
                         _recv_frame(
                             websocket,
-                            max_bytes=settings.ws_max_frame_bytes,
+                            max_bytes=settings.effective_ws_max_frame_bytes,
                             verifier=verifier,
                         ),
                         timeout=idle_timeout,
@@ -959,6 +1014,7 @@ async def _issue_external_schedule_activations(
         return 0
 
     from z4j_brain.persistence.repositories import (
+        AgentRepository,
         AuditLogRepository,
         CommandRepository,
     )
@@ -1036,6 +1092,17 @@ async def _issue_external_schedule_activations(
                     or stream.activation_requirement is not None
                     or stream.authorized_adapter_instance_id != adapter_instance_id
                 ):
+                    await session.rollback()
+                    continue
+                # Keep the established Stream→Agent lock order and make this
+                # check the final edge before command insertion. Revocation may
+                # commit after registration; in that case roll back all stream
+                # planning in this unit and mint nothing for the tombstone.
+                live_agent = await AgentRepository(session).get_live(
+                    agent_id,
+                    lock=True,
+                )
+                if live_agent is None or live_agent.project_id != project_id:
                     await session.rollback()
                     continue
                 payload = {
@@ -1215,11 +1282,16 @@ async def _drain_pending_for_agent(
             # Another worker / replica already claimed it.
             continue
         try:
-            await deliver_command_frame(
+            delivered = await deliver_command_frame_with_authority(
+                db=db,
                 websocket=session_handle.websocket,
                 settings=settings,
                 command=command_to_send,
             )
+            if not delivered:
+                raise RuntimeError(  # noqa: TRY301  enter the shared claim-cleanup path
+                    "agent revoked before pending-command delivery"
+                )
         except Exception:
             if command_to_send.schedule_protocol_marker is not None:
                 logger.warning(
@@ -1330,4 +1402,72 @@ async def deliver_command_frame(
     await websocket.send_bytes(signer.sign_and_serialize(frame))
 
 
-__all__ = ["deliver_command_frame", "router"]
+async def deliver_command_frame_with_authority(
+    *,
+    db: DatabaseManager,
+    websocket: WebSocket,
+    settings: Settings,
+    command: Command,
+) -> bool:
+    """Send only while the exact command target is durably unrevoked.
+
+    PostgreSQL holds the live-agent row lock through the bounded physical send
+    so the ordering works across brain replicas. SQLite is a supported
+    single-worker deployment: its process-local per-agent mutex provides the
+    same send/revoke ordering, but the live read session is fully closed before
+    socket I/O so a slow peer cannot monopolise SQLite's global writer lock.
+    """
+    from z4j_brain.persistence.repositories import AgentRepository
+
+    selected_agent_id = getattr(websocket, "_z4j_agent_id", None)
+    if command.agent_id is None or selected_agent_id != command.agent_id:
+        return False
+
+    if db.engine.dialect.name == "sqlite":
+        async with local_agent_authority(command.agent_id):
+            async with db.session() as authority_session:
+                live = await AgentRepository(authority_session).get_live(
+                    command.agent_id,
+                )
+                if live is None or live.project_id != command.project_id:
+                    return False
+            await asyncio.wait_for(
+                deliver_command_frame(
+                    websocket=websocket,
+                    settings=settings,
+                    command=command,
+                ),
+                timeout=min(
+                    _COMMAND_AUTHORITY_SEND_TIMEOUT_SECONDS,
+                    float(settings.command_timeout_seconds),
+                ),
+            )
+        return True
+
+    async with db.session(write=True) as authority_session:
+        live = await AgentRepository(authority_session).get_live(
+            command.agent_id,
+            lock=True,
+        )
+        if live is None or live.project_id != command.project_id:
+            return False
+        await asyncio.wait_for(
+            deliver_command_frame(
+                websocket=websocket,
+                settings=settings,
+                command=command,
+            ),
+            timeout=min(
+                _COMMAND_AUTHORITY_SEND_TIMEOUT_SECONDS,
+                float(settings.command_timeout_seconds),
+            ),
+        )
+        await authority_session.commit()
+    return True
+
+
+__all__ = [
+    "deliver_command_frame",
+    "deliver_command_frame_with_authority",
+    "router",
+]

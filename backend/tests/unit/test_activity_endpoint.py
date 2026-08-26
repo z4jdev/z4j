@@ -122,7 +122,11 @@ async def _seed_two_projects_one_user(
         )
 
     async with db.session() as s:
-        s.add_all(rows)
+        # These fixtures assign scalar FK values rather than ORM relationships,
+        # so SQLAlchemy cannot infer parent/child insert ordering.
+        s.add_all(rows[:3])
+        await s.flush()
+        s.add_all(rows[3:])
         await s.commit()
 
     return {
@@ -139,6 +143,7 @@ async def _seed_audit_row(
     *,
     project_id: uuid.UUID | None,
     action: str = "task.failed",
+    user_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Insert one audit row directly. The activity endpoint reads
     from the audit_log table; the row HMAC is not verified by the
@@ -154,7 +159,7 @@ async def _seed_audit_row(
                 result="success",
                 outcome="allow",
                 event_id=None,
-                user_id=None,
+                user_id=user_id,
                 project_id=project_id,
                 source_ip=None,
                 user_agent=None,
@@ -224,7 +229,7 @@ class TestActivityScopeEnforcement:
         assert str(a_id) in seen_ids
         assert str(b_id) not in seen_ids
 
-    async def test_non_admin_with_no_memberships_returns_empty(
+    async def test_non_admin_with_no_memberships_and_no_own_rows_returns_empty(
         self,
         settings: Settings,
         brain_app,
@@ -254,6 +259,48 @@ class TestActivityScopeEnforcement:
         assert body["items"] == []
         assert body["next_before_cursor"] is None
         assert body["newest_cursor"] is None
+
+    async def test_non_admin_without_memberships_sees_only_own_user_scoped_rows(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _seed_two_projects_one_user(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=False,
+            member_of_b=False,
+        )
+        db = brain_app.state.db
+        from sqlalchemy import delete as _delete
+
+        async with db.session() as session:
+            await session.execute(
+                _delete(Membership).where(
+                    Membership.user_id == seed["user_id"],
+                ),
+            )
+            await session.commit()
+
+        own_id = await _seed_audit_row(
+            db,
+            project_id=None,
+            user_id=seed["user_id"],
+            action="mfa.enroll",
+        )
+        await _seed_audit_row(
+            db,
+            project_id=None,
+            user_id=uuid.uuid4(),
+            action="mfa.enroll",
+        )
+        await _seed_audit_row(db, project_id=seed["proj_a"])
+
+        async with _make_client(brain_app, settings, seed) as client:
+            response = await client.get("/api/v1/activity")
+
+        assert response.status_code == 200, response.text
+        assert [item["id"] for item in response.json()["items"]] == [str(own_id)]
 
     async def test_admin_sees_every_project(
         self,
@@ -317,6 +364,38 @@ class TestActivityScopeEnforcement:
         # Only the proj_a row should appear, not the project-less one.
         for it in items:
             assert it["project_id"] == str(seed["proj_a"])
+
+    async def test_non_admin_sees_only_their_own_user_scoped_rows(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _seed_two_projects_one_user(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=False,
+        )
+        db = brain_app.state.db
+        own_id = await _seed_audit_row(
+            db,
+            project_id=None,
+            user_id=seed["user_id"],
+            action="mfa.enroll",
+        )
+        other_id = await _seed_audit_row(
+            db,
+            project_id=None,
+            user_id=uuid.uuid4(),
+            action="mfa.enroll",
+        )
+
+        async with _make_client(brain_app, settings, seed) as client:
+            response = await client.get("/api/v1/activity")
+
+        assert response.status_code == 200, response.text
+        seen = {item["id"] for item in response.json()["items"]}
+        assert str(own_id) in seen
+        assert str(other_id) not in seen
 
 
 @pytest.mark.asyncio
@@ -425,7 +504,7 @@ class TestActivityPagination:
         assert r.status_code == 200
         body = r.json()
         assert len(body["items"]) == 2
-        # next_before_cursor is set when the page is full.
+        # There are overflow rows, so the cursor is truthful.
         assert body["next_before_cursor"] is not None
         # newest_cursor encodes the first item (rows return newest-first).
         first_id = body["items"][0]["id"]
@@ -433,6 +512,56 @@ class TestActivityPagination:
         # Cursor shape: <iso>|<uuid>.
         assert "|" in body["next_before_cursor"]
         assert "|" in body["newest_cursor"]
+
+    async def test_exact_final_full_page_has_no_next_cursor(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        """A page exactly equal to ``limit`` is final without overflow."""
+        seed = await _seed_two_projects_one_user(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        db = brain_app.state.db
+        for _ in range(2):
+            await _seed_audit_row(db, project_id=seed["proj_a"])
+
+        async with _make_client(brain_app, settings, seed) as client:
+            response = await client.get("/api/v1/activity?limit=2")
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert len(body["items"]) == 2
+        assert body["next_before_cursor"] is None
+
+    async def test_overflow_cursor_anchors_last_returned_row(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _seed_two_projects_one_user(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        db = brain_app.state.db
+        for _ in range(3):
+            await _seed_audit_row(db, project_id=seed["proj_a"])
+
+        async with _make_client(brain_app, settings, seed) as client:
+            first = await client.get("/api/v1/activity?limit=2")
+            cursor = first.json()["next_before_cursor"]
+            second = await client.get(
+                "/api/v1/activity",
+                params={"limit": 2, "before_cursor": cursor},
+            )
+
+        assert cursor is not None
+        assert cursor.endswith(first.json()["items"][-1]["id"])
+        assert len(second.json()["items"]) == 1
+        assert second.json()["next_before_cursor"] is None
 
     async def test_since_cursor_returns_only_newer_rows(
         self,

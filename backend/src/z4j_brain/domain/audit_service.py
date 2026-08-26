@@ -1,27 +1,45 @@
-"""Append-only audit log service with per-row HMAC tamper evidence.
+"""Append-only audit log service with per-row HMAC chaining.
 
-Every privileged action goes through :meth:`AuditService.record`.
-The service:
+Mutating workflows call :meth:`AuditService.record` where their contract
+requires a transactional audit row. Some denial and security breadcrumbs are
+best effort, so infrastructure failure can prevent those rows from being
+recorded. The service:
 
 1. Builds a canonical JSON representation of the row's content.
-2. Computes ``HMAC-SHA256(settings.secret, canonical)``.
-3. Inserts the row via :class:`AuditLogRepository`.
+2. Chains it to its predecessor and computes the row HMAC under the
+   dedicated audit-chain key.
+3. Inserts the row via :class:`AuditLogRepository` and advances the
+   authenticated head in ``audit_chain_state``.
 
 The verifier (:meth:`verify_row`) recomputes the HMAC and
-constant-time-compares. Combined with the database append-only
-trigger, this gives us tamper evidence for any party who does
-NOT also hold the master secret. A privileged DBA who DOES hold
-the secret can still forge rows, that scenario is out of scope
-(addressed by operational controls: secret in env, not on disk).
+constant-time-compares. Current rows are keyed by the audit-chain
+keyring; legacy rows predating the chain fall back to ``Z4J_SECRET``.
 
-Secret rotation is supported transparently: callers add the old
-secret to ``Z4J_SECRETS_PREVIOUS`` and writes use the new
-``Z4J_SECRET``. ``verify_row`` tries every accepted secret in
-order so pre-rotation rows still verify.
+What this evidence actually covers, since the name suggests more: a write or
+delete which changes the retained active rows without making the matching
+authenticated-state transition leaves the rows disagreeing with the signed
+head, counts, or snapshot digest. Verification then reports the mismatch.
 
-HMAC version is currently 1 (the v1.3.0 baseline). Future
-incompatible changes to the canonical form will bump the version
-and add a fallback path here so historical rows stay verifiable.
+It does not cover a role that can write both ``audit_log`` and
+``audit_chain_state``. Such a role need not forge anything: restoring
+an earlier copy of the state row and deleting the rows written after
+it yields a log that authenticates and verifies clean, because the
+brain signed that copy when it was current. Keeping the chain key out
+of the database raises the cost of writing *new* history, not of
+rolling back to real history. Anchoring a head outside the database
+is what closes that gap (see ``docs/SECURITY.md`` section 10.2).
+
+Rotation has two distinct contracts. Legacy v1 rows use the application master
+secret, and ``verify_row`` tries ``Z4J_SECRET`` plus
+``Z4J_PREVIOUS_SECRETS``. Active v2 rows use the dedicated audit-chain keyring.
+Changing that keyring is not by itself a completed rotation: stop all brain
+replicas and run the documented ``z4j audit rotate-chain-key`` ceremony so the
+authenticated state moves to the new ``Z4J_AUDIT_CHAIN_SECRET`` while the old
+key remains in ``Z4J_AUDIT_CHAIN_PREVIOUS_SECRETS``.
+
+Future incompatible changes to the canonical form bump the row HMAC
+version and add a fallback path here so historical rows stay
+verifiable.
 """
 
 from __future__ import annotations
@@ -38,6 +56,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import event as _sa_event
 from sqlalchemy.orm import Session as _SyncSession
+from sqlalchemy.orm import SessionTransaction as _SessionTransaction
 
 from z4j_brain.domain.audit_chain import (
     AUDIT_ROW_HMAC_VERSION,
@@ -58,26 +77,41 @@ from z4j_brain.domain.audit_chain import (
 logger = logging.getLogger("z4j.brain.domain.audit_service")
 
 
-#: Session.info key under which AuditService stages pending forwarder
-#: payloads. The dict-of-(payload, hooks) tuples is drained by the
-#: ``after_commit`` listener installed at module-load below; an
-#: ``after_rollback`` listener clears the staging so a rolled-back
-#: transaction never forwards. (v1.6 audit C6.)
+#: Session.info key under which AuditService keeps transaction-scoped
+#: forwarder state. SQLAlchemy emits ``after_commit`` for a committed
+#: SAVEPOINT as well as for the root transaction, so the state is finalized
+#: from ``after_transaction_end`` where the exact transaction is available.
 _PENDING_KEY: str = "_z4j_pending_audit_forwards"
 _ROLLBACK_ONLY_KEY: str = "_z4j_audit_integrity_rollback_only"
 
 
-def _fire_pending_audit_forwards(session: _SyncSession) -> None:
-    """Drain the session's pending-forward list and fire hooks."""
-    items = session.info.pop(_PENDING_KEY, None) or []
+_AuditForwardItem = tuple[dict[str, Any], list[Any]]
+
+
+@dataclass(slots=True)
+class _AuditForwardTransactionState:
+    """Pending forwards owned by one root ``SessionTransaction``.
+
+    Each SAVEPOINT has its own bucket. A committed SAVEPOINT merges into its
+    parent bucket; a rolled-back SAVEPOINT loses only its own bucket. Nothing
+    is delivered until the root transaction is known to have committed.
+    """
+
+    root: _SessionTransaction
+    pending: dict[_SessionTransaction, list[_AuditForwardItem]]
+    committed: set[_SessionTransaction]
+
+
+def _fire_pending_audit_forwards(items: list[_AuditForwardItem]) -> None:
+    """Fire a root transaction's committed forward payloads."""
     for payload, hooks in items:
         for hook in hooks:
             try:
                 hook(payload)
             except Exception:
-                # v1.6 Round 5 I: route the failure through the
-                # swallowed-exceptions counter so the Grafana alert
-                # picks it up alongside the other audit-fwd sites.
+                # Route the failure through the swallowed-exceptions
+                # counter so the Grafana alert picks it up alongside
+                # the other audit-forward sites.
                 try:
                     from z4j_brain.api.metrics import record_swallowed
 
@@ -90,20 +124,88 @@ def _fire_pending_audit_forwards(session: _SyncSession) -> None:
                 )
 
 
-def _drop_pending_audit_forwards(
-    session: _SyncSession,
-    *_unused: Any,
-) -> None:
-    """Clear the pending-forward list on rollback so phantom rows
-    are never forwarded. (v1.6 audit C6.)
+def _current_audit_transaction(session: _SyncSession) -> _SessionTransaction | None:
+    """Return the SAVEPOINT receiving writes, or the root transaction."""
 
-    Accepts ``*_unused`` because SQLAlchemy's ``after_soft_rollback``
-    event passes ``(session, previous_transaction)`` while
-    ``after_rollback`` passes only ``(session,)``. Both fire on the
-    same listener; the extra positional is silently ignored.
+    return session.get_nested_transaction() or session.get_transaction()
+
+
+def _stage_pending_audit_forward(
+    session: _SyncSession,
+    item: _AuditForwardItem,
+) -> None:
+    """Attach one forward to the transaction scope that wrote its row."""
+
+    root = session.get_transaction()
+    transaction = _current_audit_transaction(session)
+    if root is None or transaction is None:
+        raise RuntimeError("cannot stage an audit forward outside a transaction")
+
+    state = session.info.get(_PENDING_KEY)
+    if not isinstance(state, _AuditForwardTransactionState) or state.root is not root:
+        # A different root here means a prior terminal event failed to clean
+        # up. Fail closed for those stale payloads rather than forwarding them
+        # under an unrelated pooled-session transaction.
+        state = _AuditForwardTransactionState(root=root, pending={}, committed=set())
+        session.info[_PENDING_KEY] = state
+    state.pending.setdefault(transaction, []).append(item)
+
+
+def _mark_audit_transaction_committed(session: _SyncSession) -> None:
+    """Remember which exact transaction produced ``after_commit``."""
+
+    state = session.info.get(_PENDING_KEY)
+    transaction = _current_audit_transaction(session)
+    if isinstance(state, _AuditForwardTransactionState) and transaction is not None:
+        state.committed.add(transaction)
+
+
+def _finish_audit_transaction(
+    session: _SyncSession,
+    transaction: _SessionTransaction,
+) -> None:
+    """Merge/drop a SAVEPOINT bucket or finalize the root transaction.
+
+    ``after_transaction_end`` supplies the transaction that ended, avoiding
+    the ambiguity of SQLAlchemy's transaction-less ``after_commit`` and
+    ``after_rollback`` callbacks. An unmarked end is treated as rollback.
     """
-    session.info.pop(_PENDING_KEY, None)
-    session.info.pop(_ROLLBACK_ONLY_KEY, None)
+
+    state = session.info.get(_PENDING_KEY)
+    is_root = transaction.parent is None
+
+    if not isinstance(state, _AuditForwardTransactionState):
+        if is_root:
+            session.info.pop(_ROLLBACK_ONLY_KEY, None)
+        return
+
+    if is_root and transaction is not state.root:
+        # Defensive pooled-session fence: never retain state whose owning root
+        # is no longer the transaction reporting its terminal event.
+        session.info.pop(_PENDING_KEY, None)
+        session.info.pop(_ROLLBACK_ONLY_KEY, None)
+        return
+
+    was_committed = transaction in state.committed
+    state.committed.discard(transaction)
+    items = state.pending.pop(transaction, [])
+
+    if transaction is state.root:
+        # Pop before invoking external hooks. A hook must not be able to make
+        # its completed state look live or leak it into the next transaction.
+        session.info.pop(_PENDING_KEY, None)
+        session.info.pop(_ROLLBACK_ONLY_KEY, None)
+        if was_committed:
+            _fire_pending_audit_forwards(items)
+        return
+
+    if not was_committed:
+        return
+
+    parent = transaction.parent
+    if parent is None:
+        return
+    state.pending.setdefault(parent, []).extend(items)
 
 
 def _clear_completed_sqlite_write_unit(
@@ -145,20 +247,17 @@ def _ensure_session_listeners_registered() -> None:
     global _AUDIT_EVENT_LISTENERS_REGISTERED  # noqa: PLW0603  module-level singleton lazy-init
     if _AUDIT_EVENT_LISTENERS_REGISTERED:
         return
-    _sa_event.listen(_SyncSession, "after_commit", _fire_pending_audit_forwards)
+    _sa_event.listen(_SyncSession, "after_commit", _mark_audit_transaction_committed)
     _sa_event.listen(_SyncSession, "before_commit", _reject_integrity_failed_commit)
-    _sa_event.listen(_SyncSession, "after_rollback", _drop_pending_audit_forwards)
+    _sa_event.listen(
+        _SyncSession,
+        "after_transaction_end",
+        _finish_audit_transaction,
+    )
     _sa_event.listen(
         _SyncSession,
         "after_transaction_end",
         _clear_completed_sqlite_write_unit,
-    )
-    # Some async test setups create + close sessions in the same
-    # tick; ``after_soft_rollback`` covers nested-savepoint paths.
-    _sa_event.listen(
-        _SyncSession,
-        "after_soft_rollback",
-        _drop_pending_audit_forwards,
     )
     _AUDIT_EVENT_LISTENERS_REGISTERED = True
 
@@ -170,7 +269,7 @@ def _build_forward_payload(row: Any) -> dict[str, Any]:
     """Eagerly snapshot an :class:`AuditLog` row into the wire shape
     audit_forwarder expects. Called INSIDE the writing transaction
     so ORM attribute access does not trigger lazy-load from inside
-    a post-commit hook. (v1.6 audit H11.)
+    a post-commit hook.
     """
     # Import locally to avoid a domain<->infrastructure import cycle
     # (audit_forwarder imports notifications.channels for _post).
@@ -239,8 +338,10 @@ class AuditEntry:
     occurred_at: datetime
     #: Prior row's ``row_hmac`` at the moment THIS row was written.
     #: ``None`` for the very first row (genesis). Folded into the
-    #: HMAC input so deleting any row breaks the next row's
-    #: ``prev_row_hmac`` anchor, detectable by ``verify_chain``.
+    #: HMAC input so deleting a non-tail row breaks the next row's
+    #: ``prev_row_hmac`` anchor, detectable by ``verify_chain``. The
+    #: linked rows alone cannot detect deletion of the legacy tail;
+    #: active v2 additionally authenticates its head in chain state.
     prev_row_hmac: str | None = None
     #: Bearer-token attribution. ``None`` for cookie-session
     #: actions (most dashboard work) or for actions taken via a
@@ -249,11 +350,11 @@ class AuditEntry:
 
 
 class AuditService:
-    """Single entry point for writing the audit log.
+    """Service used by application workflows to append audit rows.
 
     The service holds:
-    - the master secret (for HMAC computation)
-    - the rotation-window secrets (for verifying pre-rotation rows)
+    - the master-secret window for legacy v1 row verification
+    - the dedicated audit-key window for active v2 writes and verification
 
     It does NOT hold a session, callers pass the repository in
     per-request, so the audit row participates in the caller's
@@ -311,7 +412,7 @@ class AuditService:
         from inside the hook), and the hook is only called when
         the writing transaction actually commits -- a rollback
         clears the staged payload and the hook is NEVER called for
-        that row. (v1.6 audit C6 + H11.)
+        that row.
 
         Hooks must be non-blocking and must never raise; exceptions
         are caught and logged at WARNING.
@@ -322,7 +423,7 @@ class AuditService:
         """Drop a previously-registered hook. Returns True if a hook
         was removed. Used at lifespan teardown so rows written
         DURING shutdown teardown do not get queued into a forwarder
-        whose drain task is about to be cancelled. (v1.6 audit H9.)
+        whose drain task is about to be cancelled.
         """
         try:
             self._post_write_hooks.remove(hook)
@@ -393,11 +494,12 @@ class AuditService:
         # read + insert. The lock window is "head read → HMAC
         # compute → INSERT", microseconds.
         await repo.acquire_chain_lock()
-        # Fetch the prior row's hmac so we can fold it into this
-        # row's input. A subsequent DELETE of any row then leaves
-        # the next row's ``prev_row_hmac`` referencing a prior row
-        # whose hmac no longer matches, detectable by
-        # ``verify_chain``.
+        # Fetch the prior row's hmac so we can fold it into this row's input. A
+        # subsequent DELETE of a non-tail row leaves the next row's
+        # ``prev_row_hmac`` referencing a missing predecessor, detectable by
+        # ``verify_chain``. A legacy tail deletion has no successor and needs
+        # evidence outside this linked sequence; active v2 supplies that with
+        # its authenticated state.
         prev_row_hmac = await repo.get_latest_row_hmac()
         entry = AuditEntry(
             id=row_id,
@@ -436,32 +538,13 @@ class AuditService:
             occurred_at=entry.occurred_at,
         )
         # Stage the row for post-COMMIT fan-out to registered hooks.
-        # Two-step design (v1.6 audit C6 + H11):
+        # Two-step design:
         #   1. eagerly materialise the row into a plain dict so no
         #      ORM lazy-load can fire from inside the hook;
-        #   2. push the dict onto ``session.info`` keyed under
-        #      ``_PENDING_KEY``. The module-level ``after_commit``
-        #      listener drains and fires hooks ONLY on successful
-        #      commit; the ``after_rollback`` listener drops the
-        #      staged dict so a rolled-back transaction never
-        #      forwards.
-        if self._post_write_hooks:
-            try:
-                payload = _build_forward_payload(inserted)
-                # ``repo.session`` is the AsyncSession; its
-                # ``sync_session`` is the SQLAlchemy Session the
-                # event listeners are bound to.
-                async_session = getattr(repo, "session", None)
-                sync_session = getattr(async_session, "sync_session", None)
-                if sync_session is not None:
-                    pending = sync_session.info.setdefault(_PENDING_KEY, [])
-                    pending.append((payload, list(self._post_write_hooks)))
-            except Exception:
-                logger.warning(
-                    "z4j audit_service: failed to stage post-commit "
-                    "hook payload; audit row written, mirror dropped",
-                    exc_info=True,
-                )
+        #   2. attach the dict to the exact root/SAVEPOINT transaction scope.
+        #      Committed SAVEPOINTs merge upward, rolled-back SAVEPOINTs are
+        #      dropped, and only a successful root commit fires hooks.
+        self._stage_forward(inserted, repo)
         return inserted
 
     async def rotate_chain_key(
@@ -904,8 +987,10 @@ class AuditService:
             async_session = getattr(repo, "session", None)
             sync_session = getattr(async_session, "sync_session", None)
             if sync_session is not None:
-                pending = sync_session.info.setdefault(_PENDING_KEY, [])
-                pending.append((payload, list(self._post_write_hooks)))
+                _stage_pending_audit_forward(
+                    sync_session,
+                    (payload, list(self._post_write_hooks)),
+                )
         except Exception:
             logger.warning(
                 "z4j audit_service: failed to stage post-commit hook payload; "
@@ -916,9 +1001,9 @@ class AuditService:
     def verify_row(self, row: AuditLog) -> bool:
         """Recompute the HMAC for ``row`` and compare it constant-time.
 
-        Returns False on missing ``row_hmac`` or tampered field.
-        Tries every secret in the rotation window so a recent
-        ``Z4J_SECRET`` rotation doesn't invalidate pre-rotation rows.
+        Returns False on a missing ``row_hmac``, an unknown key id, or a
+        tampered field. Active v2 rows select their dedicated audit-chain key
+        by id; legacy rows try every master secret in the v1 rotation window.
         """
         if row.hmac_version == AUDIT_ROW_HMAC_VERSION and row.legacy_frozen is False:
             return self._verify_v2_row(row)
@@ -1034,10 +1119,10 @@ class AuditService:
         # prev_row_hmac=None. Without this check, an operator with
         # DB write access who deletes the first N rows would produce
         # a "valid" trimmed chain because the verifier silently
-        # re-anchors at whatever row is fed in first. (1.6.0
-        # round-2 audit High-3.) Exception: after retention prunes the
-        # genesis row, the first survivor legitimately anchors on the
-        # stored prune watermark rather than NULL. (1.7 audit.)
+        # re-anchors at whatever row is fed in first. Exception:
+        # after retention prunes the genesis row, the first survivor
+        # legitimately anchors on the stored prune watermark rather
+        # than NULL.
         if rows and rows[0].prev_row_hmac is not None and rows[0].prev_row_hmac != prune_watermark:
             reasons.append(
                 f"row {rows[0].id}: input does not start at the "
@@ -1167,10 +1252,12 @@ class AuditService:
 
 
 def verify_canonical_fields_emitted() -> None:
-    """Round-trip guard: every entry in ``_CANONICAL_FIELDS`` MUST
-    appear in the JSON output of ``_canonicalize``. Catches the
-    "field added to the tuple but forgotten in ``_canonicalize``"
-    hole.
+    """Guard the legacy v1 canonical-field inventory against drift.
+
+    Every entry in ``_CANONICAL_FIELDS`` must appear in the JSON output of
+    ``_canonicalize``. This catches the "field added to the tuple but
+    forgotten in ``_canonicalize``" hole for legacy rows; active v2 rows use
+    :func:`canonical_row_payload` instead.
 
     Called by ``create_app`` at startup. Raises ``RuntimeError``
     on drift; the brain refuses to start so the bug is visible
@@ -1201,8 +1288,7 @@ def verify_canonical_fields_emitted() -> None:
                 f"_CANONICAL_FIELDS but not emitted by "
                 f"_canonicalize. Adding a field to the tuple "
                 f"without also emitting it in _canonicalize "
-                f"silently breaks HMAC verification for every row "
-                f"written at the current version. See "
+                f"silently breaks legacy v1 HMAC verification. See "
                 f"z4j_brain/docs/audit-canonical-fields.md.",
             )
 

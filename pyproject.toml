@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.8.2"
+version = "1.9.0"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -56,7 +56,7 @@ classifiers = [
 #   pip install z4j[django,celery]    # Full Django + Celery stack
 #   pip install z4j[postgres]         # Postgres backend
 #   pip install z4j[agents]           # Every adapter at once
-#   pip install z4j[all]              # Everything: agents + postgres
+#   pip install z4j[all]              # All agents + Postgres drivers
 #
 # Agent-only installs (no AGPL brain in your venv) -- use the
 # standalone packages directly, they are all Apache 2.0:
@@ -65,7 +65,7 @@ classifiers = [
 #   pip install z4j-celery            # SDK + Celery adapter only
 #
 dependencies = [
-    "z4j-core>=1.8.0,<2",
+    "z4j-core>=1.9.0,<2",
     # Server runtime (was in z4j-brain pre-1.4.0).
     "fastapi>=0.136",
     # 1.6.5 (audit R4-M1): explicit Starlette floor for
@@ -80,6 +80,8 @@ dependencies = [
     "alembic>=1.18.4",
     "websockets>=16",
     "httpx>=0.28.1",
+    # PEP 440 comparison for the release-aware `z4j upgrade` status command.
+    "packaging>=26.2",
     "argon2-cffi>=25.1",
     "structlog>=25.5",
     "prometheus-client>=0.25",
@@ -103,7 +105,7 @@ dependencies = [
     # optional extra. Promoted out of [scheduler-grpc] in 1.6.0
     # to fix a release-day smoke regression. ``cryptography``
     # ships pre-built wheels for every supported (cp311+) platform.
-    "cryptography>=48.0.1",
+    "cryptography>=50.0.0",
     # Tasks-page xlsx export. Pure Python, write-only, ~1 MB, no
     # native deps.
     "xlsxwriter>=3.2.9",
@@ -115,16 +117,36 @@ dependencies = [
     # libraries are pulled in transitively (aiohttp via taskiq, pyjwt
     # via redis-py). Drop these lines when the upstream transitive
     # owners raise their own floors past the advisory ceilings.
-    "aiohttp>=3.14.0",
+    # Raised to 3.14.3 for CVE-2026-59881, CVE-2026-69243 (both fixed in
+    # 3.14.2) and CVE-2026-69244 (3.14.3). Unlike the two npm advisories that
+    # landed the same day, this one is on a SHIPPED runtime path, so the floor
+    # is the fix rather than a build-tooling pin.
+    "aiohttp>=3.14.3",
     "pyjwt>=2.13.0",
     # Boundary D: the Brain validates every prepared successor using an
     # independent implementation.  These exact pins are the complete
     # cadence-affecting closure and intentionally match z4j-scheduler.
+    #
+    # tzdata is IANA 2026c. 2026a computes fire times an hour wrong for seven
+    # zones with future effect: Africa/Casablanca and Africa/El_Aaiun from
+    # 2026-09-20, and America/Edmonton, America/Vancouver, America/Yellowknife,
+    # Canada/Mountain and Canada/Pacific from 2026-11-01.
+    #
+    # A change to this closure changes the cadence runtime fingerprint, and the
+    # rollback compatibility carrier must keep computing the same value or the
+    # prepare-runtime-rollback ceremony cannot honestly restamp a cursor. The
+    # carrier therefore carries this same tzdata, so the sealed rollback target
+    # stays byte-equal to this closure. Published 1.8 is untouched: its own
+    # bytes are unchanged and it is never asked to agree with this closure
+    # except through that ceremony.
+    #
+    # Both distributions move together or the closure is not exact, and the
+    # carrier moves with them or the rollback target is not reachable.
     "croniter==6.2.2",
     "python-dateutil==2.9.0.post0",
     "six==1.17.0",
     "astral==3.2",
-    "tzdata==2026.1",
+    "tzdata==2026.3",
 ]
 
 [project.optional-dependencies]
@@ -132,21 +154,21 @@ dependencies = [
 # Engine adapter extras. Each pulls the engine adapter and its
 # companion scheduler (if any) in one shot -- the 95% case.
 # ------------------------------------------------------------------
-celery = ["z4j-celery>=1.8.0,<2", "z4j-celerybeat>=1.8.0,<2"]
-django = ["z4j-django>=1.8.0,<2"]
-flask = ["z4j-flask>=1.8.0,<2"]
-fastapi = ["z4j-fastapi>=1.8.0,<2"]
+celery = ["z4j-celery>=1.9.0,<2", "z4j-celerybeat>=1.9.0,<2"]
+django = ["z4j-django>=1.9.0,<2"]
+flask = ["z4j-flask>=1.9.0,<2"]
+fastapi = ["z4j-fastapi>=1.9.0,<2"]
 # Intra-z4j floor policy: extras track the release-wave version so
 # a mixed-version install cannot be assembled through the umbrella
 # (R9 H-2 precedent: a stale z4j-rq paired with a newer z4j-bare
 # dispatcher re-opened the R8 H-1 pickle RCE).
-rq = ["z4j-rq>=1.8.0,<2", "z4j-rqscheduler>=1.8.0,<2"]
-dramatiq = ["z4j-dramatiq>=1.8.0,<2"]
-huey = ["z4j-huey>=1.8.0,<2", "z4j-hueyperiodic>=1.8.0,<2"]
-arq = ["z4j-arq>=1.8.0,<2", "z4j-arqcron>=1.8.0,<2"]
-taskiq = ["z4j-taskiq>=1.8.0,<2", "z4j-taskiqscheduler>=1.8.0,<2"]
-apscheduler = ["z4j-apscheduler>=1.8.0,<2"]
-bare = ["z4j-bare>=1.8.0,<2"]
+rq = ["z4j-rq>=1.9.0,<2", "z4j-rqscheduler>=1.9.0,<2"]
+dramatiq = ["z4j-dramatiq>=1.9.0,<2"]
+huey = ["z4j-huey>=1.9.0,<2", "z4j-hueyperiodic>=1.9.0,<2"]
+arq = ["z4j-arq>=1.9.0,<2", "z4j-arqcron>=1.9.0,<2"]
+taskiq = ["z4j-taskiq>=1.9.0,<2", "z4j-taskiqscheduler>=1.9.0,<2"]
+apscheduler = ["z4j-apscheduler>=1.9.0,<2"]
+bare = ["z4j-bare>=1.9.0,<2"]
 
 # ------------------------------------------------------------------
 # Postgres backend (asyncpg for the application; psycopg/libpq for
@@ -167,7 +189,7 @@ postgres = [
 # Sentry init helper degrades to a no-op (sentry-sdk ImportError
 # is logged at WARNING and discarded).
 # ------------------------------------------------------------------
-sentry = ["sentry-sdk>=2.0,<3"]
+sentry = ["sentry-sdk>=2.8.0,<3"]
 
 # ------------------------------------------------------------------
 # Optional OpenTelemetry tracing via OTLP. Activate with
@@ -187,32 +209,38 @@ otel = [
 ]
 
 # ------------------------------------------------------------------
-# z4j-scheduler companion process. Operators install when they
-# want one canonical scheduler driving every engine via gRPC.
+# z4j-scheduler companion process. The scheduler submits prepared fires to
+# the brain over gRPC, and the brain routes them to connected engine agents.
 # ------------------------------------------------------------------
 scheduler-grpc = [
     # Floors must not drop below the committed gRPC/protobuf gencode:
     # scheduler_pb2_grpc.py hard-requires grpcio>=1.80.0 and scheduler_pb2.py
-    # rejects a protobuf runtime older than its 6.31.1 gencode, both at
-    # import time -- a lower floor lets a resolver land a version that
-    # crashes the brain's scheduler client on first import.
+    # rejects a protobuf runtime older than its 6.31.1 gencode. The published
+    # protobuf floor is higher because 6.33.5 is the first advisory-fixed
+    # runtime; either lower bound would otherwise permit an unsafe install.
     "grpcio>=1.80.0",
     "grpcio-tools>=1.80.0",
-    "protobuf>=6.31.1",
-    "cryptography>=48.0.1",
+    "protobuf>=6.33.5",
+    "cryptography>=50.0.0",
 ]
 
 # ------------------------------------------------------------------
 # Test extras (was z4j-brain[test] / [test-integration]).
 # ------------------------------------------------------------------
 test = [
-    "pytest>=9.0.3",
+    "pytest>=9.1.1,<10",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
     "httpx>=0.28.1",
     "aiosqlite>=0.22.1",
     "freezegun>=1.5.5",
     "hypothesis>=6.152.1",
+    # The scheduler-client tests ``import grpc`` at module scope. grpcio is
+    # optional for running the brain ([scheduler-grpc]) but mandatory for
+    # testing it, and an install that lacks it loses those modules at
+    # collection instead of failing them. Same floor as [scheduler-grpc]:
+    # the committed gencode rejects an older runtime at import time.
+    "grpcio>=1.80.0",
 ]
 test-integration = [
     "testcontainers[postgres]>=4.14.2",
@@ -223,16 +251,16 @@ test-integration = [
 # Convenience bundles.
 #   [agents] = every adapter engine, useful for CI / dev rigs that
 #              test against all engines at once.
-#   [all]    = agents + postgres, the kitchen sink.
+#   [all]    = agents + postgres. Observability and the separate dynamic
+#              scheduler remain explicit choices.
 # ------------------------------------------------------------------
 agents = ["z4j[celery,django,flask,fastapi,rq,dramatiq,huey,arq,taskiq,apscheduler,bare]"]
 all = ["z4j[agents,postgres]"]
 
 [project.scripts]
-# 1.4.0: only ``z4j`` survives. The pre-1.4.0 ``z4j-brain`` console
-# script alias was dropped (Level 3 in RELEASE-1.4.0-PLAN.md). Both
-# scripts called the same entry point pre-cut, so removing the alias
-# is purely a name cleanup.
+# The retired ``z4j-brain`` console alias is not shipped. Callers
+# must invoke ``z4j``; after that command-name migration the entry
+# point behavior is the same.
 z4j = "z4j_brain.cli:main"
 
 [project.urls]
@@ -243,7 +271,7 @@ Issues = "https://github.com/z4jdev/z4j/issues"
 Changelog = "https://github.com/z4jdev/z4j/blob/main/CHANGELOG.md"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 # Bundle the built dashboard SPA, docs, and data files into BOTH
@@ -269,30 +297,68 @@ packages = ["src/z4j", "backend/src/z4j_brain"]
 "src" = ""
 "backend/src" = ""
 
+[tool.hatch.build.targets.wheel.force-include]
+"docker/rollback-1.8.2-py3147/manifest.json" = "z4j_brain/data/rollback-1.8.2-py3147-manifest.json"
+"docker/rollback-1.8.2-py3147/durable_evidence.py" = "z4j_brain/rollback_compat_durable_evidence.py"
+
 # Include Docker Compose recipes + ``.env.example`` in the sdist so
 # ``pip install z4j`` + ``pip download --no-deps z4j`` + unpacking
-# the sdist gives operators a full docker-compose kit. These files
-# are NOT in the wheel (wheel is pure-python distribution).
+# the sdist gives operators a full docker-compose kit. The dashboard source
+# inputs are retained so the production-image verifier can recompute its exact
+# projection in a standalone release checkout. Except for the exact rollback
+# manifest and offline durable verifier above, these files are NOT in the wheel.
 [tool.hatch.build.targets.sdist]
 include = [
   "src/z4j",
   "backend",
-  "README.md",
-  "CHANGELOG.md",
-  "LICENSE",
-  "SECURITY.md",
-  "pyproject.toml",
-  "Dockerfile",
-  ".dockerignore",
-  "docker-compose.yml",
-  "docker-compose.postgres.yml",
-  "docker-compose.caddy.yml",
+  "dashboard/.npmrc",
+  "dashboard/components.json",
+  "dashboard/index.html",
+  "dashboard/package.json",
+  "dashboard/pnpm-lock.yaml",
+  "dashboard/pnpm-workspace.yaml",
+  "dashboard/public/**",
+  "dashboard/scripts/**",
+  "dashboard/src/**",
+  "dashboard/tsconfig.json",
+  "dashboard/vite.config.ts",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/SECURITY.md",
+  "/pyproject.toml",
+  "/Dockerfile",
+  "docker/production/**",
+  "/.dockerignore",
+  "/docker-compose.yml",
+  "/docker-compose.postgres.yml",
+  "/docker-compose.caddy.yml",
   "deploy",
-  ".env.example",
+  "docker/rollback-1.8.2-py3147/Dockerfile",
+  "docker/rollback-1.8.2-py3147/README.md",
+  "docker/rollback-1.8.2-py3147/manifest.json",
+  "docker/rollback-1.8.2-py3147/verify.py",
+  "docker/rollback-1.8.2-py3147/durable_evidence.py",
+  "docker/rollback-1.8.2-py3147/recovery_evidence.py",
+  "/.env.example",
+]
+exclude = [
+  "dashboard/**/node_modules/**",
+  "dashboard/**/dist/**",
+  "dashboard/**/.pnpm-store/**",
+  "dashboard/**/.cache/**",
+  "dashboard/**/coverage/**",
+  "dashboard/**/.vite/**",
+  "dashboard/**/.turbo/**",
+  "dashboard/**/.DS_Store",
+  "dashboard/**/__pycache__/**",
+  "dashboard/**/*.map",
+  "dashboard/**/*.pyc",
+  "dashboard/**/*.pyo",
 ]
 
-# The compose kit must build before the coordinated 1.8.0 package wave exists
-# on PyPI. Bundle the matching Apache-2.0 z4j-core and z4j-scheduler sources in
+# The compose kit must build before the coordinated package wave exists on
+# PyPI. Bundle the matching Apache-2.0 z4j-core and z4j-scheduler sources in
 # the sdist's Docker deployment payload only; the z4j wheel remains unchanged.
 [tool.hatch.build.targets.sdist.force-include]
 "../z4j-core/pyproject.toml" = "docker/vendor/z4j-core/pyproject.toml"

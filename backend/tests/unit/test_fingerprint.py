@@ -1,9 +1,9 @@
 """Tests for failure fingerprinting.
 
-The load-bearing property: the SAME logical failure across runs -- with
-different memory addresses, uuids, object reprs, and numeric ids in the
-message -- collapses to ONE fingerprint, while genuinely different failures
-(different exception class or different call site) stay distinct."""
+The load-bearing property: the same exception string and call site collapse to
+one fingerprint even when traceback message text varies, while a different
+exception string or call site stays distinct. A standalone event ``message``
+field is not an input to this fingerprint."""
 
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ def test_deterministic() -> None:
     assert len(fp1) == 32
 
 
-def test_noise_in_message_collapses_to_one_fingerprint() -> None:
-    """Same class + same frames, message varies only in volatile noise."""
+def test_traceback_message_text_is_not_used_when_frames_parse() -> None:
+    """Same exception string + frames, with different traceback tail text."""
     variants = [
         "<Foo object at 0x7f8b2c1d>",
         "<Foo object at 0x55aa99bb>",
@@ -44,6 +44,13 @@ def test_noise_in_message_collapses_to_one_fingerprint() -> None:
     ]
     fps = {compute_fingerprint("ValueError", _tb(v)) for v in variants}
     assert len(fps) == 1, f"expected one fingerprint, got {fps}"
+
+
+def test_standalone_event_message_is_not_a_fingerprint_input() -> None:
+    shared = {"exception": "ValueError", "traceback": _tb("x")}
+    first = fingerprint_from_data({**shared, "message": "tenant 1 failed"})
+    second = fingerprint_from_data({**shared, "message": "tenant 2 failed"})
+    assert first == second
 
 
 def test_different_exception_class_differs() -> None:

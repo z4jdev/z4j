@@ -2,8 +2,9 @@
 # z4j standalone Docker release
 #
 # Builds native amd64 + arm64 images, joins them behind a temporary staging
-# reference, signs and attests that multi-arch digest, and only then promotes
-# the same digest to the public version tag (and, when eligible, ``latest``).
+# reference, qualifies and attests that exact multi-arch digest, and retains a
+# byte-authenticated receipt. It never mutates a public release tag. A separate
+# protected workflow must reverify that receipt before promotion.
 # =============================================================================
 
 name: release-docker
@@ -15,12 +16,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Existing tag to rebuild, without the leading v"
+        description: "Existing source tag to release or retry, without the leading v"
         required: true
         type: string
 
 concurrency:
-  group: release-docker-${{ github.event.inputs.version || github.ref }}
+  # Tag pushes and manual retries for every version share one lock. A
+  # version-derived key would still allow two stable releases to race while
+  # deciding which digest owns ``latest``.
+  group: z4j-docker-publisher
   cancel-in-progress: false
 
 permissions:
@@ -38,9 +42,18 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
-      is_latest: ${{ steps.version.outputs.is_latest }}
-      release_ref: ${{ steps.version.outputs.release_ref }}
       release_sha: ${{ steps.version.outputs.release_sha }}
+      release_tree: ${{ steps.version.outputs.release_tree }}
+      production_manifest_sha256: ${{ steps.production.outputs.production_manifest_sha256 }}
+      production_source_projection_sha256: ${{ steps.production.outputs.production_source_projection_sha256 }}
+      production_wheelhouse_image: ${{ steps.production.outputs.production_wheelhouse_image }}
+      production_wheelhouse_index_digest: ${{ steps.production.outputs.production_wheelhouse_index_digest }}
+      production_system_bundle_image: ${{ steps.production.outputs.production_system_bundle_image }}
+      production_system_bundle_index_digest: ${{ steps.production.outputs.production_system_bundle_index_digest }}
+      production_dashboard_bundle_image: ${{ steps.production.outputs.production_dashboard_bundle_image }}
+      production_dashboard_bundle_index_digest: ${{ steps.production.outputs.production_dashboard_bundle_index_digest }}
+      production_dashboard_source_projection_sha256: ${{ steps.production.outputs.dashboard_source_projection_sha256 }}
+      production_source_date_epoch: ${{ steps.production.outputs.production_source_date_epoch }}
     steps:
       - name: Resolve requested source ref
         id: requested
@@ -48,18 +61,24 @@ jobs:
           DISPATCH_VERSION: ${{ github.event.inputs.version }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            printf 'ref=refs/tags/v%s\n' "${DISPATCH_VERSION}" >> "$GITHUB_OUTPUT"
+            VERSION="${DISPATCH_VERSION#v}"
+            if ! printf '%s' "${VERSION}" \
+              | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+              echo "::error::refusing to resolve '${DISPATCH_VERSION}': not a SemVer version"
+              exit 1
+            fi
+            printf 'ref=refs/tags/v%s\n' "${VERSION}" >> "$GITHUB_OUTPUT"
           else
             printf 'ref=%s\n' "${GITHUB_REF}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Checkout requested tag
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
         with:
           ref: ${{ steps.requested.outputs.ref }}
           fetch-depth: 0
 
-      - name: Resolve version and latest eligibility
+      - name: Resolve version and source identity
         id: version
         run: |
           VERSION="${Z4J_VERSION#v}"
@@ -76,28 +95,24 @@ jobs:
             exit 1
           fi
 
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "release_ref=${RELEASE_REF}" >> "$GITHUB_OUTPUT"
-          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          RELEASE_SHA=$(git rev-parse HEAD)
+          TAG_SHA=$(git rev-list -n 1 "${RELEASE_REF}")
+          if [ "${TAG_SHA}" != "${RELEASE_SHA}" ]; then
+            echo "::error::checked-out source ${RELEASE_SHA} is not ${RELEASE_REF} (${TAG_SHA})"
+            exit 1
+          fi
+          # A tag can be force-moved after its push event queued this run.
+          # Bind tag-triggered releases to the immutable commit carried by the
+          # event, not merely to whatever that mutable ref resolves to now.
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] \
+            && [ "${RELEASE_SHA}" != "${GITHUB_SHA}" ]; then
+            echo "::error::checked-out source ${RELEASE_SHA} differs from triggered tag commit ${GITHUB_SHA}"
+            exit 1
+          fi
 
-          case "${VERSION}" in
-            *-*)
-              echo "is_latest=false" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              STABLE_TAGS=$(git ls-remote --tags --refs origin 'v*' \
-                | sed 's|.*refs/tags/||' \
-                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-                | sed 's/^v//' || true)
-              HIGHEST=$(printf '%s\n%s\n' "${STABLE_TAGS}" "${VERSION}" \
-                | sed '/^$/d' | sort -V | tail -n 1)
-              if [ "${HIGHEST}" = "${VERSION}" ]; then
-                echo "is_latest=true" >> "$GITHUB_OUTPUT"
-              else
-                echo "is_latest=false" >> "$GITHUB_OUTPUT"
-              fi
-              ;;
-          esac
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "release_tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
 
       - name: Release identity gate
         env:
@@ -123,8 +138,22 @@ jobs:
             exit 1
           fi
 
+      - name: Verify finalized production Python closure
+        id: production
+        env:
+          RELEASE_SHA: ${{ steps.version.outputs.release_sha }}
+          RELEASE_TREE: ${{ steps.version.outputs.release_tree }}
+        run: |
+          python3 docker/production/verify.py source \
+            --manifest docker/production/manifest.json \
+            --repo-root . \
+            --require-finalized \
+            --release-commit "${RELEASE_SHA}" \
+            --release-tree "${RELEASE_TREE}" \
+            --github-output "${GITHUB_OUTPUT}"
+
   build:
-    name: Build ${{ matrix.arch }}
+    name: Build and catalogue ${{ matrix.arch }}
     needs: prepare
     strategy:
       fail-fast: false
@@ -138,23 +167,196 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - name: Checkout validated tag
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Checkout validated source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
         with:
-          ref: ${{ needs.prepare.outputs.release_ref }}
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # immutable ref; audited 2026-08-20
+        with:
+          version: v0.36.1
+          driver-opts: image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
 
       - name: Login to Docker Hub
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # immutable ref; audited 2026-08-20
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Verify every native production OCI authority
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+          WHEELHOUSE_IMAGE: ${{ needs.prepare.outputs.production_wheelhouse_image }}
+          SYSTEM_IMAGE: ${{ needs.prepare.outputs.production_system_bundle_image }}
+          DASHBOARD_IMAGE: ${{ needs.prepare.outputs.production_dashboard_bundle_image }}
+        run: |
+          set -eu
+          mkdir -p /tmp/z4j-production-authority
+          verify_oci() {
+            material="$1"
+            image="$2"
+            leaf=$(MATERIAL="${material}" PLATFORM="${PLATFORM}" \
+              python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path("docker/production/manifest.json").read_text(encoding="utf-8")
+          )
+          material = os.environ["MATERIAL"]
+          authority = manifest["dashboard"]["node"] if material == "dashboard_node" else manifest[material]
+          print(authority["platforms"][os.environ["PLATFORM"]]["manifest_digest"])
+          PY
+            )
+            docker buildx imagetools inspect "${image}" --raw \
+              > "/tmp/z4j-production-authority/${material}.index.json"
+            docker buildx imagetools inspect "${image%@*}@${leaf}" --raw \
+              > "/tmp/z4j-production-authority/${material}.manifest.json"
+            python3 docker/production/verify.py oci \
+              --manifest docker/production/manifest.json \
+              --material "${material}" \
+              --platform "${PLATFORM}" \
+              --index-json "/tmp/z4j-production-authority/${material}.index.json" \
+              --manifest-json "/tmp/z4j-production-authority/${material}.manifest.json"
+          }
+          PYTHON_IMAGE=$(python3 -c \
+            'import json; print(json.load(open("docker/production/manifest.json"))["python"]["image"])')
+          verify_oci python "${PYTHON_IMAGE}"
+          NODE_IMAGE=$(python3 -c \
+            'import json; print(json.load(open("docker/production/manifest.json"))["dashboard"]["node"]["image"])')
+          verify_oci dashboard_node "${NODE_IMAGE}"
+          verify_oci wheelhouse "${WHEELHOUSE_IMAGE}"
+          verify_oci system_packages "${SYSTEM_IMAGE}"
+          verify_oci dashboard "${DASHBOARD_IMAGE}"
+
+          extract_payload() {
+            image="$1"
+            source="$2"
+            destination="$3"
+            mkdir -p "${destination}"
+            # Data-only scratch images have no CMD. An inert never-started
+            # command lets Docker create a container solely for `docker cp`.
+            container=$(docker create --platform "${PLATFORM}" "${image}" true)
+            trap 'docker rm -f "${container}" >/dev/null 2>&1 || true' EXIT
+            docker cp "${container}:${source}/." "${destination}"
+            docker rm "${container}" >/dev/null
+            trap - EXIT
+          }
+          extract_payload "${WHEELHOUSE_IMAGE}" /opt/z4j-production \
+            /tmp/z4j-production-authority/wheelhouse
+          extract_payload "${SYSTEM_IMAGE}" /opt/z4j-production-system \
+            /tmp/z4j-production-authority/system
+          extract_payload "${DASHBOARD_IMAGE}" /opt/z4j-production-dashboard \
+            /tmp/z4j-production-authority/dashboard
+          python3 docker/production/verify.py wheelhouse \
+            --manifest docker/production/manifest.json \
+            --root /tmp/z4j-production-authority/wheelhouse \
+            --platform "${PLATFORM}"
+          docker run --rm --platform "${PLATFORM}" \
+            --entrypoint python \
+            -v "${GITHUB_WORKSPACE}:/source:ro" \
+            -v "/tmp/z4j-production-authority:/materials:ro" \
+            "${PYTHON_IMAGE}" \
+            /source/docker/production/verify.py system-bundle \
+              --manifest /source/docker/production/manifest.json \
+              --root /materials/system \
+              --platform "${PLATFORM}" \
+              --apt-get /usr/bin/apt-get \
+              --gpgv /usr/bin/gpgv \
+              --dpkg-deb /usr/bin/dpkg-deb
+          python3 docker/production/verify.py dashboard-bundle \
+            --manifest docker/production/manifest.json \
+            --root /tmp/z4j-production-authority/dashboard \
+            --repo-root . \
+            --platform "${PLATFORM}"
+
+          # Rebuild the dashboard from the retained, byte-sealed pnpm store.
+          # This independently proves that the signed build receipt and dist
+          # bytes are reproducible without registry or network access.
+          rm -rf /tmp/z4j-dashboard-replay
+          mkdir -p /tmp/z4j-dashboard-replay/workspace \
+            /tmp/z4j-dashboard-replay/materials
+          cp -a dashboard/. /tmp/z4j-dashboard-replay/workspace/
+          cp -a /tmp/z4j-production-authority/dashboard/. \
+            /tmp/z4j-dashboard-replay/materials/
+          rm -rf /tmp/z4j-dashboard-replay/workspace/node_modules \
+            /tmp/z4j-dashboard-replay/workspace/dist
+          SOURCE_DATE_EPOCH=$(python3 -c \
+            'import json; print(json.load(open("docker/production/manifest.json"))["install"]["source_date_epoch"])')
+          docker run --rm --network none --platform "${PLATFORM}" \
+            --entrypoint /bin/sh \
+            --env CI=true \
+            --env LANG=C.UTF-8 \
+            --env SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
+            --env TZ=UTC \
+            -v /tmp/z4j-dashboard-replay/workspace:/workspace \
+            -v /tmp/z4j-dashboard-replay/materials:/opt/z4j-production-dashboard \
+            "${NODE_IMAGE}" -euxc '
+              cd /workspace
+              node /opt/z4j-production-dashboard/bin/pnpm.cjs install \
+                --offline --frozen-lockfile \
+                --store-dir /opt/z4j-production-dashboard/store
+              node /opt/z4j-production-dashboard/bin/pnpm.cjs run build
+              for marker in .build-context .build-inputs.sha256 .build-output.sha256; do
+                cp "/opt/z4j-production-dashboard/dist/${marker}" "/workspace/dist/${marker}"
+              done
+            ' >/tmp/z4j-dashboard-replay/build.stdout \
+              2>/tmp/z4j-dashboard-replay/build.stderr
+          ARCH="${ARCH}" PLATFORM="${PLATFORM}" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("/tmp/z4j-dashboard-replay")
+          build = json.loads(
+              Path(
+                  "/tmp/z4j-production-authority/dashboard/evidence/build-receipt.json"
+              ).read_text(encoding="utf-8")
+          )
+          if build.get("platform") != os.environ["PLATFORM"]:
+              raise SystemExit("offline dashboard replay receipt is wrong-platform")
+          manifest = json.loads(
+              Path("docker/production/manifest.json").read_text(encoding="utf-8")
+          )
+
+          def seal(path: Path) -> dict[str, object]:
+              payload = path.read_bytes()
+              return {"sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)}
+
+          replay = {
+              "format": "z4j-production-dashboard-replay-v1",
+              "platform": os.environ["PLATFORM"],
+              "result": "pass",
+              "sealed_bundle_tree_sha256": manifest["dashboard"]["platforms"]
+              [os.environ["PLATFORM"]]["bundle_tree_sha256"],
+              "stdout": seal(root / "build.stdout"),
+              "stderr": seal(root / "build.stderr"),
+          }
+          payload = json.dumps(
+              replay, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+          ).encode("ascii") + b"\n"
+          replay_output = Path("/tmp/z4j-release")
+          replay_output.mkdir(parents=True, exist_ok=True)
+          for stream_name in ("stdout", "stderr"):
+              (replay_output / f"dashboard-replay.{os.environ['ARCH']}.{stream_name}").write_bytes(
+                  (root / f"build.{stream_name}").read_bytes()
+              )
+          (replay_output / f"dashboard-replay.{os.environ['ARCH']}.json").write_bytes(
+              payload
+          )
+          PY
+          python3 docker/production/verify.py dashboard-output \
+            --manifest docker/production/manifest.json \
+            --directory /tmp/z4j-dashboard-replay/workspace/dist \
+            --platform "${PLATFORM}"
+
       - name: Build and push native image by digest
         id: build
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # immutable ref; audited 2026-08-20
         with:
           context: ${{ github.workspace }}
           file: ${{ github.workspace }}/Dockerfile
@@ -164,177 +366,1425 @@ jobs:
           sbom: true
           build-args: |
             Z4J_VERSION=${{ needs.prepare.outputs.version }}
+            PRODUCTION_WHEELHOUSE_IMAGE=${{ needs.prepare.outputs.production_wheelhouse_image }}
+            PRODUCTION_SYSTEM_BUNDLE_IMAGE=${{ needs.prepare.outputs.production_system_bundle_image }}
+            PRODUCTION_DASHBOARD_BUNDLE_IMAGE=${{ needs.prepare.outputs.production_dashboard_bundle_image }}
+            PRODUCTION_MANIFEST_SHA256=${{ needs.prepare.outputs.production_manifest_sha256 }}
+            PRODUCTION_SOURCE_PROJECTION_SHA256=${{ needs.prepare.outputs.production_source_projection_sha256 }}
+            PRODUCTION_WHEELHOUSE_INDEX_DIGEST=${{ needs.prepare.outputs.production_wheelhouse_index_digest }}
+            PRODUCTION_SYSTEM_BUNDLE_INDEX_DIGEST=${{ needs.prepare.outputs.production_system_bundle_index_digest }}
+            PRODUCTION_DASHBOARD_BUNDLE_INDEX_DIGEST=${{ needs.prepare.outputs.production_dashboard_bundle_index_digest }}
+            SOURCE_DATE_EPOCH=${{ needs.prepare.outputs.production_source_date_epoch }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
             org.opencontainers.image.revision=${{ needs.prepare.outputs.release_sha }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.z4j.production.manifest.sha256=${{ needs.prepare.outputs.production_manifest_sha256 }}
+            org.z4j.production.source-projection.sha256=${{ needs.prepare.outputs.production_source_projection_sha256 }}
+            org.z4j.production.wheelhouse.index=${{ needs.prepare.outputs.production_wheelhouse_index_digest }}
+            org.z4j.production.system-bundle.index=${{ needs.prepare.outputs.production_system_bundle_index_digest }}
+            org.z4j.production.dashboard-bundle.index=${{ needs.prepare.outputs.production_dashboard_bundle_index_digest }}
           outputs: |
-            type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+            type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true,rewrite-timestamp=true
 
-      - name: Export digest
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          case "${DIGEST}" in
-            sha256:*) ;;
-            *)
-              echo "::error::build did not return a sha256 digest"
-              exit 1
-              ;;
-          esac
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${DIGEST#sha256:}"
-
-      - name: Upload digest artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # immutable ref; audited 2026-08-20
         with:
-          name: digests-${{ matrix.arch }}
-          path: /tmp/digests/*
+          syft-version: 1.50.0
+
+      - name: Capture native digest and generate SBOM
+        id: capture
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          RELEASE_TREE: ${{ needs.prepare.outputs.release_tree }}
+          PRODUCTION_MANIFEST_SHA256: ${{ needs.prepare.outputs.production_manifest_sha256 }}
+          PRODUCTION_SOURCE_PROJECTION_SHA256: ${{ needs.prepare.outputs.production_source_projection_sha256 }}
+          PRODUCTION_WHEELHOUSE_INDEX_DIGEST: ${{ needs.prepare.outputs.production_wheelhouse_index_digest }}
+          PRODUCTION_SYSTEM_BUNDLE_INDEX_DIGEST: ${{ needs.prepare.outputs.production_system_bundle_index_digest }}
+          PRODUCTION_DASHBOARD_BUNDLE_INDEX_DIGEST: ${{ needs.prepare.outputs.production_dashboard_bundle_index_digest }}
+        run: |
+          if ! printf '%s' "${BUILD_DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::native ${ARCH} build did not return a sha256 digest"
+            exit 1
+          fi
+          mkdir -p /tmp/z4j-release
+
+          # Attested one-platform BuildKit output can itself be an OCI index:
+          # one runnable manifest plus unknown/unknown attestation descriptors.
+          # Preserve that source index for the merge while independently
+          # validating and recording the runnable child used by Syft/cosign.
+          RAW_MANIFEST="/tmp/z4j-${ARCH}-build-manifest.json"
+          LEAF_MANIFEST="/tmp/z4j-${ARCH}-leaf-manifest.json"
+          IMAGE_CONFIG="/tmp/z4j-${ARCH}-image-config.json"
+          docker buildx imagetools inspect \
+            "${IMAGE}@${BUILD_DIGEST}" --raw > "${RAW_MANIFEST}"
+          LEAF_DIGEST=$(BUILD_DIGEST="${BUILD_DIGEST}" PLATFORM="${PLATFORM}" \
+            python3 - "${RAW_MANIFEST}" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          expected_os, expected_arch = os.environ["PLATFORM"].split("/", 1)
+          manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected = (expected_os, expected_arch)
+
+          descriptors = manifest.get("manifests")
+          if descriptors is None:
+              leaf_digest = os.environ["BUILD_DIGEST"]
+          else:
+              matches = []
+              unexpected = []
+              for descriptor in descriptors:
+                  platform = descriptor.get("platform") or {}
+                  pair = (platform.get("os"), platform.get("architecture"))
+                  if pair == expected:
+                      matches.append(descriptor.get("digest"))
+                  elif pair != ("unknown", "unknown"):
+                      unexpected.append(pair)
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"native build output has {len(matches)} {expected_os}/{expected_arch} manifests"
+                  )
+              if unexpected:
+                  raise SystemExit(
+                      f"native build output has unexpected platforms: {unexpected}"
+                  )
+              leaf_digest = matches[0]
+
+          if not isinstance(leaf_digest, str) or not re.fullmatch(
+              r"sha256:[0-9a-f]{64}", leaf_digest
+          ):
+              raise SystemExit(f"native runnable manifest has invalid digest {leaf_digest!r}")
+          print(leaf_digest)
+          PY
+          )
+
+          # `.Image` on the source OCI index is keyed by platform. Inspect the
+          # runnable child, where Docker returns one top-level image config.
+          docker buildx imagetools inspect \
+            "${IMAGE}@${LEAF_DIGEST}" --raw > "${LEAF_MANIFEST}"
+          docker buildx imagetools inspect \
+            "${IMAGE}@${LEAF_DIGEST}" --format '{{json .Image}}' \
+            > "${IMAGE_CONFIG}"
+          PLATFORM="${PLATFORM}" python3 - "${IMAGE_CONFIG}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          expected = tuple(os.environ["PLATFORM"].split("/", 1))
+          image = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          actual = (image.get("os"), image.get("architecture"))
+          if actual != expected:
+              raise SystemExit(
+                  f"native image config platform differs: expected {expected}, found {actual}"
+              )
+          labels = (image.get("config") or {}).get("Labels") or {}
+          expected_labels = {
+              "org.opencontainers.image.revision": os.environ["RELEASE_SHA"],
+              "org.z4j.production.manifest.sha256": os.environ[
+                  "PRODUCTION_MANIFEST_SHA256"
+              ],
+              "org.z4j.production.source-projection.sha256": os.environ[
+                  "PRODUCTION_SOURCE_PROJECTION_SHA256"
+              ],
+              "org.z4j.production.wheelhouse.index": os.environ[
+                  "PRODUCTION_WHEELHOUSE_INDEX_DIGEST"
+              ],
+              "org.z4j.production.system-bundle.index": os.environ[
+                  "PRODUCTION_SYSTEM_BUNDLE_INDEX_DIGEST"
+              ],
+              "org.z4j.production.dashboard-bundle.index": os.environ[
+                  "PRODUCTION_DASHBOARD_BUNDLE_INDEX_DIGEST"
+              ],
+          }
+          if any(labels.get(key) != value for key, value in expected_labels.items()):
+              raise SystemExit("native image config release/provenance labels differ")
+          PY
+
+          printf '%s\n' "${LEAF_DIGEST}" > "/tmp/z4j-release/${ARCH}.digest"
+          printf '%s\n' "${BUILD_DIGEST}" > "/tmp/z4j-release/${ARCH}.build.digest"
+          printf 'leaf_digest=%s\n' "${LEAF_DIGEST}" >> "${GITHUB_OUTPUT}"
+          syft "${IMAGE}@${LEAF_DIGEST}" \
+            -o "cyclonedx-json=/tmp/z4j-release/sbom.${ARCH}.cyclonedx.json" \
+            -o "spdx-json=/tmp/z4j-release/sbom.${ARCH}.spdx.json"
+
+          docker run --rm --platform "${PLATFORM}" -i \
+            --entrypoint /opt/venv/bin/python \
+            "${IMAGE}@${LEAF_DIGEST}" - \
+            < docker/production/probe.py \
+            > "/tmp/z4j-release/cadence.${ARCH}.json"
+          python3 docker/production/verify.py cadence-probe \
+            --manifest docker/production/manifest.json \
+            --platform "${PLATFORM}" \
+            --probe "/tmp/z4j-release/cadence.${ARCH}.json"
+
+          docker run --rm --platform "${PLATFORM}" -i \
+            --entrypoint /opt/venv/bin/python \
+            "${IMAGE}@${LEAF_DIGEST}" - \
+            > "/tmp/z4j-release/signature-verifier.${ARCH}.json" <<'PY'
+          import hashlib
+          import json
+          import platform
+          import stat
+          import subprocess
+          from pathlib import Path
+
+          binary = Path("/usr/local/bin/cosign")
+          observed = binary.stat(follow_symlinks=False)
+          if binary.is_symlink() or not stat.S_ISREG(observed.st_mode):
+              raise SystemExit("runtime Cosign is absent, a symlink, or nonregular")
+          payload = binary.read_bytes()
+          version = subprocess.run(
+              [str(binary), "version", "--json"],
+              capture_output=True,
+              check=False,
+          )
+          if version.returncode != 0:
+              raise SystemExit("runtime Cosign version probe failed")
+          version_output = version.stdout + version.stderr
+          probe = {
+              "format": "z4j-production-signature-verifier-probe-v1",
+              "platform": {"system": platform.system(), "machine": platform.machine()},
+              "runtime_path": str(binary),
+              "binary_sha256": hashlib.sha256(payload).hexdigest(),
+              "binary_size": len(payload),
+              "version_output_sha256": hashlib.sha256(version_output).hexdigest(),
+              "version_output_size": len(version_output),
+          }
+          print(json.dumps(probe, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+          PY
+          python3 docker/production/verify.py signature-verifier-probe \
+            --manifest docker/production/manifest.json \
+            --platform "${PLATFORM}" \
+            --probe "/tmp/z4j-release/signature-verifier.${ARCH}.json"
+
+          SMOKE_CONTAINER=$(docker run -d \
+            --platform "${PLATFORM}" \
+            --network none \
+            --tmpfs /data:rw,nosuid,nodev,noexec,size=64m,uid=10001,gid=10001,mode=0700 \
+            "${IMAGE}@${LEAF_DIGEST}")
+          cleanup_smoke() {
+            docker rm -f "${SMOKE_CONTAINER}" >/dev/null 2>&1 || true
+          }
+          trap cleanup_smoke EXIT INT TERM
+          SMOKE_STATUS=starting
+          attempt=0
+          while [ "${attempt}" -lt 50 ]; do
+            SMOKE_STATUS=$(docker inspect \
+              --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}absent{{end}}' \
+              "${SMOKE_CONTAINER}")
+            CONTAINER_STATUS=$(docker inspect \
+              --format '{{.State.Status}}' "${SMOKE_CONTAINER}")
+            if [ "${SMOKE_STATUS}" = healthy ]; then
+              break
+            fi
+            if [ "${CONTAINER_STATUS}" != running ] || [ "${SMOKE_STATUS}" = unhealthy ]; then
+              break
+            fi
+            attempt=$((attempt + 1))
+            sleep 2
+          done
+          docker logs "${SMOKE_CONTAINER}" \
+            > "/tmp/z4j-release/service-smoke.${ARCH}.log" 2>&1 || true
+          docker inspect "${SMOKE_CONTAINER}" \
+            > "/tmp/z4j-release/service-smoke.${ARCH}.inspect.json"
+          if [ "${SMOKE_STATUS}" != healthy ]; then
+            echo "::error::exact ${PLATFORM} candidate did not become healthy"
+            cat "/tmp/z4j-release/service-smoke.${ARCH}.log"
+            exit 1
+          fi
+          ARCH="${ARCH}" PLATFORM="${PLATFORM}" LEAF_DIGEST="${LEAF_DIGEST}" \
+            python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("/tmp/z4j-release")
+          arch = os.environ["ARCH"]
+
+          def seal(path: Path) -> dict[str, object]:
+              payload = path.read_bytes()
+              return {"sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)}
+
+          inspect_path = root / f"service-smoke.{arch}.inspect.json"
+          inspection = json.loads(inspect_path.read_text(encoding="utf-8"))
+          if not isinstance(inspection, list) or len(inspection) != 1:
+              raise SystemExit("candidate service smoke inspection is ambiguous")
+          container = inspection[0]
+          config = container.get("Config") or {}
+          state = container.get("State") or {}
+          health = state.get("Health") or {}
+          if (
+              config.get("Entrypoint") != ["/usr/bin/tini", "--", "z4j"]
+              or config.get("Cmd") != ["serve"]
+              or state.get("Running") is not True
+              or health.get("Status") != "healthy"
+          ):
+              raise SystemExit("candidate did not boot through its exact healthy service path")
+          receipt = {
+              "format": "z4j-production-service-smoke-v1",
+              "platform": os.environ["PLATFORM"],
+              "candidate_manifest_digest": os.environ["LEAF_DIGEST"],
+              "entrypoint": config["Entrypoint"],
+              "command": config["Cmd"],
+              "network_mode": "none",
+              "health_status": "healthy",
+              "logs": seal(root / f"service-smoke.{arch}.log"),
+              "inspection": seal(inspect_path),
+              "result": "pass",
+          }
+          (root / f"service-smoke.{arch}.json").write_bytes(
+              json.dumps(
+                  receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+              ).encode("ascii")
+              + b"\n"
+          )
+          PY
+          cleanup_smoke
+          trap - EXIT INT TERM
+
+          ARCH="${ARCH}" PLATFORM="${PLATFORM}" \
+          BUILD_DIGEST="${BUILD_DIGEST}" LEAF_DIGEST="${LEAF_DIGEST}" \
+          RELEASE_SHA="${RELEASE_SHA}" RELEASE_TREE="${RELEASE_TREE}" \
+          PRODUCTION_MANIFEST_SHA256="${PRODUCTION_MANIFEST_SHA256}" \
+          PRODUCTION_SOURCE_PROJECTION_SHA256="${PRODUCTION_SOURCE_PROJECTION_SHA256}" \
+            python3 - "${LEAF_MANIFEST}" "/tmp/z4j-release" <<'PY'
+          import hashlib
+          import datetime as dt
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          leaf_raw = Path(sys.argv[1]).read_bytes()
+          output = Path(sys.argv[2])
+          leaf = json.loads(leaf_raw)
+          observed_leaf_digest = "sha256:" + hashlib.sha256(leaf_raw).hexdigest()
+          if observed_leaf_digest != os.environ["LEAF_DIGEST"]:
+              raise SystemExit(
+                  "candidate leaf bytes differ from the registry-selected digest: "
+                  f"expected {os.environ['LEAF_DIGEST']}, found {observed_leaf_digest}"
+              )
+          contract = json.loads(
+              Path("docker/production/manifest.json").read_text(encoding="utf-8")
+          )
+          platform = os.environ["PLATFORM"]
+          arch = os.environ["ARCH"]
+          wheelhouse = contract["wheelhouse"]["platforms"][platform]
+          candidate_config = leaf.get("config") or {}
+          config_digest = candidate_config.get("digest")
+          config_size = candidate_config.get("size")
+          if (
+              not isinstance(config_digest, str)
+              or re.fullmatch(r"sha256:[0-9a-f]{64}", config_digest) is None
+              or not isinstance(config_size, int)
+              or isinstance(config_size, bool)
+              or config_size <= 0
+          ):
+              raise SystemExit("candidate leaf has no valid content-addressed config descriptor")
+
+          def seal(path: Path) -> dict[str, object]:
+              payload = path.read_bytes()
+              return {"sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)}
+
+          receipt = {
+              "format": "z4j-production-native-build-v1",
+              "release_git_commit": os.environ["RELEASE_SHA"],
+              "release_git_tree": os.environ["RELEASE_TREE"],
+              "platform": platform,
+              "contract": {
+                  "manifest_sha256": os.environ["PRODUCTION_MANIFEST_SHA256"],
+                  "source_projection_sha256": os.environ[
+                      "PRODUCTION_SOURCE_PROJECTION_SHA256"
+                  ],
+              },
+              "python": contract["python"],
+              "signature_verifier": contract["signature_verifier"],
+              "wheelhouse": {
+                  "image": contract["wheelhouse"]["image"],
+                  "index": contract["wheelhouse"]["index"],
+                  "manifest_digest": wheelhouse["manifest_digest"],
+                  "manifest_size": wheelhouse["manifest_size"],
+                  "config_digest": wheelhouse["config_digest"],
+                  "config_size": wheelhouse["config_size"],
+                  "runtime_lock": wheelhouse["runtime_lock"],
+                  "build_lock": wheelhouse["build_lock"],
+                  "inventory": wheelhouse["inventory"],
+                  "tree_sha256": wheelhouse["tree_sha256"],
+                  "tree_bytes": wheelhouse["tree_bytes"],
+                  "uv": wheelhouse["uv"],
+                  "local_wheels": wheelhouse["local_wheels"],
+                  "provenance_receipt": wheelhouse["provenance_receipt"],
+                  "resolver_receipt": wheelhouse["resolver_receipt"],
+                  "cadence_probe": wheelhouse["cadence_probe"],
+                  "sbom": wheelhouse["sbom"],
+                  "advisory_receipt": wheelhouse["advisory_receipt"],
+              },
+              "system_packages": contract["system_packages"],
+              "dashboard": contract["dashboard"],
+              "candidate": {
+                  "build_output_digest": os.environ["BUILD_DIGEST"],
+                  "manifest_digest": os.environ["LEAF_DIGEST"],
+                  "manifest_size": len(leaf_raw),
+                  "config_digest": config_digest,
+                  "config_size": config_size,
+                  "labels": {
+                      "org.opencontainers.image.revision": os.environ["RELEASE_SHA"],
+                      "org.z4j.production.manifest.sha256": os.environ[
+                          "PRODUCTION_MANIFEST_SHA256"
+                      ],
+                      "org.z4j.production.source-projection.sha256": os.environ[
+                          "PRODUCTION_SOURCE_PROJECTION_SHA256"
+                      ],
+                      "org.z4j.production.wheelhouse.index": contract["wheelhouse"]["index"][
+                      "digest"
+                      ],
+                      "org.z4j.production.system-bundle.index": contract[
+                          "system_packages"
+                      ]["index"]["digest"],
+                      "org.z4j.production.dashboard-bundle.index": contract[
+                          "dashboard"
+                      ]["index"]["digest"],
+                  },
+              },
+              "install": contract["install"],
+              "cadence_probe": seal(output / f"cadence.{arch}.json"),
+              "signature_verifier_probe": seal(
+                  output / f"signature-verifier.{arch}.json"
+              ),
+              "service_smoke": seal(output / f"service-smoke.{arch}.json"),
+              "candidate_sbom": {
+                  "cyclonedx": seal(output / f"sbom.{arch}.cyclonedx.json"),
+                  "spdx": seal(output / f"sbom.{arch}.spdx.json"),
+              },
+              "dashboard_replay": seal(
+                  output / f"dashboard-replay.{arch}.json"
+              ),
+          }
+          payload = json.dumps(
+              receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+          ).encode("ascii") + b"\n"
+          (output / f"production.{arch}.json").write_bytes(payload)
+          PY
+
+      - name: Scan native candidate for fixed high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # immutable ref; audited 2026-08-20
+        env:
+          TRIVY_CACHE_DIR: /tmp/z4j-trivy-cache-${{ matrix.arch }}
+        with:
+          version: v0.74.0
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}@${{ steps.capture.outputs.leaf_digest }}
+          format: json
+          output: /tmp/z4j-release/trivy.${{ matrix.arch }}.json
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+          scanners: vuln
+          vuln-type: os,library
+          list-all-pkgs: true
+          cache: false
+          cache-dir: /tmp/z4j-trivy-cache-${{ matrix.arch }}
+
+      - name: Bind passing native scanner verdict to production receipt
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE: ${{ env.IMAGE }}
+          LEAF_DIGEST: ${{ steps.capture.outputs.leaf_digest }}
+          TRIVY_CACHE_DIR: /tmp/z4j-trivy-cache-${{ matrix.arch }}
+        run: |
+          python3 - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          import re
+          import shutil
+          import stat
+          import subprocess
+          from pathlib import Path
+
+          root = Path("/tmp/z4j-release")
+          arch = os.environ["ARCH"]
+          receipt_path = root / f"production.{arch}.json"
+          report_path = root / f"trivy.{arch}.json"
+          receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+          report_raw = report_path.read_bytes()
+          report = json.loads(report_raw)
+          if report.get("SchemaVersion") != 2:
+              raise SystemExit("Trivy report schema is not version 2")
+          leaf_digest = os.environ["LEAF_DIGEST"]
+          expected_names = {
+              f"{os.environ['IMAGE']}@{leaf_digest}",
+              f"docker.io/{os.environ['IMAGE']}@{leaf_digest}",
+          }
+          if report.get("ArtifactName") not in expected_names:
+              raise SystemExit("Trivy report is not bound to the exact candidate leaf")
+          metadata = report.get("Metadata") or {}
+          candidate = receipt.get("candidate") or {}
+          if metadata.get("ImageID") != candidate.get("config_digest"):
+              raise SystemExit("Trivy report image config differs from the candidate")
+          repo_digests = metadata.get("RepoDigests") or []
+          if not any(
+              isinstance(value, str) and value.endswith("@" + leaf_digest)
+              for value in repo_digests
+          ):
+              raise SystemExit("Trivy report repository digests omit the candidate leaf")
+          results = report.get("Results")
+          if not isinstance(results, list) or not results:
+              raise SystemExit("Trivy report has no scan targets")
+          observed_classes = set()
+          observed_types = set()
+          observed_packages = {"debian": set(), "python-pkg": set()}
+          for result in results:
+              if not isinstance(result, dict) or not isinstance(result.get("Target"), str):
+                  raise SystemExit("Trivy report has a malformed scan target")
+              result_class = result.get("Class")
+              if result_class not in {"os-pkgs", "lang-pkgs"}:
+                  raise SystemExit(f"Trivy report has an unexpected scan class {result_class!r}")
+              observed_classes.add(result_class)
+              result_type = result.get("Type")
+              if not isinstance(result_type, str) or not result_type:
+                  raise SystemExit("Trivy report has a malformed scan target type")
+              observed_types.add(result_type)
+              if result_type in observed_packages:
+                  packages = result.get("Packages")
+                  if not isinstance(packages, list) or not packages:
+                      raise SystemExit(
+                          f"Trivy {result_type} target has no retained package inventory"
+                      )
+                  for package in packages:
+                      name = package.get("Name") if isinstance(package, dict) else None
+                      version = package.get("Version") if isinstance(package, dict) else None
+                      if (
+                          not isinstance(name, str)
+                          or not name
+                          or not isinstance(version, str)
+                          or not version
+                      ):
+                          raise SystemExit(
+                              f"Trivy {result_type} package inventory is malformed"
+                          )
+                      observed_packages[result_type].add(
+                          (re.sub(r"[-_.]+", "-", name).lower(), version)
+                      )
+              if result.get("Vulnerabilities") not in (None, []):
+                  raise SystemExit("Trivy report contains a fixed HIGH/CRITICAL finding")
+          if observed_classes != {"os-pkgs", "lang-pkgs"}:
+              raise SystemExit(
+                  "Trivy report did not retain both OS-package and language-package coverage"
+              )
+          required_types = {"debian", "python-pkg"}
+          if not required_types.issubset(observed_types):
+              raise SystemExit(
+                  "Trivy report did not retain Debian and Python package targets"
+              )
+
+          system_lock = json.loads(
+              Path(
+                  "/tmp/z4j-production-authority/system/locks/packages.json"
+              ).read_text(encoding="utf-8")
+          )
+          expected_debian = {
+              (
+                  re.sub(r"[-_.]+", "-", package["name"]).lower(),
+                  package["version"],
+              )
+              for package in system_lock.get("packages", [])
+              if (
+                  isinstance(package, dict)
+                  and isinstance(package.get("name"), str)
+                  and isinstance(package.get("version"), str)
+              )
+          }
+          if not expected_debian:
+              raise SystemExit("sealed Debian package lock has no package identities")
+
+          runtime_lock = Path(
+              "/tmp/z4j-production-authority/wheelhouse/locks/runtime.txt"
+          ).read_text(encoding="utf-8")
+          logical = []
+          current = ""
+          for raw_line in runtime_lock.splitlines():
+              stripped = raw_line.strip()
+              if not stripped or stripped.startswith("#"):
+                  continue
+              continuation = stripped.endswith("\\")
+              piece = stripped[:-1].strip() if continuation else stripped
+              current = f"{current} {piece}".strip()
+              if not continuation:
+                  logical.append(current)
+                  current = ""
+          if current:
+              raise SystemExit("sealed runtime lock has an incomplete continuation")
+          lock_pattern = re.compile(
+              r"([A-Za-z0-9][A-Za-z0-9_.-]*)=="
+              r"([A-Za-z0-9][A-Za-z0-9_.+!-]*) "
+              r"--hash=sha256:[0-9a-f]{64}"
+          )
+          expected_python = set()
+          for requirement in logical:
+              match = lock_pattern.fullmatch(requirement)
+              if match is None:
+                  raise SystemExit("sealed runtime lock has a malformed requirement")
+              expected_python.add(
+                  (re.sub(r"[-_.]+", "-", match.group(1)).lower(), match.group(2))
+              )
+          local_wheels = ((receipt.get("wheelhouse") or {}).get("local_wheels") or [])
+          for wheel in local_wheels:
+              distribution = wheel.get("distribution") if isinstance(wheel, dict) else None
+              version = wheel.get("version") if isinstance(wheel, dict) else None
+              if (
+                  not isinstance(distribution, str)
+                  or not distribution
+                  or not isinstance(version, str)
+                  or not version
+              ):
+                  raise SystemExit("native receipt has a malformed local-wheel identity")
+              expected_python.add(
+                  (re.sub(r"[-_.]+", "-", distribution).lower(), version)
+              )
+          if not expected_python:
+              raise SystemExit("sealed Python runtime closure has no package identities")
+
+          missing_debian = expected_debian - observed_packages["debian"]
+          missing_python = expected_python - observed_packages["python-pkg"]
+          if missing_debian or missing_python:
+              raise SystemExit(
+                  "Trivy package inventory omits sealed production packages: "
+                  f"debian={sorted(missing_debian)}, python={sorted(missing_python)}"
+              )
+
+          trivy_name = shutil.which("trivy")
+          if trivy_name is None:
+              raise SystemExit("Trivy action did not leave its exact scanner on PATH")
+          trivy_path = Path(trivy_name)
+          trivy_stat = trivy_path.stat(follow_symlinks=False)
+          if trivy_path.is_symlink() or not stat.S_ISREG(trivy_stat.st_mode):
+              raise SystemExit("Trivy scanner is not a regular non-symlink binary")
+          trivy_raw = trivy_path.read_bytes()
+          version = subprocess.run(
+              [str(trivy_path), "--version"],
+              check=True,
+              capture_output=True,
+          )
+          version_raw = version.stdout + version.stderr
+          if b"Version: 0.74.0" not in version_raw:
+              raise SystemExit("actual Trivy version output is not 0.74.0")
+          version_path = root / f"trivy-version.{arch}.txt"
+          version_path.write_bytes(version_raw)
+
+          cache_root = Path(os.environ["TRIVY_CACHE_DIR"])
+          database_records = []
+          for path in sorted(
+              cache_root.rglob("*"),
+              key=lambda item: item.relative_to(cache_root).as_posix().encode("utf-8"),
+          ):
+              relative = path.relative_to(cache_root).as_posix()
+              observed = path.stat(follow_symlinks=False)
+              if path.is_symlink() or not (path.is_dir() or stat.S_ISREG(observed.st_mode)):
+                  raise SystemExit(f"Trivy database cache has unsafe entry {relative}")
+              if path.is_dir():
+                  continue
+              payload = path.read_bytes()
+              database_records.append(
+                  {
+                      "path": relative,
+                      "size": len(payload),
+                      "sha256": hashlib.sha256(payload).hexdigest(),
+                  }
+              )
+          database_paths = {record["path"] for record in database_records}
+          if not any(path.endswith("db/trivy.db") for path in database_paths):
+              raise SystemExit("Trivy vulnerability database payload is absent")
+          if not any(path.endswith("db/metadata.json") for path in database_paths):
+              raise SystemExit("Trivy vulnerability database metadata is absent")
+          metadata_paths = [
+              path for path in database_paths if path.endswith("db/metadata.json")
+          ]
+          if len(metadata_paths) != 1:
+              raise SystemExit("Trivy vulnerability database metadata is ambiguous")
+          metadata_source = cache_root / metadata_paths[0]
+          metadata_raw = metadata_source.read_bytes()
+          database_metadata = json.loads(metadata_raw)
+          if database_metadata.get("Version") != 2:
+              raise SystemExit("Trivy vulnerability database schema is not version 2")
+
+          def timestamp(value: object, context: str) -> dt.datetime:
+              if not isinstance(value, str):
+                  raise SystemExit(f"{context} is absent")
+              try:
+                  parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+              except ValueError as exc:
+                  raise SystemExit(f"{context} is malformed") from exc
+              if parsed.tzinfo is None:
+                  raise SystemExit(f"{context} is not timezone-aware")
+              return parsed.astimezone(dt.UTC)
+
+          updated_at = timestamp(database_metadata.get("UpdatedAt"), "Trivy DB UpdatedAt")
+          next_update = timestamp(database_metadata.get("NextUpdate"), "Trivy DB NextUpdate")
+          contract_manifest = json.loads(
+              Path("docker/production/manifest.json").read_text(encoding="utf-8")
+          )
+          cutoff = timestamp(
+              contract_manifest.get("finalization", {}).get("not_before_utc"),
+              "production manifest finalization cutoff",
+          )
+          now = dt.datetime.now(dt.UTC)
+          if (
+              updated_at < cutoff
+              or updated_at > now
+              or next_update <= updated_at
+              or next_update < now
+              or next_update - updated_at > dt.timedelta(days=7)
+          ):
+              raise SystemExit("Trivy vulnerability database freshness window is invalid")
+          database_inventory = {
+              "format": "z4j-trivy-database-tree-v1",
+              "files": database_records,
+          }
+          database_raw = json.dumps(
+              database_inventory, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+          ).encode("ascii") + b"\n"
+          database_path = root / f"trivy-database.{arch}.json"
+          database_path.write_bytes(database_raw)
+          metadata_path = root / f"trivy-database-metadata.{arch}.json"
+          metadata_path.write_bytes(metadata_raw)
+          retained_database = root / f"trivy-database-cache.{arch}"
+          if retained_database.exists():
+              raise SystemExit("retained Trivy database path already exists")
+          shutil.copytree(cache_root, retained_database, symlinks=False)
+
+          def seal(payload: bytes) -> dict[str, object]:
+              return {"sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)}
+
+          if "candidate_scanner" in receipt:
+              raise SystemExit("native production receipt already has a scanner verdict")
+          receipt["candidate_scanner"] = {
+              "tool": "trivy",
+              "version": "v0.74.0",
+              "policy": {
+                  "severity": ["CRITICAL", "HIGH"],
+                  "ignore_unfixed": True,
+                  "list_all_packages": True,
+                  "package_inventory_identity": "normalized-name+version",
+                  "required_result_types": ["debian", "python-pkg"],
+                  "scanners": ["vuln"],
+                  "vulnerability_types": ["os", "library"],
+              },
+              "verdict": "pass",
+              "binary": seal(trivy_raw),
+              "version_transcript": seal(version_raw),
+              "database_inventory": seal(database_raw),
+              "database_metadata": seal(metadata_raw),
+              "report": seal(report_raw),
+          }
+          payload = json.dumps(
+              receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+          ).encode("ascii") + b"\n"
+          receipt_path.write_bytes(payload)
+          PY
+
+      - name: Upload native digest and SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # immutable ref; audited 2026-08-20
+        with:
+          name: native-${{ matrix.arch }}
+          path: /tmp/z4j-release/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Sign, attest, and promote multi-arch image
+    name: Qualify and attest multi-arch image
     needs: [prepare, build]
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout validated tag
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Checkout validated source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
         with:
-          ref: ${{ needs.prepare.outputs.release_ref }}
+          ref: ${{ needs.prepare.outputs.release_sha }}
 
-      - name: Download digest artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download native digest and SBOM artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # immutable ref; audited 2026-08-20
         with:
-          path: /tmp/digests
-          pattern: digests-*
+          path: /tmp/z4j-release
+          pattern: native-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # immutable ref; audited 2026-08-20
+        with:
+          version: v0.36.1
+          driver-opts: image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
 
       - name: Login to Docker Hub
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # immutable ref; audited 2026-08-20
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Push staging multi-arch reference
         id: staging
-        working-directory: /tmp/digests
+        working-directory: /tmp/z4j-release
         env:
           RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
         run: |
-          mapfile -t DIGEST_FILES < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
-          if [ "${#DIGEST_FILES[@]}" -ne 2 ]; then
-            echo "::error::expected exactly two native image digests"
+          read_digest() {
+            local arch="$1"
+            local path="${arch}.digest"
+            if [ ! -f "${path}" ]; then
+              echo "::error::missing ${arch} digest artifact" >&2
+              return 1
+            fi
+            local digest
+            digest=$(tr -d '[:space:]' < "${path}")
+            if ! printf '%s' "${digest}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::invalid ${arch} digest artifact '${digest}'" >&2
+              return 1
+            fi
+            printf '%s' "${digest}"
+          }
+
+          AMD64_DIGEST=$(read_digest amd64)
+          ARM64_DIGEST=$(read_digest arm64)
+          AMD64_SOURCE=$(read_digest amd64.build)
+          ARM64_SOURCE=$(read_digest arm64.build)
+          if [ "${AMD64_DIGEST}" = "${ARM64_DIGEST}" ]; then
+            echo "::error::amd64 and arm64 builds returned the same digest"
             exit 1
           fi
-          SOURCES=()
-          for digest in "${DIGEST_FILES[@]}"; do
-            if ! printf '%s' "${digest}" | grep -Eq '^[0-9a-f]{64}$'; then
-              echo "::error::invalid sha256 digest artifact '${digest}'"
-              exit 1
-            fi
-            SOURCES+=("${IMAGE}@sha256:${digest}")
-          done
+          if [ "${AMD64_SOURCE}" = "${ARM64_SOURCE}" ]; then
+            echo "::error::amd64 and arm64 build outputs returned the same digest"
+            exit 1
+          fi
 
           STAGING_TAG="staging-${RELEASE_SHA}"
           docker buildx imagetools create \
             --tag "${IMAGE}:${STAGING_TAG}" \
-            "${SOURCES[@]}"
+            "${IMAGE}@${AMD64_DIGEST}" \
+            "${IMAGE}@${ARM64_DIGEST}"
           DIGEST=$(docker buildx imagetools inspect \
             "${IMAGE}:${STAGING_TAG}" --format '{{ .Manifest.Digest }}')
-          case "${DIGEST}" in
-            sha256:*) ;;
-            *)
-              echo "::error::could not resolve the staging manifest digest"
-              exit 1
-              ;;
-          esac
-          echo "tag=${STAGING_TAG}" >> "$GITHUB_OUTPUT"
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          if ! printf '%s' "${DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::could not resolve the staging index digest"
+            exit 1
+          fi
+
+          docker buildx imagetools inspect \
+            "${IMAGE}@${DIGEST}" --raw > /tmp/z4j-release/staging-index.json
+          AMD64_DIGEST="${AMD64_DIGEST}" ARM64_DIGEST="${ARM64_DIGEST}" \
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          expected = {
+              "amd64": os.environ["AMD64_DIGEST"],
+              "arm64": os.environ["ARM64_DIGEST"],
+          }
+          payload = json.loads(
+              Path("/tmp/z4j-release/staging-index.json").read_text(encoding="utf-8")
+          )
+          if (
+              payload.get("schemaVersion") != 2
+              or payload.get("mediaType") != "application/vnd.oci.image.index.v1+json"
+          ):
+              raise SystemExit("staging index schema/media type differs")
+          descriptors = payload.get("manifests", [])
+          if not isinstance(descriptors, list) or len(descriptors) != 2:
+              raise SystemExit("staging index is not an exact two-descriptor index")
+          found = {}
+          unexpected = []
+          for descriptor in descriptors:
+              if not isinstance(descriptor, dict):
+                  raise SystemExit("staging index contains a malformed descriptor")
+              platform = descriptor.get("platform") or {}
+              operating_system = platform.get("os")
+              architecture = platform.get("architecture")
+              if operating_system == "linux" and architecture in expected:
+                  if architecture in found:
+                      raise SystemExit(f"duplicate linux/{architecture} manifest")
+                  found[architecture] = descriptor.get("digest")
+              else:
+                  unexpected.append(f"{operating_system}/{architecture}")
+
+          if found != expected:
+              raise SystemExit(
+                  f"staging index platform digests differ: expected {expected}, found {found}"
+              )
+          if unexpected:
+              raise SystemExit(f"staging index has unexpected platforms: {unexpected}")
+          PY
+
+          {
+            echo "tag=${STAGING_TAG}"
+            echo "digest=${DIGEST}"
+            echo "amd64_digest=${AMD64_DIGEST}"
+            echo "arm64_digest=${ARM64_DIGEST}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@61119d458adab75f756bc0b9e4bde25725f86a7a # v0.17.2
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # immutable ref; audited 2026-08-20
+        with:
+          syft-version: 1.50.0
 
-      - name: Generate multi-arch image SBOM
-        env:
-          DIGEST: ${{ steps.staging.outputs.digest }}
+      - name: Generate npm-only SBOM
         run: |
-          syft "${IMAGE}@${DIGEST}" \
-            -o cyclonedx-json=sbom.cyclonedx.json \
-            -o spdx-json=sbom.spdx.json
+          syft \
+            dir:dashboard \
+            --override-default-catalogers javascript \
+            -o cyclonedx-json=sbom.npm.cyclonedx.json \
+            -o spdx-json=sbom.npm.spdx.json
 
-      - name: Upload SBOMs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Generate detached production finalization predicate
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          RELEASE_TREE: ${{ needs.prepare.outputs.release_tree }}
+          INDEX_DIGEST: ${{ steps.staging.outputs.digest }}
+          AMD64_DIGEST: ${{ steps.staging.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ steps.staging.outputs.arm64_digest }}
+          PRODUCTION_MANIFEST_SHA256: ${{ needs.prepare.outputs.production_manifest_sha256 }}
+          PRODUCTION_SOURCE_PROJECTION_SHA256: ${{ needs.prepare.outputs.production_source_projection_sha256 }}
+        run: |
+          docker buildx imagetools inspect \
+            "${IMAGE}@${AMD64_DIGEST}" --raw \
+            > /tmp/z4j-release/candidate.amd64.manifest.json
+          docker buildx imagetools inspect \
+            "${IMAGE}@${ARM64_DIGEST}" --raw \
+            > /tmp/z4j-release/candidate.arm64.manifest.json
+          docker buildx imagetools inspect \
+            "${IMAGE}@${AMD64_DIGEST}" --format '{{json .Image}}' \
+            > /tmp/z4j-release/candidate.amd64.config.json
+          docker buildx imagetools inspect \
+            "${IMAGE}@${ARM64_DIGEST}" --format '{{json .Image}}' \
+            > /tmp/z4j-release/candidate.arm64.config.json
+          python3 docker/production/verify.py cadence-probe \
+            --manifest docker/production/manifest.json \
+            --platform linux/amd64 \
+            --probe /tmp/z4j-release/cadence.amd64.json
+          python3 docker/production/verify.py cadence-probe \
+            --manifest docker/production/manifest.json \
+            --platform linux/arm64 \
+            --probe /tmp/z4j-release/cadence.arm64.json
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("/tmp/z4j-release")
+          index_raw = (root / "staging-index.json").read_bytes()
+          observed_index_digest = "sha256:" + hashlib.sha256(index_raw).hexdigest()
+          if observed_index_digest != os.environ["INDEX_DIGEST"]:
+              raise SystemExit(
+                  "candidate index bytes differ from the staging digest: "
+                  f"expected {os.environ['INDEX_DIGEST']}, found {observed_index_digest}"
+              )
+          index = json.loads(index_raw)
+          if (
+              index.get("schemaVersion") != 2
+              or index.get("mediaType") != "application/vnd.oci.image.index.v1+json"
+          ):
+              raise SystemExit("candidate index schema/media type differs")
+          contract_manifest = json.loads(
+              Path("docker/production/manifest.json").read_text(encoding="utf-8")
+          )
+          native = {
+              arch: json.loads((root / f"production.{arch}.json").read_text(encoding="utf-8"))
+              for arch in ("amd64", "arm64")
+          }
+          expected_leaf = {
+              "amd64": os.environ["AMD64_DIGEST"],
+              "arm64": os.environ["ARM64_DIGEST"],
+          }
+          descriptors = index.get("manifests", [])
+          if not isinstance(descriptors, list) or len(descriptors) != 2:
+              raise SystemExit("candidate index is not an exact two-descriptor index")
+          index_descriptors = {}
+          for descriptor in descriptors:
+              if not isinstance(descriptor, dict):
+                  raise SystemExit("candidate index contains a malformed descriptor")
+              platform = descriptor.get("platform") or {}
+              pair = (platform.get("os"), platform.get("architecture"))
+              if pair[0] == "linux" and pair[1] in expected_leaf:
+                  if pair[1] in index_descriptors:
+                      raise SystemExit(f"duplicate candidate index descriptor for {pair}")
+                  index_descriptors[pair[1]] = descriptor
+              else:
+                  raise SystemExit(f"unexpected candidate index platform {pair}")
+          if set(index_descriptors) != set(expected_leaf):
+              raise SystemExit("candidate index platform inventory differs")
+
+          def seal(path: Path) -> dict[str, object]:
+              payload = path.read_bytes()
+              return {"sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)}
+
+          for arch, receipt in native.items():
+              platform_name = f"linux/{arch}"
+              if receipt.get("format") != "z4j-production-native-build-v1":
+                  raise SystemExit(f"native {arch} production receipt format differs")
+              if receipt.get("platform") != platform_name:
+                  raise SystemExit(f"native {arch} receipt platform differs")
+              if receipt.get("release_git_commit") != os.environ["RELEASE_SHA"]:
+                  raise SystemExit(f"native {arch} source commit differs")
+              if receipt.get("release_git_tree") != os.environ["RELEASE_TREE"]:
+                  raise SystemExit(f"native {arch} source tree differs")
+              contract = receipt.get("contract") or {}
+              if contract.get("manifest_sha256") != os.environ["PRODUCTION_MANIFEST_SHA256"]:
+                  raise SystemExit(f"native {arch} manifest seal differs")
+              if contract.get("source_projection_sha256") != os.environ[
+                  "PRODUCTION_SOURCE_PROJECTION_SHA256"
+              ]:
+                  raise SystemExit(f"native {arch} source projection differs")
+              if receipt.get("python") != contract_manifest["python"]:
+                  raise SystemExit(f"native {arch} Python authority differs")
+              if receipt.get("signature_verifier") != contract_manifest["signature_verifier"]:
+                  raise SystemExit(f"native {arch} signature-verifier authority differs")
+              if receipt.get("install") != contract_manifest["install"]:
+                  raise SystemExit(f"native {arch} install closure differs")
+              wheelhouse_platform = contract_manifest["wheelhouse"]["platforms"][platform_name]
+              expected_wheelhouse = {
+                  "image": contract_manifest["wheelhouse"]["image"],
+                  "index": contract_manifest["wheelhouse"]["index"],
+                  **{
+                      key: wheelhouse_platform[key]
+                      for key in (
+                          "manifest_digest",
+                          "manifest_size",
+                          "config_digest",
+                          "config_size",
+                          "runtime_lock",
+                          "build_lock",
+                          "inventory",
+                          "tree_sha256",
+                          "tree_bytes",
+                          "uv",
+                          "local_wheels",
+                          "provenance_receipt",
+                          "resolver_receipt",
+                          "cadence_probe",
+                          "sbom",
+                          "advisory_receipt",
+                      )
+                  },
+              }
+              if receipt.get("wheelhouse") != expected_wheelhouse:
+                  raise SystemExit(f"native {arch} wheelhouse authority differs")
+              if receipt.get("system_packages") != contract_manifest["system_packages"]:
+                  raise SystemExit(f"native {arch} system-package authority differs")
+              if receipt.get("dashboard") != contract_manifest["dashboard"]:
+                  raise SystemExit(f"native {arch} dashboard authority differs")
+              if (receipt.get("candidate") or {}).get("manifest_digest") != expected_leaf[arch]:
+                  raise SystemExit(f"native {arch} candidate digest differs")
+              scanner = receipt.get("candidate_scanner") or {}
+              if (
+                  scanner.get("tool") != "trivy"
+                  or scanner.get("version") != "v0.74.0"
+                  or scanner.get("policy")
+                  != {
+                      "severity": ["CRITICAL", "HIGH"],
+                      "ignore_unfixed": True,
+                      "list_all_packages": True,
+                      "package_inventory_identity": "normalized-name+version",
+                      "required_result_types": ["debian", "python-pkg"],
+                      "scanners": ["vuln"],
+                      "vulnerability_types": ["os", "library"],
+                  }
+                  or scanner.get("verdict") != "pass"
+              ):
+                  raise SystemExit(f"native {arch} scanner verdict differs or is absent")
+              binary = scanner.get("binary") or {}
+              if (
+                  not isinstance(binary.get("sha256"), str)
+                  or len(binary["sha256"]) != 64
+                  or not isinstance(binary.get("size"), int)
+                  or binary["size"] <= 0
+              ):
+                  raise SystemExit(f"native {arch} scanner binary seal differs")
+              scanner_report = scanner.get("report") or {}
+              actual_scanner_report = seal(root / f"trivy.{arch}.json")
+              if scanner_report != actual_scanner_report:
+                  raise SystemExit(f"native {arch} scanner report seal differs")
+              if scanner.get("version_transcript") != seal(
+                  root / f"trivy-version.{arch}.txt"
+              ):
+                  raise SystemExit(f"native {arch} scanner version transcript differs")
+              if scanner.get("database_inventory") != seal(
+                  root / f"trivy-database.{arch}.json"
+              ):
+                  raise SystemExit(f"native {arch} scanner database inventory differs")
+              if scanner.get("database_metadata") != seal(
+                  root / f"trivy-database-metadata.{arch}.json"
+              ):
+                  raise SystemExit(f"native {arch} scanner database metadata differs")
+              descriptor = index_descriptors[arch]
+              candidate = receipt.get("candidate") or {}
+              expected_labels = {
+                  "org.opencontainers.image.revision": os.environ["RELEASE_SHA"],
+                  "org.z4j.production.manifest.sha256": os.environ[
+                      "PRODUCTION_MANIFEST_SHA256"
+                  ],
+                  "org.z4j.production.source-projection.sha256": os.environ[
+                      "PRODUCTION_SOURCE_PROJECTION_SHA256"
+                  ],
+                  "org.z4j.production.wheelhouse.index": contract_manifest["wheelhouse"][
+                      "index"
+                  ]["digest"],
+                  "org.z4j.production.system-bundle.index": contract_manifest[
+                      "system_packages"
+                  ]["index"]["digest"],
+                  "org.z4j.production.dashboard-bundle.index": contract_manifest[
+                      "dashboard"
+                  ]["index"]["digest"],
+              }
+              if candidate.get("labels") != expected_labels:
+                  raise SystemExit(f"native {arch} candidate label receipt differs")
+              if (
+                  descriptor.get("digest") != candidate.get("manifest_digest")
+                  or descriptor.get("size") != candidate.get("manifest_size")
+              ):
+                  raise SystemExit(f"native {arch} candidate index descriptor differs")
+              build_digest = (root / f"{arch}.build.digest").read_text(
+                  encoding="utf-8"
+              ).strip()
+              if candidate.get("build_output_digest") != build_digest:
+                  raise SystemExit(f"native {arch} BuildKit output digest differs")
+              leaf_raw = (root / f"candidate.{arch}.manifest.json").read_bytes()
+              if (
+                  "sha256:" + hashlib.sha256(leaf_raw).hexdigest()
+                  != candidate.get("manifest_digest")
+                  or len(leaf_raw) != candidate.get("manifest_size")
+              ):
+                  raise SystemExit(f"native {arch} candidate manifest bytes differ")
+              leaf = json.loads(leaf_raw)
+              leaf_config = leaf.get("config") or {}
+              if (
+                  leaf_config.get("digest") != candidate.get("config_digest")
+                  or leaf_config.get("size") != candidate.get("config_size")
+              ):
+                  raise SystemExit(f"native {arch} candidate config descriptor differs")
+              config = json.loads(
+                  (root / f"candidate.{arch}.config.json").read_text(encoding="utf-8")
+              )
+              if (config.get("os"), config.get("architecture")) != ("linux", arch):
+                  raise SystemExit(f"native {arch} candidate config platform differs")
+              labels = (config.get("config") or {}).get("Labels") or {}
+              if any(labels.get(key) != value for key, value in candidate["labels"].items()):
+                  raise SystemExit(f"native {arch} candidate config labels differ")
+              if receipt.get("cadence_probe") != seal(root / f"cadence.{arch}.json"):
+                  raise SystemExit(f"native {arch} cadence receipt seal differs")
+              if receipt.get("signature_verifier_probe") != seal(
+                  root / f"signature-verifier.{arch}.json"
+              ):
+                  raise SystemExit(
+                      f"native {arch} signature-verifier probe seal differs"
+                  )
+              smoke_path = root / f"service-smoke.{arch}.json"
+              if receipt.get("service_smoke") != seal(smoke_path):
+                  raise SystemExit(f"native {arch} service-smoke receipt differs")
+              smoke = json.loads(smoke_path.read_text(encoding="utf-8"))
+              if smoke != {
+                  "format": "z4j-production-service-smoke-v1",
+                  "platform": f"linux/{arch}",
+                  "candidate_manifest_digest": candidate["manifest_digest"],
+                  "entrypoint": ["/usr/bin/tini", "--", "z4j"],
+                  "command": ["serve"],
+                  "network_mode": "none",
+                  "health_status": "healthy",
+                  "logs": seal(root / f"service-smoke.{arch}.log"),
+                  "inspection": seal(root / f"service-smoke.{arch}.inspect.json"),
+                  "result": "pass",
+              }:
+                  raise SystemExit(f"native {arch} service-smoke evidence differs")
+              sbom = receipt.get("candidate_sbom") or {}
+              if sbom != {
+                  "cyclonedx": seal(root / f"sbom.{arch}.cyclonedx.json"),
+                  "spdx": seal(root / f"sbom.{arch}.spdx.json"),
+              }:
+                  raise SystemExit(f"native {arch} candidate SBOM seals differ")
+
+          predicate = {
+              "format": "z4j-production-container-finalization-v1",
+              "release": os.environ["VERSION"],
+              "release_git_commit": os.environ["RELEASE_SHA"],
+              "release_git_tree": os.environ["RELEASE_TREE"],
+              "manifest_sha256": os.environ["PRODUCTION_MANIFEST_SHA256"],
+              "production_source_projection_sha256": os.environ[
+                  "PRODUCTION_SOURCE_PROJECTION_SHA256"
+              ],
+              "candidate_index": {
+                  "image": "docker.io/" + os.environ["IMAGE"],
+                  "digest": os.environ["INDEX_DIGEST"],
+                  "sha256": hashlib.sha256(index_raw).hexdigest(),
+                  "size": len(index_raw),
+              },
+              "signature_verifier": contract_manifest["signature_verifier"],
+              "dashboard_sbom": {
+                  "cyclonedx": seal(Path("sbom.npm.cyclonedx.json")),
+                  "spdx": seal(Path("sbom.npm.spdx.json")),
+              },
+              "native": native,
+              "native_receipts": {
+                  arch: seal(root / f"production.{arch}.json")
+                  for arch in ("amd64", "arm64")
+              },
+          }
+          payload = json.dumps(
+              predicate, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+          ).encode("ascii") + b"\n"
+          (root / "production-finalization.json").write_bytes(payload)
+          PY
+
+      - name: Stage exact durable qualification evidence inventory
+        run: |
+          set -eu
+          destination=/tmp/z4j-qualified-upload
+          rm -rf "${destination}"
+          mkdir -p "${destination}"
+          for relative in \
+            sbom.amd64.cyclonedx.json \
+            sbom.amd64.spdx.json \
+            sbom.arm64.cyclonedx.json \
+            sbom.arm64.spdx.json \
+            cadence.amd64.json \
+            cadence.arm64.json \
+            dashboard-replay.amd64.json \
+            dashboard-replay.amd64.stdout \
+            dashboard-replay.amd64.stderr \
+            dashboard-replay.arm64.json \
+            dashboard-replay.arm64.stdout \
+            dashboard-replay.arm64.stderr \
+            production.amd64.json \
+            production.arm64.json \
+            signature-verifier.amd64.json \
+            signature-verifier.arm64.json \
+            service-smoke.amd64.json \
+            service-smoke.amd64.log \
+            service-smoke.amd64.inspect.json \
+            service-smoke.arm64.json \
+            service-smoke.arm64.log \
+            service-smoke.arm64.inspect.json \
+            trivy.amd64.json \
+            trivy.arm64.json \
+            trivy-version.amd64.txt \
+            trivy-version.arm64.txt \
+            trivy-database.amd64.json \
+            trivy-database.arm64.json \
+            trivy-database-metadata.amd64.json \
+            trivy-database-metadata.arm64.json \
+            production-finalization.json; do
+            cp "/tmp/z4j-release/${relative}" "${destination}/${relative}"
+          done
+          cp sbom.npm.cyclonedx.json "${destination}/sbom.npm.cyclonedx.json"
+          cp sbom.npm.spdx.json "${destination}/sbom.npm.spdx.json"
+          cp -a /tmp/z4j-release/trivy-database-cache.amd64 \
+            "${destination}/trivy-database-cache.amd64"
+          cp -a /tmp/z4j-release/trivy-database-cache.arm64 \
+            "${destination}/trivy-database-cache.arm64"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("/tmp/z4j-qualified-upload")
+          expected_files = {
+              "sbom.amd64.cyclonedx.json",
+              "sbom.amd64.spdx.json",
+              "sbom.arm64.cyclonedx.json",
+              "sbom.arm64.spdx.json",
+              "sbom.npm.cyclonedx.json",
+              "sbom.npm.spdx.json",
+              "cadence.amd64.json",
+              "cadence.arm64.json",
+              "dashboard-replay.amd64.json",
+              "dashboard-replay.amd64.stdout",
+              "dashboard-replay.amd64.stderr",
+              "dashboard-replay.arm64.json",
+              "dashboard-replay.arm64.stdout",
+              "dashboard-replay.arm64.stderr",
+              "production.amd64.json",
+              "production.arm64.json",
+              "signature-verifier.amd64.json",
+              "signature-verifier.arm64.json",
+              "trivy.amd64.json",
+              "trivy.arm64.json",
+              "trivy-version.amd64.txt",
+              "trivy-version.arm64.txt",
+              "trivy-database.amd64.json",
+              "trivy-database.arm64.json",
+              "trivy-database-metadata.amd64.json",
+              "trivy-database-metadata.arm64.json",
+              "production-finalization.json",
+          }
+          actual_files = {path.name for path in root.iterdir() if path.is_file()}
+          actual_directories = {path.name for path in root.iterdir() if path.is_dir()}
+          if actual_files != expected_files or actual_directories != {
+              "trivy-database-cache.amd64",
+              "trivy-database-cache.arm64",
+          }:
+              raise SystemExit("durable qualification evidence inventory differs")
+          for directory in actual_directories:
+              if not any(path.is_file() for path in (root / directory).rglob("*")):
+                  raise SystemExit(f"durable qualification evidence is empty: {directory}")
+          PY
+
+      - name: Upload SBOMs and production finalization receipts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # immutable ref; audited 2026-08-20
         with:
           name: sbom-${{ needs.prepare.outputs.version }}
-          path: |
-            sbom.cyclonedx.json
-            sbom.spdx.json
+          path: /tmp/z4j-qualified-upload/
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # immutable ref; audited 2026-08-20
         with:
-          cosign-release: v2.4.1
+          cosign-release: v3.1.3
 
-      - name: Sign multi-arch image
+      - name: Sign multi-arch image and native manifests
         env:
-          DIGEST: ${{ steps.staging.outputs.digest }}
-        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+          INDEX_DIGEST: ${{ steps.staging.outputs.digest }}
+          AMD64_DIGEST: ${{ steps.staging.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ steps.staging.outputs.arm64_digest }}
+        run: |
+          cosign sign --yes "${IMAGE}@${INDEX_DIGEST}"
+          cosign sign --yes "${IMAGE}@${AMD64_DIGEST}"
+          cosign sign --yes "${IMAGE}@${ARM64_DIGEST}"
 
-      - name: Attach SBOM attestation
+      - name: Attach native SBOM attestations
+        env:
+          AMD64_DIGEST: ${{ steps.staging.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ steps.staging.outputs.arm64_digest }}
+        run: |
+          cosign attest --yes \
+            --predicate /tmp/z4j-release/sbom.amd64.cyclonedx.json \
+            --type cyclonedx \
+            "${IMAGE}@${AMD64_DIGEST}"
+          cosign attest --yes \
+            --predicate /tmp/z4j-release/sbom.arm64.cyclonedx.json \
+            --type cyclonedx \
+            "${IMAGE}@${ARM64_DIGEST}"
+
+      - name: Attach npm SBOM attestation
         env:
           DIGEST: ${{ steps.staging.outputs.digest }}
         run: |
           cosign attest --yes \
-            --predicate sbom.cyclonedx.json \
+            --predicate sbom.npm.cyclonedx.json \
             --type cyclonedx \
             "${IMAGE}@${DIGEST}"
 
+      - name: Attach detached production finalization attestation
+        env:
+          DIGEST: ${{ steps.staging.outputs.digest }}
+        run: |
+          cosign attest --yes \
+            --predicate /tmp/z4j-release/production-finalization.json \
+            --type https://z4j.dev/attestations/production-container-finalization/v1 \
+            "${IMAGE}@${DIGEST}"
+
+      - name: Sign exact production finalization receipt bytes
+        run: |
+          cosign sign-blob --yes \
+            --bundle /tmp/z4j-release/production-finalization.bundle.json \
+            /tmp/z4j-release/production-finalization.json
+
+      - name: Verify exact production finalization receipt bytes
+        run: |
+          cosign verify-blob \
+            --bundle /tmp/z4j-release/production-finalization.bundle.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp \
+              "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-docker.yml@refs/" \
+            /tmp/z4j-release/production-finalization.json
+
+      - name: Verify discoverable finalization attestation object
+        env:
+          DIGEST: ${{ steps.staging.outputs.digest }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cosign verify-attestation \
+            --type https://z4j.dev/attestations/production-container-finalization/v1 \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp \
+              "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-docker.yml@refs/" \
+            "${IMAGE}@${DIGEST}" \
+            > /tmp/z4j-release/production-finalization.attestation.jsonl
+          DIGEST="${DIGEST}" python3 - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+
+          expected_predicate = json.loads(
+              Path("/tmp/z4j-release/production-finalization.json").read_text(encoding="utf-8")
+          )
+          expected_digest = os.environ["DIGEST"].removeprefix("sha256:")
+          verified = []
+          for line in Path(
+              "/tmp/z4j-release/production-finalization.attestation.jsonl"
+          ).read_text(encoding="utf-8").splitlines():
+              if not line.strip():
+                  continue
+              envelope = json.loads(line)
+              payload = envelope.get("payload")
+              if not isinstance(payload, str):
+                  raise SystemExit("verified attestation has no DSSE payload")
+              statement = json.loads(base64.b64decode(payload, validate=True))
+              subjects = statement.get("subject") or []
+              subject_matches = any(
+                  isinstance(subject, dict)
+                  and (subject.get("digest") or {}).get("sha256") == expected_digest
+                  for subject in subjects
+              )
+              if (
+                  statement.get("predicateType")
+                  == "https://z4j.dev/attestations/production-container-finalization/v1"
+                  and subject_matches
+                  and statement.get("predicate") == expected_predicate
+              ):
+                  verified.append(statement)
+          if not verified:
+              raise SystemExit(
+                  "no authenticated finalization attestation matches the exact receipt bytes"
+              )
+          PY
+
+      - name: Retain authenticated production receipt proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # immutable ref; audited 2026-08-20
+        with:
+          name: production-finalization-attestation-${{ needs.prepare.outputs.version }}
+          path: |
+            /tmp/z4j-release/production-finalization.json
+            /tmp/z4j-release/production-finalization.bundle.json
+            /tmp/z4j-release/production-finalization.attestation.jsonl
+            /tmp/z4j-release/staging-index.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # immutable ref; audited 2026-08-20
         with:
           subject-name: docker.io/${{ env.IMAGE }}
           subject-digest: ${{ steps.staging.outputs.digest }}
           push-to-registry: true
 
-      - name: Promote signed digest to release tags
+      - name: Record qualified candidate (no public release-tag mutation)
         env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          IS_LATEST: ${{ needs.prepare.outputs.is_latest }}
           DIGEST: ${{ steps.staging.outputs.digest }}
-        run: |
-          TAGS=(--tag "${IMAGE}:${VERSION}")
-          if [ "${IS_LATEST}" = "true" ]; then
-            TAGS+=(--tag "${IMAGE}:latest")
-          fi
-          docker buildx imagetools create \
-            "${TAGS[@]}" "${IMAGE}@${DIGEST}"
-
-          fail=0
-          check_tag() {
-            resolved=$(docker buildx imagetools inspect \
-              "${IMAGE}:$1" --format '{{ .Manifest.Digest }}')
-            if [ "${resolved}" != "${DIGEST}" ]; then
-              echo "::error::promoted tag $1 resolves to ${resolved}; signed digest is ${DIGEST}"
-              fail=1
-            else
-              echo "ok: ${IMAGE}:$1 -> ${DIGEST} (signed digest)"
-            fi
-          }
-          check_tag "${VERSION}"
-          if [ "${IS_LATEST}" = "true" ]; then
-            check_tag latest
-          fi
-          exit "${fail}"
-
-      - name: Inspect resulting manifest
-        env:
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+        run: |
+          echo "Qualified ${IMAGE}@${DIGEST} for v${VERSION}."
+          echo "A separately dispatched, protected promotion workflow must consume"
+          echo "and reverify this run's authenticated finalization receipt."
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}"
 
   notify-on-failure:
     needs: [prepare, build, merge]
@@ -344,7 +1794,7 @@ jobs:
       issues: write
     steps:
       - name: Open or comment on tracking issue
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # immutable ref; audited 2026-08-20
         with:
           script: |
             const title = 'release-docker workflow failed';
@@ -353,8 +1803,9 @@ jobs:
               '',
               `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
-              'The public version tag is promoted only after signing and attestation.',
-              'Inspect the failed gate, fix it, and rerun the same release tag.',
+              'This workflow creates only a qualified digest and never mutates public release tags.',
+              'Inspect the retained signed receipt before retrying or dispatching promotion.',
+              'If the version tag already points at different bytes, publish repaired bytes under a new version.',
             ].join('\n');
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,

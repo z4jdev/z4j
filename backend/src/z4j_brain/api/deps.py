@@ -3,11 +3,12 @@
 Most of the dep surface is auth-shaped:
 
 - :func:`get_session` - yields a per-request DB session.
-- :func:`get_current_user` - resolves the session cookie, looks up
-  the row, validates expiry/revocation, returns the User. 401 if
-  any check fails.
-- :func:`get_optional_user` - same but returns ``None`` instead of
-  raising. Used by ``/api/v1/health`` and ``/api/v1/setup/status``.
+- :func:`get_current_user` - resolves a valid session cookie first,
+  otherwise a Bearer API key, and returns the User. Invalid credentials
+  are refused.
+- :func:`get_optional_user` - uses the same cookie-first precedence but
+  returns ``None`` for missing, unknown, revoked, expired, or inactive-owner
+  credentials. Used by ``/api/v1/health`` and ``/api/v1/setup/status``.
 - :func:`require_admin` - current user must have ``is_admin``.
 - :func:`require_csrf` - checks the ``X-CSRF-Token`` header against
   the session's CSRF token. State-changing endpoints depend on this.
@@ -140,6 +141,165 @@ def _release_touch_slot(key_id: UUID) -> None:
         _touch_last_committed.pop(key_id, None)
 
 
+#: ``request.state`` key under which bearer auth parks the
+#: ``last_used_at`` bookkeeping for :func:`_drain_api_key_touch` to run once
+#: the request's own session has been closed.
+_TOUCH_STATE_ATTR = "z4j_api_key_touch"
+
+# Session activity uses the same post-request shape as API-key activity:
+# authentication runs in the handler's request transaction, but the activity
+# stamp must survive read-only requests and handler rollback without ever
+# committing the handler's business writes. A small process-local throttle
+# avoids turning every dashboard asset/API read into a database UPDATE.
+_SESSION_TOUCH_MAX_INTERVAL_SECONDS: float = 60.0
+_SESSION_TOUCH_MAX_SESSIONS: int = 10_000
+_SESSION_TOUCH_STATE_ATTR = "z4j_session_touch"
+_SESSION_REVOKE_STATE_ATTR = "z4j_session_revoke"
+_session_touch_lock = threading.Lock()
+_session_touch_last_committed: OrderedDict[UUID, float] = OrderedDict()
+
+
+def _session_touch_interval_seconds(idle_timeout_seconds: int) -> float:
+    """Return a cadence safely inside the configured idle window."""
+    return min(
+        _SESSION_TOUCH_MAX_INTERVAL_SECONDS,
+        max(1.0, idle_timeout_seconds / 2.0),
+    )
+
+
+def _claim_session_touch_slot(
+    session_id: UUID,
+    *,
+    interval_seconds: float,
+) -> bool:
+    """Reserve a throttled durable activity write for ``session_id``."""
+    monotonic_now = time.monotonic()
+    with _session_touch_lock:
+        last = _session_touch_last_committed.get(session_id)
+        if last is not None and (monotonic_now - last) < interval_seconds:
+            _session_touch_last_committed.move_to_end(session_id)
+            return False
+        _session_touch_last_committed[session_id] = monotonic_now
+        while len(_session_touch_last_committed) > _SESSION_TOUCH_MAX_SESSIONS:
+            _session_touch_last_committed.popitem(last=False)
+        return True
+
+
+def _release_session_touch_slot(session_id: UUID) -> None:
+    """Release a failed activity-write reservation so the next request retries."""
+    with _session_touch_lock:
+        _session_touch_last_committed.pop(session_id, None)
+
+
+async def _drain_session_touch(request: Request) -> None:
+    """Persist validated session activity in its own transaction.
+
+    This runs after the request-scoped session has closed. Therefore a read-only
+    request advances the sliding idle clock, while a failing mutation still
+    rolls back all handler writes before this isolated primary-key UPDATE is
+    committed.
+    """
+    session_id = getattr(request.state, _SESSION_TOUCH_STATE_ATTR, None)
+    if session_id is None:
+        return
+    setattr(request.state, _SESSION_TOUCH_STATE_ATTR, None)
+    settings = getattr(request.app.state, "settings", None)
+    idle_timeout_seconds = int(
+        getattr(settings, "session_idle_timeout_seconds", 1_800),
+    )
+    if not _claim_session_touch_slot(
+        session_id,
+        interval_seconds=_session_touch_interval_seconds(idle_timeout_seconds),
+    ):
+        return
+    committed = False
+    try:
+        db_mgr = getattr(request.app.state, "db", None)
+        if db_mgr is not None:
+            async with db_mgr.session(write=True) as touch_session:
+                touched = await SessionRepository(touch_session).touch(session_id)
+                await touch_session.commit()
+                committed = touched
+    except Exception:
+        from z4j_brain.api.metrics import record_swallowed
+
+        record_swallowed("deps.session_auth", "touch")
+    if not committed:
+        _release_session_touch_slot(session_id)
+
+
+async def _drain_session_revoke(request: Request) -> None:
+    """Persist a request-time session invalidation in isolation."""
+    pending = getattr(request.state, _SESSION_REVOKE_STATE_ATTR, None)
+    if pending is None:
+        return
+    setattr(request.state, _SESSION_REVOKE_STATE_ATTR, None)
+    session_id, reason = pending
+    try:
+        db_mgr = getattr(request.app.state, "db", None)
+        if db_mgr is not None:
+            async with db_mgr.session(write=True) as revoke_session:
+                await SessionRepository(revoke_session).revoke(session_id, reason=reason)
+                await revoke_session.commit()
+    except Exception:
+        from z4j_brain.api.metrics import record_swallowed
+
+        record_swallowed("deps.session_auth", "revoke")
+
+
+async def _drain_api_key_touch(request: Request) -> None:
+    """Stamp ``last_used_at`` for the key that authenticated this request.
+
+    Called from :func:`get_session` AFTER the request's session is closed,
+    which is the whole point of the split. The write needs a session of its
+    own -- on the request's session it would ride the handler's transaction,
+    so a handler rollback would erase the fact that the key was used and the
+    bookkeeping's commit would carry the handler's partial writes -- and a
+    second session means a second connection. Taken during the request, that
+    checkout waits behind the connection the request itself is holding, which
+    on the ``pool_size=1, max_overflow=0`` pool this brain permits is a
+    connection that is never coming: every bearer request paid the full pool
+    timeout and then dropped the stamp anyway. Taken here, the request's
+    connection is already back in the pool.
+
+    Sampling (see :func:`_claim_touch_slot`) is decided here rather than at
+    auth time so a request that ends in an error path, where no stamp is
+    written, does not hold the sample window against the next one.
+
+    Best-effort: the reservation is handed back on failure so the next
+    request retries rather than waiting out the cooldown with a stale one.
+    """
+    pending = getattr(request.state, _TOUCH_STATE_ATTR, None)
+    if pending is None:
+        return
+    setattr(request.state, _TOUCH_STATE_ATTR, None)
+    key_id, ip, when = pending
+    if not _claim_touch_slot(key_id):
+        return
+    committed = False
+    try:
+        from z4j_brain.persistence.repositories.api_keys import (
+            ApiKeyRepository as _ApiKeyRepo,
+        )
+
+        db_mgr = getattr(request.app.state, "db", None)
+        if db_mgr is not None:
+            async with db_mgr.session() as touch_session:
+                await _ApiKeyRepo(touch_session).touch_used(
+                    key_id=key_id,
+                    ip=ip,
+                    when=when,
+                )
+                await touch_session.commit()
+                committed = True
+    except Exception:
+        from z4j_brain.api.metrics import record_swallowed
+
+        record_swallowed("deps.bearer_auth", "touch_used")
+    if not committed:
+        _release_touch_slot(key_id)
+
+
 # ---------------------------------------------------------------------------
 # Settings + DB
 # ---------------------------------------------------------------------------
@@ -163,11 +323,24 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     persist their changes. SQLite mutation requests reserve the writer
     before dependency resolution can perform the first authentication or
     domain read; this is the request-owned Boundary-F write unit.
+
+    Work that needs a connection of its own runs in the ``finally``, not
+    during the request: this dependency's teardown is the one moment where
+    the request's connection is provably back in the pool, and a pool of one
+    is a supported size. The ``finally`` rather than a plain trailing
+    statement because an error path throws into this generator at the
+    ``yield``, and the bookkeeping is not conditional on the handler
+    succeeding.
     """
     db = get_db(request)
     write = not is_safe_method(request.method)
-    async with db.session(write=write) as session:
-        yield session
+    try:
+        async with db.session(write=write) as session:
+            yield session
+    finally:
+        await _drain_session_revoke(request)
+        await _drain_session_touch(request)
+        await _drain_api_key_touch(request)
 
 
 async def begin_sqlite_immediate_write_unit(
@@ -208,11 +381,7 @@ def get_auth_service(request: Request) -> AuthService:
 
 
 def get_setup_service(request: Request) -> SetupService:
-    """The process-wide :class:`SetupService`.
-
-    Singleton because the per-IP attempt-budget cache lives on the
-    instance - a new instance per request would reset the budget.
-    """
+    """The process-wide :class:`SetupService` bound during app startup."""
     return request.app.state.setup_service  # type: ignore[no-any-return]
 
 
@@ -322,8 +491,9 @@ async def get_optional_session(
 ) -> tuple[SessionRow, User] | None:
     """Resolve the session cookie OR return None.
 
-    Used by :func:`get_optional_user` (which never raises) and by
-    :func:`get_current_user` (which raises 401 on None).
+    Used by :func:`get_optional_user` (which treats credential-authentication
+    failures as anonymous) and by :func:`get_current_user` (which raises 401
+    when neither a valid cookie nor a valid Bearer credential resolves).
     """
     cookie_value = request.cookies.get(cookie_name(environment=settings.environment))
     if not cookie_value:
@@ -340,18 +510,31 @@ async def get_optional_session(
         sessions=sessions,
         session_id=sid,
     )
-    # Mark the auth winner as
-    # "session" so ``resolve_api_key_id`` can correctly distinguish
+    if resolved is not None and settings.session_pin_user_agent:
+        issued_user_agent = resolved[0].user_agent_at_issue
+        current_user_agent = request.headers.get("user-agent")
+        current_user_agent = current_user_agent[:256] if current_user_agent else None
+        if issued_user_agent != current_user_agent:
+            setattr(
+                request.state,
+                _SESSION_REVOKE_STATE_ATTR,
+                (resolved[0].id, "user_agent_changed"),
+            )
+            return None
+    # Mark the auth winner as "session" so ``resolve_api_key_id`` can
+    # correctly distinguish
     # cookie-authenticated calls from bearer-authenticated calls.
-    # Without this, a request that authenticates via cookie but
-    # ALSO carries a (possibly stale) bearer header would have
-    # ``auth_kind`` left unset and the bearer-set
-    # ``request.state.api_key`` could leak into audit attribution.
+    # Without this, a request that authenticates via cookie but ALSO carries
+    # a Bearer header could leave ambiguous audit attribution. The wrapper
+    # dependencies below make the precedence stronger still: once this
+    # function resolves a valid cookie session, they do not evaluate the
+    # Bearer header at all.
     # The cross-check at ``resolve_api_key_id`` only succeeds when
     # ``auth_kind == "api_key"``; setting ``"session"`` here makes
     # the contract explicit.
     if resolved is not None:
         request.state.auth_kind = "session"
+        setattr(request.state, _SESSION_TOUCH_STATE_ATTR, resolved[0].id)
     return resolved
 
 
@@ -362,11 +545,13 @@ async def _resolve_bearer_user(  # noqa: PLR0912, PLR0915  bearer auth resolutio
 ) -> User | None:
     """Resolve ``Authorization: Bearer z4k_...`` to a User.
 
-    Returns ``None`` if the header is missing / malformed / the
-    token is unknown / revoked / expired / the owner is inactive.
-    Also enforces scope + per-project authorization against the
-    matched FastAPI route on the current request. Attaches the
-    successful :class:`ApiKey` row to ``request.state.api_key``.
+    Returns ``None`` if the header is missing, malformed, or the token is
+    unknown. A known-but-revoked, expired, stale-bound, or inactive-owner key
+    raises :class:`AuthenticationError`; the strict/optional wrapper selects
+    whether that error is propagated or treated as anonymous. Scope and
+    per-project authorization failures always raise
+    :class:`AuthorizationError`. Attaches a successful :class:`ApiKey` row to
+    ``request.state.api_key``.
     """
     # Lazy imports to keep the module-level dep graph small.
     from datetime import UTC
@@ -518,58 +703,76 @@ async def _resolve_bearer_user(  # noqa: PLR0912, PLR0915  bearer auth resolutio
     # rps-many. That's still 99.9%+ reduction on a 4-worker
     # 1k-rps cluster.
     #
-    # Use a **dedicated session** so the bookkeeping write commits
-    # without tying it to the caller's transaction lifetime
-    # (audit C4/H2 fix: handler's partial writes could otherwise
-    # leak past a handler rollback). Best-effort: a touch
-    # failure must never block auth.
-    if _claim_touch_slot(key_row.id):
-        committed = False
-        try:
-            from z4j_brain.persistence.repositories.api_keys import (
-                ApiKeyRepository as _ApiKeyRepo,
-            )
-
-            ip_hint = request.client.host if request.client else None
-            db_mgr = getattr(request.app.state, "db", None)
-            if db_mgr is not None:
-                async with db_mgr.session() as touch_session:
-                    await _ApiKeyRepo(touch_session).touch_used(
-                        key_id=key_row.id,
-                        ip=ip_hint,
-                        when=now,
-                    )
-                    await touch_session.commit()
-                    committed = True
-        except Exception:
-            from z4j_brain.api.metrics import record_swallowed
-
-            record_swallowed("deps.bearer_auth", "touch_used")
-        if not committed:
-            # DB write didn't land - release the slot so the next
-            # request retries instead of waiting out the full cooldown.
-            _release_touch_slot(key_row.id)
+    # Park it rather than write it here: the write wants a dedicated
+    # session, so it wants a second connection, and this request is
+    # holding the first one for the rest of its life. ``get_session``
+    # runs it once that connection is back in the pool. See
+    # :func:`_drain_api_key_touch`.
+    #
+    # ``now`` is deliberately the moment this key AUTHENTICATED and not the
+    # moment the parked write runs, so the stamp describes the use rather
+    # than the drain. That is also why requests reach the write out of
+    # order, and why ``touch_used`` refuses to move the row backwards.
+    setattr(
+        request.state,
+        _TOUCH_STATE_ATTR,
+        (
+            key_row.id,
+            request.client.host if request.client else None,
+            now,
+        ),
+    )
 
     request.state.api_key = key_row
-    # Cookie wins over bearer for auth attribution. If
-    # ``get_optional_session`` already
-    # resolved a cookie session and set ``auth_kind = "session"``,
-    # don't overwrite it, the audit trail should show the cookie
-    # user as the actor, with the bearer header as a defense-in-
-    # depth sidecar (used by ``require_csrf`` to allow stricter
-    # paths). This matches ``require_csrf``'s C4 precedence: a
-    # request with BOTH cookie + bearer is treated as cookie-
-    # authenticated for CSRF + audit, even though the bearer can
-    # still grant elevated scope checks.
+    # The public wrappers skip this resolver entirely after a valid cookie
+    # session wins. Keep this state guard as defense in depth for direct
+    # internal callers: a Bearer lookup must never overwrite an already-set
+    # session attribution.
     if getattr(request.state, "auth_kind", None) != "session":
         request.state.auth_kind = "api_key"
     return user
 
 
 async def get_optional_api_key_user(
-    user: User | None = Depends(_resolve_bearer_user),
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
+    resolved: tuple[SessionRow, User] | None = Depends(get_optional_session),
 ) -> User | None:
-    return user
+    """Resolve a Bearer user for an optional-auth endpoint.
+
+    A valid cookie session has absolute precedence, so a coincident Bearer
+    header is not looked up, scope-checked, touched, or attributed. Without a
+    valid cookie, missing/unknown Bearer credentials already resolve to
+    ``None`` in :func:`_resolve_bearer_user`; known but revoked, expired,
+    stale-bound, or inactive-owner credentials raise
+    :class:`AuthenticationError`, which optional auth deliberately converts
+    to ``None`` as well. Authorization failures for an otherwise valid key
+    still propagate -- "optional" does not mean "ignore a forbidden action".
+    """
+    if resolved is not None:
+        return None
+    try:
+        return await _resolve_bearer_user(request, settings, db_session)
+    except AuthenticationError:
+        return None
+
+
+async def _get_strict_api_key_user(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db_session: AsyncSession = Depends(get_session),
+    resolved: tuple[SessionRow, User] | None = Depends(get_optional_session),
+) -> User | None:
+    """Resolve Bearer auth for required-auth and CSRF dependencies.
+
+    A valid cookie still wins and suppresses Bearer evaluation. When no valid
+    cookie resolves, however, credential failures from
+    :func:`_resolve_bearer_user` remain strict and propagate as 401 responses.
+    """
+    if resolved is not None:
+        return None
+    return await _resolve_bearer_user(request, settings, db_session)
 
 
 def resolve_api_key_id(request: Request) -> UUID | None:
@@ -612,6 +815,13 @@ async def get_optional_user(
     resolved: tuple[SessionRow, User] | None = Depends(get_optional_session),
     api_key_user: User | None = Depends(get_optional_api_key_user),
 ) -> User | None:
+    """Return the cookie-first principal, or ``None`` when unauthenticated.
+
+    A valid session cookie wins over any Authorization header. If no cookie
+    session resolves, optional Bearer authentication treats missing, unknown,
+    revoked, expired, stale, and inactive-owner credentials as anonymous.
+    Valid credentials that fail route authorization still raise 403.
+    """
     if resolved is not None:
         return resolved[1]
     return api_key_user
@@ -793,13 +1003,16 @@ def enforce_mfa_verified(
 async def get_current_user(
     request: Request,
     resolved: tuple[SessionRow, User] | None = Depends(get_optional_session),
-    api_key_user: User | None = Depends(get_optional_api_key_user),
+    api_key_user: User | None = Depends(_get_strict_api_key_user),
     settings: Settings = Depends(get_settings),
 ) -> User:
     """Return the authenticated user, or raise 401.
 
-    Session cookies win when both are present - this matches the
-    behaviour most operators expect when sharing a browser.
+    A valid session cookie wins when both cookie and Bearer credentials are
+    present. The Bearer header is not evaluated, scope-checked, touched, or
+    used for audit attribution in that case. When no valid cookie resolves,
+    Bearer authentication is strict: revoked, expired, stale-bound, and
+    inactive-owner keys are refused rather than treated as anonymous.
 
     Cookie sessions additionally pass through
     :func:`enforce_mfa_enrollment`: a user targeted by the MFA
@@ -973,7 +1186,7 @@ async def require_csrf(
     # Force Bearer resolution before the CSRF check so the exemption
     # below can read ``request.state.auth_kind`` reliably regardless
     # of the order FastAPI walks the dep DAG for a given endpoint.
-    _api_key_user: User | None = Depends(get_optional_api_key_user),
+    _api_key_user: User | None = Depends(_get_strict_api_key_user),
 ) -> None:
     """Enforce the double-submit CSRF check on state-changing requests.
 

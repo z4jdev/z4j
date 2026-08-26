@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -21,6 +22,7 @@ from sqlalchemy import create_engine, inspect, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from z4j_brain import cli
 from z4j_brain.configuration import capture_configuration
+from z4j_brain.domain import audit_activation
 from z4j_brain.domain.audit_activation import (
     _manifest_digest,
     read_activation_manifest,
@@ -33,6 +35,8 @@ from z4j_brain.domain.audit_chain import (
 from z4j_brain.domain.audit_service import AuditEntry, AuditService
 from z4j_brain.persistence.models import AuditLog
 from z4j_brain.settings import Settings
+
+from tests.migration_head import code_head
 
 _SQLITE_AUDIT_UPDATE_TRIGGER_SQL = """
 CREATE TRIGGER audit_log_boundary_f_no_update
@@ -104,6 +108,358 @@ def test_activation_manifest_read_rejects_parent_made_permissive(
     manifest_dir.chmod(0o755)
 
     with pytest.raises(AuditChainIntegrityError, match=r"parent.*owner-private"):
+        read_activation_manifest(manifest_path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor oracle")
+def test_activation_manifest_write_rejects_ancestor_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    moved_dir = tmp_path / "moved"
+    replacement_dir = tmp_path / "replacement"
+    replacement_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    real_open = audit_activation.os.open
+    swapped = False
+
+    def swapping_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if not swapped and dir_fd is not None and path == manifest_dir.name:
+            swapped = True
+            manifest_dir.rename(moved_dir)
+            manifest_dir.symlink_to(replacement_dir, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(audit_activation.os, "open", swapping_open)
+
+    with pytest.raises(AuditChainIntegrityError, match="parent changed"):
+        write_activation_manifest(manifest_path, _io_test_manifest())
+
+    assert not (moved_dir / manifest_path.name).exists()
+    assert not (replacement_dir / manifest_path.name).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor oracle")
+def test_activation_manifest_rejects_symlinked_ancestor(tmp_path: Path) -> None:
+    real_ancestor = tmp_path / "real"
+    real_ancestor.mkdir(mode=0o700)
+    manifest_dir = real_ancestor / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    write_activation_manifest(manifest_path, _io_test_manifest())
+    linked_ancestor = tmp_path / "linked"
+    linked_ancestor.symlink_to(real_ancestor, target_is_directory=True)
+    linked_manifest = linked_ancestor / "manifests" / manifest_path.name
+
+    with pytest.raises(AuditChainIntegrityError, match=r"parent path.*real directories"):
+        read_activation_manifest(linked_manifest)
+    with pytest.raises(AuditChainIntegrityError, match=r"parent path.*real directories"):
+        write_activation_manifest(
+            linked_manifest.with_name("second.json"),
+            _io_test_manifest(),
+        )
+
+    assert not (manifest_dir / "second.json").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor oracle")
+def test_activation_parent_walk_consumes_close_attempts_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened_fds = iter((100, 101, 102))
+    close_calls: list[int] = []
+
+    def succeeding_open(
+        _path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        _flags: int,
+        _mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        del dir_fd
+        return next(opened_fds)
+
+    def failing_close(file_descriptor: int) -> None:
+        close_calls.append(file_descriptor)
+        if file_descriptor in {101, 102}:
+            raise OSError(f"forced close failure {file_descriptor}")
+
+    monkeypatch.setattr(audit_activation.os, "open", succeeding_open)
+    monkeypatch.setattr(audit_activation.os, "close", failing_close)
+
+    with pytest.raises(OSError, match="forced close failure 101"):
+        audit_activation._open_activation_parent_walk(Path("/first/second"))
+
+    assert close_calls == [101, 100, 102]
+    assert len(close_calls) == len(set(close_calls))
+
+    primary_open_calls = 0
+    primary_close_calls: list[int] = []
+
+    def primary_failing_open(
+        _path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        _flags: int,
+        _mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal primary_open_calls
+        del dir_fd
+        primary_open_calls += 1
+        if primary_open_calls == 3:
+            raise OSError("forced primary open failure")
+        return 199 + primary_open_calls
+
+    def cleanup_failing_close(file_descriptor: int) -> None:
+        primary_close_calls.append(file_descriptor)
+        raise OSError(f"forced cleanup close failure {file_descriptor}")
+
+    monkeypatch.setattr(audit_activation.os, "open", primary_failing_open)
+    monkeypatch.setattr(audit_activation.os, "close", cleanup_failing_close)
+
+    with pytest.raises(OSError, match="forced primary open failure"):
+        audit_activation._open_activation_parent_walk(Path("/first/second"))
+
+    assert primary_close_calls == [201, 200]
+    assert len(primary_close_calls) == len(set(primary_close_calls))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor oracle")
+def test_activation_manifest_read_rejects_entry_swap_after_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    write_activation_manifest(manifest_path, _io_test_manifest())
+    replacement = manifest_dir / "replacement.json"
+    replacement.write_bytes(manifest_path.read_bytes())
+    replacement.chmod(0o600)
+    displaced = manifest_dir / "displaced.json"
+    real_open = audit_activation.os.open
+    swapped = False
+
+    def swapping_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if not swapped and dir_fd is not None and path == manifest_path.name:
+            swapped = True
+            manifest_path.rename(displaced)
+            replacement.rename(manifest_path)
+        return fd
+
+    monkeypatch.setattr(audit_activation.os, "open", swapping_open)
+
+    with pytest.raises(AuditChainIntegrityError, match="pathname changed"):
+        read_activation_manifest(manifest_path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX FIFO oracle")
+def test_activation_manifest_read_rejects_fifo_swap_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    write_activation_manifest(manifest_path, _io_test_manifest())
+    displaced = manifest_dir / "displaced.json"
+    real_open = audit_activation.os.open
+    swapped = False
+    observed_nonblocking = False
+
+    def swapping_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal observed_nonblocking, swapped
+        if not swapped and dir_fd is not None and path == manifest_path.name:
+            swapped = True
+            observed_nonblocking = bool(flags & os.O_NONBLOCK)
+            manifest_path.rename(displaced)
+            os.mkfifo(manifest_path, mode=0o600)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(audit_activation.os, "open", swapping_open)
+
+    with pytest.raises(AuditChainIntegrityError, match="descriptor was acquired"):
+        read_activation_manifest(manifest_path)
+
+    assert observed_nonblocking
+    assert stat.S_ISFIFO(manifest_path.lstat().st_mode)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link oracle")
+def test_activation_manifest_read_rejects_hard_link(tmp_path: Path) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    write_activation_manifest(manifest_path, _io_test_manifest())
+    os.link(manifest_path, manifest_dir / "second-link.json")
+
+    with pytest.raises(AuditChainIntegrityError, match="single-link"):
+        read_activation_manifest(manifest_path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX write oracle")
+def test_activation_manifest_zero_progress_write_is_retained_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    monkeypatch.setattr(audit_activation.os, "write", lambda _fd, _payload: 0)
+
+    with pytest.raises(AuditChainIntegrityError, match="made no progress"):
+        write_activation_manifest(manifest_path, _io_test_manifest())
+
+    retained = manifest_path.lstat()
+    assert stat.S_ISREG(retained.st_mode)
+    assert stat.S_IMODE(retained.st_mode) == 0o600
+    assert retained.st_nlink == 1
+    assert retained.st_size == 0
+    with pytest.raises(FileExistsError):
+        write_activation_manifest(manifest_path, _io_test_manifest())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX durability oracle")
+def test_activation_manifest_directory_fsync_failure_retains_unreadable_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    real_fsync = audit_activation.os.fsync
+
+    def failing_directory_fsync(file_descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(file_descriptor).st_mode):
+            raise OSError("forced activation-directory fsync failure")
+        real_fsync(file_descriptor)
+
+    monkeypatch.setattr(audit_activation.os, "fsync", failing_directory_fsync)
+
+    with pytest.raises(OSError, match="activation-directory fsync failure"):
+        write_activation_manifest(manifest_path, _io_test_manifest())
+
+    retained = manifest_path.lstat()
+    assert stat.S_ISREG(retained.st_mode)
+    assert stat.S_IMODE(retained.st_mode) == 0o600
+    assert retained.st_nlink == 1
+    assert retained.st_size == 0
+    with pytest.raises(AuditChainIntegrityError, match="not strict JSON"):
+        read_activation_manifest(manifest_path)
+    with pytest.raises(FileExistsError):
+        write_activation_manifest(manifest_path, _io_test_manifest())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX durability oracle")
+def test_activation_manifest_write_rechecks_entry_after_directory_fsync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    replacement = manifest_dir / "replacement.json"
+    replacement.write_bytes(b"attacker replacement\n")
+    replacement.chmod(0o600)
+    displaced = manifest_dir / "displaced.json"
+    real_fsync = audit_activation.os.fsync
+    swapped = False
+
+    def swapping_directory_fsync(file_descriptor: int) -> None:
+        nonlocal swapped
+        real_fsync(file_descriptor)
+        if not swapped and stat.S_ISDIR(os.fstat(file_descriptor).st_mode):
+            swapped = True
+            manifest_path.rename(displaced)
+            replacement.rename(manifest_path)
+
+    monkeypatch.setattr(audit_activation.os, "fsync", swapping_directory_fsync)
+
+    with pytest.raises(AuditChainIntegrityError, match="durably finalized"):
+        write_activation_manifest(manifest_path, _io_test_manifest())
+
+    # Failure handling never unlinks by pathname: POSIX cannot make an
+    # identity-conditional unlink atomic, so it must not delete the replacement.
+    assert manifest_path.read_bytes() == b"attacker replacement\n"
+    assert displaced.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX parent ctime oracle")
+def test_activation_manifest_read_rejects_parent_metadata_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    write_activation_manifest(manifest_path, _io_test_manifest())
+    real_read = audit_activation.os.read
+    changed = False
+
+    def changing_read(file_descriptor: int, length: int) -> bytes:
+        nonlocal changed
+        chunk = real_read(file_descriptor, length)
+        if not changed:
+            changed = True
+            transient = manifest_dir / "transient"
+            transient.write_bytes(b"x")
+            transient.unlink()
+        return chunk
+
+    monkeypatch.setattr(audit_activation.os, "read", changing_read)
+
+    with pytest.raises(AuditChainIntegrityError, match="parent changed"):
+        read_activation_manifest(manifest_path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file ctime oracle")
+def test_activation_manifest_read_rejects_restored_file_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(mode=0o700)
+    manifest_path = manifest_dir / "activation.json"
+    write_activation_manifest(manifest_path, _io_test_manifest())
+    real_read = audit_activation.os.read
+    changed = False
+
+    def changing_read(file_descriptor: int, length: int) -> bytes:
+        nonlocal changed
+        chunk = real_read(file_descriptor, length)
+        if not changed:
+            changed = True
+            manifest_path.chmod(0o400)
+            manifest_path.chmod(0o600)
+        return chunk
+
+    monkeypatch.setattr(audit_activation.os, "read", changing_read)
+
+    with pytest.raises(AuditChainIntegrityError, match="changed while read"):
         read_activation_manifest(manifest_path)
 
 
@@ -406,7 +762,7 @@ def test_supplied_snapshot_remains_bound_through_fresh_activation(
             ).scalar_one()
     finally:
         engine.dispose()
-    assert version == "v1_8_schedule_cursor_repair"
+    assert version == code_head()
     assert state_key_id == canonical_audit_key_id(supplied_audit_secret.encode())
     assert state_key_id != canonical_audit_key_id(ambient_audit_secret.encode())
 
@@ -578,7 +934,7 @@ def test_linked_manifest_applies_and_full_verifies(
                 connection.execute(
                     text("SELECT version_num FROM alembic_version"),
                 ).scalar_one()
-                == "v1_8_schedule_cursor_repair"
+                == code_head()
             )
             frozen = connection.execute(
                 AuditLog.__table__.select()
@@ -1655,7 +2011,8 @@ def test_cli_password_change_is_atomic_with_signed_non_secret_audit(
                 ),
             ).scalar_one()
             metadata = json.loads(row) if isinstance(row, str) else row
-            assert set(metadata) == {"operator_uid"}
+            assert set(metadata) == {"operator_uid", "revoked_sessions"}
+            assert metadata["revoked_sessions"] == 0
             assert old_password not in str(metadata)
             assert new_password not in str(metadata)
         with SyncSession(engine) as session:

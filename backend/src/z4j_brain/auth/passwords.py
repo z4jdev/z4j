@@ -4,11 +4,12 @@ Wraps :class:`argon2.PasswordHasher` with the brain's tunable
 parameters from :class:`Settings`. Public surface:
 
 - :meth:`PasswordHasher.hash` - argon2id hash a plaintext password.
-- :meth:`PasswordHasher.verify` - constant-time verify, returns
-  ``bool``, never raises.
-- :meth:`PasswordHasher.needs_rehash` - true when the stored hash
-  used weaker parameters than the current configuration. The auth
-  service uses this to lazily upgrade hashes on next login.
+- :meth:`PasswordHasher.verify` - argon2id verify, returns ``bool``,
+  never raises.
+- :meth:`PasswordHasher.needs_rehash` - true only when rehashing is a
+  monotonic upgrade from the stored Argon2 parameters to the current
+  configuration. Lower or incomparable operator settings never silently
+  downgrade a stronger dimension.
 - :attr:`PasswordHasher.dummy_hash` - a real argon2 hash of a random
   string, generated once at construction. Used by
   :class:`AuthService` for the absent-user branch of login so the
@@ -16,15 +17,12 @@ parameters from :class:`Settings`. Public surface:
 
 Why argon2id (not bcrypt, scrypt, PBKDF2):
 
-- Memory-hard - defeats GPU/ASIC parallelism the way bcrypt cannot.
-- Constant-time verify (compare_digest internally).
+- Memory-hard - raises the cost of GPU/ASIC parallelism.
 - OWASP 2024 recommendation, NIST 800-63B accepted.
 - Active maintenance, audited C bindings via ``argon2-cffi``.
 
-Defaults: ``time_cost=3, memory_cost=64MiB, parallelism=4``. These
-are the OWASP 2024 minimums for argon2id. Operators tune via
-``Z4J_ARGON2_*`` env vars; defaults give roughly 50-80ms on a 2024
-server CPU.
+Defaults: ``time_cost=3, memory_cost=64MiB, parallelism=4``. Operators
+can tune them via ``Z4J_ARGON2_*`` after benchmarking their own host.
 """
 
 from __future__ import annotations
@@ -32,6 +30,7 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING
 
+from argon2 import Parameters, extract_parameters
 from argon2 import PasswordHasher as _Argon2Hasher
 from argon2.exceptions import (
     InvalidHashError,
@@ -62,17 +61,17 @@ class PasswordHasher:
     """Stateful argon2id hasher bound to brain settings.
 
     One instance per process - pass it around explicitly via the
-    domain services. Construction is cheap (microseconds); the
-    expensive bit is :meth:`hash` and :meth:`verify` themselves.
+    domain services. Construction performs one real Argon2 hash for
+    :attr:`dummy_hash`, so callers should reuse the instance.
 
     Attributes:
         dummy_hash: A real argon2id hash of a random 32-byte string,
             computed once at construction. The auth service verifies
             wrong-username login attempts against this hash so the
-            timing is indistinguishable from a real account.
+            unknown-account attempts perform comparable Argon2 work.
     """
 
-    __slots__ = ("_hasher", "_min_length", "dummy_hash")
+    __slots__ = ("_hasher", "_min_length", "_parameters", "dummy_hash")
 
     def __init__(self, settings: Settings) -> None:
         self._hasher = _Argon2Hasher(
@@ -90,6 +89,11 @@ class PasswordHasher:
         self.dummy_hash: str = self._hasher.hash(
             secrets.token_urlsafe(32),
         )
+        # Derive the exact effective PHC parameters from a hash this
+        # configured hasher just produced. This stays aligned with argon2-cffi
+        # defaults (algorithm type/version included) without reaching into
+        # private hasher attributes.
+        self._parameters: Parameters = extract_parameters(self.dummy_hash)
 
     # ------------------------------------------------------------------
     # Policy
@@ -100,8 +104,10 @@ class PasswordHasher:
 
         Rules:
         1. Minimum length from ``settings.password_min_length`` (≥8).
-        2. At least one letter and one digit.
-        3. Not in the common-password denylist.
+        2. Passwords shorter than 16 characters use at least three of
+           lowercase, uppercase, digits and non-whitespace symbols.
+        3. Maximum length 256.
+        4. Not in the common-password denylist.
 
         Raises:
             PasswordError: If any rule fails. The ``code`` field is
@@ -172,7 +178,7 @@ class PasswordHasher:
         return self._hasher.hash(plaintext)
 
     def verify(self, stored_hash: str, plaintext: str) -> bool:
-        """Constant-time verify ``plaintext`` against ``stored_hash``.
+        """Verify ``plaintext`` against an Argon2 ``stored_hash``.
 
         Never raises. Returns False on every failure mode (mismatch,
         malformed hash, wrong algorithm). The auth service treats
@@ -187,19 +193,50 @@ class PasswordHasher:
             return False
 
     def needs_rehash(self, stored_hash: str) -> bool:
-        """True if ``stored_hash`` was produced with weaker parameters.
+        """True only when current parameters monotonically upgrade the hash.
 
-        Called after a successful verify. When True, the auth
-        service rehashes the password with current parameters and
-        updates ``users.password_hash`` - silent upgrade for users
-        who logged in before a parameter bump.
+        Called after a successful verify. A rehash is requested when every
+        comparable current parameter is at least as strong as the stored one
+        and at least one parameter, the Argon2 version, or the algorithm type
+        changes. If any stored dimension is stronger than the current
+        configuration, the profiles are stronger or incomparable and this
+        returns False: an operator lowering one setting must never silently
+        downgrade hashes on login. Deliberate migrations from a non-Argon2id
+        type are allowed only when no numeric dimension or version decreases.
+
+        The compared PHC parameters are ``time_cost``, ``memory_cost``,
+        ``parallelism``, ``hash_len``, ``salt_len``, algorithm type, and
+        version. Malformed hashes return True for compatibility, although the
+        auth service calls this only after successful verification.
         """
         try:
-            return self._hasher.check_needs_rehash(stored_hash)
+            stored = extract_parameters(stored_hash)
         except InvalidHashError:
             # Treat malformed hash as "needs rehash" so the next
             # successful login replaces it. Belt-and-braces.
             return True
+
+        current = self._parameters
+        # A future/newer PHC version must not be rewritten by an older
+        # implementation. Likewise, never lower any independently encoded
+        # work/output dimension even if another configured dimension rose.
+        if stored.version > current.version:
+            return False
+        dimensions = (
+            "time_cost",
+            "memory_cost",
+            "parallelism",
+            "hash_len",
+            "salt_len",
+        )
+        if any(getattr(current, name) < getattr(stored, name) for name in dimensions):
+            return False
+
+        return (
+            stored.type != current.type
+            or stored.version < current.version
+            or any(getattr(current, name) > getattr(stored, name) for name in dimensions)
+        )
 
 
 __all__ = ["PasswordError", "PasswordHasher"]

@@ -1,21 +1,26 @@
-"""In-process per-IP token bucket rate limiter.
+"""In-process per-IP sliding-window rate limiter.
 
 Use as a FastAPI ``Depends(...)`` on individual endpoints that
 need IP-level throttling but aren't worth the operational cost
 of an external rate-limit store. v1 scope: a single brain
 process; if the brain ever scales horizontally each replica gets
-its own bucket and a determined attacker can multiply Nx.
+its own window and a determined attacker can multiply Nx.
 
-Memory bound: one ``deque`` per IP per bucket name. ``_BUCKET_TTL``
-prunes entries idle for >5 min so a botnet hitting random IPs
-can't grow the dict unbounded.
+Memory bound: each limiter holds at most ``_IP_BUCKET_MAX_KEYS`` IP
+keys. Stale keys are pruned periodically and whenever a new key
+arrives at the cap. If every retained key is still active, the
+limiter preserves their history and deterministically denies the
+unseen key; it never evicts an active bucket and thereby grants an
+attacker a fresh budget. The cap is per process and per limiter
+object, matching this module's intentionally process-local scope.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -28,16 +33,50 @@ _IP_KEY_MAX_LEN = 120
 returns whatever the X-Forwarded-For middleware produced; a 10KB
 forged XFF would otherwise become a 10KB dict key."""
 
+_IP_BUCKET_MAX_KEYS = 10_000
+"""Hard per-limiter cardinality cap.
+
+Once all slots contain hits inside the rolling window, unseen IPs fail
+closed until a slot becomes stale. Existing IPs retain their histories.
+"""
+
 
 class _IPBucket:
     """Sliding-window counter keyed by IP."""
 
-    __slots__ = ("_hits", "_hits_since_prune", "_lock", "_max_hits", "_window_seconds")
+    __slots__ = (
+        "_hits",
+        "_hits_since_prune",
+        "_lock",
+        "_max_hits",
+        "_max_keys",
+        "_window_seconds",
+    )
 
-    def __init__(self, window_seconds: int, max_hits: int) -> None:
+    def __init__(
+        self,
+        window_seconds: int,
+        max_hits: int,
+        *,
+        max_keys: int = _IP_BUCKET_MAX_KEYS,
+    ) -> None:
+        if (
+            isinstance(window_seconds, bool)
+            or not isinstance(window_seconds, int)
+            or window_seconds < 1
+        ):
+            raise ValueError("window_seconds must be a positive integer")
+        if isinstance(max_hits, bool) or not isinstance(max_hits, int) or max_hits < 1:
+            raise ValueError("max_hits must be a positive integer")
+        if isinstance(max_keys, bool) or not isinstance(max_keys, int) or max_keys < 1:
+            raise ValueError("max_keys must be a positive integer")
         self._window_seconds = window_seconds
         self._max_hits = max_hits
-        self._hits: dict[str, deque[float]] = defaultdict(deque)
+        self._max_keys = max_keys
+        # Oldest most-recently-allowed hit first. This lets capacity and
+        # periodic pruning remove only the stale prefix rather than scanning
+        # every active IP for every unseen-IP request at saturation.
+        self._hits: OrderedDict[str, deque[float]] = OrderedDict()
         self._lock = asyncio.Lock()
         # Inline-prune counter. Without this a spoofed-
         # XFF botnet with 1M distinct IPs would grow ``_hits``
@@ -52,46 +91,108 @@ class _IPBucket:
         cap from operator configuration at request time, while the
         bucket object itself stays import-time constructible.
         """
+        allowed, _retry_after_seconds = await self.hit_with_retry_after(
+            key,
+            max_hits=max_hits,
+        )
+        return allowed
+
+    async def hit_with_retry_after(
+        self,
+        key: str,
+        *,
+        max_hits: int | None = None,
+    ) -> tuple[bool, int | None]:
+        """Record a hit and return its decision plus a bounded retry delay.
+
+        Allowed hits return ``(True, None)``. Denied hits return a retry delay
+        between one second and the configured rolling-window length. The
+        decision and delay are computed under the same lock so callers never
+        have to inspect mutable bucket state after a rejection.
+        """
         # Clamp the key so an attacker can't burn memory
         # by submitting arbitrarily long ``X-Forwarded-For`` values.
         if len(key) > _IP_KEY_MAX_LEN:
             key = key[:_IP_KEY_MAX_LEN]
 
         cap = self._max_hits if max_hits is None else max_hits
-        now = time.monotonic()
-        cutoff = now - self._window_seconds
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+            raise ValueError("max_hits must be a positive integer")
         async with self._lock:
-            # Inline prune every 500 hits - amortized O(1) per hit,
-            # linear in len(_hits) per prune pass. Guarantees
-            # bounded memory without needing a background task.
+            now = time.monotonic()
+            cutoff = now - self._window_seconds
+            # Inline prune every 500 hits. The OrderedDict is sorted by each
+            # key's newest allowed hit, so pruning stops at the first active
+            # key instead of scanning the whole cardinality cap.
             self._hits_since_prune += 1
             if self._hits_since_prune >= 500:
                 self._prune_idle_locked(cutoff)
                 self._hits_since_prune = 0
 
-            dq = self._hits[key]
-            while dq and dq[0] < cutoff:
+            dq = self._hits.get(key)
+            if dq is None:
+                # A unique-IP flood can fill the table entirely inside one
+                # rolling window, before periodic TTL pruning can help. At
+                # the hard cap, give stale slots one immediate prune pass.
+                # If all keys remain active, deny this unseen key without
+                # allocating it. Evicting an active key would reset that
+                # attacker's history and weaken the limiter.
+                if len(self._hits) >= self._max_keys:
+                    self._prune_idle_locked(cutoff)
+                if len(self._hits) >= self._max_keys:
+                    _oldest_key, oldest_dq = next(iter(self._hits.items()))
+                    return (
+                        False,
+                        self._bounded_retry_after_seconds(
+                            eligible_at=oldest_dq[-1] + self._window_seconds,
+                            now=now,
+                        ),
+                    )
+                dq = deque()
+                self._hits[key] = dq
+            while dq and dq[0] <= cutoff:
                 dq.popleft()
             if len(dq) >= cap:
-                return False
+                # A runtime cap can be lower than the number of hits already
+                # retained (the MFA cap is settings-driven). The request can
+                # proceed only after enough of the oldest hits have expired to
+                # leave at most ``cap - 1`` in the window.
+                limiting_hit = dq[len(dq) - cap]
+                return (
+                    False,
+                    self._bounded_retry_after_seconds(
+                        eligible_at=limiting_hit + self._window_seconds,
+                        now=now,
+                    ),
+                )
             dq.append(now)
-            return True
+            self._hits.move_to_end(key)
+            return True, None
+
+    def _bounded_retry_after_seconds(self, *, eligible_at: float, now: float) -> int:
+        """Round a retry delay up and keep it inside this bucket's window."""
+        return min(
+            self._window_seconds,
+            max(1, math.ceil(eligible_at - now)),
+        )
 
     def _prune_idle_locked(self, cutoff: float) -> None:
-        """Drop keys whose newest hit is older than ``cutoff``.
+        """Drop keys whose newest hit is at or before ``cutoff``.
 
         Must be called with ``_lock`` held.
         """
-        stale = [k for k, dq in self._hits.items() if not dq or dq[-1] < cutoff]
-        for k in stale:
-            del self._hits[k]
+        while self._hits:
+            _key, dq = next(iter(self._hits.items()))
+            if dq and dq[-1] > cutoff:
+                return
+            self._hits.popitem(last=False)
 
     async def prune_idle(self, idle_seconds: int = 300) -> None:
         """External prune - kept for tests / manual triggers.
 
-        Inline pruning in ``hit()`` covers the bounded-growth
-        guarantee on the hot path; this just lets tests force a
-        clean state.
+        The hard cardinality cap in ``hit()`` provides the bounded-growth
+        guarantee. This method lets tests and maintenance hooks eagerly
+        discard entries no newer than a caller-selected idle interval.
         """
         now = time.monotonic()
         cutoff = now - idle_seconds
@@ -206,16 +307,21 @@ ever reach the audit-log query path.
 """
 
 _mfa_verify_bucket = _IPBucket(window_seconds=60, max_hits=10)
-"""Throttle for ``/auth/mfa/verify``.
+"""Shared throttle for the MFA verification family.
 
-Tighter than the login bucket because the verify endpoint is a TOTP
-code-brute-force target: only ``10^6`` possible 6-digit codes, so an
-unbounded verifier with a 30s window gives roughly 50% odds of guessing
-the right code in a few thousand attempts. The 10/min cap reduces an
-attacker who has already stolen the password to roughly 0.001% odds
-within the code's 30s validity window. Operators can dial this up via
-``Z4J_MFA_VERIFICATION_RATE_PER_MIN`` if they have a legitimate reason
-(typically: testing). The default tracks the docs/MFA-DESIGN.md.
+The same per-IP, per-process bucket covers ``/auth/mfa/enroll-start``,
+``/enroll-complete``, ``/verify``, and ``/disable``. It therefore limits
+both code guessing and repeated sensitive MFA state changes; it is not a
+distributed or per-account budget.
+
+The TOTP verifier accepts the current 6-digit code plus the adjacent time
+steps, so one random guess can match at most three of ``10^6`` values. If
+all ten requests from a fresh default bucket were independent TOTP guesses
+in one validity interval, the success bound is
+``1 - (1 - 3 / 10^6)^10``, approximately ``0.003%``. Account lockout and
+single-use counters add separate defenses. Operators can change the shared
+cap via ``Z4J_MFA_VERIFICATION_RATE_PER_MIN``; every covered route consumes
+from that configured budget.
 """
 
 
@@ -224,11 +330,12 @@ def _make_dependency(bucket: _IPBucket, name: str) -> Callable[..., Coroutine[An
         request: Request,
         ip: str = Depends(get_client_ip),
     ) -> None:
-        ok = await bucket.hit(ip)
+        ok, retry_after_seconds = await bucket.hit_with_retry_after(ip)
         if not ok:
+            assert retry_after_seconds is not None
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"too many requests; please try again in a minute ({name})",
+                detail=(f"too many requests; retry in {retry_after_seconds} seconds ({name})"),
             )
 
     return _check
@@ -279,14 +386,15 @@ async def require_mfa_verify_throttle(
     """
     settings = getattr(request.app.state, "settings", None)
     cap = getattr(settings, "mfa_verification_rate_per_min", None)
-    ok = await _mfa_verify_bucket.hit(
+    ok, retry_after_seconds = await _mfa_verify_bucket.hit_with_retry_after(
         ip,
         max_hits=cap if isinstance(cap, int) and cap >= 1 else None,
     )
     if not ok:
+        assert retry_after_seconds is not None
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="too many requests; please try again in a minute (mfa-verify)",
+            detail=(f"too many requests; retry in {retry_after_seconds} seconds (mfa-verify)"),
         )
 
 

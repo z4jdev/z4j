@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -48,6 +50,12 @@ class TestDecode:
     def test_truncated_payload_returns_none(self) -> None:
         valid = encode_cursor(datetime.now(UTC), uuid.uuid4())
         assert decode_cursor(valid[:5]) is None
+
+    def test_non_string_tiebreaker_returns_none(self) -> None:
+        for malformed in (0, False, [], {}):
+            payload = json.dumps([["raw", "value"], malformed], separators=(",", ":"))
+            cursor = base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
+            assert decode_cursor(cursor) is None
 
 
 class TestClampLimit:

@@ -76,7 +76,7 @@ function ScheduleDetailPage() {
     refetch: refetchFires,
   } = useScheduleFires(slug, scheduleId);
 
-  const canManage = useCan(slug, "manage_schedules");
+  const canOperate = useCan(slug, "operate_schedules");
   const toggle = useToggleSchedule(slug);
   const trigger = useTriggerSchedule(slug);
 
@@ -151,11 +151,11 @@ function ScheduleDetailPage() {
                 <Switch
                   checked={schedule.is_enabled}
                   onCheckedChange={onToggle}
-                  disabled={!canManage || toggle.isPending}
+                  disabled={!canOperate || toggle.isPending}
                 />
               </div>
             )}
-            {schedule && canManage && (
+            {schedule && canOperate && (
               <Button
                 size="sm"
                 variant="outline"
@@ -295,9 +295,7 @@ function FireHistoryCard({
           disabled={fetching}
           className="h-8"
         >
-          <RefreshCw
-            className={cn("size-4", fetching && "animate-spin")}
-          />
+          <RefreshCw className={cn("size-4", fetching && "animate-spin")} />
         </Button>
       </CardHeader>
       <CardContent>

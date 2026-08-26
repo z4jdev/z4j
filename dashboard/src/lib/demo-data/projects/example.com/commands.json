@@ -5,11 +5,17 @@
       "project_id": "00000000-0000-4000-9000-000000000001",
       "agent_id": "10000000-0000-4000-a000-000000000002",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "retry-task",
+      "action": "retry_task",
       "target_type": "task",
-      "target_id": "celery-8793ac43a19b",
+      "target_id": "celery:9a07c1ce-8960-5404-a2c4-af2bbdff3710",
       "payload": {
-        "task_id": "celery-7c4f9a2e"
+        "engine": "celery",
+        "task_id": "9a07c1ce-8960-5404-a2c4-af2bbdff3710",
+        "task_name": "exports.generate_csv",
+        "args": null,
+        "kwargs": null,
+        "override_args": null,
+        "override_kwargs": null
       },
       "status": "completed",
       "result": null,
@@ -24,12 +30,12 @@
       "project_id": "00000000-0000-4000-9000-000000000001",
       "agent_id": "10000000-0000-4000-a000-000000000002",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "cancel-task",
+      "action": "cancel_task",
       "target_type": "task",
-      "target_id": "celery-1fe4172b4e25",
+      "target_id": "celery:14e959bd-4e61-50f7-a145-154a93ff5e2a",
       "payload": {
-        "task_id": "celery-aa11bb22",
-        "terminate": true
+        "engine": "celery",
+        "task_id": "14e959bd-4e61-50f7-a145-154a93ff5e2a"
       },
       "status": "completed",
       "result": null,
@@ -44,10 +50,11 @@
       "project_id": "00000000-0000-4000-9000-000000000001",
       "agent_id": "10000000-0000-4000-a000-000000000002",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "pool-resize",
+      "action": "pool_grow",
       "target_type": "worker",
-      "target_id": "worker-1@hostname",
+      "target_id": "worker-1@worker-host.example.com",
       "payload": {
+        "worker_name": "worker-1@worker-host.example.com",
         "delta": 4
       },
       "status": "completed",
@@ -63,13 +70,15 @@
       "project_id": "00000000-0000-4000-9000-000000000001",
       "agent_id": "10000000-0000-4000-a000-000000000001",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "restart-worker",
+      "action": "restart_worker",
       "target_type": "worker",
-      "target_id": "worker-stale@hostname",
-      "payload": {},
+      "target_id": "worker-1@worker-host.example.com",
+      "payload": {
+        "worker_name": "worker-1@worker-host.example.com"
+      },
       "status": "failed",
       "result": null,
-      "error": "worker 'worker-stale@hostname' not found in agent registry",
+      "error": "worker restart broadcast failed: OperationalError",
       "issued_at_offset_s": -7200,
       "dispatched_at_offset_s": -7198,
       "completed_at_offset_s": -7196,
@@ -78,15 +87,19 @@
     {
       "id": "c0000000-0000-4005-9000-000000000005",
       "project_id": "00000000-0000-4000-9000-000000000001",
-      "agent_id": "10000000-0000-4000-a000-000000000003",
+      "agent_id": "10000000-0000-4000-a000-000000000002",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "revoke-task",
-      "target_type": "task",
-      "target_id": "celery-5bdeae069ff3",
-      "payload": {},
+      "action": "purge_queue",
+      "target_type": "queue",
+      "target_id": "exports",
+      "payload": {
+        "queue": "exports",
+        "confirm_token": "9f3c1a4e2b7d40c8",
+        "force": false
+      },
       "status": "failed",
       "result": null,
-      "error": "task already in 'success' state; revoke is a no-op",
+      "error": "purge_queue: confirm_token mismatch. The queue depth changed between brain issue and agent execution, or the command is replayed. Re-issue the command.",
       "issued_at_offset_s": -2700,
       "dispatched_at_offset_s": -2699,
       "completed_at_offset_s": -2697,
@@ -97,11 +110,12 @@
       "project_id": "00000000-0000-4000-9000-000000000001",
       "agent_id": "10000000-0000-4000-a000-000000000002",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "add-consumer",
+      "action": "add_consumer",
       "target_type": "worker",
-      "target_id": "worker-1@hostname",
+      "target_id": "worker-1@worker-host.example.com",
       "payload": {
-        "queue": "billing.high"
+        "worker_name": "worker-1@worker-host.example.com",
+        "queue": "billing"
       },
       "status": "dispatched",
       "result": null,
@@ -116,11 +130,13 @@
       "project_id": "00000000-0000-4000-9000-000000000001",
       "agent_id": "10000000-0000-4000-a000-000000000003",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "trigger-schedule",
+      "action": "schedule.trigger_now",
       "target_type": "schedule",
-      "target_id": "sched-e0c7554d",
+      "target_id": "30000000-0000-4000-c000-000000000003",
       "payload": {
-        "schedule_id": "billing-daily-rollup"
+        "schedule_id": "search.reindex_documents",
+        "schedule_name": "search.reindex_documents",
+        "external_id": "celery-beat:search.reindex_documents"
       },
       "status": "dispatched",
       "result": null,
@@ -135,11 +151,12 @@
       "project_id": "00000000-0000-4000-9000-000000000001",
       "agent_id": null,
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "cancel-consumer",
+      "action": "cancel_consumer",
       "target_type": "worker",
-      "target_id": "worker-2@hostname",
+      "target_id": "worker-1@worker-host.example.com",
       "payload": {
-        "queue": "low-priority"
+        "worker_name": "worker-1@worker-host.example.com",
+        "queue": "search"
       },
       "status": "pending",
       "result": null,
@@ -152,15 +169,18 @@
     {
       "id": "c0000000-0000-4009-9000-000000000009",
       "project_id": "00000000-0000-4000-9000-000000000001",
-      "agent_id": "10000000-0000-4000-a000-000000000001",
-      "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "ping-agent",
-      "target_type": "agent",
-      "target_id": "10000000-0000-4000-a000-000000000001",
-      "payload": {},
+      "agent_id": "10000000-0000-4000-a000-000000000002",
+      "issued_by": null,
+      "action": "reconcile_task",
+      "target_type": "task",
+      "target_id": "38c5a4e3-4dc0-55d5-9e6a-a4169a2d3bd6",
+      "payload": {
+        "task_id": "38c5a4e3-4dc0-55d5-9e6a-a4169a2d3bd6",
+        "engine": "celery"
+      },
       "status": "timeout",
       "result": null,
-      "error": "no ack from agent within 60s timeout window",
+      "error": "command timed out before agent responded",
       "issued_at_offset_s": -340,
       "dispatched_at_offset_s": -339,
       "completed_at_offset_s": null,
@@ -171,11 +191,12 @@
       "project_id": "00000000-0000-4000-9000-000000000001",
       "agent_id": "10000000-0000-4000-a000-000000000002",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "bulk-retry",
-      "target_type": "task",
+      "action": "bulk_retry",
+      "target_type": "bulk",
       "target_id": null,
       "payload": {
         "filter": {
+          "engine": "celery",
           "state": "failure"
         },
         "max": 500
@@ -191,14 +212,12 @@
     {
       "id": "c0000000-0000-400b-9000-00000000000b",
       "project_id": "00000000-0000-4000-9000-000000000001",
-      "agent_id": "10000000-0000-4000-a000-000000000002",
+      "agent_id": "10000000-0000-4000-a000-000000000003",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "clear-failed-tasks",
-      "target_type": "task",
-      "target_id": null,
-      "payload": {
-        "older_than_hours": 24
-      },
+      "action": "schedule.resync",
+      "target_type": "project",
+      "target_id": "example.com",
+      "payload": {},
       "status": "completed",
       "result": null,
       "error": null,
@@ -210,12 +229,16 @@
     {
       "id": "c0000000-0000-400c-9000-00000000000c",
       "project_id": "00000000-0000-4000-9000-000000000001",
-      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000002",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "reload-config",
-      "target_type": "agent",
-      "target_id": "10000000-0000-4000-a000-000000000001",
-      "payload": {},
+      "action": "rate_limit",
+      "target_type": "task",
+      "target_id": "analytics.aggregate_pageviews",
+      "payload": {
+        "task_name": "analytics.aggregate_pageviews",
+        "rate": "10/m",
+        "worker_name": "worker-1@worker-host.example.com"
+      },
       "status": "completed",
       "result": null,
       "error": null,

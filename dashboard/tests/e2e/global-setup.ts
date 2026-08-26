@@ -1,75 +1,76 @@
 /**
- * Warm the dev server before any test runs.
+ * Prove that the dashboard is rendered before any visual baseline is taken.
  *
- * The visual-regression project runs FIRST (the functional spine depends on
- * it, so baselines observe a freshly bootstrapped database) and it sets
- * `retries: 0` on purpose, because a retried pixel comparison hides a real
- * regression behind a lucky second attempt.
+ * A successful fetch of Vite's index HTML does not prove that its browser
+ * module graph is usable. Starting Vite before the tracked TanStack route tree
+ * is refreshed can pin every browser request to stale optimized-dependency
+ * hashes. The result is HTTP 200 with a blank #root.
  *
- * The combination is fragile: in CI the suite starts immediately after
- * `playwright install`, so the very first navigation pays Vite's cold-start
- * cost. A measured cold start on this stack was 32 seconds, and one local run
- * had "Home dashboard" time out on `goto("/")` before the page ever rendered.
- * That failure looks exactly like a visual regression in the CI log while
- * being nothing of the sort.
- *
- * Warming here fixes the cause rather than the symptom: no retry is added and
- * no threshold is widened, the server is simply ready before the first
- * screenshot is taken.
+ * Use a real browser and the same login control as the functional spine. This
+ * remains fail-closed: a blank page, failed module, or missing login contract
+ * aborts the suite before screenshots or stateful tests run.
  */
-import type { FullConfig } from "@playwright/test";
+import { chromium, type FullConfig } from "@playwright/test";
 
-const WARMUP_TIMEOUT_MS = 120_000;
-const POLL_INTERVAL_MS = 1_000;
-// Two consecutive fast responses mean the module graph is compiled and
-// cached, not merely that the socket accepted a connection.
-const FAST_RESPONSE_MS = 3_000;
-const REQUIRED_FAST_RESPONSES = 2;
-
-async function probe(url: string): Promise<number | null> {
-  const started = Date.now();
-  try {
-    const response = await fetch(url, { redirect: "manual" });
-    // Drain the body so the timing reflects a fully served response.
-    await response.arrayBuffer().catch(() => undefined);
-    return response.ok || response.status < 500 ? Date.now() - started : null;
-  } catch {
-    return null;
-  }
-}
+const READINESS_TIMEOUT_MS = 120_000;
+const MAX_DIAGNOSTICS = 20;
 
 export default async function globalSetup(config: FullConfig): Promise<void> {
   const baseURL =
     config.projects[0]?.use?.baseURL ??
     process.env.Z4J_E2E_BASE_URL ??
     "http://localhost:7701";
+  const loginURL = new URL("/login", baseURL).toString();
+  const diagnostics: string[] = [];
+  const remember = (message: string): void => {
+    if (diagnostics.length < MAX_DIAGNOSTICS) diagnostics.push(message);
+  };
 
-  const deadline = Date.now() + WARMUP_TIMEOUT_MS;
-  let consecutiveFast = 0;
-  let lastDuration: number | null = null;
+  const browser = await chromium.launch();
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  page.on("pageerror", (error) => remember(`pageerror: ${error.message}`));
+  page.on("console", (message) => {
+    if (message.type() === "error") remember(`console: ${message.text()}`);
+  });
+  page.on("requestfailed", (request) => {
+    remember(
+      `requestfailed: ${request.method()} ${request.url()} ` +
+        `(${request.failure()?.errorText ?? "unknown error"})`,
+    );
+  });
 
-  while (Date.now() < deadline) {
-    lastDuration = await probe(baseURL);
-    if (lastDuration !== null && lastDuration < FAST_RESPONSE_MS) {
-      consecutiveFast += 1;
-      if (consecutiveFast >= REQUIRED_FAST_RESPONSES) {
-        console.log(
-          `[global-setup] ${baseURL} warm (last response ${lastDuration}ms)`,
-        );
-        return;
-      }
-    } else {
-      consecutiveFast = 0;
+  try {
+    const response = await page.goto(loginURL, {
+      waitUntil: "domcontentloaded",
+      timeout: READINESS_TIMEOUT_MS,
+    });
+    if (response === null || !response.ok()) {
+      throw new Error(
+        `navigation returned ${response === null ? "no response" : response.status()}`,
+      );
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    await page.getByLabel(/^Email$/i).waitFor({
+      state: "visible",
+      timeout: READINESS_TIMEOUT_MS,
+    });
+    await page.getByRole("button", { name: /^Sign in$/i }).waitFor({
+      state: "visible",
+      timeout: READINESS_TIMEOUT_MS,
+    });
+    console.log(`[global-setup] rendered login ready at ${loginURL}`);
+  } catch (error) {
+    const details = diagnostics.length > 0 ? `\n${diagnostics.join("\n")}` : "";
+    throw new Error(
+      `[global-setup] dashboard did not render a usable login at ${loginURL}: ` +
+        `${error instanceof Error ? error.message : String(error)}${details}`,
+      { cause: error },
+    );
+  } finally {
+    try {
+      await context.close();
+    } finally {
+      await browser.close();
+    }
   }
-
-  // Do not fail the run here. If the server is genuinely down the tests
-  // report that far more clearly than a setup hook can, and failing here
-  // would turn an infrastructure blip into an unexplained suite abort.
-  console.warn(
-    `[global-setup] ${baseURL} did not warm within ${WARMUP_TIMEOUT_MS}ms ` +
-      `(last probe: ${lastDuration === null ? "unreachable" : `${lastDuration}ms`}). ` +
-      "Continuing; the first navigation may be slow.",
-  );
 }

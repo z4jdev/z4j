@@ -15,9 +15,9 @@ import { defineConfig, devices } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./tests/e2e",
-  // Warm the dev server before the first navigation. The visual project
-  // runs first and sets `retries: 0` deliberately, so a cold-start timeout
-  // reads as a visual regression in CI. See tests/e2e/global-setup.ts.
+  // Prove a real browser can render the login before the first screenshot.
+  // HTTP-only readiness accepts a blank SPA when Vite's module graph is stale.
+  // See tests/e2e/global-setup.ts.
   globalSetup: "./tests/e2e/global-setup.ts",
   // Sequential on purpose. These tests mutate shared state
   // (projects, users, API keys). Parallelism would require

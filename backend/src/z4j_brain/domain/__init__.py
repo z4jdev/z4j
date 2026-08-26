@@ -1,10 +1,11 @@
 """Domain services.
 
-Per :doc:`docs/BACKEND.md` §4: services hold business logic and
-depend only on :mod:`z4j_core` and the brain's repository
-interfaces. They have no awareness of FastAPI, HTTP, or asyncio
-internals beyond the ``async def`` keyword. Routers depend on
-services; tests can swap repositories for fakes.
+This package groups business/application services and related helpers. It
+is not a strict clean-architecture dependency boundary: implementations
+use :mod:`z4j_core` alongside brain persistence, authentication, settings,
+and other infrastructure modules, and some helpers in the wider package are
+FastAPI-aware. Routers generally delegate core workflows to these services,
+whose explicit repository collaborators can be replaced by fakes in tests.
 
 Public surface:
 

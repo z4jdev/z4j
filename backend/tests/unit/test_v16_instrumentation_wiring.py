@@ -152,40 +152,65 @@ class TestLocalRegistryFleetSnapshot:
 
 class TestNotificationStatusValues:
     """The notification dispatcher's status taxonomy must match what
-    the Grafana dashboards filter on. Verified by direct module-level
-    inspection of the dispatcher's status mapping (the integration
-    test path needs a real DB + project + subscription, which is out
-    of scope for this regression pin).
+    the Grafana dashboards filter on. Verified by exercising the
+    production metric helper with a fake counter, without depending
+    on a globally registered Prometheus collector.
     """
 
-    def test_status_values_are_taxonomy_compatible(self) -> None:
-        """The dashboard regexes filter on ``failed`` and ``blocked``;
-        the success donut filters on ``success``. Verify the
-        instrumentation site emits exactly those three strings.
-        """
-        # Read the service module source and grep for the status
-        # literals; the dispatcher is a deeply-async path that is
-        # painful to unit-test end-to-end. The source-level pin is
-        # the cheapest reliable contract.
-        from pathlib import Path
+    @pytest.mark.parametrize(
+        ("success", "error", "expected"),
+        [
+            (True, None, "success"),
+            (False, "SSRF destination blocked", "blocked"),
+            (False, "connection refused", "failed"),
+        ],
+    )
+    def test_runtime_metric_increment_uses_dashboard_taxonomy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        success: bool,
+        error: str | None,
+        expected: str,
+    ) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from uuid import uuid4
 
-        import z4j_brain
+        from z4j_brain.domain.notifications.service import (
+            _DeliveryOutcome,
+            _PendingDelivery,
+            _record_delivery_metric,
+        )
 
-        # Anchor on the installed package, not the cwd, so this passes
-        # whether pytest runs from the repo root or from
-        # packages/z4j/backend.
-        source = (
-            Path(z4j_brain.__file__).resolve().parent / "domain" / "notifications" / "service.py"
-        ).read_text(encoding="utf-8")
-        # The instrumentation block must reference all three vocab
-        # values; if a future refactor drops one, the dashboard
-        # silently breaks again.
-        assert '_status = "success"' in source
-        assert '"blocked"' in source
-        assert '"failed"' in source
-        # Must use the counter we registered.
-        assert "z4j_notifications_sent_total" in source
-        # Must label by (project, channel_type, status) -- matches the
-        # gauge declaration in metrics.py and the dashboard PromQL.
-        assert "channel_type=" in source
-        assert "status=_status" in source
+        increment = Mock()
+        labels = Mock(return_value=SimpleNamespace(inc=increment))
+        monkeypatch.setattr(
+            metrics_mod,
+            "z4j_notifications_sent_total",
+            SimpleNamespace(labels=labels),
+        )
+        pending = _PendingDelivery(
+            subscription_id=uuid4(),
+            recipient_user_id=uuid4(),
+            channel_id=uuid4(),
+            user_channel_id=None,
+            channel_type="webhook",
+            channel_name="ops",
+            config={},
+            project_id=uuid4(),
+            trigger="task.failed",
+            task_id="task-1",
+            task_name="tasks.fail",
+        )
+
+        status = _record_delivery_metric(
+            _DeliveryOutcome(pending=pending, success=success, error=error),
+        )
+
+        assert status == expected
+        labels.assert_called_once_with(
+            project=str(pending.project_id),
+            channel_type="webhook",
+            status=expected,
+        )
+        increment.assert_called_once_with()

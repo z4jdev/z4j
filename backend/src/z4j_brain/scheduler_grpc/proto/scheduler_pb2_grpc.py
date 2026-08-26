@@ -29,13 +29,12 @@ class SchedulerServiceStub(object):
     """SchedulerService is implemented by both sides depending on
     direction:
 
-    - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
-    AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
-    these.
+    - Brain implements every RPC below except TriggerSchedule. Scheduler is
+    the gRPC client for these brain-side RPCs.
 
-    - Scheduler implements: TriggerSchedule (operator-initiated
-    manual fires originating from the dashboard). Brain is the
-    gRPC client for this one.
+    - Scheduler implements the legacy TriggerSchedule reverse RPC. It is off
+    by default and retained for a Brain predating durable schedule control.
+    A current Brain dispatches operator manual fires directly.
 
     In practice this is two separate gRPC services on different
     ports; we declare them as one logical service here for clarity.
@@ -113,13 +112,12 @@ class SchedulerServiceServicer(object):
     """SchedulerService is implemented by both sides depending on
     direction:
 
-    - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
-    AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
-    these.
+    - Brain implements every RPC below except TriggerSchedule. Scheduler is
+    the gRPC client for these brain-side RPCs.
 
-    - Scheduler implements: TriggerSchedule (operator-initiated
-    manual fires originating from the dashboard). Brain is the
-    gRPC client for this one.
+    - Scheduler implements the legacy TriggerSchedule reverse RPC. It is off
+    by default and retained for a Brain predating durable schedule control.
+    A current Brain dispatches operator manual fires directly.
 
     In practice this is two separate gRPC services on different
     ports; we declare them as one logical service here for clarity.
@@ -136,9 +134,9 @@ class SchedulerServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def WatchSchedules(self, request, context):
-        """Subscribe to schedule changes. Server-streaming. Brain pushes
-        events on every create/update/delete so the scheduler updates
-        its in-memory tick wheel within 100ms.
+        """Subscribe to schedule changes. Server-streaming. PostgreSQL uses
+        LISTEN/NOTIFY for this legacy stream; SQLite polls at the configured
+        watch interval. Delivery latency is therefore backend-dependent.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -155,19 +153,20 @@ class SchedulerServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def TriggerSchedule(self, request, context):
-        """Operator-initiated manual fire. Same wire effect as
-        FireSchedule but tagged differently in the audit log so the
-        operator-clicked vs schedule-tick distinction is preserved.
-        Brain calls scheduler (reverse direction).
+        """Legacy operator-initiated manual-fire path from Brain to scheduler.
+        Current Brain versions dispatch manual fires directly, and the
+        scheduler-side server is disabled by default. Retained for wire
+        compatibility with a Brain predating durable schedule control.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def AcknowledgeFireResult(self, request, context):
-        """Brain calls back when the agent has acknowledged + executed
-        the fire. Scheduler updates last_run_at + computes next_run_at
-        for the schedule.
+        """Scheduler reports its terminal FireSchedule receipt back to Brain.
+        Current cadence progress is already committed in FireSchedule; this
+        receipt records history, audit and notifications. The legacy path also
+        updates the schedule projection.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -299,13 +298,12 @@ class SchedulerService(object):
     """SchedulerService is implemented by both sides depending on
     direction:
 
-    - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
-    AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
-    these.
+    - Brain implements every RPC below except TriggerSchedule. Scheduler is
+    the gRPC client for these brain-side RPCs.
 
-    - Scheduler implements: TriggerSchedule (operator-initiated
-    manual fires originating from the dashboard). Brain is the
-    gRPC client for this one.
+    - Scheduler implements the legacy TriggerSchedule reverse RPC. It is off
+    by default and retained for a Brain predating durable schedule control.
+    A current Brain dispatches operator manual fires directly.
 
     In practice this is two separate gRPC services on different
     ports; we declare them as one logical service here for clarity.

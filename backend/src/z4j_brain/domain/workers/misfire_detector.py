@@ -131,12 +131,42 @@ def cron_next_fire(
     wraps) so the misfire bound matches the real fire schedule,
     including timezone handling. A malformed expression returns None so
     the detector skips it rather than raising a false misfire.
+
+    Timezones resolve through :func:`packaged_zoneinfo`, the pinned
+    ``tzdata`` wheel, because that is what the scheduler ticks with. This
+    used bare ``ZoneInfo``, which searches the host's
+    ``/usr/share/zoneinfo`` first, and the shipped image really does
+    disagree with the pin: ``python:3.14-slim-trixie`` carries IANA 2026b
+    against the wheel's 2026a. Measured across every available zone they
+    answer differently for exactly one, ``America/Vancouver``, from
+    2026-11-01 -- so for that zone this function computed an expected fire
+    an hour away from the one the scheduler actually produces, and the
+    detector flagged a schedule that had missed nothing: an audit row, a
+    ``schedule.misfired`` automation and a delivery fanout, every sweep,
+    for a schedule running exactly on time. That contradicts this module's
+    headline property, "No false positives", and the detector is on by
+    default.
+
+    The set moves whenever the pin moves, so re-derive it rather than
+    trusting this list.
+
+    This is the only always-on path in the brain that derives a fire time
+    from a schedule's timezone; the other two (the schedules API validator
+    and the scheduler's shadow comparator) were already moved to the
+    packaged wheel and this one was missed.
     """
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    from zoneinfo import ZoneInfoNotFoundError
+
+    from z4j_brain.domain.schedule_runtime import packaged_zoneinfo
 
     try:
-        tz = ZoneInfo(timezone or "UTC")
+        tz = packaged_zoneinfo(timezone or "UTC")
     except (ZoneInfoNotFoundError, ValueError):
+        # Unchanged on purpose: an unresolvable zone still degrades to UTC
+        # rather than raising, and test_unknown_timezone_falls_back_to_utc
+        # pins that as deliberate. Whether a silent UTC fallback can itself
+        # manufacture a false misfire is a separate question from which
+        # tzdb we read, and is not settled here.
         tz = UTC  # type: ignore[assignment]
 
     from croniter import croniter
@@ -198,6 +228,14 @@ class MisfireDetector:
             result = await session.execute(
                 select(Schedule).where(
                     Schedule.is_enabled.is_(True),
+                    # A held schedule is deliberately not running, and pause
+                    # leaves is_enabled true while freezing last_run_at, which
+                    # is exactly the value this detector anchors on. Without
+                    # this every pause produced a misfire incident: an audit
+                    # row with result "failed", a schedule.misfired automation,
+                    # and fanout to every delivery channel. One deliberate
+                    # operator action reading as a credible outage.
+                    Schedule.paused_at.is_(None),
                     # Only kinds whose cadence the brain can compute
                     # without a location (solar) or that fire more than
                     # once (clocked is single-shot).

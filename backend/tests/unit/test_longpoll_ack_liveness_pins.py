@@ -97,6 +97,7 @@ async def agent_ids(settings: Settings, brain_app) -> dict[str, uuid.UUID]:
     agent_id = uuid.uuid4()
     async with brain_app.state.db.session() as s:
         s.add(Project(id=project_id, slug="lp-pins", name="LP Pins"))
+        await s.flush()
         s.add(
             Agent(
                 id=agent_id,
@@ -165,13 +166,24 @@ def _signed_heartbeat(
 
 
 class _FakeSession:
+    bind = type("_FakeBind", (), {"dialect": type("_FakeDialect", (), {"name": "sqlite"})()})()
+
+    async def execute(self, _statement):
+        class _LiveResult:
+            @staticmethod
+            def scalar_one_or_none():
+                return object()
+
+        return _LiveResult()
+
     async def commit(self) -> None:
         return None
 
 
 class _FakeDB:
     @contextlib.asynccontextmanager
-    async def session(self):
+    async def session(self, *, write: bool = False):
+        assert write is True
         yield _FakeSession()
 
 
@@ -702,8 +714,8 @@ async def test_rejected_upload_does_not_refresh_liveness(
     brain_app,
     agent_ids,
 ) -> None:
-    """(Preserved through): an upload with no verified,
-    durably-handled frame must NOT bump last_seen_at.
+    """(Preserved through): an upload with no HMAC-authenticated,
+    signed frame must NOT bump last_seen_at.
 
     Otherwise a bearer holder who cannot produce a valid frame HMAC could
     keep a dead agent pinned ONLINE by POSTing garbage, defeating the
@@ -732,6 +744,46 @@ async def test_rejected_upload_does_not_refresh_liveness(
     # but liveness is UNTOUCHED by unauthenticated garbage.
     after = await _agent_last_seen(brain_app, agent_ids["agent_id"])
     assert after == before
+
+
+async def test_authenticated_transient_dispatch_still_refreshes_liveness(
+    client,
+    brain_app,
+    settings,
+    agent_ids,
+    monkeypatch,
+) -> None:
+    """Presence is proven by HMAC, independently of downstream durability."""
+
+    async def transient_dispatch(_router, _frame):
+        return FrameOutcome.TRANSIENT
+
+    monkeypatch.setattr(FrameRouter, "dispatch", transient_dispatch)
+    nonce = f"transient-liveness-{uuid.uuid4()}"
+    before = await _agent_last_seen(brain_app, agent_ids["agent_id"])
+    response = await client.post(
+        "/api/v1/agent/events",
+        json={
+            "frames": [
+                _signed_heartbeat(
+                    settings,
+                    agent_ids,
+                    nonce=nonce,
+                    frame_id="transient-liveness",
+                ),
+            ],
+        },
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": nonce,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["accepted"] == 0
+    assert response.json()["rejected"] == 1
+    after = await _agent_last_seen(brain_app, agent_ids["agent_id"])
+    assert after is not None
+    assert after != before
 
 
 async def test_version_skew_frame_is_retried_not_dropped(
@@ -838,3 +890,367 @@ async def test_promote_online_repo_semantics(brain_app, agent_ids) -> None:
         await AgentRepository(s).promote_online_if_offline(agent_id)
         await s.commit()
     assert await _agent_state(brain_app, agent_id) == AgentState.ONLINE
+
+
+def test_frame_upload_cap_counts_encoded_utf8_bytes() -> None:
+    """The 1 MiB wire ceiling is bytes, not Python code points."""
+    from pydantic import ValidationError
+    from z4j_brain.api.agent_longpoll import FrameUploadBody
+
+    FrameUploadBody(frames=["é" * (512 * 1024)])
+    with pytest.raises(ValidationError, match=r"1048578 bytes; cap is 1048576"):
+        FrameUploadBody(frames=["é" * ((512 * 1024) + 1)])
+
+
+async def test_signature_failure_requires_fresh_nonce_connect_probe(
+    client,
+    settings,
+    agent_ids,
+) -> None:
+    """A failed nonce stays invalid instead of silently gaining seq=0 state."""
+    nonce = f"invalidated-{uuid.uuid4()}"
+    raw = _signed_heartbeat(settings, agent_ids, nonce=nonce, frame_id="first")
+    first = await client.post(
+        "/api/v1/agent/events",
+        json={"frames": [raw]},
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": nonce,
+        },
+    )
+    assert first.status_code == 200
+
+    # Replaying seq=1 raises SignatureError and invalidates the registry slot.
+    failed = await client.post(
+        "/api/v1/agent/events",
+        json={"frames": [raw]},
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": nonce,
+        },
+    )
+    assert failed.status_code == 409
+
+    same_nonce_probe = await client.get(
+        "/api/v1/agent/commands",
+        params={"wait": 0, "max_frames": 0},
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": nonce,
+        },
+    )
+    assert same_nonce_probe.status_code == 409
+
+    fresh_nonce = f"fresh-{uuid.uuid4()}"
+    fresh_claim = await client.get(
+        "/api/v1/agent/commands",
+        params={"wait": 0, "max_frames": 1},
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": fresh_nonce,
+        },
+    )
+    assert fresh_claim.status_code == 409
+
+    fresh_probe = await client.get(
+        "/api/v1/agent/commands",
+        params={"wait": 0, "max_frames": 0},
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": fresh_nonce,
+        },
+    )
+    assert fresh_probe.status_code == 200
+    fresh_upload = await client.post(
+        "/api/v1/agent/events",
+        json={
+            "frames": [
+                _signed_heartbeat(
+                    settings,
+                    agent_ids,
+                    nonce=fresh_nonce,
+                    frame_id="fresh",
+                ),
+            ],
+        },
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": fresh_nonce,
+        },
+    )
+    assert fresh_upload.status_code == 200
+
+
+async def test_global_session_cap_never_evicts_another_agent(monkeypatch) -> None:
+    """At capacity, nonce churn self-evicts or fails; it never crosses agents."""
+    from types import SimpleNamespace
+
+    import z4j_brain.api.agent_longpoll as longpoll
+
+    monkeypatch.setattr(longpoll, "_SESSION_REGISTRY_MAX", 2)
+    monkeypatch.setattr(longpoll, "_SESSION_PER_AGENT_MAX", 3)
+    project_id = uuid.uuid4()
+    agent_a = SimpleNamespace(id=uuid.uuid4(), project_id=project_id)
+    agent_b = SimpleNamespace(id=uuid.uuid4(), project_id=project_id)
+    agent_c = SimpleNamespace(id=uuid.uuid4(), project_id=project_id)
+    secret = b"registry-fairness-test-secret-32b"
+
+    async with longpoll._registry_lock:
+        longpoll._sessions.clear()
+        longpoll._sessions_per_agent.clear()
+    try:
+        await longpoll._get_or_create_session(
+            agent=agent_a,
+            master_secret=secret,
+            session_nonce="a-1",
+        )
+        pair_b = await longpoll._get_or_create_session(
+            agent=agent_b,
+            master_secret=secret,
+            session_nonce="b-1",
+        )
+        key_b = longpoll._session_key(agent_b.id, "b-1")
+        stored_b = longpoll._sessions[key_b]
+        assert stored_b.state == pair_b
+
+        # A is below its per-agent limit, but the global registry is full.
+        # Its new nonce may replace only A's old nonce; B survives unchanged.
+        await longpoll._get_or_create_session(
+            agent=agent_a,
+            master_secret=secret,
+            session_nonce="a-2",
+        )
+        assert longpoll._sessions[key_b] is stored_b
+        assert longpoll._session_key(agent_a.id, "a-1") not in longpoll._sessions
+
+        # A brand-new agent has no self-owned victim, so admission fails closed.
+        with pytest.raises(longpoll._SessionCapacityError):
+            await longpoll._get_or_create_session(
+                agent=agent_c,
+                master_secret=secret,
+                session_nonce="c-1",
+            )
+        assert longpoll._sessions[key_b] is stored_b
+    finally:
+        async with longpoll._registry_lock:
+            longpoll._sessions.clear()
+            longpoll._sessions_per_agent.clear()
+
+
+async def test_global_session_cap_recovers_after_idle_ttl(monkeypatch) -> None:
+    """Abandoned distinct-agent entries cannot make HTTP 503 permanent."""
+    from types import SimpleNamespace
+
+    import z4j_brain.api.agent_longpoll as longpoll
+
+    monkeypatch.setattr(longpoll, "_SESSION_REGISTRY_MAX", 2)
+    monkeypatch.setattr(longpoll, "_SESSION_PER_AGENT_MAX", 3)
+    monkeypatch.setattr(longpoll, "_SESSION_IDLE_TTL_SECONDS", 10.0)
+    clock = [100.0]
+    monkeypatch.setattr(longpoll, "_registry_now", lambda: clock[0])
+    project_id = uuid.uuid4()
+    agents = [SimpleNamespace(id=uuid.uuid4(), project_id=project_id) for _ in range(3)]
+    secret = b"registry-idle-ttl-test-secret-32b"
+
+    async with longpoll._registry_lock:
+        longpoll._sessions.clear()
+        longpoll._sessions_per_agent.clear()
+    try:
+        for index, agent in enumerate(agents[:2]):
+            await longpoll._get_or_create_session(
+                agent=agent,
+                master_secret=secret,
+                session_nonce=f"resident-{index}",
+            )
+
+        clock[0] = 109.999
+        with pytest.raises(longpoll._SessionCapacityError):
+            await longpoll._get_or_create_session(
+                agent=agents[2],
+                master_secret=secret,
+                session_nonce="new-agent",
+            )
+        assert len(longpoll._sessions) == 2
+
+        clock[0] = 110.0
+        pair = await longpoll._get_or_create_session(
+            agent=agents[2],
+            master_secret=secret,
+            session_nonce="new-agent",
+        )
+        new_key = longpoll._session_key(agents[2].id, "new-agent")
+        assert longpoll._sessions[new_key].state == pair
+        assert len(longpoll._sessions) == 1
+        assert longpoll._sessions_per_agent == {agents[2].id: 1}
+    finally:
+        async with longpoll._registry_lock:
+            longpoll._sessions.clear()
+            longpoll._sessions_per_agent.clear()
+
+
+async def test_missing_invalidation_never_exceeds_both_caps(monkeypatch) -> None:
+    """A failed self-eviction cannot be followed by an unchecked insert."""
+    from types import SimpleNamespace
+
+    import z4j_brain.api.agent_longpoll as longpoll
+
+    monkeypatch.setattr(longpoll, "_SESSION_REGISTRY_MAX", 2)
+    monkeypatch.setattr(longpoll, "_SESSION_PER_AGENT_MAX", 2)
+    agent = SimpleNamespace(id=uuid.uuid4(), project_id=uuid.uuid4())
+    secret = b"registry-invalidation-cap-secret-32b"
+
+    async with longpoll._registry_lock:
+        longpoll._sessions.clear()
+        longpoll._sessions_per_agent.clear()
+    try:
+        for nonce in ("failed-1", "failed-2"):
+            await longpoll._get_or_create_session(
+                agent=agent,
+                master_secret=secret,
+                session_nonce=nonce,
+            )
+        for nonce in ("failed-1", "failed-2"):
+            await longpoll._invalidate_session(agent.id, nonce)
+
+        for missing_nonce in ("missing-3", "missing-4"):
+            with pytest.raises(longpoll._SessionCapacityError):
+                await longpoll._invalidate_session(agent.id, missing_nonce)
+
+        assert len(longpoll._sessions) == 2
+        assert longpoll._sessions_per_agent == {agent.id: 2}
+        assert all(
+            isinstance(entry.state, longpoll._InvalidatedSession)
+            for entry in longpoll._sessions.values()
+        )
+    finally:
+        async with longpoll._registry_lock:
+            longpoll._sessions.clear()
+            longpoll._sessions_per_agent.clear()
+
+
+async def test_concurrent_invalidation_pins_state_until_safe_recovery(monkeypatch) -> None:
+    """Concurrent cap pressure cannot evict or overcount in-flight state."""
+    from types import SimpleNamespace
+
+    import z4j_brain.api.agent_longpoll as longpoll
+
+    monkeypatch.setattr(longpoll, "_registry_lock", asyncio.Lock())
+    monkeypatch.setattr(longpoll, "_SESSION_REGISTRY_MAX", 2)
+    monkeypatch.setattr(longpoll, "_SESSION_PER_AGENT_MAX", 2)
+    monkeypatch.setattr(longpoll, "_SESSION_IDLE_TTL_SECONDS", 1.0)
+    clock = [200.0]
+    monkeypatch.setattr(longpoll, "_registry_now", lambda: clock[0])
+    agent = SimpleNamespace(id=uuid.uuid4(), project_id=uuid.uuid4())
+    secret = b"registry-concurrency-test-secret-32b"
+    requests = [SimpleNamespace(state=SimpleNamespace()) for _ in range(2)]
+
+    async with longpoll._registry_lock:
+        longpoll._sessions.clear()
+        longpoll._sessions_per_agent.clear()
+    try:
+        for nonce, request in zip(("leased-1", "leased-2"), requests, strict=True):
+            await longpoll._get_or_create_session(
+                agent=agent,
+                master_secret=secret,
+                session_nonce=nonce,
+                request=request,
+            )
+
+        # Both entries are far beyond the TTL but request leases make them
+        # ineligible for cleanup. Queue invalidation before admission on the
+        # fair registry lock so the interleaving is deterministic.
+        clock[0] = 300.0
+        async with longpoll._registry_lock:
+            invalidate_task = asyncio.create_task(
+                longpoll._invalidate_session(agent.id, "leased-1"),
+            )
+            admission_task = asyncio.create_task(
+                longpoll._get_or_create_session(
+                    agent=agent,
+                    master_secret=secret,
+                    session_nonce="fresh",
+                    establishes_session=True,
+                ),
+            )
+            await asyncio.sleep(0)
+        await invalidate_task
+        with pytest.raises(longpoll._SessionInvalidatedError):
+            await admission_task
+
+        key_one = longpoll._session_key(agent.id, "leased-1")
+        key_two = longpoll._session_key(agent.id, "leased-2")
+        assert isinstance(
+            longpoll._sessions[key_one].state,
+            longpoll._InvalidatedSession,
+        )
+        assert longpoll._sessions[key_one].leases == 1
+        assert longpoll._sessions[key_two].leases == 1
+        assert len(longpoll._sessions) == 2
+        assert longpoll._sessions_per_agent == {agent.id: 2}
+
+        await longpoll._release_session_lease(
+            requests[0].state._z4j_longpoll_session_lease,
+        )
+        fresh_pair = await longpoll._get_or_create_session(
+            agent=agent,
+            master_secret=secret,
+            session_nonce="fresh",
+            establishes_session=True,
+        )
+        fresh_key = longpoll._session_key(agent.id, "fresh")
+        assert longpoll._sessions[fresh_key].state == fresh_pair
+        assert key_one not in longpoll._sessions
+        assert longpoll._sessions[key_two].leases == 1
+        assert len(longpoll._sessions) == 2
+        assert longpoll._sessions_per_agent == {agent.id: 2}
+    finally:
+        lease = getattr(requests[1].state, "_z4j_longpoll_session_lease", None)
+        if lease is not None:
+            await longpoll._release_session_lease(lease)
+        async with longpoll._registry_lock:
+            longpoll._sessions.clear()
+            longpoll._sessions_per_agent.clear()
+
+
+async def test_cancelled_response_finalizer_still_releases_session_lease(monkeypatch) -> None:
+    """Cancellation cannot leave an otherwise idle entry permanently pinned."""
+    from types import SimpleNamespace
+
+    import z4j_brain.api.agent_longpoll as longpoll
+
+    monkeypatch.setattr(longpoll, "_registry_lock", asyncio.Lock())
+    agent = SimpleNamespace(id=uuid.uuid4(), project_id=uuid.uuid4())
+    request = SimpleNamespace(state=SimpleNamespace())
+    secret = b"registry-finalizer-cancel-secret-32b"
+
+    async with longpoll._registry_lock:
+        longpoll._sessions.clear()
+        longpoll._sessions_per_agent.clear()
+    try:
+        await longpoll._get_or_create_session(
+            agent=agent,
+            master_secret=secret,
+            session_nonce="cancelled-response",
+            request=request,
+        )
+        finalizer = longpoll._release_longpoll_session_after_request(request)
+        await anext(finalizer)
+
+        # Hold the registry lock so cancellation lands while the shielded
+        # release is genuinely pending, then let the finalizer drain it.
+        async with longpoll._registry_lock:
+            close_task = asyncio.create_task(finalizer.aclose())
+            await asyncio.sleep(0)
+            close_task.cancel()
+            await asyncio.sleep(0)
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        key = longpoll._session_key(agent.id, "cancelled-response")
+        assert longpoll._sessions[key].leases == 0
+        assert request.state._z4j_longpoll_session_lease is None
+        assert longpoll._sessions_per_agent == {agent.id: 1}
+    finally:
+        async with longpoll._registry_lock:
+            longpoll._sessions.clear()
+            longpoll._sessions_per_agent.clear()

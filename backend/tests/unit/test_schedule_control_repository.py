@@ -1,3 +1,15 @@
+"""Boundary-D schedule control transitions.
+
+Most of this file runs against a MIGRATED database rather than a
+create_all() one. Every Boundary-D guard is a database trigger installed by
+a migration, so a create_all() schema accepts every write the repository
+emits and proves only that the Python half agrees with itself.
+
+Six tests deliberately construct states an activated database forbids: an
+absent revision singleton, a foreign-owner schedule row, and receipt-NULL
+fire evidence. They keep the create_all() fixtures; each says why.
+"""
+
 from __future__ import annotations
 
 import uuid
@@ -47,10 +59,38 @@ from z4j_brain.persistence.repositories.schedules import (
     ScheduleRepository,
     upsert_imported_schedule,
 )
+from z4j_brain.persistence.schedule_guard import (
+    install_schedule_guard_engine_hooks,
+)
 
 
 @pytest.fixture
-async def session() -> AsyncIterator[AsyncSession]:
+async def session(migrated_db_url: str) -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine(migrated_db_url)
+    # Production installs these when ``DatabaseManager`` wraps the engine.
+    # The SQLite guard UDFs are per-connection and a connection without them
+    # fails closed inside the trigger, so a raw-session test has to install
+    # them itself or it is testing a permanently fenced database.
+    install_schedule_guard_engine_hooks(engine)
+    async with AsyncSession(engine, expire_on_commit=False) as active:
+        yield active
+        await active.rollback()
+    await engine.dispose()
+
+
+@pytest.fixture
+async def project(session: AsyncSession) -> Project:
+    # No revision-state row here: a migrated database arrives with the
+    # singleton already activated, and that table is itself guarded.
+    row = Project(id=uuid.uuid4(), slug="control", name="Control")
+    session.add(row)
+    await session.commit()
+    return row
+
+
+@pytest.fixture
+async def legacy_session() -> AsyncIterator[AsyncSession]:
+    """A create_all() session, for states an activated database forbids."""
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         poolclass=StaticPool,
@@ -65,9 +105,10 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 @pytest.fixture
-async def project(session: AsyncSession) -> Project:
+async def legacy_project(legacy_session: AsyncSession) -> Project:
+    """Hand-activate Boundary D on a create_all() schema."""
     row = Project(id=uuid.uuid4(), slug="control", name="Control")
-    session.add_all(
+    legacy_session.add_all(
         [
             row,
             ScheduleRevisionState(
@@ -77,7 +118,7 @@ async def project(session: AsyncSession) -> Project:
             ),
         ],
     )
-    await session.commit()
+    await legacy_session.commit()
     return row
 
 
@@ -328,10 +369,20 @@ async def test_activation_routes_reserved_import_and_source_delete(
 
 
 async def test_reserved_import_refuses_cross_owner_name_collision(
-    session: AsyncSession,
-    project: Project,
+    legacy_session: AsyncSession,
+    legacy_project: Project,
 ) -> None:
-    """An import cannot silently create a second enabled owner for one name."""
+    """An import cannot silently create a second enabled owner for one name.
+
+    Stays on create_all(). The collision needs a foreign-owner row to
+    already exist, and on an activated database a non-reserved schedule can
+    only be minted by the Boundary-E stream-epoch protocol (activation
+    epoch, snapshot frame, projection) or carried in by a 1.7 upgrade.
+    Standing that up here would replace the import-collision contract under
+    test with a Boundary-E integration; the repository check itself is in
+    Python and fires identically on either schema.
+    """
+    session, project = legacy_session, legacy_project
     external = Schedule(
         id=uuid.uuid4(),
         project_id=project.id,
@@ -376,9 +427,12 @@ async def test_reserved_import_refuses_cross_owner_name_collision(
 
 
 async def test_activation_refuses_unsequenced_external_import_and_delete(
-    session: AsyncSession,
-    project: Project,
+    legacy_session: AsyncSession,
+    legacy_project: Project,
 ) -> None:
+    """Stays on create_all() for the same reason as the collision test above:
+    the delete half needs a pre-existing foreign-owner row."""
+    session, project = legacy_session, legacy_project
     with pytest.raises(
         ScheduleControlConflictError,
         match="stream epoch authority",
@@ -577,10 +631,28 @@ async def test_current_fire_rejects_noncanonical_successor_before_mutation(
     ],
 )
 async def test_current_terminal_command_creates_one_generation_hold(
-    session: AsyncSession,
-    project: Project,
+    legacy_session: AsyncSession,
+    legacy_project: Project,
     status: CommandStatus,
 ) -> None:
+    """Stays on create_all(), along with the three tests below it.
+
+    All four need a cadence command that is ALREADY terminal before
+    ``terminalize_current_fire`` runs, and on an activated database a
+    ``schedule.fire`` command may only leave 'dispatched' through a real
+    transition: ``apply_current_agent_result`` for failed/completed,
+    ``expire_current_schedule_delivery`` for timeout. Nothing in the product
+    ever cancels a cadence command, so this parametrization has no product
+    route at all for one of its three cases.
+
+    Worse, ``apply_current_agent_result`` IS the site that creates the
+    terminal hold (schedule_control.py:3227-3260). Reaching the precondition
+    through it would make the call under test a replay rather than the first
+    application, so the conversion would silently retarget every assertion
+    below. The database-level version of this transition is covered by
+    test_schedule_activation_boundary_d.py.
+    """
+    session, project = legacy_session, legacy_project
     row, command = await _accept_command(session, project)
     command.status = status
     command.error = f"{status.value} evidence"
@@ -615,9 +687,11 @@ async def test_current_terminal_command_creates_one_generation_hold(
 
 
 async def test_terminal_hold_resolution_rotates_token_and_carries_exact_grant(
-    session: AsyncSession,
-    project: Project,
+    legacy_session: AsyncSession,
+    legacy_project: Project,
 ) -> None:
+    """Stays on create_all(); see the terminal-hold note above."""
+    session, project = legacy_session, legacy_project
     row, command = await _accept_command(session, project)
     token = row.control_token
     assert token is not None
@@ -696,10 +770,17 @@ async def test_terminal_hold_resolution_rotates_token_and_carries_exact_grant(
 
 @pytest.mark.parametrize("status", list(CommandStatus))
 async def test_receipt_null_occurrence_has_exact_operator_exit(
-    session: AsyncSession,
-    project: Project,
+    legacy_session: AsyncSession,
+    legacy_project: Project,
     status: CommandStatus,
 ) -> None:
+    """Stays on create_all(). A receipt-NULL ``schedule.fire`` command is
+    refused at INSERT by an activated database ('current schedule command
+    receipt tuple is required'). Such rows exist only because activation
+    MARKED pre-1.8 evidence rather than inventing authority for it, so the
+    faithful way to produce one is to migrate a 1.7 database forward, which
+    test_schedule_activation_boundary_d.py already does."""
+    session, project = legacy_session, legacy_project
     row = await _create(session, project)
     token = row.control_token
     slot = row.next_run_at
@@ -766,9 +847,13 @@ async def test_receipt_null_occurrence_has_exact_operator_exit(
 
 
 async def test_receipt_null_pending_resolution_deletes_only_unaccepted_state(
-    session: AsyncSession,
-    project: Project,
+    legacy_session: AsyncSession,
+    legacy_project: Project,
 ) -> None:
+    """Stays on create_all(): the buffered pending-fire and fire rows it
+    resolves both carry a NULL receipt token, which an activated database
+    refuses at INSERT."""
+    session, project = legacy_session, legacy_project
     row = await _create(session, project)
     token = row.control_token
     slot = row.next_run_at
@@ -850,9 +935,11 @@ async def test_receipt_null_pending_resolution_deletes_only_unaccepted_state(
 
 
 async def test_completed_current_command_never_creates_terminal_hold(
-    session: AsyncSession,
-    project: Project,
+    legacy_session: AsyncSession,
+    legacy_project: Project,
 ) -> None:
+    """Stays on create_all(); see the terminal-hold note above."""
+    session, project = legacy_session, legacy_project
     row, command = await _accept_command(session, project)
     command.status = CommandStatus.COMPLETED
     await session.commit()
@@ -874,9 +961,11 @@ async def test_completed_current_command_never_creates_terminal_hold(
 
 
 async def test_old_receipt_terminal_cannot_disable_repaired_definition(
-    session: AsyncSession,
-    project: Project,
+    legacy_session: AsyncSession,
+    legacy_project: Project,
 ) -> None:
+    """Stays on create_all(); see the terminal-hold note above."""
+    session, project = legacy_session, legacy_project
     row, command = await _accept_command(session, project)
     old_token = row.control_token
     command.status = CommandStatus.FAILED
@@ -908,8 +997,12 @@ async def test_old_receipt_terminal_cannot_disable_repaired_definition(
 
 
 async def test_missing_revision_state_refuses_before_schedule_mutation(
-    session: AsyncSession,
+    legacy_session: AsyncSession,
 ) -> None:
+    """Stays on create_all(). The state under test is an ABSENT revision
+    singleton, and a migrated database always has one: the row is created by
+    the activation migration and its table is guarded against deletion."""
+    session = legacy_session
     project = Project(id=uuid.uuid4(), slug="missing", name="Missing")
     session.add(project)
     await session.commit()
@@ -976,15 +1069,39 @@ async def test_control_update_rotates_token_and_clears_same_generation_state(
 ) -> None:
     row = await _create(session, project)
     original_token = row.control_token
-    row.legacy_fire_control_token = original_token
-    row.quarantine_control_token = original_token
-    row.quarantine_code = "old"
+    assert original_token is not None
+    repository = ScheduleControlRepository(session)
+    # Reach the same-generation state through the two transitions that
+    # actually produce it. Assigning the columns directly is refused by
+    # Boundary D, and it also proved less: a hand-set token was never a
+    # grant the fire authority would have honoured.
+    granted = await repository.set_legacy_fire_grant(
+        project_id=project.id,
+        schedule_id=row.id,
+        observed_control_token=original_token,
+        allow=True,
+        all_replicas_quiesced_and_resynced=True,
+        occurred_at=datetime(2026, 1, 1, 12, 4, tzinfo=UTC),
+    )
+    assert granted.disposition == "granted"
+    quarantined = await repository.quarantine(
+        project_id=project.id,
+        schedule_id=row.id,
+        observed_control_token=original_token,
+        reason_code="cadence_definition_invalid",
+        detail="old",
+        occurred_at=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+    )
+    assert quarantined.outcome == "applied"
+    assert row.control_token == original_token
+    assert row.legacy_fire_control_token == original_token
+    assert row.quarantine_control_token == original_token
 
-    updated = await ScheduleControlRepository(session).update_current(
+    updated = await repository.update_current(
         project_id=project.id,
         schedule_id=row.id,
         data={"queue": "critical"},
-        planning_at=datetime(2026, 1, 1, 12, 4, tzinfo=UTC),
+        planning_at=datetime(2026, 1, 1, 12, 6, tzinfo=UTC),
     )
 
     assert updated is row
@@ -992,7 +1109,8 @@ async def test_control_update_rotates_token_and_clears_same_generation_state(
     assert row.legacy_fire_control_token is None
     assert row.quarantine_control_token is None
     assert row.quarantine_code is None
-    assert row.schedule_revision == 2
+    # create + grant + quarantine + this update.
+    assert row.schedule_revision == 4
 
 
 async def test_legacy_grant_requires_attestation_and_is_generation_cas(
@@ -1076,10 +1194,13 @@ async def test_legacy_grant_requires_attestation_and_is_generation_cas(
 
 @pytest.mark.parametrize("status", list(CommandStatus))
 async def test_legacy_grant_refuses_every_receipt_null_command_status(
-    session: AsyncSession,
-    project: Project,
+    legacy_session: AsyncSession,
+    legacy_project: Project,
     status: CommandStatus,
 ) -> None:
+    """Stays on create_all(): the blocker under test IS a receipt-NULL
+    command, which an activated database refuses at INSERT."""
+    session, project = legacy_session, legacy_project
     row = await _create(session, project)
     assert row.control_token is not None
     session.add(

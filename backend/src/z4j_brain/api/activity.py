@@ -1,18 +1,18 @@
 """``/api/v1/activity`` cross-project live activity feed.
 
 Aggregates audit-log rows across every project the caller can see.
-For admins that is every project; for non-admin users it is just
-the projects they hold a membership in. The endpoint is the data
-source for the dashboard's Live Activity Feed page.
+Admins can see every row. Non-admin users can see rows from projects
+where they hold a membership plus their own user-scoped rows whose
+``project_id`` is null. The endpoint is the data source for the
+dashboard's Live Activity Feed page.
 
 Cursor pagination is keyed on ``(occurred_at, id)`` because the
 audit-log row id is ``uuid4`` (random, not time-ordered) -- ordering
 by ``id`` alone would shuffle rows unpredictably. (v1.6 audit C8.)
 
-The endpoint is READ-ONLY against the audit table; the brain's
-existing per-project audit router (``api/audit.py``) handles
-deep-dive forensics with HMAC re-verification. This module is the
-brain-wide overview surface.
+The endpoint is READ-ONLY against the audit table and returns stored
+rows without re-verifying their audit-chain HMACs. It is a brain-wide
+overview surface, not an integrity-verification operation.
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ def _slug_for(
 
 
 @router.get("", response_model=ActivityListResponse)
-async def list_activity(  # noqa: PLR0912  branch-heavy activity aggregation
+async def list_activity(
     user: User = Depends(get_current_user),
     memberships: MembershipRepository = Depends(get_membership_repo),
     session: AsyncSession = Depends(get_session),
@@ -222,8 +222,9 @@ async def list_activity(  # noqa: PLR0912  branch-heavy activity aggregation
 ) -> ActivityListResponse:
     """List audit rows across every project the caller can see.
 
-    Admins see every row including brain-wide rows (no project_id);
-    non-admins see only rows whose project they hold a membership in.
+    Admins see every row including brain-wide rows (no project_id).
+    Non-admins see rows from projects where they hold a membership
+    plus their own user-scoped rows whose project_id is null.
     """
     # v1.6 audit H13: per-user rate limit (per worker process).
     # Include Retry-After per RFC 6585 so well-behaved clients
@@ -240,14 +241,8 @@ async def list_activity(  # noqa: PLR0912  branch-heavy activity aggregation
     if user.is_admin:
         accessible_project_ids = None
     else:
-        rows = await memberships.list_for_user(user.id)
-        accessible_project_ids = [m.project_id for m in rows]
-        if not accessible_project_ids:
-            return ActivityListResponse(
-                items=[],
-                next_before_cursor=None,
-                newest_cursor=None,
-            )
+        membership_rows = await memberships.list_for_user(user.id)
+        accessible_project_ids = [membership.project_id for membership in membership_rows]
 
     project_id_filter = accessible_project_ids
     if project_slug is not None:
@@ -274,7 +269,13 @@ async def list_activity(  # noqa: PLR0912  branch-heavy activity aggregation
     # every page. The (occurred_at, id) tuple is monotonic and
     # stable across replicas; the secondary id key handles ties when
     # two rows share microsecond-precision timestamps.
-    stmt = select(AuditLog).order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(limit)
+    # Fetch one overflow row so a page whose size exactly equals ``limit``
+    # can still truthfully report that it is the final page. Inferring
+    # continuation from ``len(rows) == limit`` produces a dead cursor and an
+    # unnecessary empty request at every exact page boundary.
+    stmt = (
+        select(AuditLog).order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(limit + 1)
+    )
     if project_id_filter is not None:
         # v1.6 Round 5 G fix: include the caller's OWN user-scoped
         # audit rows (e.g., their own MFA enroll / verify / recovery
@@ -325,7 +326,9 @@ async def list_activity(  # noqa: PLR0912  branch-heavy activity aggregation
         stmt = stmt.where(AuditLog.action.like(f"{escaped}%", escape="\\"))
 
     result = await session.execute(stmt)
-    rows = list(result.scalars().all())
+    fetched_rows: list[AuditLog] = list(result.scalars().all())
+    has_more = len(fetched_rows) > limit
+    rows = fetched_rows[:limit]
 
     if rows:
         project_ids = [r.project_id for r in rows if r.project_id is not None]
@@ -335,7 +338,7 @@ async def list_activity(  # noqa: PLR0912  branch-heavy activity aggregation
             ),
         )
         project_slug_by_id: dict[uuid.UUID, str] = dict(
-            project_lookup_result.all(),
+            project_lookup_result.tuples().all(),
         )
     else:
         project_slug_by_id = {}
@@ -368,7 +371,7 @@ async def list_activity(  # noqa: PLR0912  branch-heavy activity aggregation
         for row in rows
     ]
 
-    next_before_cursor = _encode_cursor(rows[-1]) if len(rows) == limit else None
+    next_before_cursor = _encode_cursor(rows[-1]) if has_more else None
     newest_cursor = _encode_cursor(rows[0]) if rows else None
 
     return ActivityListResponse(

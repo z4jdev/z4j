@@ -5,11 +5,11 @@ from __future__ import annotations
 import base64
 import secrets
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from z4j_core.transport import CURRENT_PROTOCOL
 from z4j_core.transport.hmac import derive_project_secret
@@ -28,6 +28,10 @@ from z4j_brain.api.deps import (
     require_fresh_mfa,
 )
 from z4j_brain.errors import ConflictError
+from z4j_brain.persistence.agent_authority import (
+    acquire_agent_authority_xact_lock,
+    local_agent_authority,
+)
 from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.websocket.auth import hash_agent_token
 
@@ -71,7 +75,10 @@ class AgentPublic(BaseModel):
             "last advertised ``protocol_version`` is older than the "
             "brain's ``CURRENT_PROTOCOL``. Never-connected agents "
             "(``last_connect_at`` is null) report ``false`` because "
-            "they have not advertised a real version yet."
+            "they have not advertised a real version yet. Agents that "
+            "advertise a newer protocol also report ``false``: this flag "
+            "means 'agent upgrade needed', not general version inequality; "
+            "inspect ``protocol_version`` to identify a newer peer."
         ),
     )
     host_name: str | None = Field(
@@ -90,7 +97,7 @@ class AgentPublic(BaseModel):
         description=(
             "z4j-core SemVer string the agent advertised in its hello "
             "frame (1.3.4+). Null when the agent has never connected "
-            "or runs a pre-1.0.3 build that didn't populate the field."
+            "or runs a pre-1.3.4 build that didn't populate the field."
         ),
     )
     version_status: str | None = Field(
@@ -112,6 +119,17 @@ class AgentPublic(BaseModel):
 
 class CreateAgentRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def _reserve_tombstone_namespace(cls, value: str) -> str:
+        from z4j_brain.persistence.repositories.agents import (
+            REVOKED_AGENT_NAME_PREFIX,
+        )
+
+        if value.strip().startswith(REVOKED_AGENT_NAME_PREFIX):
+            raise ValueError("agent name uses a reserved internal prefix")
+        return value
 
 
 class CreateAgentResponse(BaseModel):
@@ -142,7 +160,16 @@ def _agent_payload(
     # (see AgentRepository.insert) and would otherwise show as
     # outdated before they get a chance to advertise their real
     # version.
-    is_outdated = agent.last_connect_at is not None and agent.protocol_version != CURRENT_PROTOCOL
+    advertised_protocol = agent.protocol_version
+    protocol_numbers = (advertised_protocol, CURRENT_PROTOCOL)
+    protocols_are_orderable = all(
+        isinstance(value, str) and value.isascii() and value.isdigit() for value in protocol_numbers
+    )
+    is_outdated = (
+        agent.last_connect_at is not None
+        and protocols_are_orderable
+        and int(advertised_protocol) < int(CURRENT_PROTOCOL)
+    )
     # Pull the operator-supplied host.name out of agent_metadata.host
     # if the agent ever sent one in its hello frame. The metadata blob
     # is bounded by the gateway (only the host dict + agent_version
@@ -258,7 +285,14 @@ async def create_agent(
     configuration; if they lose it they have to mint another.
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
-    from z4j_brain.persistence.repositories import AgentRepository
+    from z4j_brain.errors import AuthenticationError, NotFoundError
+    from z4j_brain.persistence.repositories import (
+        AgentRepository,
+        MembershipRepository,
+        ProjectRepository,
+        UserRepository,
+    )
+    from z4j_brain.persistence.repositories.agents import AgentNameConflictError
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
@@ -269,25 +303,55 @@ async def create_agent(
         min_role=ProjectRole.ADMIN,
     )
 
+    project_id = project.id
+    user_id = user.id
+    name = body.name.strip()
+    agents = AgentRepository(db_session)
+
+    # A same-name remint can wait behind the transaction that currently owns
+    # the tombstone row. Acquire that authority before minting credentials,
+    # then discard every ORM object used by the first policy decision. Without
+    # this second read, a demotion, membership removal, user deactivation, or
+    # project replacement committed during the wait would still receive a new
+    # bearer token and project HMAC secret.
+    reservation = await agents.reserve_name(project_id=project_id, name=name)
+    db_session.expire_all()
+    fresh_user = await UserRepository(db_session).get(user_id)
+    if fresh_user is None or not fresh_user.is_active:
+        raise AuthenticationError("authentication required")
+    fresh_project = await policy.get_project_or_404(
+        ProjectRepository(db_session),
+        slug,
+    )
+    if fresh_project.id != project_id:
+        raise NotFoundError(
+            f"project {slug!r} not found",
+            details={"slug": slug},
+        )
+    await policy.require_member(
+        MembershipRepository(db_session),
+        user=fresh_user,
+        project=fresh_project,
+        min_role=ProjectRole.ADMIN,
+    )
+
     plaintext = secrets.token_urlsafe(32)
     secret = settings.secret.get_secret_value().encode("utf-8")
     token_hash = hash_agent_token(plaintext=plaintext, secret=secret)
 
-    agents = AgentRepository(db_session)
     try:
-        agent = await agents.insert(
-            project_id=project.id,
-            name=body.name.strip(),
+        agent = await agents.insert_reserved(
+            reservation=reservation,
             token_hash=token_hash,
         )
-    except IntegrityError as exc:  # noqa: F841 -- str() used below
+    except (AgentNameConflictError, IntegrityError):
         # Audit A5: unique constraint on (project_id, name) -
         # concurrent mints with the same name land here. Previous
         # behavior silently created duplicates.
         await db_session.rollback()
         raise ConflictError(
             "an agent with that name already exists in this project",
-            details={"name": body.name.strip()},
+            details={"name": name},
         ) from None
     await audit.record(
         audit_log,
@@ -296,14 +360,14 @@ async def create_agent(
         target_id=str(agent.id),
         result="success",
         outcome="allow",
-        user_id=user.id,
-        project_id=project.id,
+        user_id=user_id,
+        project_id=project_id,
         source_ip=ip,
-        metadata={"name": body.name.strip()},
+        metadata={"name": name},
     )
     await db_session.commit()
 
-    project_signing_secret = derive_project_secret(secret, project.id)
+    project_signing_secret = derive_project_secret(secret, project_id)
     return CreateAgentResponse(
         agent=_agent_payload(agent),
         token=plaintext,
@@ -329,8 +393,13 @@ async def revoke_agent(
     registry=Depends(get_brain_registry),
 ) -> None:
     from z4j_brain.domain.policy_engine import PolicyEngine
-    from z4j_brain.errors import NotFoundError
-    from z4j_brain.persistence.repositories import AgentRepository
+    from z4j_brain.errors import AuthenticationError, NotFoundError
+    from z4j_brain.persistence.repositories import (
+        AgentRepository,
+        MembershipRepository,
+        ProjectRepository,
+        UserRepository,
+    )
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
@@ -341,33 +410,111 @@ async def revoke_agent(
         min_role=ProjectRole.ADMIN,
     )
 
-    agents = AgentRepository(db_session)
-    agent = await agents.get(agent_id)
-    if agent is None or agent.project_id != project.id:
-        raise NotFoundError(
-            "agent not found",
-            details={"agent_id": str(agent_id)},
+    if db_session.bind is None:
+        raise RuntimeError("agent-revoke session is not bound to an engine")
+    is_sqlite = db_session.bind.dialect.name == "sqlite"
+    project_id = project.id
+    user_id = user.id
+
+    async def _revalidate_authorization() -> None:
+        # Authority acquisition can wait behind a bounded physical send. Read
+        # every mutable authorization input again after that wait so a user
+        # deactivation/admin demotion, membership removal, project
+        # deactivation, or delete-and-recreate of the slug wins cleanly.
+        fresh_user = await UserRepository(db_session).get(user_id)
+        if fresh_user is None or not fresh_user.is_active:
+            raise AuthenticationError("authentication required")
+        fresh_project = await policy.get_project_or_404(
+            ProjectRepository(db_session),
+            slug,
+        )
+        if fresh_project.id != project_id:
+            raise NotFoundError(
+                f"project {slug!r} not found",
+                details={"slug": slug},
+            )
+        await policy.require_member(
+            MembershipRepository(db_session),
+            user=fresh_user,
+            project=fresh_project,
+            min_role=ProjectRole.ADMIN,
         )
 
-    await agents.delete(agent)
-    await audit.record(
-        audit_log,
-        action="agent.token.revoked",
-        target_type="agent",
-        target_id=str(agent_id),
-        result="success",
-        outcome="allow",
-        user_id=user.id,
-        project_id=project.id,
-        source_ip=ip,
-    )
-    await db_session.commit()
+    async def _persist_revoke() -> None:
+        agents = AgentRepository(db_session)
+        # Take the physical-send row authority before revalidating. PostgreSQL
+        # outbound delivery holds this row through the bounded socket send, so
+        # checking authorization before this SELECT would still use the state
+        # from before that wait.
+        agent = await agents.get_locked(agent_id)
+        if agent is None:
+            raise NotFoundError(
+                "agent not found",
+                details={"agent_id": str(agent_id)},
+            )
+
+        # The initial request checks populated User, Project and Membership in
+        # this identity map. A later ORM SELECT returns those same Python
+        # objects without overwriting loaded attributes, even though PostgreSQL
+        # READ COMMITTED gives the statement a fresh database snapshot. Expire
+        # them only after every authority wait, then make every mutable policy
+        # input come from the database again. SQLite's rollback above already
+        # expires them; repeating it here is harmless and keeps one invariant.
+        db_session.expire_all()
+        await _revalidate_authorization()
+        # expire_all() also expired the locked Agent instance. Refresh it while
+        # retaining the row lock acquired above before inspecting or mutating it.
+        await db_session.refresh(agent)
+        if agent.project_id != project_id:
+            raise NotFoundError(
+                "agent not found",
+                details={"agent_id": str(agent_id)},
+            )
+
+        # Soft delete. The row has to survive: events.agent_id is non-null with
+        # ON DELETE RESTRICT, so a hard delete was refused outright by
+        # PostgreSQL for any agent that had emitted an event, and silently
+        # orphaned those events on SQLite, which does not enforce foreign keys
+        # here. Revoking rewrites the token hash as well as setting the
+        # timestamp, so the leaked token stops working immediately rather than
+        # only being flagged.
+        await agents.revoke(agent, at=datetime.now(UTC))
+        await audit.record(
+            audit_log,
+            action="agent.token.revoked",
+            target_type="agent",
+            target_id=str(agent_id),
+            result="success",
+            outcome="allow",
+            user_id=user_id,
+            project_id=project_id,
+            source_ip=ip,
+        )
+        await db_session.commit()
+
+    if is_sqlite:
+        # DELETE requests enter get_session with BEGIN IMMEDIATE before their
+        # authorization reads. End that transaction before waiting for a slow
+        # physical send: otherwise this coroutine would retain SQLite's global
+        # writer reservation while queued on the per-agent mutex. Once the
+        # mutex is ours, begin a fresh audited write unit and revalidate.
+        await db_session.rollback()
+        async with local_agent_authority(agent_id):
+            await audit_log.require_sqlite_immediate_write_unit()
+            await _persist_revoke()
+    else:
+        # Inbound writes use this same xact-scoped mutex instead of an Agent
+        # row lock. Revoke therefore cannot interleave with an already-
+        # authorized frame, and inbound projection cannot deadlock command
+        # claims through an Agent -> Schedule/Stream lock-order inversion.
+        await acquire_agent_authority_xact_lock(db_session, agent_id)
+        await _persist_revoke()
 
     # 1.6.5 security advisory F2: terminate any active WebSocket
     # sessions for this agent. Without this, the revoked agent
     # could continue sending signed event frames + heartbeats +
-    # command results until natural disconnect, even though the DB
-    # row is gone. ``kick`` is best-effort across replicas (via
+    # command results until natural disconnect, even though the durable
+    # revoke marker has committed. ``kick`` is best-effort across replicas (via
     # Postgres NOTIFY in the multi-replica backend) and idempotent
     # if no connections are registered.
     #

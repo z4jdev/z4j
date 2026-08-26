@@ -1,0 +1,1 @@
+import{S as e}from"./query-BG_t9wMn.js";import{n as t}from"./createLucideIcon-RRbop8M2.js";var n=e(),r={sm:`space-y-4`,md:`space-y-6`,lg:`space-y-8`};function i({children:e,spacing:i=`md`,className:a}){return(0,n.jsx)(`div`,{className:t(r[i],`p-4 md:p-6`,a),children:e})}export{i as t};

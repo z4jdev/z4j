@@ -1,4 +1,10 @@
-"""Boundary B durable request, outbox and ambiguity invariants."""
+"""Boundary B durable request, outbox and ambiguity invariants.
+
+``boundary_db`` is a MIGRATED database rather than a create_all() one. Every
+Boundary-D and Boundary-F guard lives inside a migration, so a create_all()
+schema refuses nothing: the durable ledger and its audit rows could pass here
+and be refused on first use by an operator's database.
+"""
 
 from __future__ import annotations
 
@@ -14,11 +20,13 @@ import pytest
 import pytest_asyncio
 from fastapi import HTTPException, Response
 from sqlalchemy import event, func, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from structlog.testing import capture_logs
 from z4j_brain.api import commands as commands_mod
 from z4j_brain.api.bulk_retry_requests import (
     BulkRetryRequestCreate,
@@ -37,7 +45,6 @@ from z4j_brain.domain.bulk_retry import (
     canonicalize_request,
 )
 from z4j_brain.domain.workers.bulk_retry import BulkRetryCoordinator
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import CommandStatus, TaskPriority, TaskState
 from z4j_brain.persistence.models import (
     Agent,
@@ -55,14 +62,20 @@ from z4j_brain.persistence.models import (
     BulkRetryRequest as BulkRetryRequestRow,
 )
 from z4j_brain.persistence.repositories import (
+    AgentRepository,
     AuditLogRepository,
     BulkRetryRequestRepository,
     CommandRepository,
+)
+from z4j_brain.persistence.schedule_guard import (
+    install_schedule_guard_engine_hooks,
 )
 from z4j_brain.settings import Settings
 from z4j_brain.websocket.registry import SessionHandle
 from z4j_brain.websocket.registry.local import LocalRegistry
 from z4j_brain.websocket.registry.postgres_notify import PostgresNotifyRegistry
+
+from tests.unit.conftest import MIGRATED_AUDIT_CHAIN_SECRET
 
 
 def _settings() -> Settings:
@@ -70,6 +83,11 @@ def _settings() -> Settings:
         database_url="sqlite+aiosqlite:///:memory:",
         secret="s" * 64,  # type: ignore[arg-type]
         session_secret="t" * 64,  # type: ignore[arg-type]
+        # Boundary F binds the activated chain to the key that signed it, so an
+        # app opened against a copy of the migrated template must present the
+        # same key. Taken from the fixture's own constant so the two cannot
+        # drift apart.
+        audit_chain_secret=MIGRATED_AUDIT_CHAIN_SECRET,  # type: ignore[arg-type]
         environment="dev",
     )
 
@@ -195,19 +213,16 @@ async def test_production_registry_selects_exact_project_session_for_coordinator
 
 @pytest_asyncio.fixture
 async def boundary_db(
-    tmp_path: Any,
+    migrated_db_url: str,
 ) -> tuple[
     async_sessionmaker[AsyncSession],
     uuid.UUID,
     uuid.UUID,
     uuid.UUID,
 ]:
-    """File-backed real SQLite with FK enforcement and production metadata."""
+    """File-backed real SQLite at the release head, with FK enforcement."""
 
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{tmp_path / 'boundary-b.sqlite'}",
-        connect_args={"timeout": 10},
-    )
+    engine = create_async_engine(migrated_db_url, connect_args={"timeout": 10})
 
     @event.listens_for(engine.sync_engine, "connect")
     def _foreign_keys(dbapi_connection: Any, _record: Any) -> None:
@@ -215,8 +230,10 @@ async def boundary_db(
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    # The guards installed by the migrations call connection-local SQLite
+    # functions. ``DatabaseManager`` installs them for the app; this fixture
+    # builds its sessionmaker by hand, so it has to install them itself.
+    install_schedule_guard_engine_hooks(engine)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     project_id = uuid.uuid4()
     user_id = uuid.uuid4()
@@ -253,6 +270,22 @@ async def boundary_db(
         await session.commit()
     yield sessions, project_id, user_id, agent_id
     await engine.dispose()
+
+
+@asynccontextmanager
+async def _request_session(sessions: async_sessionmaker[AsyncSession]) -> Any:
+    """A session shaped like the one a mutating request is handed.
+
+    ``get_session`` opens ``db.session(write=True)`` for every non-GET, which
+    on SQLite is the BEGIN IMMEDIATE write unit the audit chain requires
+    before its first read. A bare sessionmaker session is not a stand-in: on a
+    migrated database it cannot sign an audit row at all, so a test using one
+    would be measuring its own harness rather than the handler.
+    """
+    async with sessions() as session:
+        await session.execute(sa_text("BEGIN IMMEDIATE"))
+        session.sync_session.info["z4j_sqlite_immediate"] = True
+        yield session
 
 
 def _child(ordinal: int, engine: str = "celery") -> PlannedChild:
@@ -321,7 +354,8 @@ async def test_fault_before_seal_commit_leaves_no_visible_prefix(
     """Parent, reservation and all engines roll back as one unit."""
 
     sessions, project_id, user_id, _agent_id = boundary_db
-    async with sessions() as session:
+    # Request-shaped, because this mirrors the handler's seal-then-audit unit.
+    async with _request_session(sessions) as session:
         with pytest.raises(RuntimeError, match="fault injected"):
             parent = await _seal(
                 session,
@@ -584,7 +618,7 @@ async def test_engine_less_api_refuses_unknown_selected_task_before_seal(
         _AllowProjectPolicy,
     )
     settings = _settings()
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None
@@ -664,11 +698,12 @@ async def test_stored_unknown_engine_cannot_select_or_claim(
     registry = _FixedRegistry(handle)
     delivered: list[Command] = []
 
-    async def _capture_delivery(**kwargs: Any) -> None:
+    async def _capture_delivery(**kwargs: Any) -> bool:
         delivered.append(kwargs["command"])
+        return True
 
     monkeypatch.setattr(
-        "z4j_brain.websocket.gateway.deliver_command_frame",
+        "z4j_brain.websocket.gateway.deliver_command_frame_with_authority",
         _capture_delivery,
     )
     coordinator = BulkRetryCoordinator(
@@ -819,6 +854,62 @@ async def test_atomic_claim_is_single_winner_and_command_never_pending(
             )
         )
         assert pending_managed == 0
+
+
+@pytest.mark.asyncio
+async def test_revoked_agent_cannot_cross_irreversible_bulk_claim_edge(
+    boundary_db: tuple[
+        async_sessionmaker[AsyncSession],
+        uuid.UUID,
+        uuid.UUID,
+        uuid.UUID,
+    ],
+) -> None:
+    """The repository edge, not an upstream lookup, owns authority."""
+    sessions, project_id, user_id, agent_id = boundary_db
+    async with sessions() as session:
+        parent = await _seal(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            key="revoked-agent-claim",
+            children=[_child(0)],
+        )
+        await session.commit()
+        child_id = await session.scalar(
+            select(BulkRetryRequestChild.id).where(
+                BulkRetryRequestChild.parent_id == parent.id,
+            ),
+        )
+        assert child_id is not None
+
+    async with sessions() as session:
+        agents = AgentRepository(session)
+        agent = await agents.get(agent_id)
+        assert agent is not None
+        await agents.revoke(agent, at=datetime.now(UTC))
+        await session.commit()
+
+    async with sessions() as session:
+        command = await BulkRetryRequestRepository(session).claim_child(
+            child_id=child_id,
+            agent_id=agent_id,
+            generation=uuid.uuid4(),
+            command_timeout_seconds=60,
+        )
+        await session.commit()
+        assert command is None
+        child = await session.get(BulkRetryRequestChild, child_id)
+        assert child is not None
+        assert child.delivery_state == BulkRetryDeliveryState.PENDING.value
+        assert (
+            await session.scalar(
+                select(func.count(Command.id)).where(
+                    Command.bulk_retry_child_id == child_id,
+                ),
+            )
+            == 0
+        )
 
 
 @pytest.mark.asyncio
@@ -1216,11 +1307,12 @@ async def test_coordinator_startup_scan_is_fair_bounded_and_generation_bound(
     registry = _FixedRegistry(handle)
     delivered: list[Command] = []
 
-    async def _capture_delivery(**kwargs: Any) -> None:
+    async def _capture_delivery(**kwargs: Any) -> bool:
         delivered.append(kwargs["command"])
+        return True
 
     monkeypatch.setattr(
-        "z4j_brain.websocket.gateway.deliver_command_frame",
+        "z4j_brain.websocket.gateway.deliver_command_frame_with_authority",
         _capture_delivery,
     )
     settings = _settings().model_copy(
@@ -1308,11 +1400,12 @@ async def test_unavailable_oldest_parent_rotates_out_of_bounded_scan_window(
     )
     delivered: list[Command] = []
 
-    async def _capture_delivery(**kwargs: Any) -> None:
+    async def _capture_delivery(**kwargs: Any) -> bool:
         delivered.append(kwargs["command"])
+        return True
 
     monkeypatch.setattr(
-        "z4j_brain.websocket.gateway.deliver_command_frame",
+        "z4j_brain.websocket.gateway.deliver_command_frame_with_authority",
         _capture_delivery,
     )
     coordinator = BulkRetryCoordinator(
@@ -1368,11 +1461,12 @@ async def test_compatible_engine_is_not_hidden_behind_ordinal_prefix(
     )
     delivered: list[Command] = []
 
-    async def _capture_delivery(**kwargs: Any) -> None:
+    async def _capture_delivery(**kwargs: Any) -> bool:
         delivered.append(kwargs["command"])
+        return True
 
     monkeypatch.setattr(
-        "z4j_brain.websocket.gateway.deliver_command_frame",
+        "z4j_brain.websocket.gateway.deliver_command_frame_with_authority",
         _capture_delivery,
     )
     await BulkRetryCoordinator(
@@ -1428,11 +1522,12 @@ async def test_coordinator_respects_pause_contract_and_explicit_resume(
     )
     delivered: list[Command] = []
 
-    async def _capture_delivery(**kwargs: Any) -> None:
+    async def _capture_delivery(**kwargs: Any) -> bool:
         delivered.append(kwargs["command"])
+        return True
 
     monkeypatch.setattr(
-        "z4j_brain.websocket.gateway.deliver_command_frame",
+        "z4j_brain.websocket.gateway.deliver_command_frame_with_authority",
         _capture_delivery,
     )
     coordinator = BulkRetryCoordinator(
@@ -1491,7 +1586,7 @@ async def test_send_failure_never_requeues_or_retargets_claimed_child(
         raise ConnectionError("socket closed during write")
 
     monkeypatch.setattr(
-        "z4j_brain.websocket.gateway.deliver_command_frame",
+        "z4j_brain.websocket.gateway.deliver_command_frame_with_authority",
         _ambiguous_send,
     )
     coordinator = BulkRetryCoordinator(
@@ -1524,6 +1619,84 @@ async def test_send_failure_never_requeues_or_retargets_claimed_child(
         assert child is not None
         assert child.outcome == BulkRetryOutcome.UNKNOWN.value
         assert child.delivery_state == BulkRetryDeliveryState.DELIVERY_CLAIMED.value
+
+
+@pytest.mark.asyncio
+async def test_revoked_send_refusal_logs_definitely_unsent_irreversible_claim(
+    boundary_db: tuple[
+        async_sessionmaker[AsyncSession],
+        uuid.UUID,
+        uuid.UUID,
+        uuid.UUID,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A False authority result is visible but never requeued or retargeted."""
+    sessions, project_id, user_id, agent_id = boundary_db
+    async with sessions() as session:
+        parent = await _seal(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            key="revoked-after-bulk-claim",
+            children=[_child(0)],
+        )
+        await session.commit()
+
+    handle = SessionHandle.create(
+        agent_id=agent_id,
+        worker_id="celery-worker",
+        websocket=object(),  # type: ignore[arg-type]
+        retry_contracts={"celery": 1},
+    )
+    attempts = 0
+
+    async def _revoked_before_send(**_kwargs: Any) -> bool:
+        nonlocal attempts
+        attempts += 1
+        return False
+
+    monkeypatch.setattr(
+        "z4j_brain.websocket.gateway.deliver_command_frame_with_authority",
+        _revoked_before_send,
+    )
+    coordinator = BulkRetryCoordinator(
+        db=_SessionDb(sessions),  # type: ignore[arg-type]
+        settings=_settings(),
+        registry=_FixedRegistry(handle),  # type: ignore[arg-type]
+    )
+    with capture_logs() as records:
+        await coordinator.tick()
+        await coordinator.tick()
+
+    assert attempts == 1
+    refusal = [
+        record
+        for record in records
+        if record.get("event")
+        == ("z4j bulk retry send refused after irreversible claim because its agent was revoked")
+    ]
+    assert len(refusal) == 1
+    assert refusal[0]["log_level"] == "error"
+
+    async with sessions() as session:
+        child = await session.scalar(
+            select(BulkRetryRequestChild).where(
+                BulkRetryRequestChild.parent_id == parent.id,
+            ),
+        )
+        assert child is not None
+        assert child.delivery_state == BulkRetryDeliveryState.DELIVERY_CLAIMED.value
+        assert child.outcome == BulkRetryOutcome.UNOBSERVED.value
+        assert child.claimed_agent_id == agent_id
+        assert (
+            await session.scalar(
+                select(func.count(Command.id)).where(
+                    Command.bulk_retry_child_id == child.id,
+                ),
+            )
+            == 1
+        )
 
 
 @pytest.mark.asyncio
@@ -1578,11 +1751,12 @@ async def test_coordinator_retains_selected_session_generation_across_send(
 
     delivered_websockets: list[object] = []
 
-    async def _capture_delivery(**kwargs: Any) -> None:
+    async def _capture_delivery(**kwargs: Any) -> bool:
         delivered_websockets.append(kwargs["websocket"])
+        return True
 
     monkeypatch.setattr(
-        "z4j_brain.websocket.gateway.deliver_command_frame",
+        "z4j_brain.websocket.gateway.deliver_command_frame_with_authority",
         _capture_delivery,
     )
     await BulkRetryCoordinator(
@@ -1680,7 +1854,7 @@ async def test_new_resource_exact_replay_never_reexpands_live_tasks(
         max=100,
     )
 
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None
@@ -1721,7 +1895,7 @@ async def test_new_resource_exact_replay_never_reexpands_live_tasks(
         "validate_selection",
         _current_validator_must_not_run,
     )
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None
@@ -1751,7 +1925,7 @@ async def test_new_resource_exact_replay_never_reexpands_live_tasks(
     assert reservation.action == "bulk_retry_request.reservation"
     assert reservation.status == CommandStatus.COMPLETED
 
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None
@@ -1848,7 +2022,7 @@ async def test_new_resource_seals_only_owned_filtered_tasks_per_engine(
         _AllowProjectPolicy,
     )
     settings = _settings()
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None
@@ -1912,7 +2086,7 @@ async def test_new_resource_seals_only_owned_filtered_tasks_per_engine(
 
     # The cap is applied after the engine predicate in SQL. Celery rows cannot
     # consume an RQ-scoped request's only slot.
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None
@@ -1956,7 +2130,7 @@ async def test_new_resource_seals_exact_priority_and_search_scope(
     ],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The durable plan must match every active dashboard selection filter."""
+    """The durable plan must match every filter and keep search metacharacters literal."""
 
     sessions, project_id, user_id, _agent_id = boundary_db
     async with sessions() as session:
@@ -1965,27 +2139,27 @@ async def test_new_resource_seals_exact_priority_and_search_scope(
                 Task(
                     project_id=project_id,
                     engine="celery",
-                    task_id="critical-needle",
+                    task_id="critical-literal",
                     name="app.worker",
-                    queue="needle-queue",
+                    queue="needle_%-queue",
                     priority=TaskPriority.CRITICAL,
                     state=TaskState.FAILURE,
                 ),
                 Task(
                     project_id=project_id,
                     engine="celery",
-                    task_id="low-needle",
+                    task_id="low-literal",
                     name="app.worker",
-                    queue="needle-queue",
+                    queue="needle_%-queue",
                     priority=TaskPriority.LOW,
                     state=TaskState.FAILURE,
                 ),
                 Task(
                     project_id=project_id,
                     engine="celery",
-                    task_id="critical-other",
+                    task_id="critical-wildcard-decoy",
                     name="app.worker",
-                    queue="other-queue",
+                    queue="needleXY-queue",
                     priority=TaskPriority.CRITICAL,
                     state=TaskState.FAILURE,
                 ),
@@ -1998,7 +2172,7 @@ async def test_new_resource_seals_exact_priority_and_search_scope(
         _AllowProjectPolicy,
     )
     settings = _settings()
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None
@@ -2009,7 +2183,7 @@ async def test_new_resource_seals_exact_priority_and_search_scope(
                 filter={
                     "state": "failure",
                     "priority": ["critical"],
-                    "search": "needle",
+                    "search": "needle_%",
                 },
                 max=100,
             ),
@@ -2035,10 +2209,10 @@ async def test_new_resource_seals_exact_priority_and_search_scope(
         )
         assert parent is not None
         assert parent.effective_request["filter"]["priority"] == ["critical"]
-        assert parent.effective_request["filter"]["search"] == "needle"
+        assert parent.effective_request["filter"]["search"] == "needle_%"
         assert child is not None
-        assert child.payload["filter"]["task_ids"] == ["critical-needle"]
-        assert child.payload["filter"]["task_priorities"] == {"critical-needle": "critical"}
+        assert child.payload["filter"]["task_ids"] == ["critical-literal"]
+        assert child.payload["filter"]["task_priorities"] == {"critical-literal": "critical"}
 
 
 @pytest.mark.asyncio
@@ -2073,7 +2247,7 @@ async def test_new_resource_refuses_instead_of_truncating_all_matching_scope(
         _AllowProjectPolicy,
     )
     settings = _settings()
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None
@@ -2143,7 +2317,7 @@ async def test_refused_filter_and_partial_explicit_resolution_are_audited(
     )
     settings = _settings()
 
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None
@@ -2166,7 +2340,7 @@ async def test_refused_filter_and_partial_explicit_resolution_are_audited(
             )
     assert smuggled.value.status_code == 400
 
-    async with sessions() as session:
+    async with _request_session(sessions) as session:
         project = await session.get(Project, project_id)
         user = await session.get(User, user_id)
         assert project is not None and user is not None

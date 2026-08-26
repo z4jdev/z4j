@@ -111,6 +111,11 @@ async def _seed_global_admin_no_membership(
                     is_admin=True,  # <-- the critical bit
                     is_active=True,
                 ),
+            ]
+        )
+        await s.flush()
+        s.add_all(
+            [
                 Session(
                     id=session_id,
                     user_id=user_id,
@@ -216,6 +221,11 @@ class TestSubscriptionCreateGlobalAdmin:
                         is_admin=False,  # <-- NOT a global admin
                         is_active=True,
                     ),
+                ]
+            )
+            await s.flush()
+            s.add_all(
+                [
                     Session(
                         id=session_id,
                         user_id=user_id,

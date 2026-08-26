@@ -92,15 +92,20 @@ async def _make_seed(
     csrf = secrets.token_urlsafe(32)
 
     async with db.session() as s:
+        s.add_all(
+            [
+                Project(id=project_id, slug="default", name="Default"),
+                User(
+                    id=user_id,
+                    email=f"u-{uuid.uuid4().hex[:8]}@example.com",
+                    password_hash=hasher.hash("correct horse battery staple 9"),
+                    is_admin=is_admin,
+                    is_active=True,
+                ),
+            ]
+        )
+        await s.flush()
         rows = [
-            Project(id=project_id, slug="default", name="Default"),
-            User(
-                id=user_id,
-                email=f"u-{uuid.uuid4().hex[:8]}@example.com",
-                password_hash=hasher.hash("correct horse battery staple 9"),
-                is_admin=is_admin,
-                is_active=True,
-            ),
             Session(
                 id=session_id,
                 user_id=user_id,

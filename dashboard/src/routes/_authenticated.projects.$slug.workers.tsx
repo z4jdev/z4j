@@ -17,14 +17,13 @@
  */
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import type { ColumnDef } from "@tanstack/react-table";
 import { Cpu } from "lucide-react";
 import { FilterToolbar } from "@/components/domain/filter-toolbar";
 import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
 import { WorkerStateBadge } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type DataTableColumnDef } from "@/components/ui/data-table";
 import {
   Select,
   SelectContent,
@@ -39,7 +38,12 @@ import { formatCompact } from "@/lib/format";
 import type { WorkerPublic, WorkerState } from "@/lib/api-types";
 import { PageShell } from "@/components/domain/page-shell";
 
-const WORKER_STATES: WorkerState[] = ["online", "offline", "draining", "unknown"];
+const WORKER_STATES: WorkerState[] = [
+  "online",
+  "offline",
+  "draining",
+  "unknown",
+];
 
 export const Route = createFileRoute("/_authenticated/projects/$slug/workers")({
   component: WorkersPage,
@@ -64,10 +68,7 @@ function WorkersPage() {
     return workers.filter((w) => {
       if (stateFilter !== "all" && w.state !== stateFilter) return false;
       if (!q) return true;
-      return (
-        w.name.toLowerCase().includes(q) ||
-        w.id.toLowerCase().includes(q)
-      );
+      return w.name.toLowerCase().includes(q) || w.id.toLowerCase().includes(q);
     });
   }, [workers, searchQuery, stateFilter]);
 
@@ -99,10 +100,7 @@ function WorkersPage() {
         icon={Cpu}
         description="every worker process the agent has observed"
         actions={
-          <RefreshButton
-              onRefresh={() => refetch()}
-              pending={isFetching}
-            />
+          <RefreshButton onRefresh={() => refetch()} pending={isFetching} />
         }
       />
 
@@ -162,11 +160,15 @@ function WorkersPage() {
                 <span className="font-semibold">
                   {totals.online}/{totals.total}
                 </span>
-                <span className="ml-1 text-xs text-muted-foreground">online</span>
+                <span className="ml-1 text-xs text-muted-foreground">
+                  online
+                </span>
               </div>
               <div>
                 <span className="text-muted-foreground">Active: </span>
-                <span className="font-semibold tabular-nums">{totals.active}</span>
+                <span className="font-semibold tabular-nums">
+                  {totals.active}
+                </span>
               </div>
               <div>
                 <span className="text-muted-foreground">Succeeded: </span>
@@ -211,11 +213,21 @@ function WorkersPage() {
             <div className="rounded-md border bg-muted/30 px-4 py-2 text-xs">
               <span className="font-semibold text-muted-foreground">Total</span>
               <span className="ml-4 inline-flex gap-4 tabular-nums">
-                <span>active <strong>{totals.active}</strong></span>
-                <span className="text-success">succeeded <strong>{formatCompact(totals.succeeded)}</strong></span>
-                <span className="text-destructive">failed <strong>{formatCompact(totals.failed)}</strong></span>
-                <span className="text-warning">retried <strong>{formatCompact(totals.retried)}</strong></span>
-                <span>processed <strong>{formatCompact(totals.processed)}</strong></span>
+                <span>
+                  active <strong>{totals.active}</strong>
+                </span>
+                <span className="text-success">
+                  succeeded <strong>{formatCompact(totals.succeeded)}</strong>
+                </span>
+                <span className="text-destructive">
+                  failed <strong>{formatCompact(totals.failed)}</strong>
+                </span>
+                <span className="text-warning">
+                  retried <strong>{formatCompact(totals.retried)}</strong>
+                </span>
+                <span>
+                  processed <strong>{formatCompact(totals.processed)}</strong>
+                </span>
               </span>
             </div>
           )}
@@ -225,7 +237,7 @@ function WorkersPage() {
   );
 }
 
-function useWorkerColumns(slug: string): ColumnDef<WorkerPublic, unknown>[] {
+function useWorkerColumns(slug: string): DataTableColumnDef<WorkerPublic>[] {
   return useMemo(
     () => [
       {

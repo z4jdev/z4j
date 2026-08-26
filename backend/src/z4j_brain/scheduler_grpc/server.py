@@ -147,24 +147,31 @@ class SchedulerGrpcServer:
                 extra={"event": "scheduler_grpc_open_ca"},
             )
 
-        # Insecure-port path: mirror the scheduler-side
-        # insecure_grpc opt-in. Refused outside dev/test environments
-        # to make the security trade-off explicit. The mTLS allowlist
-        # interceptor cannot run without client certs, so when
-        # insecure mode is on we don't install it. This is OK because
-        # insecure mode requires environment != production by the
-        # check below; a production deployment hits the secure path.
+        # Insecure-port path: mirror the scheduler-side insecure_grpc opt-in.
+        # The mTLS allowlist interceptor cannot run without client certs, so
+        # when insecure mode is on we do not install it. That makes this the
+        # most privileged relaxation in the brain: no transport encryption and
+        # no certificate allow-list on the channel that drives schedules.
+        #
+        # It is therefore refused unless the environment is exactly ``dev``.
+        # This used to compare against "production", so a deployment labelled
+        # "staging" or "development" opened the listener with neither, while
+        # the message told the operator to set dev and the documentation said
+        # every non-dev value is treated as production. Both were true of every
+        # other gate and false here.
         insecure_mode = bool(
             getattr(self._settings, "scheduler_grpc_insecure", False),
         )
         if insecure_mode:
-            if self._settings.environment.strip().lower() == "production":
+            if not self._settings.is_dev:
                 raise RuntimeError(
                     "z4j.brain.scheduler_grpc: scheduler_grpc_insecure=true "
-                    "is refused in production. Either provide a TLS "
-                    "bundle (Z4J_SCHEDULER_GRPC_TLS_CERT/KEY/CA) or "
-                    "set Z4J_ENVIRONMENT=dev to acknowledge the "
-                    "trade-off for non-production deployments.",
+                    "is refused unless Z4J_ENVIRONMENT is exactly 'dev' "
+                    f"(it is {self._settings.environment!r}). Insecure mode "
+                    "serves the schedule-control channel with no TLS and no "
+                    "client-certificate allow-list. Either provide a TLS "
+                    "bundle (Z4J_SCHEDULER_GRPC_TLS_CERT/KEY/CA) or set "
+                    "Z4J_ENVIRONMENT=dev to acknowledge the trade-off.",
                 )
             logger.warning(
                 "z4j.brain.scheduler_grpc: serving INSECURE channel "

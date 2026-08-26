@@ -390,9 +390,10 @@ async def reset_password(
     """Admin password reset.
 
     Sets a fresh password hash, marks ``password_changed_at``,
-    and revokes every active session for the target user. The
-    ``password_changed_at`` anchor (B3) makes any session issued
-    before this point unusable even before the explicit revoke.
+    and revokes every active session for the target user. The explicit
+    revoke is authoritative. ``password_changed_at`` is
+    defense in depth for older rows outside SQLite's one-second timestamp
+    precision edge.
     """
     user = await users.get(user_id)
     if user is None:

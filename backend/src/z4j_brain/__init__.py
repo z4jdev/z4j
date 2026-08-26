@@ -19,9 +19,10 @@ from importlib.metadata import version as _pkg_version
 # this code.
 #
 # The wire-protocol version is still exposed (for compat checks
-# against agents) as ``protocol_version`` below, just under a
-# different name so operator-facing surfaces (logs, banners,
-# /api/v1/health) report the brain wheel version.
+# against agents) as ``protocol_version`` below. Keeping it separate
+# lets authenticated operator surfaces such as ``/api/v1/health/system``
+# report the brain wheel version; the public liveness and readiness
+# endpoints intentionally omit version details.
 try:
     __version__ = _pkg_version("z4j")
 except PackageNotFoundError:

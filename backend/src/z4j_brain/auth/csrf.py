@@ -16,8 +16,8 @@ by same-origin JS so it can be echoed back. An attacker who can
 read the CSRF cookie cannot use it without ALSO holding the
 session cookie (which is HttpOnly).
 
-This module is FastAPI-free. The dep wrapper lives in
-:mod:`z4j_brain.auth.deps`.
+This module is FastAPI-free. The dependency wrapper lives in
+:mod:`z4j_brain.api.deps`.
 """
 
 from __future__ import annotations
@@ -75,8 +75,10 @@ def tokens_match(expected: str, supplied: str | None) -> bool:
     """Constant-time equality between the session token and the header.
 
     Returns False on missing header, length mismatch, or value
-    mismatch - never raises. The constant-time guarantee is what
-    makes this safe against length-extension and timing leak.
+    mismatch - never raises. Equal-length token values are compared
+    with :func:`hmac.compare_digest` to avoid a value-dependent timing
+    comparison. These are random tokens, not hashes, so hash
+    length-extension is not part of the threat model.
     """
     if not supplied:
         return False

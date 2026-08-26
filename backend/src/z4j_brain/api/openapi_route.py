@@ -20,8 +20,9 @@ Defense-in-depth layers applied regardless of mode:
 1. Per-IP rate limit (``require_openapi_throttle``: 10 req/min/IP)
 2. ``Cache-Control`` headers per mode
 3. ``ETag`` based on schema hash; respond 304 on ``If-None-Match``
-4. Audit row ``openapi.schema_accessed`` on every successful 200
-5. Build watermark (``x-z4j-build``) at the top of the schema
+4. Best-effort ``openapi.schema_accessed`` audit attempt before each
+   successful 200 (an audit-store outage is logged but does not deny docs)
+5. Version watermark (``info.x-z4j-build``) in the schema metadata
 6. No-leak responses: ``private`` returns 401 with a generic
    ``WWW-Authenticate`` header; ``disabled`` paths simply do not
    exist (404 from the SPA catch-all)
@@ -73,11 +74,11 @@ def _build_schema_with_watermark(app: FastAPI) -> dict[str, Any]:
     """Build the OpenAPI schema and inject the build watermark.
 
     FastAPI caches ``app.openapi()`` internally on first call so this
-    function is cheap on subsequent invocations. We add a top-level
-    ``x-z4j-build`` extension carrying ``<version>+<git-sha>`` (or
-    just ``<version>`` if git is unavailable) so consumers can detect
-    stale schemas and forensic teams can correlate a captured schema
-    to a specific build.
+    function is cheap on subsequent invocations. We add an
+    ``info.x-z4j-build`` extension carrying the package version so
+    consumers can detect a stale schema. The installed artifact does
+    not necessarily carry source-control metadata, so this is a version
+    watermark rather than a commit identifier.
     """
     schema = app.openapi()
     # ``info.x-z4j-build`` is conventional placement for extensions

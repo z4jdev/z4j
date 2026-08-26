@@ -4,13 +4,14 @@ Shared by routers that need to stream query results as file
 downloads (today: ``/audit``; ``/tasks`` has inlined equivalents
 that will migrate here in a follow-up cleanup).
 
-Security: every helper routes attacker-controllable strings
-through :func:`neutralise_formula` before they reach the client's
-spreadsheet. Task names, audit ``action`` values, ``user_agent``
-headers, and exception strings are all operator-visible in Excel /
-Google Sheets / LibreOffice; without the apostrophe prefix a
-crafted value starting with ``=``, ``+``, ``-``, ``@``, tab, or CR
-becomes a live formula. Same rationale as ``tasks.py``.
+Security: the CSV and XLSX helpers route attacker-controllable strings
+through :func:`neutralise_formula` before they reach spreadsheet cells.
+Task names, audit ``action`` values, ``user_agent`` headers, and exception
+strings are all operator-visible in Excel / Google Sheets / LibreOffice;
+without the apostrophe prefix a crafted value starting with ``=``, ``+``,
+``-``, ``@``, tab, or CR becomes a live formula. JSON preserves the source
+value because it is a data interchange format rather than a spreadsheet
+cell format. Same rationale as ``tasks.py``.
 """
 
 from __future__ import annotations

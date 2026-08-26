@@ -14,6 +14,7 @@ from __future__ import annotations
 from z4j_brain.persistence.base import Base, naming_convention
 from z4j_brain.persistence.database import (
     DatabaseManager,
+    create_async_engine_from_url,
     create_engine_from_settings,
     get_session,
 )
@@ -21,6 +22,7 @@ from z4j_brain.persistence.database import (
 __all__ = [
     "Base",
     "DatabaseManager",
+    "create_async_engine_from_url",
     "create_engine_from_settings",
     "get_session",
     "naming_convention",

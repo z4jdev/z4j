@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Literal
@@ -19,7 +21,7 @@ from astral.sun import (
     sunrise,
     sunset,
 )
-from croniter import CroniterBadCronError, croniter
+from croniter import CroniterBadCronError, croniter  # type: ignore[import-untyped]
 
 from z4j_brain.domain.schedule_runtime import (
     CADENCE_SEMANTICS_VERSION,
@@ -38,7 +40,7 @@ _INTERVAL_SECONDS = {
     "h": 3600,
     "d": 86400,
 }
-_SOLAR_EVENTS = {
+_SOLAR_EVENTS: dict[str, Callable[..., datetime]] = {
     "dawn": dawn,
     "sunrise": sunrise,
     "noon": noon,
@@ -94,9 +96,15 @@ def _next_cron(expression: str, timezone: str, after: datetime) -> datetime:
     except ZoneInfoNotFoundError as exc:
         raise ScheduleCadenceError(f"unknown timezone: {timezone!r}") from exc
     try:
-        return croniter(expression, _aware(after, field="after").astimezone(zone)).get_next(
+        candidate = croniter(
+            expression,
+            _aware(after, field="after").astimezone(zone),
+        ).get_next(
             datetime,
         )
+        if not isinstance(candidate, datetime):
+            raise TypeError("croniter returned a non-datetime successor")
+        return candidate
     except (CroniterBadCronError, ValueError) as exc:
         raise ScheduleCadenceError(
             f"invalid cron expression: {expression!r}",
@@ -133,6 +141,8 @@ def _parse_solar(expression: str) -> tuple[str, float, float]:
         longitude = float(longitude_raw)
     except ValueError as exc:
         raise ScheduleCadenceError("solar coordinates must be finite numbers") from exc
+    if not math.isfinite(latitude) or not math.isfinite(longitude):
+        raise ScheduleCadenceError("solar coordinates must be finite numbers")
     if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
         raise ScheduleCadenceError("solar coordinates are out of range")
     return event, latitude, longitude
@@ -152,7 +162,12 @@ def _next_solar(
     for _ in range(max_days_ahead):
         try:
             candidate = event_function(observer, date=cursor, tzinfo=UTC)
-        except Exception:
+        # Astral documents ValueError for dates on which the requested event
+        # does not occur (for example polar-night sunrise). That is a normal
+        # search miss. Dependency failures and programming errors must escape;
+        # swallowing every Exception here used to turn a broken runtime into a
+        # plausible-looking "no successor in 365 days" result.
+        except ValueError:
             cursor += timedelta(days=1)
             continue
         if candidate > lower_bound:
@@ -171,6 +186,7 @@ def canonical_next_run_at(
 ) -> datetime | None:
     """Return the exact canonical UTC successor for one definition."""
 
+    result: datetime | None
     if kind == "cron":
         result = _next_cron(
             expression,

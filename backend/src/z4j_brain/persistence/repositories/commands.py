@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import DateTime, and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from z4j_core.errors import ConflictError
+from z4j_core.errors import AgentOfflineError, ConflictError
 
 from z4j_brain.domain.schedule_fire_authority import (
     SCHEDULE_FIRE_PROTOCOL_MARKER,
 )
 from z4j_brain.persistence.enums import CommandStatus
 from z4j_brain.persistence.models import (
+    Agent,
     Command,
     Schedule,
     ScheduleExternalControlOperation,
@@ -94,9 +95,44 @@ def action_is_redeliverable(action: str) -> bool:
     return action in _REDELIVERABLE_ACTIONS
 
 
+async def _database_now(session: AsyncSession) -> datetime:
+    """Read a wall-clock generation from the database, never this process.
+
+    PostgreSQL ``CURRENT_TIMESTAMP`` is fixed at transaction start, which is
+    unsuitable for leases in a long-running transaction. ``clock_timestamp``
+    advances in real time. SQLite's fractional ``strftime`` is the equivalent
+    connection-local database clock and avoids its one-second
+    ``CURRENT_TIMESTAMP`` resolution. Other supported/test dialects fall back
+    to their typed ``CURRENT_TIMESTAMP``.
+    """
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        expression = func.clock_timestamp(type_=DateTime(timezone=True))
+    elif dialect == "sqlite":
+        expression = func.strftime(
+            "%Y-%m-%d %H:%M:%f",
+            "now",
+            type_=DateTime(timezone=True),
+        )
+    else:
+        expression = func.current_timestamp(type_=DateTime(timezone=True))
+    observed = cast("datetime | None", await session.scalar(select(expression)))
+    if observed is None:
+        raise RuntimeError("database did not return a timestamp for command lease")
+    return observed if observed.tzinfo is not None else observed.replace(tzinfo=UTC)
+
+
 def _canonical_payload(payload: dict[str, Any] | None) -> str:
     """A stable string identity for a command payload, minus volatile keys."""
     stable = {k: v for k, v in (payload or {}).items() if k not in _VOLATILE_PAYLOAD_KEYS}
+    # Retry's public identity is its relative ``eta_seconds`` request. ``eta``
+    # is the absolute wire deadline derived from the request clock, so it will
+    # differ when the same idempotency key is replayed. Ignore only that
+    # derivative when its stable source field is present; a different
+    # ``eta_seconds`` still conflicts, and a caller that supplies only an
+    # absolute ``eta`` still has that value included in identity.
+    if stable.get("eta_seconds") is not None:
+        stable.pop("eta", None)
     return json.dumps(stable, sort_keys=True, default=str)
 
 
@@ -113,6 +149,29 @@ class CommandRepository(BaseRepository[Command]):
 
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, Command)
+
+    async def _lock_live_agent(self, *, project_id: UUID, agent_id: UUID) -> bool:
+        """Lock the durable command target in the caller's established order."""
+        live = (
+            await self.session.execute(
+                select(Agent.id)
+                .where(
+                    Agent.id == agent_id,
+                    Agent.project_id == project_id,
+                    Agent.revoked_at.is_(None),
+                )
+                .with_for_update(),
+            )
+        ).scalar_one_or_none()
+        return live is not None
+
+    async def _require_live_agent(self, *, project_id: UUID, agent_id: UUID) -> None:
+        """Lock the durable command target or fail before inserting work."""
+        if not await self._lock_live_agent(project_id=project_id, agent_id=agent_id):
+            raise AgentOfflineError(
+                "agent is revoked or unavailable",
+                details={"agent_id": str(agent_id)},
+            )
 
     # ------------------------------------------------------------------
     # Inserts
@@ -141,6 +200,7 @@ class CommandRepository(BaseRepository[Command]):
     ) -> tuple[Command, bool]:
         """Insert/reuse one complete receipt-bound cadence command."""
 
+        await self._require_live_agent(project_id=project_id, agent_id=agent_id)
         if payload.get("fire_id") != str(execution_fire_id):
             raise ValueError("cadence command payload lacks its execution fire identity")
         idempotency_key = f"schedule:{schedule_id}:fire:{fire_id}:receipt:{receipt_control_token}"
@@ -296,6 +356,16 @@ class CommandRepository(BaseRepository[Command]):
             async with self.session.begin_nested():
                 self.session.add(row)
                 await self.session.flush()
+                # Preserve idempotency-collision classification: a conflicting
+                # existing row must still raise ConflictError even when the
+                # re-issuer supplied an unknown agent. For a genuinely new row,
+                # validate the durable target inside the same SAVEPOINT so a
+                # revoked target rolls the insert back before it can escape.
+                if agent_id is not None:
+                    await self._require_live_agent(
+                        project_id=project_id,
+                        agent_id=agent_id,
+                    )
         except IntegrityError:
             if idempotency_key is None:
                 # No idempotency contract → caller did not opt into
@@ -449,6 +519,11 @@ class CommandRepository(BaseRepository[Command]):
             select(Schedule).where(Schedule.id == candidate.schedule_id).with_for_update(),
         )
         schedule = schedule_result.scalar_one_or_none()
+        if not await self._lock_live_agent(
+            project_id=project_id,
+            agent_id=agent_id,
+        ):
+            return True, None
         command_result = await self.session.execute(
             select(Command).where(Command.id == command_id).with_for_update(),
         )
@@ -616,6 +691,12 @@ class CommandRepository(BaseRepository[Command]):
             or stream.executor_agent_id != agent_id
             or stream.executor_registry_owner_id != registry_owner_id
             or stream.executor_session_generation != session_generation
+        ):
+            return None
+
+        if not await self._lock_live_agent(
+            project_id=project_id,
+            agent_id=agent_id,
         ):
             return None
 
@@ -793,6 +874,12 @@ class CommandRepository(BaseRepository[Command]):
         if schedule is None:
             return None
 
+        if not await self._lock_live_agent(
+            project_id=project_id,
+            agent_id=agent_id,
+        ):
+            return None
+
         command = (
             await self.session.execute(
                 select(Command).where(Command.id == command_id).with_for_update(),
@@ -952,9 +1039,11 @@ class CommandRepository(BaseRepository[Command]):
         caller threads it into ``revert_dispatch(expected_dispatched_at=...)`` so a
         failed-send revert can only ever undo ITS OWN claim -- a delayed sender
         whose claim was already superseded by a newer redispatch reverts nothing.
-        The datetime is truthy, None is falsy, so existing ``if claimed`` /
-        ``if not claimed`` callers are unaffected."""
-        generation = datetime.now(UTC)
+        The generation comes from the database wall clock, so replica clock skew
+        cannot make a fresh delivery immediately lease-eligible (or postpone it
+        indefinitely). The datetime is truthy, None is falsy, so existing ``if
+        claimed`` / ``if not claimed`` callers are unaffected."""
+        generation = await _database_now(self.session)
         predicates = [
             Command.id == command_id,
             Command.status == CommandStatus.PENDING,
@@ -974,7 +1063,7 @@ class CommandRepository(BaseRepository[Command]):
                 timeout_at=generation + timedelta(seconds=timeout_seconds),
             ),
         )
-        return generation if (result.rowcount or 0) > 0 else None
+        return generation if (getattr(result, "rowcount", 0) or 0) > 0 else None
 
     async def revert_dispatch(
         self,
@@ -1086,6 +1175,7 @@ class CommandRepository(BaseRepository[Command]):
         command_id: UUID,
         *,
         min_interval_seconds: float,
+        expected_dispatched_at: datetime | None = None,
     ) -> bool:
         """Single-winner lease for a DISPATCHED-recovery redispatch (/
         ). Returns True for the poller that should re-send the frame.
@@ -1098,32 +1188,59 @@ class CommandRepository(BaseRepository[Command]):
         restarted agent that lacks in-memory dedup), and re-stamping ``now()`` kept
         the row inside the selection window indefinitely.
 
-        This is now a real LEASE: the claim fires only if the last dispatch/redispatch
-        was at least ``min_interval_seconds`` ago (``dispatched_at <= now - lease``),
-        computed against a SERVER-side cutoff, not the caller's read value. So the
-        first re-send stamps ``dispatched_at = now()`` and every poll within the
-        next ``min_interval_seconds`` finds ``dispatched_at > cutoff`` and skips --
-        capping re-sends to at most one per lease interval. ``timeout_at`` is left
-        untouched so the CommandTimeoutWorker still retires a truly-stuck row on
-        its original deadline. Cross-restart dedup still relies on agent-side
-        idempotency (a larger design item).
+        This is a real database-clock lease with a strict generation CAS. The
+        repository first observes ``dispatched_at`` and the database wall clock,
+        then updates only if that exact generation is still current and is at
+        least ``min_interval_seconds`` old. A concurrent replica that advanced
+        the generation wins; a stale claimant cannot overwrite it (including an
+        ABA-shaped delayed claim). The winner stamps a strictly-newer generation
+        derived from database time. Process clock skew is irrelevant.
+
+        ``timeout_at`` is left untouched so the CommandTimeoutWorker still
+        retires a truly-stuck row on its original deadline. Cross-restart dedup
+        still relies on agent-side idempotency (a larger design item).
         """
-        cutoff = datetime.now(UTC) - timedelta(seconds=min_interval_seconds)
+        observed = expected_dispatched_at
+        if observed is None:
+            # Compatibility for internal callers that did not select the row.
+            # Delivery paths should pass their observed generation so a delayed
+            # snapshot cannot become authoritative after the lease elapses.
+            observed = await self.session.scalar(
+                select(Command.dispatched_at).where(
+                    Command.id == command_id,
+                    Command.status == CommandStatus.DISPATCHED,
+                    Command.schedule_protocol_marker.is_(None),
+                    Command.action != _EXTERNAL_CONTROL_ACTION,
+                ),
+            )
+        if observed is None:
+            return False
+        database_now = await _database_now(self.session)
+        observed_utc = observed if observed.tzinfo else observed.replace(tzinfo=UTC)
+        cutoff = database_now - timedelta(seconds=max(min_interval_seconds, 0.0))
+        if observed_utc > cutoff:
+            return False
+        # Fractional SQLite database time has millisecond resolution.  A zero
+        # lease can therefore observe the same timestamp twice; advance one
+        # microsecond from the durable generation so every successful CAS has a
+        # distinct token even then.  No process clock participates.
+        generation = max(database_now, observed_utc + timedelta(microseconds=1))
         result = await self.session.execute(
             update(Command)
             .where(
                 Command.id == command_id,
                 Command.status == CommandStatus.DISPATCHED,
+                Command.dispatched_at == observed,
                 Command.dispatched_at <= cutoff,
                 Command.schedule_protocol_marker.is_(None),
                 Command.action != _EXTERNAL_CONTROL_ACTION,
             )
-            .values(dispatched_at=datetime.now(UTC))
+            .values(dispatched_at=generation)
             # The datetime WHERE must run in SQL, not the ORM's in-memory
             # evaluator (which trips on a naive/aware mix under SQLite).
             .execution_options(synchronize_session=False),
         )
-        return (result.rowcount or 0) > 0
+        return (getattr(result, "rowcount", 0) or 0) > 0
 
     async def mark_completed(
         self,

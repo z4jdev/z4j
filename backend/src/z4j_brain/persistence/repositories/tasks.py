@@ -7,14 +7,105 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import Select, and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from z4j_brain.persistence.enums import TERMINAL_TASK_STATES, TaskState
 from z4j_brain.persistence.models import Task
 from z4j_brain.persistence.repositories._base import BaseRepository
 
 logger = structlog.get_logger("z4j.brain.repositories.tasks")
+
+_TERMINAL_STATES_SQL = tuple(
+    sorted(TERMINAL_TASK_STATES, key=lambda state: state.value),
+)
+_PROJECTION_LIFECYCLE_FIELDS = frozenset(
+    {"received_at", "started_at", "finished_at", "last_failed_at"},
+)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize a dialect-returned or caller-supplied datetime to UTC."""
+    return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _bound_projection_lifecycle_values(
+    values: dict[str, Any],
+    *,
+    guard_now: datetime,
+) -> dict[str, Any]:
+    """Prevent source clock skew from becoming a future task watermark."""
+    bounded = dict(values)
+    for field in _PROJECTION_LIFECYCLE_FIELDS:
+        value = bounded.get(field)
+        if isinstance(value, datetime):
+            bounded[field] = min(_as_utc(value), guard_now)
+    return bounded
+
+
+def _event_projection_guard(
+    *,
+    incoming_state: TaskState,
+    occurred_at: datetime,
+    guard_now: datetime,
+) -> ColumnElement[bool]:
+    """Return the database-side eligibility guard for one task event.
+
+    The predicate is deliberately expressed only with portable SQL constructs;
+    both SQLite and PostgreSQL execute the same transition rules:
+
+    * terminal always wins over a currently non-terminal row;
+    * a terminal row is never demoted to non-terminal;
+    * within the same tier, every non-future stored lifecycle timestamp must be
+      no newer than the incoming event;
+    * a legacy/future-skewed stored timestamp is bounded to the incoming
+      processing-authority watermark, so it cannot permanently pin the row.
+
+    ``Task.updated_at <= guard_now`` is the processing-order fence. Every
+    accepted projection writes its bound ``guard_now`` into ``updated_at``;
+    consequently a repository call that began earlier but waited behind a
+    newer writer cannot later mistake that writer's lifecycle value for legacy
+    source-clock skew and overwrite it. This is what makes the result independent
+    of database lock/writer order under concurrent brain replicas.
+
+    ``guard_now`` is a bound value rather than a database clock expression so
+    SQLite and PostgreSQL compare the same instant and datetime representation.
+    The incoming ``occurred_at`` has already been capped to that instant. A
+    stored value beyond it is treated as source clock skew and folded to the
+    incoming watermark rather than to ``guard_now`` itself: folding to
+    ``guard_now`` would reject an ordinary event whose source timestamp was a
+    few microseconds before the repository began processing it, then the raw
+    event dedupe row would make that rejection irreversible on replay.
+    """
+    lifecycle_not_newer = and_(
+        *(
+            or_(
+                column.is_(None),
+                case(
+                    (column > guard_now, occurred_at),
+                    else_=column,
+                )
+                <= occurred_at,
+            )
+            for column in (Task.received_at, Task.started_at, Task.finished_at)
+        ),
+    )
+    current_terminal = Task.state.in_(_TERMINAL_STATES_SQL)
+    processing_not_newer = Task.updated_at <= guard_now
+    if incoming_state in TERMINAL_TASK_STATES:
+        return and_(
+            processing_not_newer,
+            or_(
+                Task.state.not_in(_TERMINAL_STATES_SQL),
+                and_(current_terminal, lifecycle_not_newer),
+            ),
+        )
+    return and_(
+        processing_not_newer,
+        Task.state.not_in(_TERMINAL_STATES_SQL),
+        lifecycle_not_newer,
+    )
 
 
 class TaskRepository(BaseRepository[Task]):
@@ -106,69 +197,99 @@ class TaskRepository(BaseRepository[Task]):
         project_id: UUID,
         engine: str,
         task_id: str,
+        incoming_state: TaskState,
+        occurred_at: datetime,
         defaults: dict[str, Any],
         updates: dict[str, Any],
-        existing: Task | None = None,
-        existing_loaded: bool = False,
-    ) -> Task:
-        """Insert-or-update a task row from an inbound event.
+    ) -> bool:
+        """Atomically insert or conditionally update a task projection.
 
-        ``defaults`` populate the row on insert; ``updates`` are
-        applied on every event regardless and override defaults
-        when a key appears in both. Single round-trip in the
-        common case via SELECT-then-update - production data
-        volumes do not justify a real upsert until B5.
+        The transition decision and *all* event-specific field writes happen
+        in one conditional ``UPDATE``. This is load-bearing: a Python
+        ``SELECT`` followed by attribute assignment lets two brain replicas
+        both approve against the same old row, after which the stale writer can
+        overwrite a newer terminal state and its result/exception details.
 
-        Callers that have already loaded the row via
-        ``get_by_engine_task_id`` (e.g.
-        ``EventIngestor._project_task`` for the
-        out-of-order-state-transition guard) can pass it as
-        ``existing`` + ``existing_loaded=True`` to skip a
-        redundant SELECT. With the 1000-event frame cap this
-        halves the SELECTs in the dominant write path (~3000 →
-        ~1500 round trips for a saturated batch).
+        The update predicate is evaluated while the database takes the row
+        write lock, so the final result is independent of writer order. If no
+        row exists, the insert is protected by a savepoint; an insert race
+        retries the same conditional update against the winner's row.
+
+        Returns ``True`` when this event inserted or updated the projection and
+        ``False`` when the existing row held newer or terminal truth.
         """
         from sqlalchemy.exc import IntegrityError
 
-        if not existing_loaded:
-            existing = await self.get_by_engine_task_id(
-                project_id=project_id,
-                engine=engine,
-                task_id=task_id,
+        identity = (
+            Task.project_id == project_id,
+            Task.engine == engine,
+            Task.task_id == task_id,
+        )
+        guard_now = datetime.now(UTC)
+        projection_at = min(_as_utc(occurred_at), guard_now)
+        guard = _event_projection_guard(
+            incoming_state=incoming_state,
+            occurred_at=projection_at,
+            guard_now=guard_now,
+        )
+        bounded_updates = _bound_projection_lifecycle_values(
+            updates,
+            guard_now=guard_now,
+        )
+        update_values = {
+            **bounded_updates,
+            "state": incoming_state,
+            "updated_at": guard_now,
+        }
+
+        async def _apply_update() -> bool:
+            result = await self.session.execute(
+                update(Task)
+                .where(*identity, guard)
+                .values(**update_values)
+                .execution_options(synchronize_session="fetch"),
             )
-        if existing is None:
-            merged: dict[str, Any] = {**defaults, **updates}
-            row = Task(
-                project_id=project_id,
-                engine=engine,
-                task_id=task_id,
-                **merged,
+            return bool(getattr(result, "rowcount", 0) or 0)
+
+        async def _row_exists() -> bool:
+            result = await self.session.execute(
+                select(Task.id).where(*identity).limit(1),
             )
-            # SAVEPOINT - two concurrent events for the same
-            # ``(project, engine, task_id)`` race on the insert.
-            # Without the savepoint, the loser's ``UniqueViolation``
-            # poisons the outer transaction and cascades a
-            # ``PendingRollbackError`` through the whole event
-            # batch (follow-up caught this under concurrent
-            # enterprise-stack load).
-            try:
-                async with self.session.begin_nested():
-                    self.session.add(row)
-                    await self.session.flush()
-            except IntegrityError:
-                existing = await self.get_by_engine_task_id(
-                    project_id=project_id,
-                    engine=engine,
-                    task_id=task_id,
-                )
-                if existing is None:
-                    raise  # genuinely couldn't insert or read back
-            else:
-                return row
-        for key, value in updates.items():
-            setattr(existing, key, value)
-        await self.session.flush()
-        return existing
+            return result.scalar_one_or_none() is not None
+
+        # Existing-row common case: one conditional statement, with no
+        # approval snapshot that can go stale before the write.
+        if await _apply_update():
+            return True
+        if await _row_exists():
+            return False
+
+        merged: dict[str, Any] = {
+            **defaults,
+            **bounded_updates,
+            "state": incoming_state,
+        }
+        row = Task(
+            project_id=project_id,
+            engine=engine,
+            task_id=task_id,
+            updated_at=guard_now,
+            **merged,
+        )
+        try:
+            async with self.session.begin_nested():
+                self.session.add(row)
+                await self.session.flush()
+        except IntegrityError:
+            # Another transaction inserted the identity after our absence
+            # probe. Re-evaluate eligibility against its committed row; never
+            # apply the pre-race decision or unconditional detail fields.
+            if await _apply_update():
+                return True
+            if await _row_exists():
+                return False
+            raise
+        return True
 
     async def apply_reconciled_state(
         self,
@@ -339,7 +460,7 @@ class TaskRepository(BaseRepository[Task]):
         # expire it so any later read in this transaction (e.g. the
         # orphaned-automation field build) refetches fresh values.
         self.session.expire(existing)
-        return bool(result.rowcount or 0)
+        return bool(getattr(result, "rowcount", 0) or 0)
 
     async def list_for_project(
         self,
@@ -372,41 +493,18 @@ class TaskRepository(BaseRepository[Task]):
         - ``until`` - upper bound on received_at
         """
         stmt = select(Task).where(Task.project_id == project_id)
-        if state is not None:
-            stmt = stmt.where(Task.state == state)
-        if engine is not None:
-            # RH4: the engine predicate MUST be in the SQL WHERE so the row
-            # ``limit`` applies to the already-engine-scoped set. Filtering by
-            # engine in Python AFTER the limit lets other-engine rows consume the
-            # cap and silently drops owned target-engine rows past the window.
-            stmt = stmt.where(Task.engine == engine)
-        if priority:
-            stmt = stmt.where(Task.priority.in_(priority))
-        if name_substring:
-            # M3: escape LIKE metacharacters so a literal '%' or '_' in the
-            # operator's selection filter matches literally. contains() defaults
-            # to autoescape=False, which would let name='billing%refund'
-            # over-match 'billingXrefund' and widen a bulk-retry beyond the
-            # operator's intended set (retrying tasks they meant to exclude).
-            stmt = stmt.where(Task.name.contains(name_substring, autoescape=True))
-        if search_query:
-            like_pattern = f"%{search_query}%"
-            stmt = stmt.where(
-                or_(
-                    Task.name.ilike(like_pattern),
-                    Task.queue.ilike(like_pattern),
-                    Task.worker_name.ilike(like_pattern),
-                    Task.task_id.ilike(like_pattern),
-                ),
-            )
-        if queue:
-            stmt = stmt.where(Task.queue == queue)
-        if worker:
-            stmt = stmt.where(Task.worker_name == worker)
-        if since is not None:
-            stmt = stmt.where(Task.received_at >= since)
-        if until is not None:
-            stmt = stmt.where(Task.received_at <= until)
+        stmt = self.apply_list_filters(
+            stmt,
+            state=state,
+            priority=priority,
+            name_substring=name_substring,
+            search_query=search_query,
+            queue=queue,
+            worker=worker,
+            engine=engine,
+            since=since,
+            until=until,
+        )
         if cursor is not None:
             sort_value, tiebreaker = cursor
             if sort_value is None:
@@ -440,6 +538,67 @@ class TaskRepository(BaseRepository[Task]):
         ).limit(limit)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    @staticmethod
+    def apply_list_filters(
+        stmt: Select[Any],
+        *,
+        state: TaskState | None = None,
+        priority: list[Any] | None = None,
+        name_substring: str | None = None,
+        search_query: str | None = None,
+        queue: str | None = None,
+        worker: str | None = None,
+        engine: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> Select[Any]:
+        """Apply the task-list selection contract to a statement.
+
+        Destructive filtered operations use this same builder so their sealed
+        target set cannot drift from the list the operator selected.
+        """
+        if state is not None:
+            stmt = stmt.where(Task.state == state)
+        if engine is not None:
+            # RH4: the engine predicate MUST be in the SQL WHERE so the row
+            # ``limit`` applies to the already-engine-scoped set. Filtering by
+            # engine in Python AFTER the limit lets other-engine rows consume the
+            # cap and silently drops owned target-engine rows past the window.
+            stmt = stmt.where(Task.engine == engine)
+        if priority:
+            stmt = stmt.where(Task.priority.in_(priority))
+        if name_substring:
+            # M3: escape LIKE metacharacters so a literal '%' or '_' in the
+            # operator's selection filter matches literally. contains() defaults
+            # to autoescape=False, which would let name='billing%refund'
+            # over-match 'billingXrefund' and widen a bulk-retry beyond the
+            # operator's intended set (retrying tasks they meant to exclude).
+            stmt = stmt.where(Task.name.contains(name_substring, autoescape=True))
+        if search_query:
+            # Search is a literal, case-insensitive substring across each field.
+            # ``icontains(..., autoescape=True)`` mirrors the guarded name filter
+            # above and emits an explicit ESCAPE clause on both SQLite and
+            # PostgreSQL.  Raw ILIKE patterns would treat operator-supplied '%',
+            # '_', and the escape character itself as pattern syntax, potentially
+            # widening both the task list and durable bulk-retry selection.
+            stmt = stmt.where(
+                or_(
+                    Task.name.icontains(search_query, autoescape=True),
+                    Task.queue.icontains(search_query, autoescape=True),
+                    Task.worker_name.icontains(search_query, autoescape=True),
+                    Task.task_id.icontains(search_query, autoescape=True),
+                ),
+            )
+        if queue:
+            stmt = stmt.where(Task.queue == queue)
+        if worker:
+            stmt = stmt.where(Task.worker_name == worker)
+        if since is not None:
+            stmt = stmt.where(Task.received_at >= since)
+        if until is not None:
+            stmt = stmt.where(Task.received_at <= until)
+        return stmt
 
     async def get_priority_label(
         self,

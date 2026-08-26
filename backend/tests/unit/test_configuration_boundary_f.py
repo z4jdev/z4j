@@ -14,6 +14,7 @@ from z4j_brain import cli
 from z4j_brain.configuration import (
     ConfigurationCaptureError,
     capture_configuration,
+    capture_explicit_configuration_file,
     settings_from_snapshot,
 )
 from z4j_brain.secret_store import (
@@ -348,6 +349,108 @@ def test_config_validate_reuses_private_secret_policy(
             shutil.rmtree(cleanup, ignore_errors=True)
 
 
+def test_config_validate_rejects_unknown_z4j_key(
+    private_home: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate = private_home / "candidate.env"
+    candidate.write_text("Z4J_TOTALLY_MADE_UP=value\n", encoding="utf-8")
+
+    assert cli._run_config_validate(Namespace(path=str(candidate))) == 1
+    assert "unsupported setting key" in capsys.readouterr().err
+
+
+def test_config_validate_accepts_non_settings_runtime_tunables(
+    private_home: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate = private_home / "candidate.env"
+    candidate.write_text(
+        "Z4J_AUTO_MIGRATE=false\nZ4J_ALEMBIC_INI=/srv/z4j/alembic.ini\nZ4J_DEBUG_HOST_ERRORS=off\n",
+        encoding="utf-8",
+    )
+
+    assert cli._run_config_validate(Namespace(path=str(candidate))) == 0
+    assert "3 setting(s) parsed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("Z4J_AUTO_MIGRATE", "flase"),
+        ("Z4J_AUTO_MIGRATE", "' false '"),
+        ("Z4J_DEBUG_HOST_ERRORS", "sometimes"),
+        ("Z4J_DEBUG_HOST_ERRORS", "' true '"),
+        ("Z4J_ALEMBIC_INI", ""),
+    ),
+)
+def test_config_validate_rejects_invalid_non_settings_tunable(
+    private_home: Path,
+    capsys: pytest.CaptureFixture[str],
+    key: str,
+    value: str,
+) -> None:
+    candidate = private_home / "candidate.env"
+    candidate.write_text(f"{key}={value}\n", encoding="utf-8")
+
+    assert cli._run_config_validate(Namespace(path=str(candidate))) == 1
+    assert key in capsys.readouterr().err
+
+
+def test_config_validate_uses_startup_json_decoder_for_composites(
+    private_home: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate = private_home / "candidate.env"
+    candidate.write_text(
+        'Z4J_ALLOWED_HOSTS=["z4j.example.com"]\nZ4J_CORS_ORIGINS=["https://z4j.example.com"]\n',
+        encoding="utf-8",
+    )
+
+    assert cli._run_config_validate(Namespace(path=str(candidate))) == 0
+    captured = capsys.readouterr()
+    assert "tunables are valid" in captured.out
+    assert "runtime bootstrap sources not checked" in captured.out
+
+
+def test_dashboard_dotenv_quoting_survives_the_startup_reader(
+    private_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = private_home / "dashboard-copy.env"
+    candidate.write_text(
+        'Z4J_EMBEDDED_SCHEDULER_ARGV=\'["serve","--label=a # b","O\\\'Brien","${HOME}"]\'\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", "/must-not-expand")
+
+    parsed = capture_explicit_configuration_file(candidate)
+
+    assert parsed["Z4J_EMBEDDED_SCHEDULER_ARGV"] == (
+        '["serve","--label=a # b","O\'Brien","${HOME}"]'
+    )
+
+
+def test_generated_init_template_is_a_valid_tunables_candidate(
+    private_home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "z4j_home", lambda: private_home)
+    monkeypatch.setattr(cli, "ensure_z4j_home", lambda: private_home.mkdir(exist_ok=True))
+
+    assert cli._run_init(Namespace(force=False)) == 0
+    capsys.readouterr()
+    candidate = private_home / "config.env"
+    assert candidate.stat().st_mode & 0o777 == 0o644
+    assert "Z4J_FIRST_BOOT_ATTEMPTS_PER_IP=30" in candidate.read_text(encoding="utf-8")
+    assert "Z4J_MAX_PAYLOAD_SIZE_BYTES=8192" in candidate.read_text(encoding="utf-8")
+    assert "Z4J_MAX_WS_FRAME_BYTES=1048576" in candidate.read_text(encoding="utf-8")
+    assert "Z4J_WS_MAX_FRAME_BYTES=1048576" in candidate.read_text(encoding="utf-8")
+    assert "Z4J_RATELIMIT_FIRST_BOOT_ATTEMPTS_PER_IP" not in candidate.read_text(encoding="utf-8")
+    assert cli._run_config_validate(Namespace(path=str(candidate))) == 0
+
+
 def _clear_z4j_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in tuple(os.environ):
         if key.startswith("Z4J_"):
@@ -476,3 +579,22 @@ def test_metrics_rotation_refuses_shadow_and_preserves_full_store(
     assert winner.values["Z4J_METRICS_AUTH_TOKEN"] == rotated
     assert winner.values["Z4J_SECRET"] == original["Z4J_SECRET"]
     assert winner.values["Z4J_AUDIT_CHAIN_SECRET"] == original["Z4J_AUDIT_CHAIN_SECRET"]
+
+
+def test_doctor_does_not_call_disabled_metrics_public(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The public flag has no effect when the endpoint is not mounted."""
+    monkeypatch.setenv("Z4J_METRICS_ENABLED", "false")
+    monkeypatch.setenv("Z4J_METRICS_PUBLIC", "true")
+    monkeypatch.setattr(cli, "_run_check", lambda _args: 0)
+    monkeypatch.setattr(
+        cli,
+        "_build_settings_from_env",
+        lambda: (_ for _ in ()).throw(RuntimeError("stop after static warnings")),
+    )
+
+    assert cli._run_doctor(Namespace()) == 0
+    output = capsys.readouterr().out
+    assert "Z4J_METRICS_PUBLIC=1 is set" not in output

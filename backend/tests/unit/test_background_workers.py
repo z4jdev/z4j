@@ -1,4 +1,10 @@
-"""Tests for ``CommandTimeoutWorker`` and ``AgentHealthWorker``."""
+"""Tests for ``CommandTimeoutWorker`` and ``AgentHealthWorker``.
+
+These run against a MIGRATED database rather than a create_all() one.
+Both workers sweep tables that carry Boundary-D and Boundary-F triggers in
+production, and a create_all() schema has none of them, so a sweep that an
+operator's database would refuse looked clean here.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +15,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
 from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.domain.workers import AgentHealthWorker, CommandTimeoutWorker
 from z4j_brain.persistence import models  # noqa: F401
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.enums import AgentState, CommandStatus
 from z4j_brain.persistence.models import Agent, Command, Project
@@ -21,11 +25,15 @@ from z4j_brain.settings import Settings
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_db_url,
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated, so it refuses an audit
+        # row that carries no chain authentication. Production always has this
+        # configured; a test that omits it is not testing production.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
         environment="dev",
         log_json=False,
         agent_offline_timeout_seconds=10,
@@ -34,13 +42,7 @@ def settings() -> Settings:
 
 @pytest.fixture
 async def db(settings: Settings) -> AsyncIterator[DatabaseManager]:
-    engine = create_async_engine(
-        settings.database_url,
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine = create_async_engine(settings.database_url)
     try:
         yield DatabaseManager(engine)
     finally:

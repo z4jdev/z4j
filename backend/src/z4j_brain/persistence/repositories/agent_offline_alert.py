@@ -74,6 +74,7 @@ class AgentOfflineAlertRepository:
             ).where(
                 Agent.id == agent_id,
                 Agent.state == AgentState.OFFLINE,
+                Agent.revoked_at.is_(None),
                 Agent.last_seen_at == anchor_at,
             ),
         )
@@ -118,6 +119,7 @@ class AgentOfflineAlertRepository:
             .where(
                 Agent.id == AgentOfflineAlert.agent_id,
                 Agent.state == AgentState.OFFLINE,
+                Agent.revoked_at.is_(None),
                 Agent.last_seen_at == AgentOfflineAlert.anchor_at,
             )
             .exists()

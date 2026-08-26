@@ -1,6 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api";
-import type { LoginRequest, LoginResponse, UserMePublic } from "@/lib/api-types";
+import type {
+  LoginRequest,
+  LoginResponse,
+  UserMePublic,
+} from "@/lib/api-types";
 
 const ME_KEY = ["auth", "me"] as const;
 const POLICY_KEY = ["auth", "policy"] as const;
@@ -19,6 +23,15 @@ export type PasswordPolicy = {
   min_length: number;
   required_character_classes: number;
   character_class_names: string[];
+};
+
+export type PasswordResetConfirmRequest = {
+  token: string;
+  new_password: string;
+};
+
+export type PasswordResetConfirmResponse = {
+  success: boolean;
 };
 
 export function usePasswordPolicy() {
@@ -59,6 +72,28 @@ export function useLogin() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ME_KEY });
     },
+  });
+}
+
+/**
+ * Public, token-gated password reset confirmation.
+ *
+ * The token is sent in the JSON body only. A zero mutation-cache lifetime is
+ * intentional: reset tokens and new passwords must not linger in React
+ * Query's mutation cache after the form explicitly resets its observer.
+ */
+export function usePasswordResetConfirm() {
+  return useMutation<
+    PasswordResetConfirmResponse,
+    ApiError,
+    PasswordResetConfirmRequest
+  >({
+    mutationFn: (body) =>
+      api.post<PasswordResetConfirmResponse>(
+        "/auth/password-reset/confirm",
+        body,
+      ),
+    gcTime: 0,
   });
 }
 

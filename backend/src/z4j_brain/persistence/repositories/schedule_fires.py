@@ -16,7 +16,9 @@ acknowledge path can't accidentally rewrite history.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import hashlib
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, delete, exists, or_, select, text, update
@@ -36,7 +38,33 @@ from z4j_brain.persistence.schedule_guard import (
     assert_evidence_delete_consumed,
 )
 
+if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
+
 _MAX_PERSISTED_LATENCY_MS = 2_147_483_647
+_FIRE_IDENTITY_KEY_PERSON = b"z4j-fire-id-v1"
+
+
+class ScheduleFireIdentityError(ValueError):
+    """A fire ID has divergent or ambiguous durable identity evidence."""
+
+
+def _postgres_fire_identity_key(fire_id: UUID) -> int:
+    """Return a stable signed PostgreSQL advisory-lock key for ``fire_id``.
+
+    PostgreSQL exposes 64 bits of transaction-scoped advisory-lock key space,
+    so a full UUID cannot be represented injectively.  BLAKE2b consumes all
+    128 UUID bits and domain-separates this lock family.  A theoretical digest
+    collision is correctness-safe: it only serializes two unrelated fire IDs;
+    it can never let two writers for the same UUID take different locks.
+    """
+
+    digest = hashlib.blake2b(
+        fire_id.bytes,
+        digest_size=8,
+        person=_FIRE_IDENTITY_KEY_PERSON,
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
 
 
 def _slot_key(dt: datetime) -> datetime:
@@ -46,8 +74,17 @@ def _slot_key(dt: datetime) -> datetime:
     microseconds), so compare naive-UTC whole seconds -- otherwise a legitimate
     idempotent retry (aware in memory vs naive from the DB) would falsely look
     divergent."""
-    naive = dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+    naive = dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo is not None else dt
     return naive.replace(microsecond=0)
+
+
+def _slot_window(dt: datetime, *, sqlite: bool) -> tuple[datetime, datetime]:
+    """Return the half-open UTC whole-second identity window for ``dt``."""
+
+    floor = _slot_key(dt).replace(tzinfo=UTC)
+    if sqlite:
+        floor = floor.replace(tzinfo=None)
+    return floor, floor + timedelta(seconds=1)
 
 
 class ScheduleFireRepository:
@@ -77,6 +114,21 @@ class ScheduleFireRepository:
         triggered_by_user_id: UUID | None = None,
     ) -> tuple[ScheduleFire, bool]:
         """Insert/reuse exact generation-scoped current fire history."""
+
+        # The PostgreSQL table is partitioned by ``scheduled_for`` and cannot
+        # have a database UNIQUE(fire_id) constraint.  Serialize every global
+        # identity decision before probing or inserting.  This method takes
+        # exactly one advisory key and never waits for another fire identity,
+        # so it cannot introduce advisory-lock order cycles.  Callers may
+        # already hold their schedule row; all fire writers follow that same
+        # Schedule -> Fire ordering.
+        await self._acquire_fire_identity_authority(fire_id)
+        await self._assert_global_fire_identity(
+            fire_id=fire_id,
+            schedule_id=schedule_id,
+            project_id=project_id,
+            scheduled_for=scheduled_for,
+        )
 
         resolved_legacy = exists().where(
             ScheduleOccurrenceResolution.schedule_id == ScheduleFire.schedule_id,
@@ -191,25 +243,17 @@ class ScheduleFireRepository:
         command_id so the dashboard's "buffered" state correctly
         progresses to "delivered" once the agent comes online.
         """
-        # Enforce single-identity per fire_id BEFORE inserting. On Postgres
-        # the fire-history table is partitioned and its unique key is the COMPOSITE
-        # (fire_id, scheduled_for), so a reused fire_id at a DIFFERENT second does
-        # NOT raise IntegrityError -- it inserts a SECOND row and the later
-        # bare-fire_id ack lookup then raises MultipleResultsFound. Probe UNPRUNED
-        # (fire_id only) and refuse any existing row whose (schedule, project,
-        # scheduled_for) differs, so one fire_id can never map to two rows / credit
-        # two schedules. (The normal idempotent retry matches on all three and
-        # proceeds to the upgrade path below.)
-        prior = await self._get_by_fire_id(fire_id)
-        if prior is not None and (
-            prior.schedule_id != schedule_id
-            or prior.project_id != project_id
-            or _slot_key(prior.scheduled_for) != _slot_key(scheduled_for)
-        ):
-            raise ValueError(
-                f"fire_id {fire_id} already recorded for a different "
-                f"schedule/project/slot; refusing to record a divergent row",
-            )
+        # PostgreSQL's partition key prevents a bare UNIQUE(fire_id)
+        # constraint.  The transaction-scoped authority mutex closes the old
+        # SELECT -> INSERT race across brain replicas; the following probe then
+        # makes a divergent second slot fail before it can reach a partition.
+        await self._acquire_fire_identity_authority(fire_id)
+        await self._assert_global_fire_identity(
+            fire_id=fire_id,
+            schedule_id=schedule_id,
+            project_id=project_id,
+            scheduled_for=scheduled_for,
+        )
         row = ScheduleFire(
             fire_id=fire_id,
             schedule_id=schedule_id,
@@ -231,7 +275,10 @@ class ScheduleFireRepository:
             # stable per fire_id and we have it here, so the buffered ->
             # delivered upgrade lookup is a single-partition probe, not a
             # scan of every daily partition.
-            existing = await self._get_by_fire_id(fire_id, scheduled_for=scheduled_for)
+            existing = await self._get_by_fire_id(
+                fire_id,
+                scheduled_for=scheduled_for,
+            )
             if existing is None:
                 raise
             # A fire_id must map to exactly ONE (schedule, project). If a
@@ -240,7 +287,7 @@ class ScheduleFireRepository:
             # (schedule B's fire mutating schedule A's history row). Refuse the
             # cross-identity collision instead of silently rewriting it.
             if existing.schedule_id != schedule_id or existing.project_id != project_id:
-                raise ValueError(
+                raise ScheduleFireIdentityError(
                     f"fire_id {fire_id} already recorded for a different "
                     f"schedule/project; refusing to rewrite it",
                 ) from None
@@ -318,18 +365,21 @@ class ScheduleFireRepository:
             # Atomic success transition. WHERE status != acked_success lets a
             # failed->success recovery through (RL1) but a duplicate success get
             # rowcount 0. Clears the stale failure detail on the transition.
-            result = await self.session.execute(
-                update(ScheduleFire)
-                .where(
-                    ScheduleFire.fire_id == fire_id,
-                    ScheduleFire.status != "acked_success",
-                )
-                .values(
-                    status="acked_success",
-                    acked_at=now,
-                    error_code=None,
-                    error_message=None,
-                    latency_ms=latency_ms,
+            result = cast(
+                "CursorResult[Any]",
+                await self.session.execute(
+                    update(ScheduleFire)
+                    .where(
+                        ScheduleFire.fire_id == fire_id,
+                        ScheduleFire.status != "acked_success",
+                    )
+                    .values(
+                        status="acked_success",
+                        acked_at=now,
+                        error_code=None,
+                        error_message=None,
+                        latency_ms=latency_ms,
+                    ),
                 ),
             )
             became_success = (result.rowcount or 0) == 1
@@ -338,18 +388,21 @@ class ScheduleFireRepository:
             # Failed / non-success ack: only the FIRST ack of the fire transitions
             # (WHERE acked_at IS NULL), so it never downgrades an already-acked
             # (success OR failed) row (RM3) and pages exactly once (RM2).
-            result = await self.session.execute(
-                update(ScheduleFire)
-                .where(
-                    ScheduleFire.fire_id == fire_id,
-                    ScheduleFire.acked_at.is_(None),
-                )
-                .values(
-                    status=status,
-                    acked_at=now,
-                    error_code=error_code[:64] if error_code is not None else None,
-                    error_message=(error_message[:2000] if error_message is not None else None),
-                    latency_ms=latency_ms,
+            result = cast(
+                "CursorResult[Any]",
+                await self.session.execute(
+                    update(ScheduleFire)
+                    .where(
+                        ScheduleFire.fire_id == fire_id,
+                        ScheduleFire.acked_at.is_(None),
+                    )
+                    .values(
+                        status=status,
+                        acked_at=now,
+                        error_code=error_code[:64] if error_code is not None else None,
+                        error_message=(error_message[:2000] if error_message is not None else None),
+                        latency_ms=latency_ms,
+                    ),
                 ),
             )
             should_notify = (result.rowcount or 0) == 1
@@ -515,11 +568,14 @@ class ScheduleFireRepository:
                     error_message[:2000] if error_message is not None else None
                 ),
             )
-        result = await self.session.execute(
-            update(ScheduleFire)
-            .where(*predicates)
-            .values(**values)
-            .execution_options(synchronize_session=False),
+        result = cast(
+            "CursorResult[Any]",
+            await self.session.execute(
+                update(ScheduleFire)
+                .where(*predicates)
+                .values(**values)
+                .execution_options(synchronize_session=False),
+            ),
         )
         should_notify = (result.rowcount or 0) == 1
         await self.session.flush()
@@ -731,8 +787,11 @@ class ScheduleFireRepository:
                         ScheduleFire.state_write_nonce == old_nonce,
                     ),
                 )
-            result = await self.session.execute(
-                delete(ScheduleFire).where(*predicates),
+            result = cast(
+                "CursorResult[Any]",
+                await self.session.execute(
+                    delete(ScheduleFire).where(*predicates),
+                ),
             )
             await assert_evidence_delete_consumed(
                 self.session,
@@ -760,8 +819,19 @@ class ScheduleFireRepository:
         stmt = select(ScheduleFire).where(ScheduleFire.fire_id == fire_id)
         if scheduled_for is not None:
             stmt = stmt.where(ScheduleFire.scheduled_for == scheduled_for)
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
+        # ``LIMIT 2`` makes corruption detection memory-bounded and avoids
+        # leaking SQLAlchemy's backend-shaped MultipleResultsFound exception.
+        # Stable ordering makes the diagnostic behavior deterministic even on
+        # a database that predates this authority fence.
+        result = await self.session.execute(
+            stmt.order_by(ScheduleFire.scheduled_for.asc(), ScheduleFire.id.asc()).limit(2),
+        )
+        rows = list(result.scalars())
+        if len(rows) > 1:
+            raise ScheduleFireIdentityError(
+                f"fire_id {fire_id} has ambiguous durable history",
+            )
+        return rows[0] if rows else None
 
     async def _get_by_identity(
         self,
@@ -776,8 +846,86 @@ class ScheduleFireRepository:
         )
         if scheduled_for is not None:
             stmt = stmt.where(ScheduleFire.scheduled_for == scheduled_for)
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
+        result = await self.session.execute(
+            stmt.order_by(ScheduleFire.scheduled_for.asc(), ScheduleFire.id.asc()).limit(2),
+        )
+        rows = list(result.scalars())
+        if len(rows) > 1:
+            raise ScheduleFireIdentityError(
+                f"fire_id {fire_id} receipt identity has ambiguous durable history",
+            )
+        return rows[0] if rows else None
+
+    async def _acquire_fire_identity_authority(self, fire_id: UUID) -> None:
+        """Serialize one fire-ID identity decision for this transaction.
+
+        The lock is PostgreSQL-only.  Supported SQLite mutation units begin
+        with ``BEGIN IMMEDIATE`` through :class:`DatabaseManager`, which is the
+        database-wide writer serializer; SQLite also retains the real
+        ``UNIQUE(fire_id)`` partial index for legacy rows.
+
+        Write-side authority callers acquire any schedule/command row locks
+        first, then this one fire key, then perform their identity probe and
+        insert.  They never acquire another fire key.  Read/ack lookup helpers
+        deliberately do *not* take this mutex: a legacy acknowledgement updates
+        its schedule after reading the fire, so Fire -> Schedule there would
+        deadlock against the canonical Schedule -> Fire insertion order.
+
+        All new inserts pass through the exclusive write-side mutex, so an
+        unlocked bounded read cannot race two divergent rows into existence;
+        it either observes the committed row, observes no row while an insert
+        is uncommitted, or fails closed on pre-existing ambiguity. Transaction
+        scope guarantees release on commit, rollback, or cancellation.
+        """
+
+        if self.session.bind is None:
+            raise RuntimeError("schedule-fire session is not bound to an engine")
+        if self.session.bind.dialect.name != "postgresql":
+            return
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": _postgres_fire_identity_key(fire_id)},
+        )
+
+    async def _assert_global_fire_identity(
+        self,
+        *,
+        fire_id: UUID,
+        schedule_id: UUID,
+        project_id: UUID,
+        scheduled_for: datetime,
+    ) -> None:
+        """Reject any retained row mapping ``fire_id`` to another identity.
+
+        Receipt generations may legitimately create multiple rows for the
+        same schedule/project/whole-second slot.  Only that immutable global
+        tuple is authoritative here.  ``EXISTS`` detects a divergent legacy
+        row without materializing an unbounded corrupt result set.
+        """
+
+        if self.session.bind is None:
+            raise RuntimeError("schedule-fire session is not bound to an engine")
+        lower, upper = _slot_window(
+            scheduled_for,
+            sqlite=self.session.bind.dialect.name == "sqlite",
+        )
+        divergent = await self.session.scalar(
+            select(
+                exists().where(
+                    ScheduleFire.fire_id == fire_id,
+                    or_(
+                        ScheduleFire.schedule_id != schedule_id,
+                        ScheduleFire.project_id != project_id,
+                        ScheduleFire.scheduled_for < lower,
+                        ScheduleFire.scheduled_for >= upper,
+                    ),
+                ),
+            ),
+        )
+        if divergent:
+            raise ScheduleFireIdentityError(
+                f"fire_id {fire_id} already identifies a different schedule/project/slot",
+            )
 
     async def get_current(
         self,

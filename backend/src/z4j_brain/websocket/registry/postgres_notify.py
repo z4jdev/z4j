@@ -47,6 +47,10 @@ from uuid import UUID, uuid4
 import asyncpg
 import structlog
 
+from z4j_brain.postgres_tls import (
+    PostgresTLSConfigurationError,
+    asyncpg_dsn_and_connect_args,
+)
 from z4j_brain.websocket.registry._protocol import (
     DeliveryResult,
     SessionHandle,
@@ -534,10 +538,13 @@ class PostgresNotifyRegistry:
     ) -> None:
         """Fire ``NOTIFY z4j_commands, '{c, a, r?}'``.
 
-        Uses the SQLAlchemy session because the payload is small
-        and the SQLAlchemy session participates in the request's
-        transaction - we want the NOTIFY and any other writes in
-        the same scope to commit atomically.
+        This method opens and commits its own SQLAlchemy transaction.  Command
+        writers commit the durable ``status='pending'`` row before calling the
+        registry, so this NOTIFY is only a low-latency wake-up; it is not atomic
+        with command persistence and is not delivery authority.  A publish
+        failure or process crash leaves the PENDING row recoverable by the
+        periodic reconciliation loop (scheduled every
+        ``registry_reconcile_interval_seconds``) and reconnect drains.
         """
         from sqlalchemy import text
 
@@ -634,6 +641,17 @@ class PostgresNotifyRegistry:
                 backoff_index = 0
             except asyncio.CancelledError:
                 return
+            except PostgresTLSConfigurationError as exc:
+                # This is a permanent configuration error, not a transient
+                # connection failure. Settings normally catches it before
+                # startup; keeping the boundary here prevents a changed or
+                # custom DSN provider from creating a reconnect storm.
+                logger.exception(
+                    "z4j registry listener: invalid PostgreSQL TLS configuration; listener stopped",
+                    error=str(exc),
+                    worker_id=self._worker_id,
+                )
+                return
             except Exception as exc:
                 logger.warning(
                     "z4j registry listener: error, will reconnect",
@@ -660,7 +678,7 @@ class PostgresNotifyRegistry:
         ``_stop_event`` is set. Any unexpected exception bubbles
         up to the outer reconnect loop.
         """
-        dsn = self._asyncpg_dsn()
+        dsn, tls_connect_args = self._asyncpg_connection_options()
         conn: asyncpg.Connection | None = None
         try:
             conn = await asyncpg.connect(
@@ -672,6 +690,7 @@ class PostgresNotifyRegistry:
                     "tcp_keepalives_count": "3",
                     "application_name": (f"z4j-brain-registry-{self._worker_id}"),
                 },
+                **tls_connect_args,
             )
             await conn.add_listener(_COMMANDS_CHANNEL, self._on_notify)
             await conn.add_listener(_HEARTBEAT_CHANNEL, self._on_heartbeat)
@@ -1106,14 +1125,10 @@ class PostgresNotifyRegistry:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _asyncpg_dsn(self) -> str:
-        """Return the DSN suitable for ``asyncpg.connect``.
+    def _asyncpg_connection_options(self) -> tuple[str, dict[str, object]]:
+        """Return a sanitized DSN and the shared explicit TLS arguments."""
 
-        SQLAlchemy uses ``postgresql+asyncpg://`` URLs but raw
-        asyncpg wants ``postgresql://``. We strip the dialect tag.
-        """
-        url = self._dsn_provider()
-        return url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        return asyncpg_dsn_and_connect_args(self._dsn_provider())
 
 
 __all__ = ["DeliverCallback", "DsnProvider", "PostgresNotifyRegistry"]

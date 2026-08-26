@@ -30,11 +30,23 @@ const ROUTES: { path: string; needsProject: boolean; label: string }[] = [
   // Top-level personal pages
   { path: "/home", needsProject: false, label: "home" },
   { path: "/settings", needsProject: false, label: "settings" },
-  { path: "/settings/profile", needsProject: false, label: "settings/profile" },
-  { path: "/settings/sessions", needsProject: false, label: "settings/sessions" },
-  { path: "/settings/projects", needsProject: false, label: "settings/projects" },
+  { path: "/settings/account", needsProject: false, label: "settings/account" },
+  {
+    path: "/settings/security",
+    needsProject: false,
+    label: "settings/security",
+  },
+  {
+    path: "/settings/projects",
+    needsProject: false,
+    label: "settings/projects",
+  },
   { path: "/settings/users", needsProject: false, label: "settings/users" },
-  { path: "/settings/api-keys", needsProject: false, label: "settings/api-keys" },
+  {
+    path: "/settings/api-keys",
+    needsProject: false,
+    label: "settings/api-keys",
+  },
   // Personal notification hub - the BUG-1 page
   {
     path: "/settings/notifications",
@@ -133,6 +145,7 @@ const CRASH_PATTERNS = [
 interface RouteFinding {
   label: string;
   status: "PASS" | "FAIL";
+  httpStatus: number | null;
   consoleErrors: string[];
   textCrashes: string[];
 }
@@ -140,7 +153,11 @@ interface RouteFinding {
 async function visitRoute(
   page: Page,
   url: string,
-): Promise<{ consoleErrors: string[]; textCrashes: string[] }> {
+): Promise<{
+  httpStatus: number | null;
+  consoleErrors: string[];
+  textCrashes: string[];
+}> {
   const consoleErrors: string[] = [];
   const consoleHandler = (msg: ConsoleMessage): void => {
     if (msg.type() === "error") {
@@ -161,7 +178,7 @@ async function visitRoute(
   };
   page.on("pageerror", errorHandler);
 
-  await page.goto(url, { waitUntil: "domcontentloaded" });
+  const response = await page.goto(url, { waitUntil: "domcontentloaded" });
   // Give React a beat to render + any data fetch to fire.
   await page.waitForTimeout(2000);
 
@@ -177,6 +194,7 @@ async function visitRoute(
 
   // Page errors are always crashes
   return {
+    httpStatus: response?.status() ?? null,
     consoleErrors: [...consoleErrors, ...pageErrors],
     textCrashes,
   };
@@ -190,7 +208,7 @@ test.describe("crash-coverage", () => {
     slug = `e2e-crash-${Math.random().toString(36).slice(2, 8)}`;
   });
 
-  // 22 routes * ~3s each = ~70s, plus auth + project create.
+  // The route walk plus auth and project creation can take over a minute.
   // Bump test timeout to 3 minutes to give comfortable headroom.
   test.setTimeout(180_000);
 
@@ -222,9 +240,12 @@ test.describe("crash-coverage", () => {
         const finding: RouteFinding = {
           label: route.label,
           status:
-            result.consoleErrors.length > 0 || result.textCrashes.length > 0
+            result.httpStatus !== 200 ||
+            result.consoleErrors.length > 0 ||
+            result.textCrashes.length > 0
               ? "FAIL"
               : "PASS",
+          httpStatus: result.httpStatus,
           consoleErrors: result.consoleErrors,
           textCrashes: result.textCrashes,
         };
@@ -236,6 +257,10 @@ test.describe("crash-coverage", () => {
       for (const f of findings) {
         const tag = f.status === "PASS" ? "[OK]  " : "[FAIL]";
         console.log(`  ${tag} ${f.label}`);
+        if (f.httpStatus !== 200)
+          console.log(
+            `         http: ${f.httpStatus === null ? "no navigation response" : f.httpStatus}`,
+          );
         for (const err of f.consoleErrors)
           console.log(`         console: ${err.slice(0, 200)}`);
         for (const crash of f.textCrashes)
@@ -245,7 +270,7 @@ test.describe("crash-coverage", () => {
       const failed = findings.filter((f) => f.status === "FAIL");
       expect(
         failed,
-        `${failed.length} routes had crashes. See findings above.`,
+        `${failed.length} routes failed HTTP/crash coverage. See findings above.`,
       ).toHaveLength(0);
     } finally {
       // Do not leak a random project into later tests or a developer's

@@ -14,7 +14,8 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -22,10 +23,118 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from z4j_brain.postgres_tls import asyncpg_engine_url_and_connect_args
+
 if TYPE_CHECKING:
     from z4j_brain.settings import Settings
 
 logger = structlog.get_logger("z4j.brain.persistence")
+
+
+def _enable_sqlite_foreign_keys(dbapi_connection: Any) -> None:
+    """Enable and verify SQLite referential actions on one DBAPI connection.
+
+    SQLite defaults ``PRAGMA foreign_keys`` to OFF independently for every
+    connection.  Declaring ``ON DELETE`` actions in metadata therefore is not
+    sufficient: without this hook a pooled runtime connection can silently
+    retain orphaned rows.  Read the value back so an unsupported or
+    transaction-scoped no-op fails closed instead of merely looking enabled.
+    """
+
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.execute("PRAGMA foreign_keys")
+        row = cursor.fetchone()
+    finally:
+        cursor.close()
+    if row is None or int(row[0]) != 1:
+        raise RuntimeError("SQLite connection refused PRAGMA foreign_keys = ON")
+
+
+def _sqlite_foreign_keys_on_connect(
+    dbapi_connection: Any,
+    _connection_record: Any,
+) -> None:
+    _enable_sqlite_foreign_keys(dbapi_connection)
+
+
+def _sqlite_foreign_keys_on_checkout(
+    dbapi_connection: Any,
+    _connection_record: Any,
+    _connection_proxy: Any,
+) -> None:
+    # Also enforce on checkout.  ``create_app(..., engine=...)`` accepts an
+    # engine that may already own a pooled connection, so a connect-only hook
+    # would never see StaticPool's pre-existing in-memory SQLite connection.
+    _enable_sqlite_foreign_keys(dbapi_connection)
+
+
+def _install_sqlite_foreign_key_hooks(engine: AsyncEngine) -> None:
+    """Install idempotent fail-closed SQLite FK enforcement hooks."""
+
+    if engine.dialect.name != "sqlite":
+        return
+    sync_engine = engine.sync_engine
+    if not event.contains(sync_engine, "connect", _sqlite_foreign_keys_on_connect):
+        event.listen(sync_engine, "connect", _sqlite_foreign_keys_on_connect)
+    if not event.contains(sync_engine, "checkout", _sqlite_foreign_keys_on_checkout):
+        event.listen(sync_engine, "checkout", _sqlite_foreign_keys_on_checkout)
+
+
+def create_async_engine_from_url(
+    database_url: str,
+    **kwargs: Any,
+) -> AsyncEngine:
+    """Create an async engine after translating asyncpg TLS URL options."""
+
+    engine_url, tls_connect_args = asyncpg_engine_url_and_connect_args(database_url)
+    supplied_connect_args = dict(kwargs.pop("connect_args", {}))
+    conflicts = supplied_connect_args.keys() & tls_connect_args.keys()
+    if conflicts:
+        raise ValueError(
+            "async engine connect_args conflict with database URL TLS options: "
+            f"{sorted(conflicts)}",
+        )
+    connect_args = {**supplied_connect_args, **tls_connect_args}
+    if connect_args:
+        kwargs["connect_args"] = connect_args
+    engine = create_async_engine(engine_url, **kwargs)
+    _install_sqlite_foreign_key_hooks(engine)
+    return engine
+
+
+def _uses_static_pool(database_url: str) -> bool:
+    """Does SQLAlchemy give this URL a StaticPool rather than a sized pool?
+
+    Only in-memory SQLite. A shared-cache memory URL counts too, since it is
+    still one database living in one connection.
+
+    Asks SQLAlchemy what the URL means rather than matching text on it. The
+    substring test missed the bare form, ``sqlite+aiosqlite://`` with no path,
+    which SQLAlchemy also treats as in-memory: ``make_url(...).database`` is
+    ``None``. That deployment got a sized pool over an in-memory database, so
+    every connection opened its own empty one, and tables created during
+    migration were invisible to the next request. Confusing to diagnose and
+    trivial to configure by accident.
+    """
+    if not database_url.startswith("sqlite"):
+        return False
+    try:
+        parsed = make_url(database_url)
+        database = parsed.database
+    except Exception:
+        return ":memory:" in database_url or "mode=memory" in database_url
+    if not database:
+        # No path at all: SQLAlchemy opens an anonymous in-memory database.
+        return True
+    if ":memory:" in database:
+        return True
+    # ``mode=memory`` is a URI query parameter, and SQLAlchemy splits it off
+    # the path, so looking for it in ``database`` alone finds nothing. The
+    # first version of this fix did exactly that and broke the shared-cache
+    # form it was not supposed to touch.
+    return str(parsed.query.get("mode", "")) == "memory" or "mode=memory" in database
 
 
 def create_engine_from_settings(settings: Settings) -> AsyncEngine:
@@ -49,7 +158,7 @@ def create_engine_from_settings(settings: Settings) -> AsyncEngine:
     )
 
     assert_database_restore_not_pending(settings.database_url)
-    kwargs: dict = {
+    kwargs: dict[str, Any] = {
         # Operator-configurable since 1.8.0. Previously hardcoded, which made
         # the brain's connection demand impossible to fit to a server the
         # operator does not control: each uvicorn worker builds its own
@@ -58,8 +167,6 @@ def create_engine_from_settings(settings: Settings) -> AsyncEngine:
         # on a 4-core host that is 120, above a stock PostgreSQL
         # max_connections of 100. Defaults are unchanged; see settings.py and
         # docs/DATABASE.md for the sizing arithmetic.
-        "pool_size": settings.database_pool_size,
-        "max_overflow": settings.database_max_overflow,
         "pool_pre_ping": True,
         # 1.5.1: shortened from 1800s to the operator-configured
         # value so SQLAlchemy-level pool recycling rotates
@@ -71,6 +178,18 @@ def create_engine_from_settings(settings: Settings) -> AsyncEngine:
         "echo": False,
         "future": True,
     }
+    # Pool sizing only applies to a pool that HAS a size. SQLAlchemy gives an
+    # in-memory SQLite database a StaticPool (one shared connection, by
+    # necessity: separate connections would see separate empty databases), and
+    # StaticPool rejects these arguments outright. Passing them unconditionally
+    # made ``sqlite+aiosqlite:///:memory:`` fail at engine construction with an
+    # opaque "Invalid argument(s) 'pool_size','max_overflow'". A file-backed
+    # SQLite URL gets a real queue pool and is unaffected, which is why this
+    # went unnoticed: the deployment shapes that matter both work.
+    if not _uses_static_pool(settings.database_url):
+        kwargs["pool_size"] = settings.database_pool_size
+        kwargs["max_overflow"] = settings.database_max_overflow
+
     if settings.database_url.startswith("postgresql+asyncpg://"):
         # asyncpg.connect() kwargs only. ``max_inactive_connection_lifetime``
         # is asyncpg.create_pool()'s parameter -- SQLAlchemy uses
@@ -79,7 +198,7 @@ def create_engine_from_settings(settings: Settings) -> AsyncEngine:
         kwargs["connect_args"] = {
             "statement_cache_size": settings.database_statement_cache_size,
         }
-    engine = create_async_engine(settings.database_url, **kwargs)
+    engine = create_async_engine_from_url(settings.database_url, **kwargs)
     from z4j_brain.management_restore import (
         install_database_restore_fence_engine_hook,
     )
@@ -194,6 +313,7 @@ class DatabaseManager:
             install_schedule_guard_engine_hooks,
         )
 
+        _install_sqlite_foreign_key_hooks(engine)
         install_schedule_guard_engine_hooks(engine)
         self._engine = engine
         self._sessionmaker: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -239,7 +359,7 @@ class DatabaseManager:
         logger.info("z4j database engine disposed")
 
 
-async def get_session(request: Any) -> AsyncIterator[AsyncSession]:  # type: ignore[name-defined]
+async def get_session(request: Any) -> AsyncIterator[AsyncSession]:
     """FastAPI dependency yielding a per-request ``AsyncSession``.
 
     The session is tied to request scope: it is opened on enter and
@@ -261,6 +381,7 @@ async def get_session(request: Any) -> AsyncIterator[AsyncSession]:  # type: ign
 
 __all__ = [
     "DatabaseManager",
+    "create_async_engine_from_url",
     "create_engine_from_settings",
     "get_session",
 ]

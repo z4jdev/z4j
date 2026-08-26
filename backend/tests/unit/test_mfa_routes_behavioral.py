@@ -37,6 +37,7 @@ comparison logic under test reads the DB values either way.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import re
@@ -48,7 +49,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from z4j_brain.api import auth_mfa
 from z4j_brain.auth.csrf import csrf_cookie_name
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.domain.mfa import encrypt_totp_secret, generate_totp_secret
@@ -124,6 +126,34 @@ async def make_brain(settings: Settings):  # type: ignore[no-untyped-def]
             base_url="http://testserver",
         ) as ac:
             yield app, ac
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def concurrent_mfa_store(tmp_path):  # type: ignore[no-untyped-def]
+    """Two-connection SQLite store for real state-transition races."""
+    settings = make_settings()
+    database_path = tmp_path / "mfa-races.sqlite3"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path}",
+        connect_args={"timeout": 10},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as db_session:
+        user = User(
+            email="race@example.com",
+            password_hash=PasswordHasher(settings).hash(PASSWORD),
+            is_admin=False,
+            is_active=True,
+        )
+        db_session.add(user)
+        await db_session.commit()
+        user_id = user.id
+    try:
+        yield sessions, user_id
     finally:
         await engine.dispose()
 
@@ -278,6 +308,182 @@ def trust_cookie_headers(response) -> list[str]:  # type: ignore[no-untyped-def]
 # ---------------------------------------------------------------------------
 # Enrollment flow
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestMfaStateTransitionRaces:
+    async def test_two_starts_cannot_both_publish_a_secret(
+        self,
+        concurrent_mfa_store,
+    ) -> None:  # type: ignore[no-untyped-def]
+        sessions, user_id = concurrent_mfa_store
+        gate = asyncio.Event()
+        candidates = (b"pending-secret-a", b"pending-secret-b")
+
+        async def attempt(candidate: bytes) -> bool:
+            async with sessions() as db_session:
+                await gate.wait()
+                won = await auth_mfa._replace_mfa_with_pending(
+                    db_session,
+                    user_id=user_id,
+                    observed_secret_encrypted=None,
+                    observed_enrolled_at=None,
+                    new_secret_encrypted=candidate,
+                )
+                if won:
+                    await db_session.commit()
+                else:
+                    await db_session.rollback()
+                return won
+
+        tasks = [asyncio.create_task(attempt(candidate)) for candidate in candidates]
+        gate.set()
+        outcomes = await asyncio.gather(*tasks)
+        assert outcomes.count(True) == 1
+
+        async with sessions() as db_session:
+            stored = await db_session.get(User, user_id)
+            assert stored is not None
+            assert stored.mfa_secret_encrypted == candidates[outcomes.index(True)]
+            assert stored.mfa_enrolled_at is None
+
+    async def test_two_completes_cannot_both_claim_pending_state(
+        self,
+        concurrent_mfa_store,
+    ) -> None:  # type: ignore[no-untyped-def]
+        sessions, user_id = concurrent_mfa_store
+        pending = b"one-pending-secret"
+        async with sessions() as db_session:
+            await db_session.execute(
+                update(User)
+                .where(User.id == user_id)
+                .values(mfa_secret_encrypted=pending, mfa_enrolled_at=None),
+            )
+            await db_session.commit()
+
+        gate = asyncio.Event()
+        enrolled_times = (
+            datetime.now(UTC),
+            datetime.now(UTC) + timedelta(microseconds=1),
+        )
+
+        async def attempt(enrolled_at: datetime) -> bool:
+            async with sessions() as db_session:
+                await gate.wait()
+                won = await auth_mfa._activate_pending_enrollment(
+                    db_session,
+                    user_id=user_id,
+                    pending_secret_encrypted=pending,
+                    stored_secret_encrypted=pending,
+                    enrolled_at=enrolled_at,
+                )
+                if won:
+                    await db_session.commit()
+                else:
+                    await db_session.rollback()
+                return won
+
+        tasks = [asyncio.create_task(attempt(value)) for value in enrolled_times]
+        gate.set()
+        outcomes = await asyncio.gather(*tasks)
+        assert outcomes.count(True) == 1
+
+        async with sessions() as db_session:
+            stored = await db_session.get(User, user_id)
+            assert stored is not None
+            assert stored.mfa_enrolled_at is not None
+            expected = enrolled_times[outcomes.index(True)].replace(tzinfo=None)
+            assert stored.mfa_enrolled_at == expected
+
+    async def test_restart_and_complete_are_mutually_exclusive(
+        self,
+        concurrent_mfa_store,
+    ) -> None:  # type: ignore[no-untyped-def]
+        sessions, user_id = concurrent_mfa_store
+        pending = b"pending-before-race"
+        replacement = b"restart-winner-secret"
+        enrolled_at = datetime.now(UTC)
+        async with sessions() as db_session:
+            await db_session.execute(
+                update(User)
+                .where(User.id == user_id)
+                .values(mfa_secret_encrypted=pending, mfa_enrolled_at=None),
+            )
+            await db_session.commit()
+
+        gate = asyncio.Event()
+
+        async def restart() -> bool:
+            async with sessions() as db_session:
+                await gate.wait()
+                won = await auth_mfa._replace_mfa_with_pending(
+                    db_session,
+                    user_id=user_id,
+                    observed_secret_encrypted=pending,
+                    observed_enrolled_at=None,
+                    new_secret_encrypted=replacement,
+                )
+                await (db_session.commit() if won else db_session.rollback())
+                return won
+
+        async def complete() -> bool:
+            async with sessions() as db_session:
+                await gate.wait()
+                won = await auth_mfa._activate_pending_enrollment(
+                    db_session,
+                    user_id=user_id,
+                    pending_secret_encrypted=pending,
+                    stored_secret_encrypted=pending,
+                    enrolled_at=enrolled_at,
+                )
+                await (db_session.commit() if won else db_session.rollback())
+                return won
+
+        restart_task = asyncio.create_task(restart())
+        complete_task = asyncio.create_task(complete())
+        gate.set()
+        restart_won, complete_won = await asyncio.gather(
+            restart_task,
+            complete_task,
+        )
+        assert restart_won is not complete_won
+
+        async with sessions() as db_session:
+            stored = await db_session.get(User, user_id)
+            assert stored is not None
+            if restart_won:
+                assert stored.mfa_secret_encrypted == replacement
+                assert stored.mfa_enrolled_at is None
+            else:
+                assert stored.mfa_secret_encrypted == pending
+                assert stored.mfa_enrolled_at is not None
+
+    async def test_regenerate_verify_fence_blocks_a_second_transaction(
+        self,
+        concurrent_mfa_store,
+    ) -> None:  # type: ignore[no-untyped-def]
+        sessions, user_id = concurrent_mfa_store
+        first = sessions()
+        second = sessions()
+        await auth_mfa._serialize_mfa_security_state(first, user_id)
+        started = asyncio.Event()
+        acquired = asyncio.Event()
+
+        async def contend() -> None:
+            started.set()
+            await auth_mfa._serialize_mfa_security_state(second, user_id)
+            acquired.set()
+            await second.rollback()
+
+        contender = asyncio.create_task(contend())
+        await started.wait()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(acquired.wait(), timeout=0.1)
+        await first.commit()
+        await asyncio.wait_for(contender, timeout=5)
+        assert acquired.is_set()
+        await first.close()
+        await second.close()
 
 
 @pytest.mark.asyncio
@@ -791,6 +997,78 @@ class TestTrustedDeviceFlow:
             devices = listing.json()
             assert len(devices) == 1
             assert devices[0]["is_current"] is True
+
+    async def test_cap_handles_sqlite_naive_timestamps(self) -> None:
+        """SQLite strips tzinfo; cap eviction must normalize before compare."""
+        settings = make_settings(mfa_trusted_devices_max_per_user=1)
+        async with make_brain(settings) as (app, client):
+            uid, secret = await seed_user(
+                app,
+                settings,
+                email="cap@example.com",
+                enrolled=True,
+            )
+            await login(client, "cap@example.com")
+            async with app.state.db.session() as db_session:
+                db_session.add(
+                    TrustedDevice(
+                        user_id=uid,
+                        cookie_id_hash=hashlib.sha256(b"old-cookie").hexdigest(),
+                        label="Old browser",
+                        expires_at=datetime.now(UTC) + timedelta(days=1),
+                    ),
+                )
+                await db_session.commit()
+
+            response = await client.post(
+                "/api/v1/auth/mfa/verify",
+                json={
+                    "code": current_totp_code(secret),
+                    "remember_device": True,
+                },
+                headers=csrf_header(client, settings),
+            )
+            assert response.status_code == 200, response.text
+            rows = await trusted_device_rows(app, uid)
+            assert len(rows) == 2
+            assert sum(row.revoked_at is None for row in rows) == 1
+
+    async def test_matching_revoked_or_expired_row_is_not_current(self) -> None:
+        settings = make_settings()
+        async with make_brain(settings) as (app, client):
+            uid, secret = await seed_user(
+                app,
+                settings,
+                email="current@example.com",
+                enrolled=True,
+            )
+            await login(client, "current@example.com")
+            await self._mint_trust(app, client, settings, secret)
+
+            async with app.state.db.session() as db_session:
+                await db_session.execute(
+                    update(TrustedDevice)
+                    .where(TrustedDevice.user_id == uid)
+                    .values(revoked_at=datetime.now(UTC)),
+                )
+                await db_session.commit()
+            listing = await client.get("/api/v1/auth/mfa/trusted-devices")
+            assert listing.status_code == 200
+            assert listing.json()[0]["is_current"] is False
+
+            async with app.state.db.session() as db_session:
+                await db_session.execute(
+                    update(TrustedDevice)
+                    .where(TrustedDevice.user_id == uid)
+                    .values(
+                        revoked_at=None,
+                        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+                    ),
+                )
+                await db_session.commit()
+            listing = await client.get("/api/v1/auth/mfa/trusted-devices")
+            assert listing.status_code == 200
+            assert listing.json()[0]["is_current"] is False
 
     async def test_trusted_device_skips_next_login_challenge(self) -> None:
         settings = make_settings()

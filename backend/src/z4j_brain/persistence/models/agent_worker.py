@@ -45,6 +45,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
@@ -115,17 +116,24 @@ class AgentWorker(PKMixin, TimestampsMixin, Base):
 
     __table_args__ = (
         # (agent_id, worker_id) is the natural composite key.
-        # NULL worker_id (legacy 1.1.x slot) is treated as
-        # distinct by Postgres' default UNIQUE semantics, so
-        # multiple NULL worker_ids could in theory coexist - but
-        # the gateway gates this: at most one NULL slot per
-        # agent_id can register at a time (in-memory registry
-        # enforces). Acceptable: the write here is idempotent
-        # via ON CONFLICT DO UPDATE in the upsert path.
+        # The composite constraint protects worker-aware rows. It cannot
+        # protect the legacy NULL slot because PostgreSQL and SQLite both
+        # treat NULL values as distinct for ordinary UNIQUE constraints.
         UniqueConstraint(
             "agent_id",
             "worker_id",
             name="uq_agent_workers_agent_worker",
+        ),
+        # Exactly one legacy (worker_id IS NULL) row per agent. The repository
+        # targets this partial unique index in its dialect-specific UPSERT, so
+        # concurrent reconnects have a database arbiter rather than relying on
+        # one process's in-memory registry.
+        Index(
+            "ux_agent_workers_legacy_agent",
+            "agent_id",
+            unique=True,
+            postgresql_where=text("worker_id IS NULL"),
+            sqlite_where=text("worker_id IS NULL"),
         ),
         Index("ix_agent_workers_project_state", "project_id", "state"),
         Index("ix_agent_workers_agent_state", "agent_id", "state"),

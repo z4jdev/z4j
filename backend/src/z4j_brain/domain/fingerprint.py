@@ -1,11 +1,12 @@
 """Failure fingerprinting: collapse the same logical failure to one hash.
 
-A fingerprint is a stable, pure hash of a task failure's *shape* -- its
-exception class plus the deepest few traceback frames (``file:line:func``)
--- with the volatile parts of the failure MESSAGE (memory addresses, uuids,
-object reprs, bare numeric ids) stripped, so the same bug across runs
-collapses to one fingerprint while genuinely different failures stay
-distinct.
+A fingerprint is a stable, pure hash of the failure fields the agent reports:
+the ``exception`` string plus the deepest few traceback frames
+(``file:line:func``). Adapters do not agree that ``exception`` is a class name:
+some send only the class and others include a summary. Noise normalization is
+therefore applied to that reported string and to the fallback used when the
+traceback has no parseable Python frames. It does not inspect or separately
+normalize a failure-message field.
 
 Computed once when a ``task.failed`` event is ingested and stored on the
 task row, then consumed by both the Issues aggregation and the rule
@@ -81,8 +82,9 @@ def compute_fingerprint(
     """Return a stable 32-hex-char fingerprint for a failure, or ``None`` if
     there is nothing to fingerprint (no exception and no traceback).
 
-    ``exception`` is the exception CLASS name (z4j stores only the class, not
-    the message). ``traceback`` is the redacted traceback text.
+    ``exception`` is the adapter-reported exception string (class-only for
+    some adapters, a summary for others). ``traceback`` is the redacted
+    traceback text.
     """
     exc = (exception or "").strip()
     tb = traceback or ""

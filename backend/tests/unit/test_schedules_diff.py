@@ -9,6 +9,11 @@ consume this contract; the per-bucket counts feed the operator's
 
 These tests exercise the four buckets independently plus the
 mode + RBAC gates.
+
+They run against a MIGRATED database rather than a create_all() one.
+Every Boundary-D guard lives in a migration, so a create_all() schema
+refuses nothing: a preview that silently wrote would look identical to
+one that did not.
 """
 
 from __future__ import annotations
@@ -18,19 +23,21 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
 from z4j_brain.persistence import models  # noqa: F401
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ScheduleKind
 from z4j_brain.persistence.models import (
     Project,
     Schedule,
     Session,
     User,
+)
+from z4j_brain.persistence.repositories.schedule_control import (
+    ScheduleControlRepository,
 )
 from z4j_brain.settings import Settings
 
@@ -40,11 +47,14 @@ from z4j_brain.settings import Settings
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_db_url,
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated, so it refuses an
+        # audit row that carries no chain authentication.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
         environment="dev",
         log_json=False,
         argon2_time_cost=1,
@@ -58,13 +68,7 @@ def settings() -> Settings:
 
 @pytest.fixture
 async def brain_app(settings: Settings):
-    engine = create_async_engine(
-        settings.database_url,
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine = create_async_engine(settings.database_url)
     app = create_app(settings, engine=engine)
     yield app
     await engine.dispose()
@@ -73,41 +77,78 @@ async def brain_app(settings: Settings):
 async def _make_admin_seed(*, settings: Settings, brain_app) -> dict:
     db = brain_app.state.db
     hasher = PasswordHasher(settings)
-    project_id = uuid.uuid4()
     user_id = uuid.uuid4()
     session_id = uuid.uuid4()
     csrf = secrets.token_urlsafe(32)
 
     async with db.session() as s:
-        s.add_all(
-            [
-                Project(id=project_id, slug="default", name="Default"),
-                User(
-                    id=user_id,
-                    email=f"u-{uuid.uuid4().hex[:8]}@example.com",
-                    password_hash=hasher.hash(
-                        "correct horse battery staple 9",
-                    ),
-                    is_admin=True,
-                    is_active=True,
+        project = (
+            await s.execute(select(Project).where(Project.slug == "default"))
+        ).scalar_one_or_none()
+        if project is None:
+            project = Project(id=uuid.uuid4(), slug="default", name="Default")
+            s.add(project)
+            await s.flush()
+        s.add(
+            User(
+                id=user_id,
+                email=f"u-{uuid.uuid4().hex[:8]}@example.com",
+                password_hash=hasher.hash(
+                    "correct horse battery staple 9",
                 ),
-                Session(
-                    id=session_id,
-                    user_id=user_id,
-                    csrf_token=csrf,
-                    expires_at=datetime.now(UTC) + timedelta(hours=1),
-                    ip_at_issue="127.0.0.1",
-                    user_agent_at_issue="test",
-                ),
-            ],
+                is_admin=True,
+                is_active=True,
+            )
+        )
+        await s.flush()
+        s.add(
+            Session(
+                id=session_id,
+                user_id=user_id,
+                csrf_token=csrf,
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+                ip_at_issue="127.0.0.1",
+                user_agent_at_issue="test",
+            )
         )
         await s.commit()
     return {
-        "project_id": project_id,
+        "project_id": project.id,
         "user_id": user_id,
         "session_id": session_id,
         "csrf": csrf,
     }
+
+
+async def _seed_schedule(brain_app, project_id: uuid.UUID, name: str, **overrides) -> None:
+    """Pre-seed one brain-side row the way the product creates them.
+
+    Through the control repository, because Boundary D refuses a direct
+    INSERT into ``schedules``. A row the guards would not have accepted is
+    not a row the diff endpoint will ever be asked about.
+    """
+    data: dict[str, object] = {
+        "engine": "celery",
+        "scheduler": "z4j-scheduler",
+        "name": name,
+        "task_name": f"app.tasks.{name}",
+        "kind": ScheduleKind.CRON.value,
+        "expression": "0 * * * *",
+        "timezone": "UTC",
+        "args": [],
+        "kwargs": {},
+        "is_enabled": True,
+        "source": "declarative:django",
+        "source_hash": f"hash-{name}",
+    }
+    data.update(overrides)
+    async with brain_app.state.db.session() as s:
+        await ScheduleControlRepository(s).create_current(
+            project_id=project_id,
+            data=data,
+            planning_at=datetime.now(UTC),
+        )
+        await s.commit()
 
 
 def _client(brain_app, settings: Settings, seed: dict):
@@ -194,25 +235,7 @@ class TestDiffBuckets:
             brain_app=brain_app,
         )
         # Pre-seed a row with the same source_hash the diff will send.
-        async with brain_app.state.db.session() as s:
-            s.add(
-                Schedule(
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="stable",
-                    task_name="app.tasks.stable",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                    source="declarative:django",
-                    source_hash="hash-stable",
-                )
-            )
-            await s.commit()
+        await _seed_schedule(brain_app, seed["project_id"], "stable")
 
         async with _client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -236,25 +259,13 @@ class TestDiffBuckets:
         # Brain has the old expression + an old hash. The diff payload
         # carries a new expression + new hash, so the row must land
         # in UPDATE with both shapes visible to the operator.
-        async with brain_app.state.db.session() as s:
-            s.add(
-                Schedule(
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="changed",
-                    task_name="app.tasks.changed",
-                    kind=ScheduleKind.CRON,
-                    expression="0 0 * * *",  # midnight
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                    source="declarative:django",
-                    source_hash="OLD-HASH",
-                )
-            )
-            await s.commit()
+        await _seed_schedule(
+            brain_app,
+            seed["project_id"],
+            "changed",
+            expression="0 0 * * *",  # midnight
+            source_hash="OLD-HASH",
+        )
 
         proposed = _row("changed", expression="*/5 * * * *", source_hash="NEW-HASH")
         async with _client(brain_app, settings, seed) as client:
@@ -285,26 +296,8 @@ class TestDiffBuckets:
             settings=settings,
             brain_app=brain_app,
         )
-        async with brain_app.state.db.session() as s:
-            for name in ("kept", "orphan"):
-                s.add(
-                    Schedule(
-                        project_id=seed["project_id"],
-                        engine="celery",
-                        scheduler="z4j-scheduler",
-                        name=name,
-                        task_name=f"app.tasks.{name}",
-                        kind=ScheduleKind.CRON,
-                        expression="0 * * * *",
-                        timezone="UTC",
-                        args=[],
-                        kwargs={},
-                        is_enabled=True,
-                        source="declarative:django",
-                        source_hash=f"hash-{name}",
-                    )
-                )
-            await s.commit()
+        for name in ("kept", "orphan"):
+            await _seed_schedule(brain_app, seed["project_id"], name)
 
         async with _client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -334,42 +327,20 @@ class TestDiffBuckets:
             settings=settings,
             brain_app=brain_app,
         )
-        async with brain_app.state.db.session() as s:
-            s.add(
-                Schedule(
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="will-update",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                    source="declarative:django",
-                    source_hash="OLD",
-                )
-            )
-            s.add(
-                Schedule(
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="will-delete",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                    source="declarative:django",
-                    source_hash="X",
-                )
-            )
-            await s.commit()
+        await _seed_schedule(
+            brain_app,
+            seed["project_id"],
+            "will-update",
+            task_name="t.t",
+            source_hash="OLD",
+        )
+        await _seed_schedule(
+            brain_app,
+            seed["project_id"],
+            "will-delete",
+            task_name="t.t",
+            source_hash="X",
+        )
 
         async with _client(brain_app, settings, seed) as client:
             r = await client.post(

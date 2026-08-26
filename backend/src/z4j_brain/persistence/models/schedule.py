@@ -140,6 +140,37 @@ class Schedule(PKMixin, TimestampsMixin, Base):
         default="skip",
         server_default="skip",
     )
+    # ``overlap_policy`` - what to do when this schedule comes due while a
+    # previous run is still in flight: ``allow`` fires anyway, ``skip``
+    # withholds the fire and records the slot as skipped, ``queue`` fires
+    # once the running one finishes so the runs serialize.
+    #
+    # Defaults to ``allow`` because that is the behaviour every existing
+    # schedule already has. Defaulting to ``skip`` would mean an upgrade
+    # silently starts withholding fires an operator was relying on, which
+    # is a data-affecting change disguised as a new feature.
+    #
+    # Plain String rather than a SQL enum for the same reason as
+    # ``catch_up``: the CHECK constraint is migration-only on Postgres so
+    # SQLite-mode tests can DROP COLUMN cleanly on downgrade.
+    overlap_policy: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="allow",
+        server_default="allow",
+    )
+    # ``paused_at`` - when this schedule was paused, NULL if it is not.
+    #
+    # Deliberately separate from ``is_enabled``. Disabling means "this
+    # should not exist for now" and is how a schedule is retired. Pausing
+    # means "hold this, I am dealing with an incident" and carries the
+    # timestamp that says how long the hold has run. Collapsing the two
+    # loses the operator's intent, and an incident pause that looks
+    # identical to a retirement is one somebody forgets to undo.
+    paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     # ``source`` - which surface created this schedule. Used by the
     # dashboard to render a "managed by" badge and by the importers
     # to resolve idempotency on re-import.

@@ -1,16 +1,20 @@
 """API-key scope catalogue + mapping helpers.
 
-z4j's scope model mirrors GitHub's fine-grained PATs: every scope
-is ``{resource}:{verb}`` where *verb* is ``read`` or ``write``.
-The admin umbrella ``admin:*`` is a single grant that unlocks
-admin-only endpoints (user management, project creation, etc.);
-it does NOT grant per-project writes on its own.
+z4j's ordinary scope model mirrors GitHub's fine-grained PATs: scopes
+are ``{resource}:{verb}`` where *verb* is ``read`` or ``write``. The
+``admin:*`` umbrella is intentionally broader: it satisfies every
+*mapped* read and write requirement, including project-resource writes.
+A key's optional project binding is an independent authorization gate
+that can still restrict which project those broad grants may target.
+``admin:*`` never satisfies an unmapped route's fail-closed
+:data:`SCOPE_UNREACHABLE` sentinel.
 
 Endpoint → required-scope mapping is keyed off the route's first
 FastAPI tag + the HTTP method. ``GET`` maps to ``read``; any other
-method maps to ``write``. Routes with no tag, or with a tag listed
-in :data:`PUBLIC_TAGS`, are always allowed (health checks, setup,
-the login endpoint itself).
+method maps to ``write``. A tag listed in :data:`PUBLIC_TAGS` needs no
+Bearer scope. Missing or unmapped tags fail closed as
+:data:`SCOPE_UNREACHABLE`; session-cookie authentication is handled by
+the route's dependencies, outside this scope mapper.
 
 The whole point of this module is that adding a new endpoint that
 uses one of the catalogued tags automatically inherits the right
@@ -62,15 +66,15 @@ ADMIN_ONLY_SCOPES: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: FastAPI tags that are always allowed regardless of scope. These
-#: are stateless / pre-auth endpoints where there is nothing to
-#: protect with a scope check. Note that ``auth`` is NOT here -
-#: ``/auth/login`` and ``/auth/logout`` are session-cookie-only
-#: (there's no ``Depends(get_current_user)`` on them), so they
-#: never hit this path. Read-only ``/auth/me`` is authorized via
-#: the ``auth:read`` scope; every write endpoint under ``/auth``
-#: is rejected outright for Bearer auth by
-#: :data:`BEARER_DENY_TAGS` below.
+#: FastAPI tags for which the Bearer scope mapper returns ``None``.
+#: This removes only the scope requirement; route dependencies and
+#: handler policy still decide whether authentication is required
+#: (for example, setup status is anonymous only during first boot).
+#: Note that ``auth`` is NOT here: every route carrying that tag,
+#: including read-only ``/auth/me``, is rejected outright for Bearer
+#: auth by :data:`BEARER_DENY_TAGS` before its derived ``auth:read`` /
+#: ``auth:write`` requirement is considered. Session-cookie callers
+#: are unaffected.
 PUBLIC_TAGS: Final[frozenset[str]] = frozenset(
     {
         "health",
@@ -106,8 +110,9 @@ PROJECT_SCOPED_NONSLUG_ALLOWLIST: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: FastAPI tag → scope resource. Any tag not listed here is treated
-#: as admin-only (fail closed).
+#: FastAPI tag → scope resource. A tag not listed here is not
+#: "admin-only": it maps to :data:`SCOPE_UNREACHABLE`, which no grant
+#: (including ``admin:*``) can satisfy until the tag is classified.
 TAG_TO_RESOURCE: Final[dict[str, str]] = {
     "home": "home",
     "projects": "projects",
@@ -207,9 +212,9 @@ def validate_requested_scopes(
 ) -> tuple[list[str], list[str]]:
     """Split the requested scopes into ``(accepted, rejected)``.
 
-    Scopes not in :data:`ALL_SCOPES` are rejected silently (typos,
-    future scopes). Admin-only scopes are rejected for non-admin
-    callers.
+    Scopes not in :data:`ALL_SCOPES` (typos or future scopes) and
+    admin-only scopes requested by non-admin callers are returned in
+    ``rejected`` so the API can refuse the mint request explicitly.
     """
     accepted: list[str] = []
     rejected: list[str] = []

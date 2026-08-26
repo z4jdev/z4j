@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import stat
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -359,8 +360,9 @@ class TestS005WriteMintedCertHardensExistingDir:
         # the cert-mint command against a previous output dir.
         out_dir = tmp_path / "out"
         out_dir.mkdir(mode=0o755)
+        out_dir.chmod(0o755)
         # Sanity check: real perms are 0o755 before our call.
-        assert oct(out_dir.stat().st_mode)[-3:] == "755"
+        assert stat.S_IMODE(out_dir.lstat().st_mode) == 0o755
 
         ca_cert, ca_key = _self_signed_ca()
         cert_pem, key_pem = mint_scheduler_cert(
@@ -535,31 +537,75 @@ class TestM1InvitationAcceptPasswordPolicy:
     the inconsistency.
     """
 
-    def test_invitations_module_calls_validate_policy(self) -> None:
-        """Source-level regression guard: the validate_policy call
-        must precede the hash call in the accept handler."""
-        from pathlib import Path
+    @pytest.mark.asyncio
+    async def test_accept_handler_rejects_weak_password_before_side_effects(
+        self,
+        brain_settings,
+    ) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
 
-        from z4j_brain.api import invitations
+        from z4j_brain.api.invitations import (
+            InvitationAcceptRequest,
+            accept_invitation,
+        )
+        from z4j_brain.auth.passwords import PasswordError
 
-        src = Path(invitations.__file__).read_text(encoding="utf-8")
-        assert "hasher.validate_policy(body.password)" in src, (
-            "M1 regression: invitation accept handler dropped the "
-            "validate_policy call. Every password write path must "
-            "validate the policy before hashing -- audit M1 in "
-            "RELEASE-1.4.0-SECURITY-AUDIT.md."
+        project_id = uuid.uuid4()
+        row = SimpleNamespace(
+            id=uuid.uuid4(),
+            project_id=project_id,
+            email="invitee@example.test",
+            role="viewer",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            revoked_at=None,
+            accepted_at=None,
         )
-        # And the validate must precede the hash, not follow it.
-        validate_pos = src.find("hasher.validate_policy(body.password)")
-        hash_pos = src.find("password_hash = hasher.hash(body.password)")
-        assert validate_pos > 0
-        assert hash_pos > 0
-        assert validate_pos < hash_pos, (
-            "M1 regression: validate_policy must run BEFORE hash. "
-            "argon2 hashing is expensive (~80ms); rejecting weak "
-            "passwords first saves the CPU budget AND closes the "
-            "policy bypass."
+        invitations = SimpleNamespace(
+            get_by_hash=AsyncMock(return_value=row),
+            accept=AsyncMock(),
         )
+        users = SimpleNamespace(
+            get_by_email=AsyncMock(return_value=None),
+            add=AsyncMock(),
+        )
+        memberships = SimpleNamespace(grant=AsyncMock())
+        projects = SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    id=project_id,
+                    slug="invited-project",
+                    name="Invited project",
+                ),
+            ),
+        )
+        audit = SimpleNamespace(record=AsyncMock())
+        db_session = SimpleNamespace(commit=AsyncMock())
+        body = InvitationAcceptRequest(
+            token="invitation-token",
+            password="qwertyuiop12",
+            display_name="Invitee",
+        )
+
+        with pytest.raises(PasswordError, match="at least 3"):
+            await accept_invitation(
+                body=body,
+                invitations=invitations,
+                users=users,
+                memberships=memberships,
+                projects=projects,
+                settings=brain_settings,
+                audit=audit,
+                audit_log=object(),
+                db_session=db_session,
+                ip="127.0.0.1",
+            )
+
+        users.add.assert_not_awaited()
+        memberships.grant.assert_not_awaited()
+        invitations.accept.assert_not_awaited()
+        audit.record.assert_not_awaited()
+        db_session.commit.assert_not_awaited()
 
     def test_validate_policy_rejects_invitation_grade_weak_passwords(
         self,
@@ -607,15 +653,24 @@ class TestLowConfig2HttpsOnlyWebhooks:
 
     def setup_method(self) -> None:
         # Each test starts in the secure default (HTTPS-only) so the
-        # behavior is independent of test ordering.
+        # behavior is independent of test ordering. Seed the real resolver
+        # cache with a public address: these are scheme-policy tests, and
+        # external DNS availability must not decide their verdict.
         from z4j_brain.domain.notifications import channels
 
         channels.set_allow_http_webhooks(False)
+        channels._DNS_CACHE.clear()
+        channels._set_dns_cache_entry(
+            "example.com",
+            time.monotonic() + 60,
+            ["93.184.216.34"],
+        )
 
     def teardown_method(self) -> None:
         from z4j_brain.domain.notifications import channels
 
         channels.set_allow_http_webhooks(False)
+        channels._DNS_CACHE.clear()
 
     @pytest.mark.asyncio
     async def test_http_url_rejected_by_default(self) -> None:
@@ -627,19 +682,32 @@ class TestLowConfig2HttpsOnlyWebhooks:
         assert "Z4J_NOTIFICATIONS_WEBHOOK_ALLOW_HTTP" in err
 
     @pytest.mark.asyncio
-    async def test_https_url_accepted_by_default(self) -> None:
+    async def test_https_url_accepted_by_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         from z4j_brain.domain.notifications import channels
 
-        # Use a public host that resolves; the SSRF guard rejects
-        # private/loopback so a literal IP would skew the test. The
-        # validator returns None on success.
+        def fail_external_dns(*_args, **_kwargs):
+            raise AssertionError("scheme-policy test attempted external DNS")
+
+        monkeypatch.setattr(channels.socket, "getaddrinfo", fail_external_dns)
+        # The setup seeds this public host in the resolver cache; the SSRF
+        # guard still parses and classifies the IP, without a network oracle.
         err = await channels.validate_webhook_url("https://example.com/hook")
         assert err is None, f"expected accept, got: {err!r}"
 
     @pytest.mark.asyncio
-    async def test_http_url_accepted_when_operator_opts_in(self) -> None:
+    async def test_http_url_accepted_when_operator_opts_in(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         from z4j_brain.domain.notifications import channels
 
+        def fail_external_dns(*_args, **_kwargs):
+            raise AssertionError("scheme-policy test attempted external DNS")
+
+        monkeypatch.setattr(channels.socket, "getaddrinfo", fail_external_dns)
         channels.set_allow_http_webhooks(True)
         err = await channels.validate_webhook_url("http://example.com/hook")
         assert err is None, f"expected accept after opt-in, got: {err!r}"

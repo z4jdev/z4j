@@ -25,8 +25,10 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from z4j_brain.settings import Settings
+
+from tests.migration_head import code_head
 
 pytestmark = pytest.mark.asyncio
 
@@ -98,6 +100,373 @@ async def _run_alembic(
                 os.environ[k] = v
 
 
+async def _schedule_rollback_state(
+    integration_settings: Settings,
+) -> tuple[str, tuple[tuple[object, ...], ...] | None, set[str]]:
+    """The three things a 1.9 rollback must not quietly change.
+
+    ``holds`` is ``None`` once ``paused_at`` is gone, so a released hold and a
+    dropped column cannot compare equal to each other.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(integration_settings.database_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            version = (
+                await conn.execute(text("SELECT version_num FROM alembic_version"))
+            ).scalar_one()
+            columns = {
+                row[0]
+                for row in (
+                    await conn.execute(
+                        text(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_name = 'schedules'",
+                        ),
+                    )
+                ).all()
+            }
+            holds = None
+            if "paused_at" in columns:
+                holds = tuple(
+                    tuple(row)
+                    for row in (
+                        await conn.execute(
+                            text("SELECT paused_at FROM schedules ORDER BY id"),
+                        )
+                    ).all()
+                )
+        return version, holds, columns
+    finally:
+        await engine.dispose()
+
+
+async def _seed_stacked_release_evidence(
+    integration_settings: Settings,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Put a row in 0014 so a refused downgrade must preserve real data."""
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from z4j_brain.persistence.models import (
+        AutomationRule,
+        AutomationRuleAdmission,
+        NotificationDelivery,
+        Project,
+        User,
+        UserSubscription,
+    )
+
+    engine = create_async_engine(integration_settings.database_url, future=True)
+    rule_id = uuid.uuid4()
+    delivery_id = uuid.uuid4()
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            project_id = (await session.scalars(select(Project.id).limit(1))).one()
+            session.add(
+                AutomationRule(
+                    id=rule_id,
+                    project_id=project_id,
+                    name=f"downgrade-preflight-{rule_id}",
+                    trigger="task.failed",
+                    conditions={},
+                    actions=[],
+                    cb_config_digest="d" * 64,
+                ),
+            )
+            await session.flush()
+            session.add(
+                AutomationRuleAdmission(
+                    id=uuid.uuid4(),
+                    rule_id=rule_id,
+                    admitted_at=datetime.now(UTC),
+                    weight=7,
+                ),
+            )
+            user = User(
+                id=uuid.uuid4(),
+                email=f"downgrade-preflight-{uuid.uuid4()}@example.invalid",
+                password_hash="not-a-login-credential",
+            )
+            subscription = UserSubscription(
+                id=uuid.uuid4(),
+                user_id=user.id,
+                project_id=project_id,
+                trigger="task.failed",
+                filters={},
+                in_app=True,
+                project_channel_ids=[],
+                user_channel_ids=[],
+                cooldown_seconds=0,
+                is_active=True,
+            )
+            session.add(user)
+            await session.flush()
+            session.add(subscription)
+            await session.flush()
+            session.add(
+                NotificationDelivery(
+                    id=delivery_id,
+                    subscription_id=subscription.id,
+                    recipient_user_id=user.id,
+                    project_id=project_id,
+                    trigger="task.failed",
+                    status="sent",
+                ),
+            )
+            await session.commit()
+        return rule_id, delivery_id
+    finally:
+        await engine.dispose()
+
+
+async def _stacked_release_evidence(
+    integration_settings: Settings,
+    rule_id: uuid.UUID,
+    delivery_id: uuid.UUID,
+) -> tuple[object, ...]:
+    """Snapshot the version plus schema/data introduced above 0012."""
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(integration_settings.database_url, future=True)
+    try:
+        async with engine.connect() as connection:
+            version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            columns = tuple(
+                tuple(row)
+                for row in (
+                    await connection.execute(
+                        text(
+                            "SELECT table_name, ordinal_position, column_name, "
+                            "data_type, is_nullable, column_default "
+                            "FROM information_schema.columns "
+                            "WHERE table_schema = current_schema() "
+                            "AND table_name IN ("
+                            "'projects', 'automation_rules', "
+                            "'automation_rule_admissions', "
+                            "'notification_deliveries'"
+                            ") ORDER BY table_name, ordinal_position",
+                        ),
+                    )
+                ).all()
+            )
+            constraints = tuple(
+                tuple(row)
+                for row in (
+                    await connection.execute(
+                        text(
+                            "SELECT relation.relname, constraint_row.conname, "
+                            "pg_get_constraintdef(constraint_row.oid, true) "
+                            "FROM pg_constraint AS constraint_row "
+                            "JOIN pg_class AS relation "
+                            "ON relation.oid = constraint_row.conrelid "
+                            "JOIN pg_namespace AS namespace "
+                            "ON namespace.oid = relation.relnamespace "
+                            "WHERE namespace.nspname = current_schema() "
+                            "AND relation.relname IN ("
+                            "'projects', 'automation_rules', "
+                            "'automation_rule_admissions', "
+                            "'notification_deliveries'"
+                            ") ORDER BY relation.relname, constraint_row.conname",
+                        ),
+                    )
+                ).all()
+            )
+            indexes = tuple(
+                tuple(row)
+                for row in (
+                    await connection.execute(
+                        text(
+                            "SELECT tablename, indexname, indexdef FROM pg_indexes "
+                            "WHERE schemaname = current_schema() "
+                            "AND (tablename = 'automation_rule_admissions' "
+                            "OR indexname IN ("
+                            "'ux_agent_workers_legacy_agent', "
+                            "'ix_notification_deliveries_recipient_sent'"
+                            ")) "
+                            "ORDER BY tablename, indexname",
+                        ),
+                    )
+                ).all()
+            )
+            rule = tuple(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT id, name, config_revision, cb_config_digest "
+                            "FROM automation_rules WHERE id = :rule_id",
+                        ),
+                        {"rule_id": rule_id},
+                    )
+                ).one()
+            )
+            project = tuple(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT project.id, project.slug, "
+                            "project.automation_revision "
+                            "FROM projects AS project "
+                            "JOIN automation_rules AS rule "
+                            "ON rule.project_id = project.id "
+                            "WHERE rule.id = :rule_id",
+                        ),
+                        {"rule_id": rule_id},
+                    )
+                ).one()
+            )
+            admissions = tuple(
+                tuple(row)
+                for row in (
+                    await connection.execute(
+                        text(
+                            "SELECT id, rule_id, admitted_at, weight "
+                            "FROM automation_rule_admissions "
+                            "WHERE rule_id = :rule_id ORDER BY id",
+                        ),
+                        {"rule_id": rule_id},
+                    )
+                ).all()
+            )
+            delivery = tuple(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT id, subscription_id, project_id, "
+                            "recipient_user_id, status, sent_at "
+                            "FROM notification_deliveries WHERE id = :delivery_id",
+                        ),
+                        {"delivery_id": delivery_id},
+                    )
+                ).one()
+            )
+        return version, columns, constraints, indexes, project, rule, admissions, delivery
+    finally:
+        await engine.dispose()
+
+
+async def _create_one_schedule(
+    integration_settings: Settings,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Create one z4j-owned schedule, returning ``(project_id, schedule_id)``.
+
+    Through the control repository rather than an INSERT, because Boundary D
+    refuses a direct write and because a hold that no operator could have
+    placed proves nothing about what a rollback would destroy.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from z4j_brain.persistence.database import DatabaseManager
+    from z4j_brain.persistence.enums import ScheduleKind
+    from z4j_brain.persistence.models import Project
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+    )
+
+    engine = create_async_engine(integration_settings.database_url, future=True)
+    database = DatabaseManager(engine)
+    try:
+        async with database.session(write=True) as session:
+            project = Project(id=uuid.uuid4(), slug="hold", name="Hold")
+            session.add(project)
+            await session.flush()
+            schedule = await ScheduleControlRepository(session).create_current(
+                project_id=project.id,
+                data={
+                    "engine": "celery",
+                    "scheduler": "z4j-scheduler",
+                    "name": "nightly",
+                    "task_name": "app.tasks.nightly",
+                    "kind": ScheduleKind.CRON.value,
+                    "expression": "0 3 * * *",
+                    "timezone": "UTC",
+                    "is_enabled": True,
+                },
+                planning_at=datetime.now(UTC),
+            )
+            project_id, schedule_id = project.id, schedule.id
+            await session.commit()
+        return project_id, schedule_id
+    finally:
+        await engine.dispose()
+
+
+async def _pause_one_schedule(integration_settings: Settings) -> datetime:
+    """Create one schedule and put it on hold, then return the hold time."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from z4j_brain.persistence.database import DatabaseManager
+    from z4j_brain.persistence.models import Schedule
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+    )
+
+    project_id, schedule_id = await _create_one_schedule(integration_settings)
+    engine = create_async_engine(integration_settings.database_url, future=True)
+    database = DatabaseManager(engine)
+    try:
+        async with database.session(write=True) as session:
+            transition = await ScheduleControlRepository(session).set_paused(
+                project_id=project_id,
+                schedule_id=schedule_id,
+                paused=True,
+                occurred_at=datetime.now(UTC),
+            )
+            assert transition.outcome == "applied"
+            await session.commit()
+
+        async with database.session() as session:
+            row = (
+                await session.execute(select(Schedule).where(Schedule.id == schedule_id))
+            ).scalar_one()
+            assert row.paused_at is not None
+            return row.paused_at
+    finally:
+        await engine.dispose()
+
+
+async def _wait_until_a_session_queues_for_table(
+    integration_settings: Settings,
+    running: asyncio.Task[None],
+    table_name: str,
+    *,
+    give_up_after_seconds: float = 60.0,
+) -> None:
+    """Block until some session is waiting for a lock on ``table_name``.
+
+    Watching the lock queue rather than sleeping a guessed interval is what
+    makes the interleaving deterministic: it proves the rollback has reached
+    the point where it wants the table, while the pause behind it is still
+    uncommitted.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + give_up_after_seconds
+    engine = create_async_engine(integration_settings.database_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            while loop.time() < deadline:
+                queued = await conn.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_locks WHERE NOT granted "
+                        "AND relation = to_regclass(:table_name)",
+                    ),
+                    {"table_name": f"public.{table_name}"},
+                )
+                # pg_locks reads shared memory rather than a snapshot, but the
+                # surrounding transaction must still end or this connection
+                # pins an ever-older one for the length of the poll.
+                await conn.rollback()
+                if queued or running.done():
+                    return
+                await asyncio.sleep(0.05)
+        raise AssertionError(
+            f"the rollback never queued for a lock on {table_name}",
+        )
+    finally:
+        await engine.dispose()
+
+
 async def test_alembic_upgrade_shares_the_schema_transition_lock(
     integration_engine: AsyncEngine,
     integration_settings: Settings,
@@ -131,7 +500,7 @@ async def test_alembic_upgrade_shares_the_schema_transition_lock(
             await connection.scalar(
                 text("SELECT version_num FROM alembic_version"),
             )
-            == "v1_8_schedule_cursor_repair"
+            == code_head()
         )
 
 
@@ -301,7 +670,7 @@ async def test_populated_1_7_upgrade_completes_manifest_ceremony_and_boot_gate(
             )
         ).one()
     assert (head, projects, users, state) == (
-        "v1_8_schedule_cursor_repair",
+        code_head(),
         1,
         1,
         "audit_chain_state",
@@ -602,7 +971,7 @@ async def test_activated_postgres_invalid_quarantine_cursor_is_parked(
                 {"schedule_id": schedule_id},
             )
         ).one()
-    assert head == "v1_8_schedule_cursor_repair"
+    assert head == code_head()
     assert not is_enabled
     assert quarantine_code == "migration_definition_invalid"
     assert quarantine_matches_control
@@ -657,6 +1026,9 @@ _Z4J_TABLES_THAT_MUST_BE_GONE = (
     # 1.7 rule engine: dropped by the consolidated v1_7_schema.downgrade()
     # (its _down_automation_rules step) on the way down to base.
     "automation_rules",
+    # 1.9 exact rolling-window breaker history: dropped by 0014 before the
+    # consolidated 1.7 automation-rule table is removed.
+    "automation_rule_admissions",
     # 1.7 automation firing outbox: dropped by v1_7_schema.downgrade()
     # (its _down_automation_firing_outbox step) on the way to base.
     "automation_firing_outbox",
@@ -772,6 +1144,194 @@ class TestMigrationStructure:
             "ix_sessions_user_active",
         ):
             assert expected in indexes, f"missing index {expected}"
+
+    async def test_audit_action_prefix_index_uses_varchar_opclass(
+        self,
+        migrated_engine: AsyncEngine,
+    ) -> None:
+        """0016 installs the exact PostgreSQL prefix-search authority."""
+
+        async with migrated_engine.connect() as conn:
+            definition = (
+                await conn.execute(
+                    text(
+                        "SELECT pg_get_indexdef(index_relation.oid) "
+                        "FROM pg_class AS index_relation "
+                        "JOIN pg_namespace AS namespace "
+                        "ON namespace.oid = index_relation.relnamespace "
+                        "WHERE namespace.nspname = current_schema() "
+                        "AND index_relation.relname = "
+                        "'ix_audit_log_action_pattern'",
+                    ),
+                )
+            ).scalar_one()
+            opclasses = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT operator_class.opcname "
+                            "FROM pg_class AS index_relation "
+                            "JOIN pg_namespace AS namespace "
+                            "ON namespace.oid = index_relation.relnamespace "
+                            "JOIN pg_index AS index_row "
+                            "ON index_row.indexrelid = index_relation.oid "
+                            "CROSS JOIN LATERAL unnest(index_row.indclass) "
+                            "WITH ORDINALITY AS class_row(class_oid, position) "
+                            "JOIN pg_opclass AS operator_class "
+                            "ON operator_class.oid = class_row.class_oid "
+                            "WHERE namespace.nspname = current_schema() "
+                            "AND index_relation.relname = "
+                            "'ix_audit_log_action_pattern' "
+                            "ORDER BY class_row.position",
+                        ),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            authority = tuple(
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT index_row.indisunique, "
+                            "index_row.indnullsnotdistinct, "
+                            "index_row.indisprimary, index_row.indisexclusion, "
+                            "index_row.indimmediate, index_row.indisvalid, "
+                            "index_row.indcheckxmin, index_row.indisready, "
+                            "index_row.indislive, constraint_row.contype "
+                            "FROM pg_class AS index_relation "
+                            "JOIN pg_namespace AS namespace "
+                            "ON namespace.oid = index_relation.relnamespace "
+                            "JOIN pg_index AS index_row "
+                            "ON index_row.indexrelid = index_relation.oid "
+                            "LEFT JOIN pg_constraint AS constraint_row "
+                            "ON constraint_row.conindid = index_relation.oid "
+                            "WHERE namespace.nspname = current_schema() "
+                            "AND index_relation.relname = "
+                            "'ix_audit_log_action_pattern'",
+                        ),
+                    )
+                ).one(),
+            )
+
+        assert str(definition).endswith(
+            "USING btree (action varchar_pattern_ops, occurred_at DESC, source_ip)",
+        )
+        assert list(opclasses) == ["varchar_pattern_ops", "timestamptz_ops", "inet_ops"]
+        assert authority == (False, False, False, False, True, True, False, True, True, None)
+
+    @pytest.mark.parametrize("direction", ["upgrade", "downgrade"])
+    @pytest.mark.parametrize(
+        ("hostile_ddl", "expected_constraint_type"),
+        [
+            (
+                "CREATE TABLE ix_audit_log_action_pattern (value integer)",
+                None,
+            ),
+            (
+                "CREATE TABLE audit_action_pattern_decoy (value integer); "
+                "CREATE INDEX ix_audit_log_action_pattern "
+                "ON audit_action_pattern_decoy (value)",
+                None,
+            ),
+            (
+                "ALTER TABLE audit_log ADD CONSTRAINT ix_audit_log_action_pattern "
+                "EXCLUDE USING btree ("
+                "action varchar_pattern_ops WITH =, "
+                "occurred_at DESC WITH =, source_ip WITH =)",
+                "x",
+            ),
+        ],
+        ids=["table", "foreign-table-index", "exclusion-constraint"],
+    )
+    async def test_audit_action_pattern_reserved_name_conflicts_preserve_version(
+        self,
+        migrated_engine: AsyncEngine,
+        integration_settings: Settings,
+        direction: str,
+        hostile_ddl: str,
+        expected_constraint_type: str | None,
+    ) -> None:
+        """0016 rejects every conflicting owner in PostgreSQL's relation namespace."""
+
+        from alembic.util import CommandError
+
+        index_name = "ix_audit_log_action_pattern"
+        await migrated_engine.dispose()
+        if direction == "upgrade":
+            await _run_alembic(
+                integration_settings,
+                "downgrade",
+                "v1_9_delivery_recipient",
+            )
+            expected_version = "v1_9_delivery_recipient"
+        else:
+            expected_version = code_head()
+
+        catalog_query = text(
+            "SELECT named_object.relkind, table_class.relname, "
+            "CASE WHEN named_object.relkind IN ('i', 'I') "
+            "THEN pg_get_indexdef(named_object.oid) END, "
+            "CAST(constraint_row.contype AS text) "
+            "FROM pg_class AS named_object "
+            "JOIN pg_namespace AS namespace "
+            "ON namespace.oid = named_object.relnamespace "
+            "LEFT JOIN pg_index AS index_row "
+            "ON index_row.indexrelid = named_object.oid "
+            "LEFT JOIN pg_class AS table_class "
+            "ON table_class.oid = index_row.indrelid "
+            "LEFT JOIN pg_constraint AS constraint_row "
+            "ON constraint_row.conindid = named_object.oid "
+            "WHERE namespace.nspname = current_schema() "
+            "AND named_object.relname = :index_name",
+        )
+        engine = create_async_engine(integration_settings.database_url, future=True)
+        try:
+            async with engine.begin() as connection:
+                if direction == "downgrade":
+                    await connection.execute(text(f"DROP INDEX {index_name}"))
+                for statement in hostile_ddl.split("; "):
+                    await connection.execute(text(statement))
+
+            async with engine.connect() as connection:
+                before = tuple(
+                    (
+                        await connection.execute(
+                            catalog_query,
+                            {"index_name": index_name},
+                        )
+                    ).one(),
+                )
+            assert before[-1] == expected_constraint_type
+
+            with pytest.raises(CommandError, match="unexpected definition"):
+                if direction == "upgrade":
+                    await _run_alembic(integration_settings, "upgrade", "head")
+                else:
+                    await _run_alembic(
+                        integration_settings,
+                        "downgrade",
+                        "v1_9_delivery_recipient",
+                    )
+
+            async with engine.connect() as connection:
+                assert (
+                    await connection.scalar(
+                        text("SELECT version_num FROM alembic_version"),
+                    )
+                    == expected_version
+                )
+                after = tuple(
+                    (
+                        await connection.execute(
+                            catalog_query,
+                            {"index_name": index_name},
+                        )
+                    ).one(),
+                )
+            assert after == before
+        finally:
+            await engine.dispose()
 
     async def test_events_is_partitioned(
         self,
@@ -1121,7 +1681,7 @@ class TestMigrationStructure:
 
         await migrated_engine.dispose()
         before = await _snapshot()
-        assert before[0] == "v1_8_schedule_cursor_repair"
+        assert before[0] == code_head()
         assert before[1][3:5] == (2, 0)
         assert [marker[1] for marker in before[2]] == [
             "audit.chain_generation_started",
@@ -1139,7 +1699,428 @@ class TestMigrationStructure:
                 "v1_8_bulk_retry_requests",
             )
 
-        assert await _snapshot() == before
+        # Alembic steps down one revision at a time and commits each step, so
+        # revisions ABOVE the guarded one used to be dropped, and committed,
+        # before the guard aborted the run. env.py now decides the whole plan
+        # up front, so a refused rollback moves nothing at all: the head stays
+        # where it was rather than stopping at the floor.
+        after = await _snapshot()
+        assert after == before
+
+    async def test_paused_schedule_survives_both_refused_rollbacks(
+        self,
+        migrated_engine: AsyncEngine,
+        integration_settings: Settings,
+    ) -> None:
+        """A hold must outlive both a plan-level and a single-step refusal.
+
+        ``paused_at`` is the only record that a hold exists, so a rollback that
+        drops it releases every held schedule at once, and the re-upgrade an
+        operator makes next re-adds the column empty with no error and no audit
+        row. Postgres exercises what SQLite cannot: env.py holds a
+        session-scoped advisory lock across the whole invocation, and the
+        refusal has to survive being taken while that lock is held.
+
+        The hold here is committed and its connection closed before the
+        rollback starts, so this covers the quiet case only. The hold that
+        lands while a rollback is already in flight is
+        ``test_pause_committed_during_the_rollback_still_refuses_it``.
+        """
+        from alembic.util import CommandError
+
+        held_at = await _pause_one_schedule(integration_settings)
+        evidence_ids = await _seed_stacked_release_evidence(integration_settings)
+        await migrated_engine.dispose()
+
+        before = await _schedule_rollback_state(integration_settings)
+        stacked_before = await _stacked_release_evidence(
+            integration_settings,
+            *evidence_ids,
+        )
+        assert before[:2] == (code_head(), ((held_at,),))
+
+        # Planned through the Boundary-D fence: refused before the 1.9 step.
+        with pytest.raises(
+            CommandError,
+            match="refused before running any step of this downgrade",
+        ):
+            await _run_alembic(
+                integration_settings,
+                "downgrade",
+                "v1_8_bulk_retry_requests",
+            )
+        assert await _schedule_rollback_state(integration_settings) == before
+        assert (
+            await _stacked_release_evidence(integration_settings, *evidence_ids) == stacked_before
+        )
+
+        # Planned entirely above the fence, so 1.9 has to refuse for itself.
+        with pytest.raises(CommandError, match=r"1 schedule\(s\) are paused"):
+            await _run_alembic(
+                integration_settings,
+                "downgrade",
+                "v1_8_schedule_cursor_repair",
+            )
+        assert await _schedule_rollback_state(integration_settings) == before
+        assert (
+            await _stacked_release_evidence(integration_settings, *evidence_ids) == stacked_before
+        )
+
+        await _run_alembic(integration_settings, "upgrade", "head")
+        assert await _schedule_rollback_state(integration_settings) == before
+        assert (
+            await _stacked_release_evidence(integration_settings, *evidence_ids) == stacked_before
+        )
+
+    async def test_revoked_agent_refuses_before_any_release_column_is_dropped(
+        self,
+        migrated_engine: AsyncEngine,
+        integration_settings: Settings,
+    ) -> None:
+        """The older hygiene worker must never receive an unmarked tombstone."""
+        from alembic.util import CommandError
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from z4j_brain.persistence.enums import AgentState
+        from z4j_brain.persistence.models import Agent, Project
+        from z4j_core.transport import CURRENT_PROTOCOL
+
+        project_id = uuid.uuid4()
+        agent_id = uuid.uuid4()
+        revoked_at = datetime.now(UTC)
+        async with async_sessionmaker(migrated_engine, expire_on_commit=False)() as session:
+            session.add(Project(id=project_id, slug="revoked", name="Revoked"))
+            await session.flush()
+            session.add(
+                Agent(
+                    id=agent_id,
+                    project_id=project_id,
+                    name=f"revoked:{agent_id}",
+                    token_hash=f"revoked:{agent_id}:{revoked_at.isoformat()}",
+                    protocol_version=CURRENT_PROTOCOL,
+                    framework_adapter="bare",
+                    engine_adapters=[],
+                    scheduler_adapters=[],
+                    capabilities={},
+                    state=AgentState.OFFLINE,
+                    revoked_at=revoked_at,
+                ),
+            )
+            await session.commit()
+        evidence_ids = await _seed_stacked_release_evidence(integration_settings)
+        await migrated_engine.dispose()
+
+        async def snapshot() -> tuple[str, set[str], set[str], datetime | None]:
+            engine = create_async_engine(integration_settings.database_url, future=True)
+            try:
+                async with engine.connect() as connection:
+                    version = (
+                        await connection.execute(
+                            text("SELECT version_num FROM alembic_version"),
+                        )
+                    ).scalar_one()
+                    rows = (
+                        await connection.execute(
+                            text(
+                                "SELECT table_name, column_name "
+                                "FROM information_schema.columns "
+                                "WHERE table_name IN ('agents', 'schedules')",
+                            ),
+                        )
+                    ).all()
+                    marker = (
+                        await connection.execute(
+                            text("SELECT revoked_at FROM agents WHERE id = :id"),
+                            {"id": agent_id},
+                        )
+                    ).scalar_one()
+                return (
+                    str(version),
+                    {str(row.column_name) for row in rows if row.table_name == "agents"},
+                    {str(row.column_name) for row in rows if row.table_name == "schedules"},
+                    marker,
+                )
+            finally:
+                await engine.dispose()
+
+        before = await snapshot()
+        stacked_before = await _stacked_release_evidence(
+            integration_settings,
+            *evidence_ids,
+        )
+        assert before[0] == code_head()
+        assert "revoked_at" in before[1]
+        assert {"paused_at", "overlap_policy"} <= before[2]
+        assert before[3] is not None
+
+        with pytest.raises(CommandError, match=r"1 agent\(s\) are revoked"):
+            await _run_alembic(
+                integration_settings,
+                "downgrade",
+                "v1_8_schedule_cursor_repair",
+            )
+
+        assert await snapshot() == before
+        assert (
+            await _stacked_release_evidence(integration_settings, *evidence_ids) == stacked_before
+        )
+
+    async def test_pause_committed_during_the_rollback_still_refuses_it(
+        self,
+        migrated_engine: AsyncEngine,
+        integration_settings: Settings,
+    ) -> None:
+        """Counting the holds and dropping the column must see one table state.
+
+        The two happen at different instants, and Postgres puts a usable window
+        between them: an ordinary pause writer takes only row-level locks, so
+        the count reads past it while it is uncommitted, and the DROP then
+        queues behind it and lands after that hold has committed. That ordering
+        is the one where a guard that counted too early waves through exactly
+        the silent release it exists to prevent, so the rollback has to take
+        ``schedules`` against writers before it counts.
+        """
+        from alembic.util import CommandError
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from z4j_brain.persistence.database import DatabaseManager
+        from z4j_brain.persistence.repositories.schedule_control import (
+            ScheduleControlRepository,
+        )
+
+        project_id, schedule_id = await _create_one_schedule(integration_settings)
+        await migrated_engine.dispose()
+        before = await _schedule_rollback_state(integration_settings)
+        assert before[:2] == (code_head(), ((None,),))
+
+        engine = create_async_engine(integration_settings.database_url, future=True)
+        database = DatabaseManager(engine)
+        rollback: asyncio.Task[None] | None = None
+        try:
+            async with database.session(write=True) as session:
+                transition = await ScheduleControlRepository(session).set_paused(
+                    project_id=project_id,
+                    schedule_id=schedule_id,
+                    paused=True,
+                    occurred_at=datetime.now(UTC),
+                )
+                assert transition.outcome == "applied"
+                assert transition.schedule is not None
+                held_at = transition.schedule.paused_at
+
+                # Deliberately still uncommitted. Any count the rollback runs
+                # from here reads the pre-pause NULL.
+                rollback = asyncio.create_task(
+                    _run_alembic(
+                        integration_settings,
+                        "downgrade",
+                        "v1_8_schedule_cursor_repair",
+                    ),
+                )
+                await _wait_until_a_session_queues_for_table(
+                    integration_settings,
+                    rollback,
+                    "schedules",
+                )
+                assert not rollback.done(), (
+                    "the rollback finished without ever waiting for schedules, "
+                    "so this run proves nothing about the interleaving"
+                )
+                await session.commit()
+
+            with pytest.raises(CommandError, match=r"1 schedule\(s\) are paused"):
+                await asyncio.wait_for(rollback, timeout=120)
+        finally:
+            if rollback is not None and not rollback.done():
+                rollback.cancel()
+            await engine.dispose()
+
+        version, holds, columns = await _schedule_rollback_state(integration_settings)
+        assert version == code_head()
+        assert {"paused_at", "overlap_policy"} <= columns
+        assert holds == ((held_at,),)
+
+    async def test_revoke_committed_during_the_rollback_still_refuses_it(
+        self,
+        migrated_engine: AsyncEngine,
+        integration_settings: Settings,
+    ) -> None:
+        """The agents lock must close the same count-then-drop race."""
+        from alembic.util import CommandError
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from z4j_brain.persistence.database import DatabaseManager
+        from z4j_brain.persistence.enums import AgentState
+        from z4j_brain.persistence.models import Agent, Project
+        from z4j_brain.persistence.repositories.agents import AgentRepository
+        from z4j_core.transport import CURRENT_PROTOCOL
+
+        project_id = uuid.uuid4()
+        agent_id = uuid.uuid4()
+        async with async_sessionmaker(migrated_engine, expire_on_commit=False)() as session:
+            session.add(Project(id=project_id, slug="revoke-race", name="Revoke race"))
+            await session.flush()
+            session.add(
+                Agent(
+                    id=agent_id,
+                    project_id=project_id,
+                    name="revoke-race",
+                    token_hash=f"live-{agent_id}",
+                    protocol_version=CURRENT_PROTOCOL,
+                    framework_adapter="bare",
+                    engine_adapters=[],
+                    scheduler_adapters=[],
+                    capabilities={},
+                    state=AgentState.ONLINE,
+                ),
+            )
+            await session.commit()
+        await migrated_engine.dispose()
+
+        revoked_at = datetime.now(UTC)
+        engine = create_async_engine(integration_settings.database_url, future=True)
+        database = DatabaseManager(engine)
+        rollback: asyncio.Task[None] | None = None
+        try:
+            async with database.session(write=True) as session:
+                agent = await AgentRepository(session).get_live(agent_id, lock=True)
+                assert agent is not None
+                await AgentRepository(session).revoke(agent, at=revoked_at)
+
+                # The marker is still uncommitted. A preflight that runs before
+                # taking the table lock can count zero, then drop the column
+                # after this transaction commits.
+                rollback = asyncio.create_task(
+                    _run_alembic(
+                        integration_settings,
+                        "downgrade",
+                        "v1_8_schedule_cursor_repair",
+                    ),
+                )
+                await _wait_until_a_session_queues_for_table(
+                    integration_settings,
+                    rollback,
+                    "agents",
+                )
+                assert not rollback.done(), (
+                    "the rollback finished without waiting for agents, so "
+                    "this run proves nothing about the interleaving"
+                )
+                await session.commit()
+
+            with pytest.raises(CommandError, match=r"1 agent\(s\) are revoked"):
+                await asyncio.wait_for(rollback, timeout=120)
+        finally:
+            if rollback is not None and not rollback.done():
+                rollback.cancel()
+            await engine.dispose()
+
+        verify = create_async_engine(integration_settings.database_url, future=True)
+        try:
+            async with verify.connect() as connection:
+                version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+                marker = await connection.scalar(
+                    text("SELECT revoked_at FROM agents WHERE id = :agent_id"),
+                    {"agent_id": agent_id},
+                )
+        finally:
+            await verify.dispose()
+        assert version == code_head()
+        assert marker == revoked_at
+
+    async def test_single_step_downgrade_proceeds_when_no_schedule_is_paused(
+        self,
+        migrated_engine: AsyncEngine,
+        integration_settings: Settings,
+    ) -> None:
+        """The hold guard must be a guard, not a blanket refusal.
+
+        This crosses all three 1.9 revisions and proves their schema removal is
+        still allowed after the whole-plan state preflight succeeds.
+        """
+        await migrated_engine.dispose()
+
+        await _run_alembic(
+            integration_settings,
+            "downgrade",
+            "v1_8_schedule_cursor_repair",
+        )
+        version, holds, columns = await _schedule_rollback_state(integration_settings)
+        assert version == "v1_8_schedule_cursor_repair"
+        assert holds is None
+        assert not {"paused_at", "overlap_policy"} & columns
+        engine = create_async_engine(integration_settings.database_url, future=True)
+        try:
+            async with engine.connect() as connection:
+                revoked_column_count = await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM information_schema.columns "
+                        "WHERE table_name = 'agents' AND column_name = 'revoked_at'",
+                    ),
+                )
+                admissions_table_count = await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM information_schema.tables "
+                        "WHERE table_schema = current_schema() "
+                        "AND table_name = 'automation_rule_admissions'",
+                    ),
+                )
+                digest_column_count = await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() "
+                        "AND table_name = 'automation_rules' "
+                        "AND column_name = 'cb_config_digest'",
+                    ),
+                )
+                rule_revision_column_count = await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() "
+                        "AND table_name = 'automation_rules' "
+                        "AND column_name = 'config_revision'",
+                    ),
+                )
+                project_revision_column_count = await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() "
+                        "AND table_name = 'projects' "
+                        "AND column_name = 'automation_revision'",
+                    ),
+                )
+                legacy_index_count = await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_indexes "
+                        "WHERE schemaname = current_schema() "
+                        "AND indexname = 'ux_agent_workers_legacy_agent'",
+                    ),
+                )
+                recipient_column_count = await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() "
+                        "AND table_name = 'notification_deliveries' "
+                        "AND column_name = 'recipient_user_id'",
+                    ),
+                )
+                recipient_index_count = await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_indexes "
+                        "WHERE schemaname = current_schema() "
+                        "AND indexname = 'ix_notification_deliveries_recipient_sent'",
+                    ),
+                )
+        finally:
+            await engine.dispose()
+        assert revoked_column_count == 0
+        assert admissions_table_count == 0
+        assert digest_column_count == 0
+        assert rule_revision_column_count == 0
+        assert project_revision_column_count == 0
+        assert legacy_index_count == 0
+        assert recipient_column_count == 0
+        assert recipient_index_count == 0
+
+        await _run_alembic(integration_settings, "upgrade", "head")
+        assert (await _schedule_rollback_state(integration_settings))[0] == code_head()
 
 
 # ---------------------------------------------------------------------------

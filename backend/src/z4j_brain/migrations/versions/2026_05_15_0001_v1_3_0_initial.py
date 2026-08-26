@@ -184,6 +184,38 @@ _POST_1_3_0_TABLES: frozenset[str] = frozenset(
 )
 
 _HISTORICAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "agent_workers": (
+        "agent_id",
+        "project_id",
+        "worker_id",
+        "role",
+        "framework",
+        "pid",
+        "started_at",
+        "state",
+        "last_seen_at",
+        "last_connect_at",
+        "id",
+        "created_at",
+        "updated_at",
+    ),
+    "agents": (
+        "project_id",
+        "name",
+        "token_hash",
+        "protocol_version",
+        "framework_adapter",
+        "engine_adapters",
+        "scheduler_adapters",
+        "capabilities",
+        "state",
+        "last_seen_at",
+        "last_connect_at",
+        "metadata",
+        "id",
+        "created_at",
+        "updated_at",
+    ),
     "audit_log": (
         "project_id",
         "user_id",
@@ -201,6 +233,26 @@ _HISTORICAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "row_hmac",
         "prev_row_hmac",
         "id",
+    ),
+    "automation_rules": (
+        "project_id",
+        "name",
+        "is_enabled",
+        "dry_run",
+        "trigger",
+        "conditions",
+        "actions",
+        "max_executions_per_window",
+        "window_seconds",
+        "cb_tripped",
+        "cb_window_start",
+        "cb_execution_count",
+        "last_notify_at",
+        "created_by",
+        "source_hash",
+        "id",
+        "created_at",
+        "updated_at",
     ),
     "commands": (
         "project_id",
@@ -231,6 +283,40 @@ _HISTORICAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "scheduled_for",
         "enqueued_at",
         "expires_at",
+    ),
+    "notification_deliveries": (
+        "subscription_id",
+        "channel_id",
+        "user_channel_id",
+        "project_id",
+        "trigger",
+        "task_id",
+        "task_name",
+        "status",
+        "response_code",
+        "response_body",
+        "error",
+        "channel_name",
+        "channel_type",
+        "sent_at",
+        "triggered_by_user_id",
+        "id",
+    ),
+    "projects": (
+        "slug",
+        "name",
+        "description",
+        "environment",
+        "timezone",
+        "is_active",
+        "automation_enabled",
+        "default_scheduler_owner",
+        "allowed_schedulers",
+        "settings",
+        "organization_id",
+        "id",
+        "created_at",
+        "updated_at",
     ),
     "schedule_fires": (
         "id",
@@ -323,10 +409,7 @@ def _copy_historical_columns(
     table_name: str,
 ) -> list[sa.Column[object]]:
     source = Base.metadata.tables[table_name]
-    return [
-        source.c[column_name]._copy()
-        for column_name in _HISTORICAL_TABLE_COLUMNS[table_name]
-    ]
+    return [source.c[column_name]._copy() for column_name in _HISTORICAL_TABLE_COLUMNS[table_name]]
 
 
 def _historical_initial_metadata() -> sa.MetaData:
@@ -336,15 +419,46 @@ def _historical_initial_metadata() -> sa.MetaData:
         naming_convention=Base.metadata.naming_convention,
     )
     # The frozen tables need their FK targets present in this private metadata
-    # for SQLAlchemy resolution.  These three declarations are name/type
+    # for SQLAlchemy resolution. These declarations are name/type
     # placeholders only; upgrade() never creates them from this metadata.
-    for table_name in ("projects", "users", "agents"):
+    for table_name in (
+        "notification_channels",
+        "user_channels",
+        "user_subscriptions",
+        "users",
+    ):
         source = Base.metadata.tables[table_name]
         sa.Table(
             table_name,
             metadata,
             source.c.id._copy(),
         )
+
+    projects = sa.Table(
+        "projects",
+        metadata,
+        *_copy_historical_columns("projects"),
+    )
+    sa.Index("ix_projects_active", projects.c.is_active)
+
+    agents = sa.Table(
+        "agents",
+        metadata,
+        *_copy_historical_columns("agents"),
+        sa.UniqueConstraint(
+            "project_id",
+            "name",
+            name="uq_agents_project_name",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_agents_project_id_projects",
+            ondelete="CASCADE",
+        ),
+    )
+    sa.Index("ix_agents_project_state", agents.c.project_id, agents.c.state)
+    sa.Index("ix_agents_last_seen_at", agents.c.last_seen_at)
 
     audit_log = sa.Table(
         "audit_log",
@@ -393,6 +507,69 @@ def _historical_initial_metadata() -> sa.MetaData:
         postgresql_where=sa.text("prev_row_hmac IS NOT NULL"),
     )
 
+    automation_rules = sa.Table(
+        "automation_rules",
+        metadata,
+        *_copy_historical_columns("automation_rules"),
+        sa.PrimaryKeyConstraint("id", name="pk_automation_rules"),
+        sa.UniqueConstraint(
+            "project_id",
+            "name",
+            name="uq_automation_rules_project_name",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_automation_rules_project_id_projects",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["created_by"],
+            ["users.id"],
+            name="fk_automation_rules_created_by_users",
+            ondelete="SET NULL",
+        ),
+    )
+    sa.Index(
+        "ix_automation_rules_project_trigger",
+        automation_rules.c.project_id,
+        automation_rules.c.trigger,
+        automation_rules.c.is_enabled,
+    )
+
+    agent_workers = sa.Table(
+        "agent_workers",
+        metadata,
+        *_copy_historical_columns("agent_workers"),
+        sa.UniqueConstraint(
+            "agent_id",
+            "worker_id",
+            name="uq_agent_workers_agent_worker",
+        ),
+        sa.ForeignKeyConstraint(
+            ["agent_id"],
+            ["agents.id"],
+            name="fk_agent_workers_agent_id_agents",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_agent_workers_project_id_projects",
+            ondelete="CASCADE",
+        ),
+    )
+    sa.Index(
+        "ix_agent_workers_project_state",
+        agent_workers.c.project_id,
+        agent_workers.c.state,
+    )
+    sa.Index(
+        "ix_agent_workers_agent_state",
+        agent_workers.c.agent_id,
+        agent_workers.c.state,
+    )
+
     commands = sa.Table(
         "commands",
         metadata,
@@ -432,6 +609,52 @@ def _historical_initial_metadata() -> sa.MetaData:
         "ix_commands_issued_by_at",
         commands.c.issued_by,
         commands.c.issued_at,
+    )
+
+    notification_deliveries = sa.Table(
+        "notification_deliveries",
+        metadata,
+        *_copy_historical_columns("notification_deliveries"),
+        sa.PrimaryKeyConstraint("id", name="pk_notification_deliveries"),
+        sa.ForeignKeyConstraint(
+            ["subscription_id"],
+            ["user_subscriptions.id"],
+            name=("fk_notification_deliveries_subscription_id_user_subscriptions"),
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["channel_id"],
+            ["notification_channels.id"],
+            name=("fk_notification_deliveries_channel_id_notification_channels"),
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_channel_id"],
+            ["user_channels.id"],
+            name=("fk_notification_deliveries_user_channel_id_user_channels"),
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_notification_deliveries_project_id_projects",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["triggered_by_user_id"],
+            ["users.id"],
+            name="fk_notification_deliveries_triggered_by_user_id_users",
+            ondelete="SET NULL",
+        ),
+    )
+    sa.Index(
+        "ix_notification_deliveries_project_sent",
+        notification_deliveries.c.project_id,
+        notification_deliveries.c.sent_at.desc(),
+    )
+    sa.Index(
+        "ix_notification_deliveries_triggered_by_user",
+        notification_deliveries.c.triggered_by_user_id,
     )
 
     pending_fires = sa.Table(
@@ -543,10 +766,11 @@ def upgrade() -> None:
         _install_extensions()
 
     # Unchanged 1.3-era tables retain their ORM definitions. Tables whose
-    # models evolved in 1.8 are emitted from the frozen historical definitions
-    # above, and later tables are absent entirely. This keeps replay of the
-    # historical chain equal to the immutable shipped 1.7 schema instead of
-    # teaching old revisions today's columns, constraints, or indexes.
+    # models evolved after 1.3 are emitted from the frozen historical
+    # definitions above, and later tables are absent entirely. This keeps
+    # replay of the historical chain equal to the immutable shipped schema
+    # instead of teaching old revisions today's columns, constraints, or
+    # indexes.
     historical = _historical_initial_metadata()
     for table_name in _HISTORICAL_INITIAL_TABLE_ORDER:
         if table_name in _POST_1_3_0_TABLES:

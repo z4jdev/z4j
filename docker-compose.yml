@@ -26,7 +26,7 @@
 #
 # When to graduate to the Postgres stack:
 #   - more than one concurrent admin
-#   - more than ~5k events / minute sustained
+#   - throughput or retention that exceeds your measured SQLite capacity
 #   - compliance / audit regimes that mandate Postgres
 #   - horizontal brain replicas behind a load balancer
 #
@@ -34,8 +34,15 @@
 #
 #   docker compose -f docker-compose.postgres.yml up -d
 #
-# Your users, audit chain, projects, and schedules all migrate over:
-# point Z4J_DATABASE_URL at Postgres, restart, let migrations run.
+# READ THIS FIRST: that starts a NEW, EMPTY database. Pointing
+# Z4J_DATABASE_URL at PostgreSQL selects a different backend and runs the
+# migrations against it; it does NOT copy your rows. Your users, projects,
+# schedules and audit chain stay in the SQLite volume, and the PostgreSQL
+# brain comes up in first-boot setup as though it were a fresh install.
+# There is no built-in path that moves the data: `z4j backup` and
+# `z4j restore` are per-backend, so a SQLite archive cannot be loaded into
+# PostgreSQL. Treat graduating as a new installation, and do NOT remove the
+# SQLite volume on the assumption its contents were transferred.
 #
 # Full deployment matrix: docs/DEPLOYMENT.md
 
@@ -54,7 +61,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        Z4J_VERSION: ${Z4J_VERSION:-1.8.0}
+        Z4J_VERSION: ${Z4J_VERSION:-1.9.0}
     image: ${Z4J_IMAGE:-z4jdev/z4j:latest}
     container_name: z4j
     environment:

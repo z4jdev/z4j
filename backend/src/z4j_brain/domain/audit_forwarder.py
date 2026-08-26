@@ -7,13 +7,27 @@ commits. This is the standard pattern for:
 - **SIEM ingest**: Splunk HEC, Datadog Logs, Sumo, Elastic. The
   receiver gets a JSON-per-row stream identical in shape to what
   the brain stores.
-- **Out-of-band tamper detection**: the receiver keeps an
-  append-only copy on a separate trust boundary, so an attacker
-  who compromises the brain's DB cannot also rewrite the
-  receiver's history.
+- **A copy on a separate trust boundary**: rows that reach the
+  receiver land outside the brain's database, so a role that can
+  rewrite ``audit_log`` does not thereby rewrite the receiver's
+  history. Read the next paragraph before treating that as tamper
+  detection.
 - **Compliance evidence**: SOC 2 / ISO 27001 auditors often want
   audit data in a logging stack they already control rather than
   through the application's own UI.
+
+What this forwarder is not, stated here because the shape of it
+invites the assumption: it is not the out-of-band anchor that
+detects a hostile database role. The queue below is bounded and
+in-memory, so a slow or unreachable receiver, a brain restart, or a
+traffic spike all drop rows, and the receiver has no way to tell
+such a gap from a deletion. Detection needs a sink whose retention
+the brain's operator cannot relax plus a periodic
+``z4j audit verify --known-head`` against an exported chain head,
+which bounds how far the log can be rolled back without that
+verification failing (see ``docs/SECURITY.md`` section 10.2). This
+forwarder is a live mirror for a SIEM, and it is genuinely useful as
+one.
 
 Design choices an operator should know about:
 
@@ -23,9 +37,9 @@ Design choices an operator should know about:
   nothing otherwise.
 - **Commit-bound.** The hook fires from a SQLAlchemy session
   ``after_commit`` event, so a transaction that rolls back never
-  forwards its audit rows. (v1.6 audit C6: previous behaviour
-  fired hooks inline after INSERT but before COMMIT, so a writer
-  that rolled back left the SIEM with phantom rows.)
+  forwards its audit rows. Firing inline after INSERT but before
+  COMMIT would leave the SIEM holding rows for writes that never
+  landed.
 - **In-memory bounded queue.** A spike in audit traffic that
   outpaces the receiver does NOT block the request; rows that
   cannot be enqueued get dropped with a WARNING and a metric
@@ -33,8 +47,8 @@ Design choices an operator should know about:
 - **HMAC-SHA256 signature over (timestamp, body).** The receiver
   verifies the body against ``Z4J_AUDIT_WEBHOOK_HMAC_SECRET`` AND
   checks that the timestamp header is within a small skew window
-  before trusting the row. (v1.6 audit H10: previous behaviour
-  signed only the body, allowing replay.)
+  before trusting the row. Signing the body alone would leave a
+  captured POST replayable indefinitely.
 - **SSRF + DNS-pin.** The forwarder reuses the notification
   channel's :func:`_post` helper and pre-flight checks so a
   configured URL pointing at loopback / RFC1918 / metadata
@@ -75,7 +89,6 @@ AUDIT_SIGNATURE_HEADER: str = "X-Z4J-Audit-Signature"
 #: before accepting the row. The timestamp is folded into the
 #: HMAC input as ``<timestamp>.<body>`` so a replayed POST with the
 #: original signature but a stale timestamp will not verify.
-#: (v1.6 audit H10.)
 AUDIT_TIMESTAMP_HEADER: str = "X-Z4J-Audit-Timestamp"
 
 
@@ -205,7 +218,7 @@ class AuditForwarder:
         receive dicts, not ORM rows -- the AuditService takes the
         snapshot inside the request transaction and fires hooks
         after commit, so ORM lazy-load cannot happen from inside the
-        hook. (v1.6 audit C6 + H11.)
+        hook.
 
         Returns True when enqueued, False when the queue is full
         (row dropped + counter bump + WARNING) or the forwarder has
@@ -250,11 +263,13 @@ class AuditForwarder:
         """Stop the drain task. Tries to flush the queue first, then
         cancels and accounts for any rows still in the queue.
 
-        v1.6 audit H8: previously rows enqueued between the
-        empty-check and the cancel could be silently lost. The
-        cancellation now happens UNDER lock with a final residual
-        accounting so the operator sees a concrete number in the
-        WARNING line.
+        ``stop`` marks the forwarder stopped before its drain loop, so
+        subsequent same-event-loop ``enqueue`` calls are rejected. It then
+        polls for an empty queue (or timeout), cancels the drain task, and
+        accounts for both the final queue depth and the explicit in-flight
+        payload. No lock makes the empty-check/cancel sequence atomic; the
+        contract relies on asyncio's same-loop serialization plus the
+        ``_stopped`` gate, with residual accounting making any loss visible.
         """
         self._stopped = True
         if self._task is None:
@@ -282,7 +297,7 @@ class AuditForwarder:
         # Account for any rows enqueued after the empty-check but
         # before the cancel, PLUS the row the drain task was
         # awaiting on _send_one (which was already pulled from the
-        # queue and therefore not in qsize). (Round 2 H10.)
+        # queue and therefore not in qsize).
         residual = self._queue.qsize()
         in_flight_lost = 1 if self._in_flight is not None else 0
         total_lost = residual + in_flight_lost
@@ -300,7 +315,7 @@ class AuditForwarder:
 
     def queue_depth(self) -> int:
         """Current queue size; safe to call from any context.
-        Used by ``register_inmemory_subsystem`` (Round 5 H) so the
+        Used by ``register_inmemory_subsystem`` so the
         ``z4j_inmemory_state_items{subsystem="audit_forwarder_queue"}``
         gauge surfaces queue saturation."""
         try:
@@ -314,7 +329,7 @@ class AuditForwarder:
         # cancellation lands while ``_send_one`` is awaiting the
         # HTTP response, the row is lost without showing in
         # ``_queue.qsize()``. Track it so ``stop()`` can include it
-        # in ``_shutdown_lost``. (Round 2 H10.)
+        # in ``_shutdown_lost``.
         #
         # CancelledError is NOT caught (would silently absorb the
         # signal); on cancellation we propagate, leaving
@@ -373,7 +388,7 @@ class AuditForwarder:
             )
         except Exception as exc:
             self._failed_count += 1
-            # v1.6 Round 5 I: also trip the Grafana swallowed-
+            # Also trip the Grafana swallowed-
             # exceptions alert on this branch. SSRF / non-2xx /
             # send_one paths already do; this one was the gap.
             record_swallowed("audit_forwarder", "post_raised")
@@ -386,7 +401,7 @@ class AuditForwarder:
             self._sent_count += 1
         else:
             self._failed_count += 1
-            # Round 4 Sev-3: trip the same swallowed-exception
+            # Trip the same swallowed-exception
             # alert Grafana watches for the SSRF / send-raises
             # paths. Without this, a clean 5xx storm from the
             # receiver leaves every audit row dropped silently

@@ -11,6 +11,15 @@ Covers:
   removes schedules absent from the batch (per-source scoped).
 
 Reuses the same auth fixture pattern as test_schedules_import.py.
+
+Most of this file runs against a MIGRATED database rather than a
+create_all() one. Every Boundary-D guard lives in a migration, so a
+create_all() schema refuses nothing and cannot observe what an operator's
+database does to a CRUD write.
+
+Two tests deliberately construct receipt-NULL legacy fire evidence, which
+an activated database refuses at INSERT. They keep the create_all()
+fixtures; see :class:`TestOccurrenceResolution`.
 """
 
 from __future__ import annotations
@@ -26,6 +35,10 @@ from sqlalchemy.pool import StaticPool
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.domain.audit_service import AuditService
+from z4j_brain.domain.schedule_cadence import (
+    CADENCE_SEMANTICS_VERSION,
+    cadence_runtime_fingerprint,
+)
 from z4j_brain.domain.schedule_fire_authority import (
     derive_scheduler_fire_id,
 )
@@ -53,6 +66,9 @@ from z4j_brain.persistence.models import (
 from z4j_brain.persistence.models.schedule_control import (
     SCHEDULE_REVISION_SINGLETON_ID,
 )
+from z4j_brain.persistence.repositories.schedule_control import (
+    ScheduleControlRepository,
+)
 from z4j_brain.settings import Settings
 
 # =====================================================================
@@ -61,7 +77,39 @@ from z4j_brain.settings import Settings
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
+    return Settings(
+        database_url=migrated_db_url,
+        secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated, so it refuses an
+        # audit row that carries no chain authentication. Every write in
+        # this file records one.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
+        environment="dev",
+        log_json=False,
+        argon2_time_cost=1,
+        argon2_memory_cost=8192,
+        login_min_duration_ms=10,
+        registry_backend="local",
+        metrics_public=True,
+        disable_spa_fallback=True,
+    )
+
+
+@pytest.fixture
+async def brain_app(settings: Settings):
+    # A migrated database, not a create_all() one: the Boundary-D guards
+    # that decide whether a CRUD write lands live in the migration chain.
+    engine = create_async_engine(settings.database_url)
+    app = create_app(settings, engine=engine)
+    yield app
+    await engine.dispose()
+
+
+@pytest.fixture
+def legacy_settings() -> Settings:
+    """Settings for the pre-Boundary-D shape. See :class:`TestOccurrenceResolution`."""
     return Settings(
         database_url="sqlite+aiosqlite:///:memory:",
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
@@ -78,15 +126,16 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-async def brain_app(settings: Settings):
+async def legacy_brain_app(legacy_settings: Settings):
+    """A create_all() brain, for evidence an activated database cannot hold."""
     engine = create_async_engine(
-        settings.database_url,
+        legacy_settings.database_url,
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    app = create_app(settings, engine=engine)
+    app = create_app(legacy_settings, engine=engine)
     yield app
     await engine.dispose()
 
@@ -100,21 +149,29 @@ async def _make_seed(
 ) -> dict:
     db = brain_app.state.db
     hasher = PasswordHasher(settings)
-    project_id = uuid.uuid4()
     user_id = uuid.uuid4()
     session_id = uuid.uuid4()
     csrf = secrets.token_urlsafe(32)
 
     async with db.session() as s:
-        rows = [
-            Project(id=project_id, slug="default", name="Default"),
+        project = (
+            await s.execute(select(Project).where(Project.slug == "default"))
+        ).scalar_one_or_none()
+        if project is None:
+            project = Project(id=uuid.uuid4(), slug="default", name="Default")
+            s.add(project)
+            await s.flush()
+        s.add(
             User(
                 id=user_id,
                 email=f"u-{uuid.uuid4().hex[:8]}@example.com",
                 password_hash=hasher.hash("correct horse battery staple 9"),
                 is_admin=is_admin,
                 is_active=True,
-            ),
+            )
+        )
+        await s.flush()
+        rows = [
             Session(
                 id=session_id,
                 user_id=user_id,
@@ -128,7 +185,7 @@ async def _make_seed(
             rows.append(
                 Membership(
                     user_id=user_id,
-                    project_id=project_id,
+                    project_id=project.id,
                     role=role,
                 ),
             )
@@ -136,11 +193,46 @@ async def _make_seed(
         await s.commit()
 
     return {
-        "project_id": project_id,
+        "project_id": project.id,
         "user_id": user_id,
         "session_id": session_id,
         "csrf": csrf,
     }
+
+
+async def _seed_schedule(
+    brain_app,
+    project_id: uuid.UUID,
+    name: str,
+    **overrides,
+) -> uuid.UUID:
+    """Pre-seed one row the way the product creates it, and return its id.
+
+    Through the control repository, because Boundary D refuses a direct
+    INSERT into ``schedules``. A hand-built row is a row no operator's
+    database contains, so an endpoint tested against one is untested.
+    """
+    data: dict[str, object] = {
+        "engine": "celery",
+        "scheduler": "z4j-scheduler",
+        "name": name,
+        "task_name": "t.t",
+        "kind": ScheduleKind.CRON.value,
+        "expression": "0 * * * *",
+        "timezone": "UTC",
+        "args": [],
+        "kwargs": {},
+        "is_enabled": True,
+    }
+    data.update(overrides)
+    async with brain_app.state.db.session() as s:
+        row = await ScheduleControlRepository(s).create_current(
+            project_id=project_id,
+            data=data,
+            planning_at=datetime.now(UTC),
+        )
+        await s.commit()
+        return row.id
 
 
 def _make_client(brain_app, settings: Settings, seed: dict):
@@ -186,6 +278,12 @@ def _create_body(name: str = "every-hour", **overrides) -> dict:
 
 
 async def _activate_current_control(brain_app) -> None:
+    """Hand-activate Boundary D on a create_all() schema.
+
+    Only :class:`TestOccurrenceResolution` still needs this. A migrated
+    database arrives activated, and its ``schedule_revision_state`` row is
+    itself guarded, so this INSERT is refused there.
+    """
     async with brain_app.state.db.session() as session:
         session.add(
             ScheduleRevisionState(
@@ -214,7 +312,6 @@ class TestCreateSchedule:
             brain_app=brain_app,
             is_admin=True,
         )
-        await _activate_current_control(brain_app)
 
         async with _make_client(brain_app, settings, seed) as client:
             response = await client.post(
@@ -346,7 +443,6 @@ class TestLegacyFireGrant:
             brain_app=brain_app,
             is_admin=True,
         )
-        await _activate_current_control(brain_app)
         async with _make_client(brain_app, settings, seed) as client:
             created = await client.post(
                 "/api/v1/projects/default/schedules",
@@ -416,13 +512,29 @@ class TestLegacyFireGrant:
 
 
 class TestOccurrenceResolution:
+    """The operator exit from receipt-NULL evidence.
+
+    These two stay on the create_all() schema on purpose. Both build a
+    tokenless fire (``schedule_receipt_control_token IS NULL``) and then
+    drive the product's resolution route over it, and an activated database
+    refuses that INSERT outright: the command and pending-fire guards demand
+    a complete receipt tuple. Such rows exist only because Boundary-D
+    activation MARKED pre-1.8 evidence rather than inventing authority for
+    it, so the only faithful way to produce one is to migrate a 1.7 database
+    forward -- which is what test_schedule_activation_boundary_d.py does.
+    Reproducing that here would replace the resolution contract under test
+    with a migration test.
+    """
+
     @pytest.mark.asyncio
     async def test_receipt_null_resolution_is_idempotent_product_action(
         self,
-        settings: Settings,
-        brain_app,
+        legacy_settings: Settings,
+        legacy_brain_app,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        settings = legacy_settings
+        brain_app = legacy_brain_app
         seed = await _make_seed(
             settings=settings,
             brain_app=brain_app,
@@ -545,10 +657,12 @@ class TestOccurrenceResolution:
     @pytest.mark.asyncio
     async def test_receipt_null_pending_has_product_resolution_route(
         self,
-        settings: Settings,
-        brain_app,
+        legacy_settings: Settings,
+        legacy_brain_app,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        settings = legacy_settings
+        brain_app = legacy_brain_app
         seed = await _make_seed(
             settings=settings,
             brain_app=brain_app,
@@ -727,8 +841,22 @@ class TestDefaultSchedulerOwnerFallback:
                 "/api/v1/projects/default/schedules",
                 json=body,
             )
-        assert r.status_code == 201, r.text
-        assert r.json()["scheduler"] == "celery-beat"
+        # 409, not 201. The project default is honoured (the owner in the
+        # message is the one the project named), but an externally owned
+        # schedule is defined in the scheduler that owns it and projected here
+        # from what its adapter reports. The brain is not its author, so there
+        # is nothing for this endpoint to create.
+        #
+        # This used to answer 201 only because the test schema was built with
+        # create_all(), which leaves Boundary D unactivated: the one state in
+        # which the legacy writer still works. On a real database it answered
+        # 422 carrying internal wording.
+        assert r.status_code == 409, r.text
+        body = r.json()
+        assert "celery-beat" in body["message"]
+        # The operator is told what to do instead, not just that it failed.
+        assert "z4j-scheduler" in body["message"]
+        assert "Boundary" not in body["message"]
 
     @pytest.mark.asyncio
     async def test_explicit_scheduler_overrides_project_default(
@@ -804,7 +932,6 @@ class TestUpdateSchedule:
             brain_app=brain_app,
             is_admin=True,
         )
-        await _activate_current_control(brain_app)
         async with _make_client(brain_app, settings, seed) as client:
             created = await client.post(
                 "/api/v1/projects/default/schedules",
@@ -852,26 +979,14 @@ class TestUpdateSchedule:
             brain_app=brain_app,
             is_admin=True,
         )
-        # Seed a row directly via the DB so we know baseline values.
-        schedule_id = uuid.uuid4()
-        async with brain_app.state.db.session() as s:
-            s.add(
-                Schedule(
-                    id=schedule_id,
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="orig",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[1, 2],
-                    kwargs={"k": "v"},
-                    is_enabled=True,
-                ),
-            )
-            await s.commit()
+        # Seed a row through the product so we know baseline values.
+        schedule_id = await _seed_schedule(
+            brain_app,
+            seed["project_id"],
+            "orig",
+            args=[1, 2],
+            kwargs={"k": "v"},
+        )
 
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.patch(
@@ -885,6 +1000,13 @@ class TestUpdateSchedule:
         assert body["args"] == [1, 2]
         assert body["kwargs"] == {"k": "v"}
 
+    # FAILING ON PURPOSE: this is a product defect, not a stale test. When the
+    # row is missing, update_schedule's control branch is skipped on the
+    # ``existing is not None`` term and the request falls through to the legacy
+    # writer (api/schedules.py:1105-1121), which an activated database refuses.
+    # The 404 at api/schedules.py:1129 is unreachable there. delete_schedule
+    # gets this right: it raises NotFoundError BEFORE choosing a writer
+    # (api/schedules.py:1554).
     @pytest.mark.asyncio
     async def test_update_unknown_id_returns_404(
         self,
@@ -905,6 +1027,11 @@ class TestUpdateSchedule:
 
 
 class TestUpdateIDOR:
+    # FAILING ON PURPOSE: same defect as test_update_unknown_id_returns_404. A
+    # cross-project schedule id makes ``get_for_project`` return None, so the
+    # request takes the refused legacy writer and answers 422 rather than the
+    # documented 404. Existence is still not leaked (the missing-row case
+    # answers 422 too), but the stated contract is not what the endpoint does.
     @pytest.mark.asyncio
     async def test_cross_project_update_returns_404_not_403(
         self,
@@ -921,26 +1048,14 @@ class TestUpdateIDOR:
             is_admin=True,
         )
         other_project_id = uuid.uuid4()
-        schedule_id = uuid.uuid4()
         async with brain_app.state.db.session() as s:
             s.add(Project(id=other_project_id, slug="other", name="Other"))
-            s.add(
-                Schedule(
-                    id=schedule_id,
-                    project_id=other_project_id,  # not seed.project_id
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="evil",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                ),
-            )
             await s.commit()
+        schedule_id = await _seed_schedule(
+            brain_app,
+            other_project_id,  # not seed.project_id
+            "evil",
+        )
 
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.patch(
@@ -969,7 +1084,6 @@ class TestDeleteSchedule:
             brain_app=brain_app,
             is_admin=True,
         )
-        await _activate_current_control(brain_app)
         async with _make_client(brain_app, settings, seed) as client:
             created = await client.post(
                 "/api/v1/projects/default/schedules",
@@ -1003,7 +1117,6 @@ class TestDeleteSchedule:
             brain_app=brain_app,
             is_admin=True,
         )
-        await _activate_current_control(brain_app)
         async with _make_client(brain_app, settings, seed) as client:
             created = await client.post(
                 "/api/v1/projects/default/schedules",
@@ -1035,7 +1148,6 @@ class TestDeleteSchedule:
             brain_app=brain_app,
             is_admin=True,
         )
-        await _activate_current_control(brain_app)
         async with _make_client(brain_app, settings, seed) as client:
             created = await client.post(
                 "/api/v1/projects/default/schedules",
@@ -1044,12 +1156,35 @@ class TestDeleteSchedule:
             assert created.status_code == 201, created.text
             schedule_id = uuid.UUID(created.json()["id"])
 
-            # Persist an aware fire cursor, then leave the transaction so the
-            # next request observes SQLite's real naive datetime round-trip.
+            # Persist an aware fire cursor the way a fire does, then leave the
+            # transaction so the next request observes SQLite's real naive
+            # datetime round-trip. A direct column write would be refused by
+            # Boundary D and would also skip the code that stores the cursor.
             async with brain_app.state.db.session() as session:
                 row = await session.get(Schedule, schedule_id)
                 assert row is not None
-                row.last_run_at = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
+                assert row.next_run_at is not None
+                assert row.control_token is not None
+                assert row.definition_digest is not None
+                slot = row.next_run_at.replace(tzinfo=UTC)
+                accepted = await ScheduleControlRepository(
+                    session,
+                ).accept_current_fire_progress(
+                    project_id=seed["project_id"],
+                    schedule_id=schedule_id,
+                    fire_id=derive_scheduler_fire_id(schedule_id, slot),
+                    scheduled_for=slot,
+                    observed_control_token=row.control_token,
+                    definition_digest=row.definition_digest,
+                    expected_revision=row.schedule_revision,
+                    expected_last_run_at=None,
+                    expected_next_run_at=slot,
+                    prepared_next_run_at=slot + timedelta(hours=1),
+                    cadence_semantics_version=CADENCE_SEMANTICS_VERSION,
+                    cadence_fingerprint=cadence_runtime_fingerprint(),
+                    occurred_at=slot + timedelta(seconds=1),
+                )
+                assert accepted.disposition == "applied"
                 await session.commit()
 
             disabled = await client.post(
@@ -1063,7 +1198,9 @@ class TestDeleteSchedule:
 
         assert enabled.status_code == 200, enabled.text
         assert enabled.json()["is_enabled"] is True
-        assert enabled.json()["last_run_at"].startswith("2026-07-25T12:00:00")
+        assert enabled.json()["last_run_at"].startswith(
+            slot.strftime("%Y-%m-%dT%H:%M:%S"),
+        )
         assert enabled.json()["next_run_at"] is not None
 
     @pytest.mark.asyncio
@@ -1077,25 +1214,7 @@ class TestDeleteSchedule:
             brain_app=brain_app,
             is_admin=True,
         )
-        schedule_id = uuid.uuid4()
-        async with brain_app.state.db.session() as s:
-            s.add(
-                Schedule(
-                    id=schedule_id,
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="goner",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                ),
-            )
-            await s.commit()
+        schedule_id = await _seed_schedule(brain_app, seed["project_id"], "goner")
 
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.delete(
@@ -1137,25 +1256,7 @@ class TestDeleteSchedule:
             is_admin=False,
             role=ProjectRole.OPERATOR,
         )
-        schedule_id = uuid.uuid4()
-        async with brain_app.state.db.session() as s:
-            s.add(
-                Schedule(
-                    id=schedule_id,
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="protected",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                ),
-            )
-            await s.commit()
+        schedule_id = await _seed_schedule(brain_app, seed["project_id"], "protected")
 
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.delete(
@@ -1185,30 +1286,14 @@ class TestImportReplaceForSource:
             brain_app=brain_app,
             is_admin=True,
         )
-        async with brain_app.state.db.session() as s:
-            for name, sh in (
-                ("alpha", "alpha-hash"),
-                ("beta", "beta-hash"),
-                ("gamma", "gamma-hash"),
-            ):
-                s.add(
-                    Schedule(
-                        project_id=seed["project_id"],
-                        engine="celery",
-                        scheduler="z4j-scheduler",
-                        name=name,
-                        task_name="t.t",
-                        kind=ScheduleKind.CRON,
-                        expression="0 * * * *",
-                        timezone="UTC",
-                        args=[],
-                        kwargs={},
-                        is_enabled=True,
-                        source="declarative_django",
-                        source_hash=sh,
-                    ),
-                )
-            await s.commit()
+        for name in ("alpha", "beta", "gamma"):
+            await _seed_schedule(
+                brain_app,
+                seed["project_id"],
+                name,
+                source="declarative_django",
+                source_hash=f"{name}-hash",
+            )
 
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -1270,40 +1355,18 @@ class TestImportReplaceForSource:
             brain_app=brain_app,
             is_admin=True,
         )
-        async with brain_app.state.db.session() as s:
-            s.add(
-                Schedule(
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="from-celerybeat",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                    source="imported_celerybeat",
-                ),
-            )
-            s.add(
-                Schedule(
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="from-django",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                    source="declarative_django",
-                ),
-            )
-            await s.commit()
+        await _seed_schedule(
+            brain_app,
+            seed["project_id"],
+            "from-celerybeat",
+            source="imported_celerybeat",
+        )
+        await _seed_schedule(
+            brain_app,
+            seed["project_id"],
+            "from-django",
+            source="declarative_django",
+        )
 
         async with _make_client(brain_app, settings, seed) as client:
             r = await client.post(

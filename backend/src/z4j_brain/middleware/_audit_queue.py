@@ -1,7 +1,11 @@
 """Bounded async queue for denial-audit writes.
 
-The error middleware writes a tamper-evident audit row for every
-denial / validation failure on schedule-endpoint mutations.
+The error middleware writes an HMAC-chained audit row for every
+denial / validation failure on schedule-endpoint mutations. That
+chaining makes an edited or removed row show up at the next
+verification, which is worth having against an application path or
+an operator statement; it is not evidence against a role that can
+write the audit tables directly.
 Doing the write from a NEW DB session synchronously inside the
 request scope would, under attack (IDOR enumeration), double the
 per-request connection demand on every 4xx and starve the

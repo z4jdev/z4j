@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -418,6 +419,33 @@ class TestRateLimitBucketCap:
 # ---------------------------------------------------------------------------
 
 
+def _public_doc(name: str) -> Path:
+    """Locate a published operations page, from this file rather than the cwd.
+
+    These two tests used a path relative to the working directory, so they
+    resolved only when pytest was invoked from inside the backend package and
+    skipped everywhere else, including CI. They have therefore never guarded
+    anything: the wording they exist to catch could have regressed at any point
+    in the last three releases and no run would have said so.
+
+    Resolving from ``__file__`` makes them run, and a missing page is now a
+    failure rather than a skip, because the page not being there is precisely
+    the case worth hearing about.
+    """
+    doc = (
+        Path(__file__).resolve().parents[5]
+        / "sites"
+        / "z4j-dev"
+        / "src"
+        / "content"
+        / "docs"
+        / "operations"
+        / name
+    )
+    assert doc.is_file(), f"published operations page is missing: {doc}"
+    return doc
+
+
 class TestRound2DocsAlignment:
     """Greps for known wrong wording from before the doc fix.
     If a future docs edit reintroduces the wrong receiver formula,
@@ -425,13 +453,7 @@ class TestRound2DocsAlignment:
     """
 
     def test_audit_webhook_doc_uses_timestamp_signing(self) -> None:
-        from pathlib import Path
-
-        doc = Path(
-            "../../sites/z4j-dev/src/content/docs/operations/audit-webhook.md",
-        )
-        if not doc.exists():
-            pytest.skip("docs not in this checkout layout")
+        doc = _public_doc("audit-webhook.md")
         text = doc.read_text(encoding="utf-8")
         assert "X-Z4J-Audit-Timestamp" in text
         assert "digest_input" in text or "ts.encode" in text, (
@@ -439,13 +461,7 @@ class TestRound2DocsAlignment:
         )
 
     def test_activity_feed_doc_uses_cursor_names(self) -> None:
-        from pathlib import Path
-
-        doc = Path(
-            "../../sites/z4j-dev/src/content/docs/operations/activity-feed.md",
-        )
-        if not doc.exists():
-            pytest.skip("docs not in this checkout layout")
+        doc = _public_doc("activity-feed.md")
         text = doc.read_text(encoding="utf-8")
         # No legacy _id cursor names should remain.
         for legacy in (

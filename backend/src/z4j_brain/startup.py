@@ -5,7 +5,7 @@ Two responsibilities at boot:
 1. **First-boot detection** - if ``users`` is empty, try the
    operator-friendly paths first (env-var bootstrap), and fall
    back to minting a setup token + printing the ASCII banner. The
-   plaintext token only ever exists in memory + on stdout; we
+   plaintext token only ever exists in memory + on stderr; we
    never log it through structlog (operators may ship structlog
    elsewhere).
 2. **Settings sanity check** - re-run the security invariants
@@ -155,7 +155,7 @@ async def run_first_boot_check(
        are only honored when the ``users`` table is empty, so
        leaving them set in a manifest across restarts is harmless.
     2. Otherwise mint a one-time setup token with 15-minute TTL
-       and print a clickable URL to stdout. Hobbyist / single-
+       and print a clickable URL to stderr. Hobbyist / single-
        container path.
 
     Idempotent: on every startup, if ``users`` is empty we wipe

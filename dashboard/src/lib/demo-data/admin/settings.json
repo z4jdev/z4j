@@ -3,7 +3,7 @@
   "settings": [
     {
       "name": "agent_offline_timeout_seconds",
-      "value": "90",
+      "value": "30",
       "source": "default",
       "is_secret": false,
       "description": "Seconds without a heartbeat before an agent is marked offline."
@@ -114,11 +114,11 @@
       "description": "Externally reachable base URL. Used for setup links and cookie scoping."
     },
     {
-      "name": "rate_limit_per_minute",
-      "value": "600",
+      "name": "ratelimit_commands_per_minute",
+      "value": "100",
       "source": "default",
       "is_secret": false,
-      "description": "Per-IP request ceiling enforced by the rate-limit middleware."
+      "description": "Reserved compatibility setting; command issuance is not currently rate-limited from this value. Do not rely on it as a security boundary."
     },
     {
       "name": "registry_backend",
@@ -156,11 +156,18 @@
       "description": "Master signing key. Derives session, agent and per-project secrets."
     },
     {
-      "name": "session_lifetime_hours",
-      "value": "24",
+      "name": "session_absolute_lifetime_seconds",
+      "value": "604800",
       "source": "default",
       "is_secret": false,
-      "description": "How long a signed-in session stays valid before re-authentication."
+      "description": "Hard cap on a session's lifetime measured from issue, regardless of activity."
+    },
+    {
+      "name": "session_idle_timeout_seconds",
+      "value": "1800",
+      "source": "default",
+      "is_secret": false,
+      "description": "Sliding idle timeout. A session with no activity for this long is rejected."
     }
   ]
 }

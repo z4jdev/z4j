@@ -48,12 +48,27 @@ export interface LoginRequest {
   email: string;
   password: string;
   /** When true the brain mints a long-lived session (30 days) and
-   * skips the idle timeout for it. Default false. */
-  remember_me?: boolean;
+   * skips the idle timeout for it.
+   *
+   * Sent explicitly rather than left to the brain's default, so the
+   * session lifetime the dashboard asked for is the one it gets even
+   * if that default ever changes. */
+  remember_me: boolean;
 }
 
 export interface LoginResponse {
   user: UserPublic;
+  /** The user has MFA enrolled and this login did not present a valid
+   * trust cookie. The session exists but is unverified: go to the
+   * second-step page and POST /auth/mfa/verify before anything else. */
+  mfa_required: boolean;
+  /** Enrollment policy targets this user and they have not enrolled.
+   * Show the enroll-by banner. */
+  mfa_enrollment_required: boolean;
+  /** End of the enrollment grace window; null unless
+   * ``mfa_enrollment_required``. Once it is in the past every endpoint
+   * outside the enrollment flow answers 403. */
+  mfa_enrollment_deadline: string | null;
 }
 
 export interface SetupStatusResponse {
@@ -72,6 +87,11 @@ export interface ProjectPublic {
   environment: string;
   timezone: string;
   is_active: boolean;
+  /** Scheduler that owns a schedule when none is named on it. */
+  default_scheduler_owner: string;
+  /** Schedulers permitted to own schedules in this project. Null means
+   * no allowlist is configured, which is not the same as an empty one. */
+  allowed_schedulers: string[] | null;
   created_at: string;
   updated_at: string;
 }
@@ -259,6 +279,10 @@ export type ScheduleKind = "cron" | "interval" | "solar" | "clocked";
 
 export type ScheduleCatchUp = "skip" | "fire_one_missed" | "fire_all_missed";
 
+// What happens when a schedule comes due while its previous run is still
+// in flight: fire anyway, withhold the fire, or serialise behind the run.
+export type ScheduleOverlapPolicy = "allow" | "skip" | "queue";
+
 export interface SchedulePublic {
   id: string;
   project_id: string;
@@ -288,6 +312,16 @@ export interface SchedulePublic {
   catch_up: ScheduleCatchUp;
   source: string;
   source_hash: string | null;
+  // Control columns. ``overlap_policy`` is what a due fire WILL do while the
+  // previous run is still going, once that is implemented -- today it is
+  // always "allow" and is read-only: no request schema accepts it and nothing
+  // writes it. Do not build a control for it until enforcement lands, or the
+  // UI would offer a setting that silently does nothing. ``paused_at`` is when
+  // an operator put the schedule on hold, null when it is not held; it is
+  // deliberately separate from ``is_enabled``, which means retired rather
+  // than held.
+  overlap_policy: ScheduleOverlapPolicy;
+  paused_at: string | null;
 }
 
 // Status enum matches the schedule_fires table's status column.
@@ -386,12 +420,7 @@ export interface FleetResponse {
 // ---------------------------------------------------------------------------
 
 export type CommandStatus =
-  | "pending"
-  | "dispatched"
-  | "completed"
-  | "failed"
-  | "timeout"
-  | "cancelled";
+  "pending" | "dispatched" | "completed" | "failed" | "timeout" | "cancelled";
 
 export interface CommandPublic {
   id: string;

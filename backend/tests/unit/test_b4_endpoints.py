@@ -13,6 +13,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from z4j_brain.auth.passwords import PasswordHasher
@@ -22,6 +23,7 @@ from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import (
     AgentState,
+    TaskPriority,
     TaskState,
 )
 from z4j_brain.persistence.models import (
@@ -95,7 +97,9 @@ async def seeded(settings: Settings, brain_app):
             ip_at_issue="127.0.0.1",
             user_agent_at_issue="test",
         )
-        s.add_all([project, user, session_row])
+        s.add_all([project, user])
+        await s.flush()
+        s.add(session_row)
         await s.commit()
 
     return {
@@ -187,15 +191,18 @@ class TestAgentsRouter:
         settings: Settings,
         seeded,
     ) -> None:
-        # Three agents: (a) connected + current protocol,
-        # (b) connected + old protocol, (c) never-connected with
-        # placeholder "0". Only (b) should be flagged outdated -
-        # (c) has not advertised a real version yet.
+        # Four agents: (a) connected + current protocol,
+        # (b) connected + old protocol, (c) connected + newer
+        # protocol, and (d) never-connected with placeholder "0".
+        # Only (b) should be flagged outdated: newer is an explicit
+        # non-outdated state, and (d) has not advertised a real version.
         now = datetime.now(UTC)
+        newer_protocol = str(int(CURRENT_PROTOCOL) + 1)
         async with brain_app.state.db.session() as s:
             for name, proto, connected in [
                 ("agent-current", CURRENT_PROTOCOL, now),
                 ("agent-old", "1", now),
+                ("agent-newer", newer_protocol, now),
                 ("agent-never", "0", None),
             ]:
                 s.add(
@@ -222,6 +229,7 @@ class TestAgentsRouter:
         by_name = {a["name"]: a for a in r.json()}
         assert by_name["agent-current"]["is_outdated"] is False
         assert by_name["agent-old"]["is_outdated"] is True
+        assert by_name["agent-newer"]["is_outdated"] is False
         assert by_name["agent-never"]["is_outdated"] is False
 
 
@@ -258,6 +266,361 @@ class TestTasksRouter:
         items = r.json()["items"]
         assert len(items) == 1
         assert items[0]["state"] == "success"
+
+    async def test_list_tasks_preserves_and_filters_non_normal_priority(
+        self,
+        brain_app,
+        client,
+        seeded,
+    ) -> None:
+        async with brain_app.state.db.session() as s:
+            for task_id, priority in [
+                ("task-high", TaskPriority.HIGH),
+                ("task-normal", TaskPriority.NORMAL),
+            ]:
+                s.add(
+                    Task(
+                        project_id=seeded["project_id"],
+                        engine="celery",
+                        task_id=task_id,
+                        name="myapp.tasks.x",
+                        priority=priority,
+                        started_at=datetime.now(UTC),
+                    ),
+                )
+            await s.commit()
+
+        r = await client.get("/api/v1/projects/default/tasks?priority=high")
+        assert r.status_code == 200
+        items = r.json()["items"]
+        assert [item["task_id"] for item in items] == ["task-high"]
+        assert items[0]["priority"] == "high"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "state=succes",
+            "state=",
+            "priority=urgent",
+            "priority=high,urgent",
+            "priority=high,",
+            "priority=",
+        ],
+    )
+    async def test_list_tasks_rejects_unknown_filter_values(
+        self,
+        client,
+        query,
+    ) -> None:
+        r = await client.get(f"/api/v1/projects/default/tasks?{query}")
+        assert r.status_code == 422
+        assert "items" not in r.json()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {},
+            {"task_ids": []},
+            {"task_ids": None},
+            {
+                "task_ids": None,
+                "filter_state": None,
+                "filter_priority": None,
+                "filter_search": None,
+                "filter_name": None,
+                "filter_queue": None,
+                "filter_worker": None,
+                "filter_since": None,
+                "filter_until": None,
+            },
+            {"filter_search": "   "},
+            {"filter_name": "\t"},
+            {"filter_queue": " "},
+            {"filter_worker": "\t "},
+            {"filter_priority": []},
+            {"filter_priority": ["critical", " CRITICAL "]},
+            {"filter_state": "succes"},
+            {"filter_priority": ["urgent"]},
+            {"task_ids": [str(uuid.uuid4())], "filter_state": "failure"},
+        ],
+    )
+    async def test_bulk_delete_rejects_empty_invalid_or_mixed_selection(
+        self,
+        brain_app,
+        client,
+        seeded,
+        body,
+    ) -> None:
+        async with brain_app.state.db.session() as session:
+            session.add(
+                Task(
+                    project_id=seeded["project_id"],
+                    engine="celery",
+                    task_id="must-survive",
+                    name="app.survive",
+                    state=TaskState.FAILURE,
+                ),
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/projects/default/tasks/bulk-delete",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json=body,
+        )
+
+        assert response.status_code == 422
+        async with brain_app.state.db.session() as session:
+            assert await session.scalar(select(func.count(Task.id))) == 1
+
+    async def test_bulk_delete_priority_only_is_exact_and_project_scoped(
+        self,
+        brain_app,
+        client,
+        seeded,
+    ) -> None:
+        other_project_id = uuid.uuid4()
+        async with brain_app.state.db.session() as session:
+            session.add(Project(id=other_project_id, slug="other", name="Other"))
+            session.add_all(
+                [
+                    Task(
+                        project_id=seeded["project_id"],
+                        engine="celery",
+                        task_id="critical-owned",
+                        name="app.work",
+                        state=TaskState.SUCCESS,
+                        priority=TaskPriority.CRITICAL,
+                    ),
+                    Task(
+                        project_id=seeded["project_id"],
+                        engine="celery",
+                        task_id="normal-owned",
+                        name="app.work",
+                        state=TaskState.SUCCESS,
+                        priority=TaskPriority.NORMAL,
+                    ),
+                    Task(
+                        project_id=other_project_id,
+                        engine="celery",
+                        task_id="critical-other",
+                        name="app.work",
+                        state=TaskState.SUCCESS,
+                        priority=TaskPriority.CRITICAL,
+                    ),
+                ],
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/projects/default/tasks/bulk-delete",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={"filter_priority": ["critical"]},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"deleted_count": 1}
+        async with brain_app.state.db.session() as session:
+            remaining = set((await session.scalars(select(Task.task_id))).all())
+        assert remaining == {"normal-owned", "critical-other"}
+
+    async def test_bulk_delete_intersects_state_priority_and_literal_search(
+        self,
+        brain_app,
+        client,
+        seeded,
+    ) -> None:
+        cases = [
+            (
+                "exact-percent",
+                "Name%Literal",
+                "queue",
+                "worker",
+                TaskState.FAILURE,
+                TaskPriority.CRITICAL,
+            ),
+            (
+                "percent-decoy",
+                "NameXLiteral",
+                "queue",
+                "worker",
+                TaskState.FAILURE,
+                TaskPriority.CRITICAL,
+            ),
+            (
+                "wrong-state",
+                "Name%Literal",
+                "queue",
+                "worker",
+                TaskState.SUCCESS,
+                TaskPriority.CRITICAL,
+            ),
+            (
+                "wrong-priority",
+                "Name%Literal",
+                "queue",
+                "worker",
+                TaskState.FAILURE,
+                TaskPriority.NORMAL,
+            ),
+        ]
+        async with brain_app.state.db.session() as session:
+            for task_id, name, queue, worker, state, priority in cases:
+                session.add(
+                    Task(
+                        project_id=seeded["project_id"],
+                        engine="celery",
+                        task_id=task_id,
+                        name=name,
+                        queue=queue,
+                        worker_name=worker,
+                        state=state,
+                        priority=priority,
+                    ),
+                )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/projects/default/tasks/bulk-delete",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={
+                "filter_state": "failure",
+                "filter_priority": [" CRITICAL "],
+                "filter_search": "%",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"deleted_count": 1}
+        async with brain_app.state.db.session() as session:
+            remaining = set((await session.scalars(select(Task.task_id))).all())
+        assert remaining == {"percent-decoy", "wrong-state", "wrong-priority"}
+
+    @pytest.mark.parametrize(
+        ("needle", "matching_field", "matching_value", "decoy_value"),
+        [
+            ("_", "queue", "queue_literal", "queueXliteral"),
+            ("\\", "worker_name", r"worker\literal", "workerXliteral"),
+            ("/", "task_id", "task/literal", "taskXliteral"),
+        ],
+    )
+    async def test_bulk_delete_search_is_literal_across_every_list_field(
+        self,
+        brain_app,
+        client,
+        seeded,
+        needle,
+        matching_field,
+        matching_value,
+        decoy_value,
+    ) -> None:
+        async with brain_app.state.db.session() as session:
+            for suffix, value in [("match", matching_value), ("decoy", decoy_value)]:
+                values = {
+                    "task_id": f"task-{suffix}",
+                    "name": f"name-{suffix}",
+                    "queue": f"queue-{suffix}",
+                    "worker_name": f"worker-{suffix}",
+                }
+                values[matching_field] = value
+                session.add(
+                    Task(
+                        project_id=seeded["project_id"],
+                        engine="celery",
+                        state=TaskState.FAILURE,
+                        priority=TaskPriority.CRITICAL,
+                        **values,
+                    ),
+                )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/projects/default/tasks/bulk-delete",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={"filter_search": needle},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"deleted_count": 1}
+        async with brain_app.state.db.session() as session:
+            remaining = (await session.scalars(select(Task))).one()
+        assert getattr(remaining, matching_field) == decoy_value
+
+    async def test_bulk_delete_explicit_ids_stays_safe(self, brain_app, client, seeded) -> None:
+        other_project_id = uuid.uuid4()
+        async with brain_app.state.db.session() as session:
+            session.add(Project(id=other_project_id, slug="foreign", name="Foreign"))
+            selected = Task(
+                project_id=seeded["project_id"],
+                engine="celery",
+                task_id="selected",
+                name="app.selected",
+            )
+            survivor = Task(
+                project_id=seeded["project_id"],
+                engine="celery",
+                task_id="survivor",
+                name="app.survivor",
+            )
+            foreign = Task(
+                project_id=other_project_id,
+                engine="celery",
+                task_id="foreign",
+                name="app.foreign",
+            )
+            session.add_all([selected, survivor, foreign])
+            await session.commit()
+            selected_id = selected.id
+            foreign_id = foreign.id
+
+        response = await client.post(
+            "/api/v1/projects/default/tasks/bulk-delete",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={"task_ids": [str(selected_id), str(foreign_id)]},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"deleted_count": 1}
+        async with brain_app.state.db.session() as session:
+            assert set((await session.scalars(select(Task.task_id))).all()) == {
+                "survivor",
+                "foreign",
+            }
+
+    async def test_bulk_delete_filtered_mode_keeps_deterministic_ten_thousand_cap(
+        self,
+        brain_app,
+        client,
+        seeded,
+    ) -> None:
+        async with brain_app.state.db.session() as session:
+            session.add_all(
+                [
+                    Task(
+                        id=uuid.UUID(int=index + 1),
+                        project_id=seeded["project_id"],
+                        engine="celery",
+                        task_id=f"capped-{index:05d}",
+                        name="app.capped",
+                        state=TaskState.FAILURE,
+                    )
+                    for index in range(10_001)
+                ],
+            )
+            await session.commit()
+
+        response = await client.post(
+            "/api/v1/projects/default/tasks/bulk-delete",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={"filter_state": "failure"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"deleted_count": 10_000}
+        async with brain_app.state.db.session() as session:
+            remaining = (await session.scalars(select(Task))).one()
+        assert remaining.id == uuid.UUID(int=10_001)
+        assert remaining.task_id == "capped-10000"
 
 
 @pytest.mark.asyncio
@@ -425,6 +788,7 @@ class TestCommandsRouter:
             retry_contracts={"celery": 1},
         )
 
+        eta_before = datetime.now(UTC).timestamp() + 60
         r = await client.post(
             "/api/v1/projects/default/commands/retry-task",
             headers={"X-CSRF-Token": seeded["csrf"]},
@@ -432,9 +796,13 @@ class TestCommandsRouter:
                 "agent_id": str(agent_id),
                 "engine": "celery",
                 "task_id": "task-001",
+                "eta_seconds": 60,
             },
         )
+        eta_after = datetime.now(UTC).timestamp() + 60
         assert r.status_code == 202
         body = r.json()
         assert body["action"] == "retry_task"
         assert body["status"] in ("pending", "dispatched")
+        assert body["payload"]["eta_seconds"] == 60
+        assert eta_before <= body["payload"]["eta"] <= eta_after

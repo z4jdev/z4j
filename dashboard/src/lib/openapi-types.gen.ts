@@ -4,7 +4,7 @@
  */
 
 export interface paths {
-    readonly "/api/v1/health": {
+    readonly "/api/v1/activity": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -12,21 +12,14 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * Health
-         * @description Liveness probe. No I/O.
+         * List Activity
+         * @description List audit rows across every project the caller can see.
          *
-         *     Returns ``200 OK``. The point is to give container runtimes
-         *     something cheap and reliable to poll: a process that can answer
-         *     this endpoint is process-alive.
-         *
-         *     .. note::
-         *        1.6.3 security advisory: removed the ``version`` field from
-         *        this response. The endpoint is publicly reachable (by design,
-         *        for liveness probes) so leaking the brain version let
-         *        attackers pin specific CVEs to a target. Version disclosure
-         *        moved to :func:`health_system` (auth-gated).
+         *     Admins see every row including brain-wide rows (no project_id).
+         *     Non-admins see rows from projects where they hold a membership
+         *     plus their own user-scoped rows whose project_id is null.
          */
-        readonly get: operations["health_api_v1_health_get"];
+        readonly get: operations["list_activity_api_v1_activity_get"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -35,7 +28,7 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/health/ready": {
+    readonly "/api/v1/admin/settings": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -43,21 +36,16 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * Health Ready
-         * @description Readiness probe. Issues ``SELECT 1`` with a hard timeout.
+         * Get Effective Settings
+         * @description Return the brain's effective settings + per-field source labels.
          *
-         *     Returns ``200 OK`` if the database is reachable, ``503`` if it
-         *     is not. Never raises - the response object is mutated in place.
-         *
-         *     Also gates on ``app.state.lifespan_ready``. Without this gate
-         *     the brain would return 200 the moment uvicorn bound the
-         *     port, but lifespan startup (run_first_boot_check,
-         *     registry.start, supervisor.start) runs AFTER the routes are
-         *     mounted, so a k8s readiness probe would flip "ready" while
-         *     the brain was still pre-bootstrap. The flag is set at the
-         *     END of the lifespan startup phase in main.py.
+         *     Reads :attr:`fastapi.Request.app.state.settings` (the same
+         *     :class:`Settings` instance every other handler depends on),
+         *     iterates ``model_fields``, and emits one
+         *     :class:`SettingItem` per field. Secrets are masked. Sorted
+         *     alphabetically by field name for stable rendering.
          */
-        readonly get: operations["health_ready_api_v1_health_ready_get"];
+        readonly get: operations["get_effective_settings_api_v1_admin_settings_get"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -66,7 +54,7 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/health/system": {
+    readonly "/api/v1/admin/system/versions": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -74,15 +62,219 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * Health System
-         * @description System information for the dashboard settings page.
+         * Get Versions Snapshot
+         * @description Return the brain's currently-cached versions snapshot.
          *
-         *     Requires authentication - exposes database version, Python
-         *     version, and package details that should not be public.
+         *     Read-only. Used by the dashboard's Settings -> System card to
+         *     display the snapshot's age, source, and the configured
+         *     ``check_for_updates_url``. No network call.
          */
-        readonly get: operations["health_system_api_v1_health_system_get"];
+        readonly get: operations["get_versions_snapshot_api_v1_admin_system_versions_get"];
         readonly put?: never;
         readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/system/versions/check": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Check For Updates
+         * @description Operator-initiated remote refresh of the versions snapshot.
+         *
+         *     Fetches ``Settings.version_check_url`` (default
+         *     ``https://raw.githubusercontent.com/z4jdev/z4j/main/versions.json``)
+         *     once, validates the response, and replaces the brain's in-memory
+         *     snapshot with the result. Returns the new snapshot for the
+         *     dashboard to render.
+         *
+         *     Failure modes (kept clean so the dashboard can show a useful
+         *     toast):
+         *
+         *     - ``Z4J_VERSION_CHECK_URL`` empty → 404 with reason
+         *       ``check_disabled``.
+         *     - URL is not ``https://`` → 409 (operator misconfig).
+         *     - Remote returns non-200, non-JSON, oversized, or fails
+         *       validation → 409 with the underlying error message.
+         *
+         *     On any failure the previously cached snapshot is unchanged.
+         *
+         *     See :mod:`z4j_brain.domain.version_check` for the validator +
+         *     fetch implementation.
+         */
+        readonly post: operations["check_for_updates_api_v1_admin_system_versions_check_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/agent/commands": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Agent Commands
+         * @description Long-poll for pending commands targeting this agent.
+         */
+        readonly get: operations["agent_commands_api_v1_agent_commands_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/agent/events": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Agent Events
+         * @description Accept a batch of signed agent->brain frames over HTTPS.
+         */
+        readonly post: operations["agent_events_api_v1_agent_events_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/api-keys": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Api Keys
+         * @description List all active (non-revoked) API keys for the current user.
+         *
+         *     Never returns the plaintext token - only the prefix for
+         *     identification.
+         */
+        readonly get: operations["list_api_keys_api_v1_api_keys_get"];
+        readonly put?: never;
+        /**
+         * Create Api Key
+         * @description Create a new personal API key.
+         *
+         *     The plaintext token is returned ONCE in the response. Only the
+         *     HMAC-SHA256 hash is stored. If the user loses the plaintext they
+         *     must revoke the key and create a new one.
+         *
+         *     Token format: ``z4k_`` prefix + 32 bytes urlsafe base64.
+         */
+        readonly post: operations["create_api_key_api_v1_api_keys_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/api-keys/scopes": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Scopes
+         * @description Catalogue of scopes the UI can offer at mint time.
+         *
+         *     1.6.3 security advisory: requires authentication. Pre-1.6.3 this
+         *     endpoint was public on the rationale that the shape was static.
+         *     A valid cookie session qualifies. For Bearer authentication, the
+         *     ``api-keys`` route tag and GET method require ``admin:read``;
+         *     currently that derived requirement is satisfied by the mintable
+         *     ``admin:*`` umbrella. The API key must also be unbound: a
+         *     project-bound key cannot call this non-project route because
+         *     ``api-keys`` is not in the project-scoped non-slug allowlist.
+         *
+         *     These stricter Bearer semantics prevent a narrow or project-bound
+         *     key from discovering future administrative scope additions while
+         *     preserving the scope picker for every logged-in dashboard user.
+         */
+        readonly get: operations["list_scopes_api_v1_api_keys_scopes_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/api-keys/{key_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        readonly post?: never;
+        /**
+         * Revoke Api Key
+         * @description Revoke (soft-delete) a personal API key.
+         *
+         *     Sets ``revoked_at`` on the key. The key can no longer be used
+         *     for authentication but remains in the database for audit
+         *     purposes.
+         */
+        readonly delete: operations["revoke_api_key_api_v1_api_keys__key_id__delete"];
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/change-password": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Change Password
+         * @description Self-service password change for the current user.
+         *
+         *     Verifies the current password, validates the new password
+         *     against the policy, hashes it, and rotates the session atomic-
+         *     ally:
+         *
+         *     1. ``update_password_hash`` writes the new hash and bumps
+         *        ``password_changed_at``.
+         *     2. ``sessions.revoke_all_for_user`` explicitly revokes every
+         *        prior session (audit H3 - the timestamp check alone leaves
+         *        stale ``revoked_at IS NULL`` rows that still show in the
+         *        Account → Security tab until each is next touched).
+         *     3. A fresh session is minted + cookies reset so the caller
+         *        keeps working without an extra login round-trip.
+         */
+        readonly post: operations["change_password_api_v1_auth_change_password_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -136,37 +328,6 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/auth/policy": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * Password Policy
-         * @description Public password-policy summary for the dashboard's UI hints.
-         *
-         *     1.6.5 advisory F4: pre-1.6.5 the dashboard hardcoded
-         *     ``minLength={8}`` on every password field, but the docs said
-         *     12 and the backend default was also 8 (drift between docs
-         *     and code AND code-and-UI). Now the dashboard reads this
-         *     endpoint at mount and uses the returned ``min_length``
-         *     directly; backend, dashboard, and docs stay in sync.
-         *
-         *     Anonymous-readable by design -- nothing here is sensitive,
-         *     and the password-reset flow needs it to render the reset
-         *     form's hint before the user has a session.
-         */
-        readonly get: operations["password_policy_api_v1_auth_policy_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
     readonly "/api/v1/auth/me": {
         readonly parameters: {
             readonly query?: never;
@@ -180,7 +341,9 @@ export interface paths {
          *
          *     The dashboard's project switcher reads this on every page
          *     load to know which projects to render in the sidebar and what
-         *     role the user holds in each.
+         *     role the user holds in each. For a global admin, the synthesized
+         *     list is intentionally capped at 500 projects; it is a bounded
+         *     switcher projection, not a complete project catalogue.
          */
         readonly get: operations["me_api_v1_auth_me_get"];
         readonly put?: never;
@@ -195,11 +358,13 @@ export interface paths {
          *     Only fields present in the request body are changed. Returns
          *     the full ``UserMePublic`` payload (same shape as ``GET /me``)
          *     so the dashboard can update its local state in one round-trip.
+         *     As on ``GET /me``, a global admin's synthesized project list is
+         *     intentionally capped at 500 projects.
          */
         readonly patch: operations["update_profile_api_v1_auth_me_patch"];
         readonly trace?: never;
     };
-    readonly "/api/v1/auth/change-password": {
+    readonly "/api/v1/auth/mfa/disable": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -209,165 +374,15 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Change Password
-         * @description Self-service password change for the current user.
+         * Disable
+         * @description Disable MFA for the current user.
          *
-         *     Verifies the current password, validates the new password
-         *     against the policy, hashes it, and rotates the session atomic-
-         *     ally:
-         *
-         *     1. ``update_password_hash`` writes the new hash and bumps
-         *        ``password_changed_at``.
-         *     2. ``sessions.revoke_all_for_user`` explicitly revokes every
-         *        prior session (audit H3 - the timestamp check alone leaves
-         *        stale ``revoked_at IS NULL`` rows that still show in the
-         *        Account → Security tab until each is next touched).
-         *     3. A fresh session is minted + cookies reset so the caller
-         *        keeps working without an extra login round-trip.
+         *     Requires BOTH current password AND a current TOTP code in the
+         *     same request body. Not session-cached: the gate fires every time,
+         *     regardless of ``sessions.mfa_verified_at``. On success the user's
+         *     MFA state is cleared and recovery codes are deleted.
          */
-        readonly post: operations["change_password_api_v1_auth_change_password_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/auth/sessions": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Sessions
-         * @description Return every active (non-revoked, non-expired) session for the
-         *     current user.
-         *
-         *     The ``is_current`` flag marks which session corresponds to the
-         *     cookie that made this request, so the dashboard can highlight
-         *     "this device" in the sessions list.
-         */
-        readonly get: operations["list_sessions_api_v1_auth_sessions_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/auth/sessions/{session_id}/revoke": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Revoke Session
-         * @description Revoke a specific session belonging to the current user.
-         *
-         *     The session must exist and belong to the authenticated user -
-         *     users cannot revoke other users' sessions. Returns 404 if the
-         *     session does not exist or does not belong to the caller.
-         */
-        readonly post: operations["revoke_session_api_v1_auth_sessions__session_id__revoke_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/auth/password-reset/request": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Password Reset Request
-         * @description Request a password-reset token.
-         *
-         *     Response is constant-shape + constant-time (audit M2): token
-         *     minting + email dispatch happen in a background task after
-         *     the response is flushed, so the known-user path and the
-         *     unknown-user path are indistinguishable to a timing attacker.
-         *     The caller ALWAYS gets ``accepted=True``. If nothing arrives
-         *     in the user's inbox they know to contact an admin - the
-         *     system deliberately does not confirm or deny account
-         *     existence.
-         */
-        readonly post: operations["password_reset_request_api_v1_auth_password_reset_request_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/auth/password-reset/confirm": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Password Reset Confirm
-         * @description Consume a reset token and set a new password.
-         *
-         *     Single-use: the token is *atomically* claimed via an UPDATE ...
-         *     WHERE consumed_at IS NULL ... RETURNING in the same transaction
-         *     as the password update. Once claimed the token is rejected on
-         *     replay even though the row stays around for the audit trail.
-         *
-         *     Revokes every existing session for the user so an attacker
-         *     who had a session open doesn't survive the reset.
-         *
-         *     z4j 1.6.5 (audit R5-M2): pre-1.6.5 this handler did SELECT,
-         *     checked ``consumed_at`` in memory, updated the password, and
-         *     then assigned ``row.consumed_at = now``. Two concurrent
-         *     confirm requests with the same valid token could both pass
-         *     the in-memory check and both write a password (final state
-         *     last-writer-wins) before either commit set consumed_at. The
-         *     atomic-claim pattern below makes exactly one caller win at
-         *     the database, the other gets the same generic
-         *     ``invalid_or_expired`` 404 a replayed token would get.
-         */
-        readonly post: operations["password_reset_confirm_api_v1_auth_password_reset_confirm_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/auth/mfa/enroll-start": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Enroll Start
-         * @description Start (or restart) an MFA enrollment.
-         *
-         *     Generates a fresh TOTP secret, encrypts it with the brain master
-         *     secret, persists it on the user row with ``mfa_enrolled_at=NULL``
-         *     (pending state), and returns the base32 form + the otpauth URL.
-         *     Any prior MFA state for the user is cleared in the same
-         *     transaction so a fresh start cannot be raced by a stale flow.
-         */
-        readonly post: operations["enroll_start_api_v1_auth_mfa_enroll_start_post"];
+        readonly post: operations["disable_api_v1_auth_mfa_disable_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -400,7 +415,7 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/auth/mfa/verify": {
+    readonly "/api/v1/auth/mfa/enroll-start": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -410,39 +425,18 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Verify
-         * @description Verify a TOTP code or a recovery code.
+         * Enroll Start
+         * @description Start (or restart) an MFA enrollment.
          *
-         *     On success, ``sessions.mfa_verified_at`` is stamped so the
-         *     sensitive-action gate accepts the caller. On a recovery-code
-         *     success the code is consumed in the same transaction.
+         *     Generates a fresh TOTP secret, encrypts it with the brain master
+         *     secret, persists it on the user row with ``mfa_enrolled_at=NULL``
+         *     (pending state), and returns the base32 form + the otpauth URL.
+         *     Any prior MFA state for the user is cleared in the same transaction.
+         *     The state change is conditional on the exact secret/enrollment state this
+         *     request observed, so concurrent starts and completions have one database-
+         *     selected winner instead of returning mutually inconsistent secrets.
          */
-        readonly post: operations["verify_api_v1_auth_mfa_verify_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/auth/mfa/disable": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Disable
-         * @description Disable MFA for the current user.
-         *
-         *     Requires BOTH current password AND a current TOTP code in the
-         *     same request body. Not session-cached: the gate fires every time,
-         *     regardless of ``sessions.mfa_verified_at``. On success the user's
-         *     MFA state is cleared and recovery codes are deleted.
-         */
-        readonly post: operations["disable_api_v1_auth_mfa_disable_post"];
+        readonly post: operations["enroll_start_api_v1_auth_mfa_enroll_start_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -462,10 +456,9 @@ export interface paths {
          * Regenerate Recovery Codes
          * @description Replace every recovery code with a fresh set.
          *
-         *     No code required as input -- the act of being able to call this
-         *     endpoint (authenticated session) plus the future sensitive-action
-         *     gate (phase 5) is the protection. Existing codes are deleted
-         *     atomically with the insert of the new ones.
+         *     No code is required in this request: ``require_fresh_mfa`` admits only a
+         *     cookie session with a recent second-factor verification. Existing codes
+         *     are deleted atomically with insertion of the new set.
          */
         readonly post: operations["regenerate_recovery_codes_api_v1_auth_mfa_recovery_codes_regenerate_post"];
         readonly delete?: never;
@@ -530,6 +523,26 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/auth/mfa/trusted-devices/{device_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        /**
+         * Rename Trusted Device
+         * @description Rename a trusted device for the user's own clarity.
+         */
+        readonly patch: operations["rename_trusted_device_api_v1_auth_mfa_trusted_devices__device_id__patch"];
+        readonly trace?: never;
+    };
     readonly "/api/v1/auth/mfa/trusted-devices/{device_id}/revoke": {
         readonly parameters: {
             readonly query?: never;
@@ -555,61 +568,7 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/auth/mfa/trusted-devices/{device_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        /**
-         * Rename Trusted Device
-         * @description Rename a trusted device for the user's own clarity.
-         */
-        readonly patch: operations["rename_trusted_device_api_v1_auth_mfa_trusted_devices__device_id__patch"];
-        readonly trace?: never;
-    };
-    readonly "/api/v1/setup/status": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * Status Endpoint
-         * @description Return whether the brain is in first-boot mode.
-         *
-         *     1.6.4 security tightening: authentication is now required EXCEPT
-         *     during the legitimate first-boot window. Pre-1.6.4 this endpoint
-         *     was anonymous-readable on every page load, which let a curious
-         *     attacker enumerate "this is z4j" + "it has been provisioned"
-         *     without ever logging in. 1.6.3's route audit flagged it as the
-         *     last SUSPICIOUS surface; 1.6.4 closes the gap.
-         *
-         *     The exception: when there are zero users in the DB (the genuine
-         *     first-boot window before an admin has been created), this endpoint
-         *     must respond anonymously so the dashboard chrome can render the
-         *     setup CTA without an auth loop. After the first admin is created
-         *     the endpoint returns 401 to anonymous callers and `200 {first_boot:
-         *     false}` to authenticated callers.
-         */
-        readonly get: operations["status_endpoint_api_v1_setup_status_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/setup/complete": {
+    readonly "/api/v1/auth/mfa/verify": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -619,17 +578,88 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Complete
-         * @description Verify the setup token and bootstrap the brain.
+         * Verify
+         * @description Verify a TOTP code or a recovery code.
+         *
+         *     On success, ``sessions.mfa_verified_at`` is stamped so the
+         *     sensitive-action gate accepts the caller. On a recovery-code
+         *     success the code is consumed in the same transaction.
          */
-        readonly post: operations["complete_api_v1_setup_complete_post"];
+        readonly post: operations["verify_api_v1_auth_mfa_verify_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/setup": {
+    readonly "/api/v1/auth/password-reset/confirm": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Password Reset Confirm
+         * @description Consume a reset token and set a new password.
+         *
+         *     Single-use: the token is *atomically* claimed via an UPDATE ...
+         *     WHERE consumed_at IS NULL ... RETURNING in the same transaction
+         *     as the password update. Once claimed the token is rejected on
+         *     replay even though the row stays around for the audit trail.
+         *
+         *     Revokes every existing session for the user so an attacker
+         *     who had a session open doesn't survive the reset.
+         *
+         *     z4j 1.6.5 (audit R5-M2): pre-1.6.5 this handler did SELECT,
+         *     checked ``consumed_at`` in memory, updated the password, and
+         *     then assigned ``row.consumed_at = now``. Two concurrent
+         *     confirm requests with the same valid token could both pass
+         *     the in-memory check and both write a password (final state
+         *     last-writer-wins) before either commit set consumed_at. The
+         *     atomic-claim pattern below makes exactly one caller win at
+         *     the database, the other gets the same generic
+         *     ``invalid_or_expired`` 404 a replayed token would get.
+         */
+        readonly post: operations["password_reset_confirm_api_v1_auth_password_reset_confirm_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/password-reset/request": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Password Reset Request
+         * @description Request a password-reset token.
+         *
+         *     Response shape is identical for known and unknown users. SMTP delivery is
+         *     deferred to a background task and the route applies the configured login
+         *     timing floor, reducing account-enumeration signal. Token/audit database
+         *     work still occurs only for a known user, so this is not a cryptographic
+         *     constant-time guarantee. The caller ALWAYS gets ``accepted=True``. If nothing arrives
+         *     in the user's inbox they know to contact an admin - the
+         *     system deliberately does not confirm or deny account
+         *     existence.
+         */
+        readonly post: operations["password_reset_request_api_v1_auth_password_reset_request_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/policy": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -637,29 +667,373 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * Setup Form
-         * @description Serve the inline HTML form.
+         * Password Policy
+         * @description Public password-policy summary for the dashboard's UI hints.
          *
-         *     Only available while ``users`` is empty. After the bootstrap
-         *     admin exists, returns 404 - the form has no business existing
-         *     after first boot. The token query parameter is intentionally
-         *     NOT used by the server; the JS reads it from
-         *     ``window.location.search`` and stuffs it into the hidden form
-         *     field. The server's only job is to gate visibility on the
-         *     first-boot flag.
+         *     1.6.5 advisory F4: pre-1.6.5 the dashboard hardcoded
+         *     ``minLength={8}`` on every password field, but the docs said
+         *     12 and the backend default was also 8 (drift between docs
+         *     and code AND code-and-UI). Now the dashboard reads this
+         *     endpoint at mount and uses the returned ``min_length``
+         *     directly; backend, dashboard, and docs stay in sync.
          *
-         *     Visibility also requires that an active token row exists.
-         *     Otherwise, between a successful ``complete()`` commit and
-         *     the user row becoming visible to a parallel reader (Postgres
-         *     replica lag), ``users.count() == 0`` could still be True
-         *     even though the setup is conceptually done; the form would
-         *     render referencing a stale URL, confusing UX and a small
-         *     information leak about install state. Tying visibility to
-         *     "active token AND users empty" closes the gap.
+         *     Anonymous-readable by design -- nothing here is sensitive,
+         *     and the password-reset flow needs it to render the reset
+         *     form's hint before the user has a session.
          */
-        readonly get: operations["setup_form_setup_get"];
+        readonly get: operations["password_policy_api_v1_auth_policy_get"];
         readonly put?: never;
         readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/sessions": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Sessions
+         * @description Return up to 100 active (non-revoked, non-expired) sessions for
+         *     the current user, newest first.
+         *
+         *     The ``is_current`` flag marks which session corresponds to the
+         *     cookie that made this request, so the dashboard can highlight
+         *     "this device" in the sessions list.
+         */
+        readonly get: operations["list_sessions_api_v1_auth_sessions_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/sessions/revoke-others": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Revoke Other Sessions
+         * @description Revoke all of the caller's sessions except the current one.
+         *
+         *     The revocation runs as one unbounded database UPDATE and is independent
+         *     of the display-only 100-row session listing cap.
+         */
+        readonly post: operations["revoke_other_sessions_api_v1_auth_sessions_revoke_others_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/auth/sessions/{session_id}/revoke": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Revoke Session
+         * @description Revoke a specific session belonging to the current user.
+         *
+         *     The session must exist and belong to the authenticated user -
+         *     users cannot revoke other users' sessions. Returns 404 if the
+         *     session does not exist or does not belong to the caller.
+         */
+        readonly post: operations["revoke_session_api_v1_auth_sessions__session_id__revoke_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/health": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Health
+         * @description Liveness probe. No I/O.
+         *
+         *     Returns ``200 OK``. The point is to give container runtimes
+         *     something cheap and reliable to poll: a process that can answer
+         *     this endpoint is process-alive.
+         *
+         *     .. note::
+         *        1.6.3 security advisory: removed the ``version`` field from
+         *        this response. The endpoint is publicly reachable (by design,
+         *        for liveness probes) so leaking the brain version let
+         *        attackers pin specific CVEs to a target. Version disclosure
+         *        moved to :func:`health_system` (auth-gated).
+         */
+        readonly get: operations["health_api_v1_health_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/health/deep": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Health Deep
+         * @description Per-subsystem health, for when "is it up" is not the question.
+         *
+         *     ``/health`` answers whether the process is alive and ``/health/ready``
+         *     whether it can serve traffic. Neither tells an operator which subsystem
+         *     is the reason, so this one names them individually.
+         *
+         *     Authenticated on purpose. ``/health`` is deliberately public for
+         *     liveness probes, and the 1.6.3 advisory removed even the version string
+         *     from it because an unauthenticated caller could use it to pin CVEs to a
+         *     target. Subsystem topology is a larger disclosure than a version, and a
+         *     public probe that does real work on request is also an amplification
+         *     vector, so this lives behind auth rather than behind a query parameter
+         *     on the public endpoint.
+         *
+         *     Returns ``503`` when any check reports failed and ``200`` otherwise, so
+         *     it can drive an alert directly. A degraded check is a warning rather than
+         *     an outage and stays a 200, because a 503 would have an orchestrator
+         *     restart a brain that is serving traffic perfectly well. A check that
+         *     cannot complete is reported as failed rather than omitted: a silent
+         *     omission reads as healthy, which is the one thing a health endpoint must
+         *     never do.
+         *
+         *     Neither verdict is a prediction of what the boot path would do with the
+         *     same database, and ``coverage`` in the response says so.
+         *
+         *     A green result is the narrower of the two. An ok is the checks named
+         *     beside it and nothing else: the audit-chain check authenticates the state
+         *     row without reading ``audit_log`` (see :func:`_check_audit_chain`), so a
+         *     database carrying a tampered audit row passes here and is refused at boot.
+         *
+         *     A red result is not the converse of that. Where a check completed and
+         *     reported a schema state, that state is one the boot path refuses, and
+         *     calling it failed rather than degraded is the deliberate part: degraded is
+         *     a subsystem working less well than it should on a brain that can still
+         *     restart, and a state the next restart rejects is failed however well the
+         *     process happens to be serving right now, because reporting it as a warning
+         *     tells an operator their brain is healthy up until the moment something asks
+         *     it to come back. But failed is also what a check gets when it exceeds
+         *     :data:`_DEEP_CHECK_TIMEOUT_S` or raises, and
+         *     :func:`z4j_brain.startup.verify_production_authority_at_startup` runs its
+         *     queries with no deadline at all, so a database slow enough to miss that
+         *     budget is a 503 here and a successful start there. Both belong in the 503,
+         *     because a subsystem this brain cannot answer for is worth paging on either
+         *     way. What does not follow is reading any 503 as proof that the next restart
+         *     will refuse; the check's own ``detail`` says which of the two it is.
+         *
+         *     Closing that gap was considered and rejected rather than overlooked. On
+         *     PostgreSQL startup's walk takes the chain advisory lock and ``LOCK TABLE
+         *     audit_log IN SHARE MODE``, which stalls every audited mutation in the brain
+         *     for as long as it runs; on SQLite it requires a unit begun with ``BEGIN
+         *     IMMEDIATE``, which the request's read-only session is not; and on both it
+         *     hashes every row of a table with no upper bound, against a per-check budget
+         *     of :data:`_DEEP_CHECK_TIMEOUT_S`. Every project member can reach this
+         *     endpoint and poll it, so an equivalent probe would hand any of them a way
+         *     to hold up the brain's writes on demand. Walking part of the table instead would not be
+         *     equivalent either, since tampering is not confined to the rows a partial
+         *     walk would reach, so it would trade one untrue claim for a subtler one. The
+         *     scheduled verifier does that work on its own schedule; what belongs here is
+         *     an accurate statement of what was and was not asked.
+         *
+         *     Every probe runs on the REQUEST's session rather than opening its own.
+         *     Authentication already holds that session for the life of the request, so
+         *     a probe that checked out a second connection needed two at once, and
+         *     ``pool_size=1, max_overflow=0`` is a configuration this brain explicitly
+         *     permits. On that pool each probe blocked until its own timeout and the
+         *     endpoint reported a perfectly reachable database as failed.
+         *
+         *     Sharing one session is why each probe runs inside :func:`_run_probe`.
+         *     PostgreSQL aborts the whole transaction on the first statement error, so
+         *     without isolation the first probe to fail poisons every later one: an
+         *     un-migrated database reported its audit chain as un-activated when the
+         *     chain was fine, and the report got worse, not better, as the probes were
+         *     sharpened.
+         */
+        readonly get: operations["health_deep_api_v1_health_deep_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/health/ready": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Health Ready
+         * @description Readiness probe. Issues ``SELECT 1`` with a hard timeout.
+         *
+         *     Returns ``200 OK`` if the database is reachable, ``503`` if it
+         *     is not. Never raises - the response object is mutated in place.
+         *
+         *     Also gates on ``app.state.lifespan_ready``. Without this gate
+         *     the brain would return 200 the moment uvicorn bound the
+         *     port, but lifespan startup (run_first_boot_check,
+         *     registry.start, supervisor.start) runs AFTER the routes are
+         *     mounted, so a k8s readiness probe would flip "ready" while
+         *     the brain was still pre-bootstrap. The flag is set at the
+         *     END of the lifespan startup phase in main.py.
+         */
+        readonly get: operations["health_ready_api_v1_health_ready_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/health/system": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Health System
+         * @description System information for the dashboard settings page.
+         *
+         *     Requires authentication - exposes database version, Python
+         *     version, and package details that should not be public.
+         */
+        readonly get: operations["health_system_api_v1_health_system_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/home/recent-failures": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Recent Failures
+         * @description Recent ``task.failed`` events across every visible project.
+         *
+         *     Non-admin visibility follows active project memberships. Global-admin
+         *     project visibility is bounded by ``Settings.admin_project_list_cap``
+         *     (``Z4J_ADMIN_PROJECT_LIST_CAP``, default 500), just like Home summary.
+         *
+         *     Keyset pagination on ``(occurred_at, id)`` - the second element
+         *     is required to break ties when multiple failures share an exact
+         *     millisecond (replay storms, batch retries). Without it the page
+         *     boundary silently drops or duplicates rows. The cursor is
+         *     encoded as ``"<iso8601>|<uuid_hex>"`` (R4 follow-up).
+         */
+        readonly get: operations["get_recent_failures_api_v1_home_recent_failures_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/home/summary": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Summary
+         * @description Return the bounded project set the SPA renders as Home cards.
+         *
+         *     Non-admins are scoped to their active memberships. Global-admin results
+         *     are bounded by ``Settings.admin_project_list_cap``
+         *     (``Z4J_ADMIN_PROJECT_LIST_CAP``, default 500); this endpoint is not an
+         *     exhaustive tenant-wide project export.
+         */
+        readonly get: operations["get_summary_api_v1_home_summary_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/invitations/accept": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Accept Invitation
+         * @description Anonymous endpoint - consumes the token + creates user + grants membership.
+         *
+         *     Everything runs in a single transaction so the four side-effects
+         *     (invitation stamped, user inserted, membership granted, default
+         *     subscriptions materialized) succeed or fail together. TOCTOU-safe
+         *     per audit H5: email uniqueness is re-checked inside the
+         *     transaction.
+         */
+        readonly post: operations["accept_invitation_api_v1_invitations_accept_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/invitations/preview": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Preview Invitation
+         * @description Anonymous body-only preview for the fragment-bearing accept page.
+         */
+        readonly post: operations["preview_invitation_api_v1_invitations_preview_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -743,6 +1117,31 @@ export interface paths {
         readonly patch: operations["update_project_api_v1_projects__slug__patch"];
         readonly trace?: never;
     };
+    readonly "/api/v1/projects/{slug}/agent-workers": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Agent Workers
+         * @description List agent worker processes for a project.
+         *
+         *     Returns rows ordered online-before-offline, then by
+         *     last_seen_at descending. The role filter accepts only known
+         *     values so a typo is rejected at the API layer rather than
+         *     silently returning everything.
+         */
+        readonly get: operations["list_agent_workers_api_v1_projects__slug__agent_workers_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/projects/{slug}/agents": {
         readonly parameters: {
             readonly query?: never;
@@ -785,7 +1184,7 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/api-keys/scopes": {
+    readonly "/api/v1/projects/{slug}/audit": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -793,580 +1192,22 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * List Scopes
-         * @description Catalogue of scopes the UI can offer at mint time.
+         * List Audit
+         * @description List audit log entries for one project.
          *
-         *     1.6.3 security advisory: requires authentication. Pre-1.6.3 this
-         *     endpoint was public on the rationale that the shape was static.
-         *     Auth-gating costs nothing (any logged-in dashboard user OR API
-         *     key qualifies), prevents future scope additions (e.g.
-         *     ``secrets:write``, ``audit:purge``) from being silently
-         *     discoverable, and keeps the principle that the brain does not
-         *     return anything substantive to anonymous callers.
+         *     Requires admin role on the project - audit reads are
+         *     privileged because they can reveal who did what when, which
+         *     is itself sensitive.
+         *
+         *     When ``format`` is ``csv`` / ``json`` the response is a file
+         *     download containing up to 50 000 matching rows; ``xlsx`` is
+         *     capped at 25 000 because its workbook is built in memory.
+         *     Cursor + limit are ignored on the export path - operators
+         *     narrow via the filter params instead.
          */
-        readonly get: operations["list_scopes_api_v1_api_keys_scopes_get"];
+        readonly get: operations["list_audit_api_v1_projects__slug__audit_get"];
         readonly put?: never;
         readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/api-keys": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Api Keys
-         * @description List all active (non-revoked) API keys for the current user.
-         *
-         *     Never returns the plaintext token - only the prefix for
-         *     identification.
-         */
-        readonly get: operations["list_api_keys_api_v1_api_keys_get"];
-        readonly put?: never;
-        /**
-         * Create Api Key
-         * @description Create a new personal API key.
-         *
-         *     The plaintext token is returned ONCE in the response. Only the
-         *     HMAC-SHA256 hash is stored. If the user loses the plaintext they
-         *     must revoke the key and create a new one.
-         *
-         *     Token format: ``z4k_`` prefix + 32 bytes urlsafe base64.
-         */
-        readonly post: operations["create_api_key_api_v1_api_keys_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/api-keys/{key_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        readonly post?: never;
-        /**
-         * Revoke Api Key
-         * @description Revoke (soft-delete) a personal API key.
-         *
-         *     Sets ``revoked_at`` on the key. The key can no longer be used
-         *     for authentication but remains in the database for audit
-         *     purposes.
-         */
-        readonly delete: operations["revoke_api_key_api_v1_api_keys__key_id__delete"];
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/tasks": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Tasks
-         * @description List tasks with filtering, search, pagination, and export.
-         *
-         *     New filters (Phase A):
-         *     - ``priority`` - comma-separated: ``?priority=critical,high``
-         *     - ``search`` - full-text search across name, queue, worker
-         *     - ``worker`` - exact match on worker_name
-         *     - ``until`` - upper bound on received_at (pair with ``since``)
-         *     - ``format`` - ``csv`` or ``xlsx`` for export (overrides pagination)
-         */
-        readonly get: operations["list_tasks_api_v1_projects__slug__tasks_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/tasks/{engine}/{task_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** Get Task */
-        readonly get: operations["get_task_api_v1_projects__slug__tasks__engine___task_id__get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/tasks/{engine}/{task_id}/tree": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * Get Task Tree
-         * @description Return the full canvas (chain / group / chord) tree this task belongs to.
-         *
-         *     Looks up the requested task, walks to its root via
-         *     ``root_task_id`` (or treats the task as its own root if the
-         *     field is null), then returns every task in the project sharing
-         *     that root. Capped at 500 nodes so a runaway chain doesn't
-         *     return an unbounded blob; the response carries ``truncated:
-         *     true`` when the cap kicks in so the dashboard can show a
-         *     "showing first 500 of N" notice.
-         */
-        readonly get: operations["get_task_tree_api_v1_projects__slug__tasks__engine___task_id__tree_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/tasks/bulk-delete": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Bulk Delete Tasks
-         * @description Delete task records from the brain database.
-         *
-         *     Supports two modes:
-         *     - By ID list: provide ``task_ids`` (up to 1000).
-         *     - By filter: provide ``filter_*`` params (deletes up to 10000).
-         *
-         *     This is a brain-side operation (no agent command needed).
-         *     Requires ADMIN role.
-         */
-        readonly post: operations["bulk_delete_tasks_api_v1_projects__slug__tasks_bulk_delete_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/events": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** List Events For Task */
-        readonly get: operations["list_events_for_task_api_v1_projects__slug__events_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/issues": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** List Issues */
-        readonly get: operations["list_issues_api_v1_projects__slug__issues_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/workers": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** List Workers */
-        readonly get: operations["list_workers_api_v1_projects__slug__workers_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/workers/{worker_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * Get Worker Detail
-         * @description Get detailed worker info including inspect() data.
-         *
-         *     Uses the worker's UUID (not hostname) so URLs don't break on
-         *     special characters like ``@``.
-         */
-        readonly get: operations["get_worker_detail_api_v1_projects__slug__workers__worker_id__get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/agent-workers": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Agent Workers
-         * @description List agent worker processes for a project.
-         *
-         *     Returns rows ordered online-before-offline, then by
-         *     last_seen_at descending. The role filter accepts only known
-         *     values so a typo is rejected at the API layer rather than
-         *     silently returning everything.
-         */
-        readonly get: operations["list_agent_workers_api_v1_projects__slug__agent_workers_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/queues": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** List Queues */
-        readonly get: operations["list_queues_api_v1_projects__slug__queues_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** List Commands */
-        readonly get: operations["list_commands_api_v1_projects__slug__commands_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/{command_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** Get Command */
-        readonly get: operations["get_command_api_v1_projects__slug__commands__command_id__get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/retry-task": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Issue Retry Task */
-        readonly post: operations["issue_retry_task_api_v1_projects__slug__commands_retry_task_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/cancel-task": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Issue Cancel Task */
-        readonly post: operations["issue_cancel_task_api_v1_projects__slug__commands_cancel_task_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/bulk-retry": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Issue Bulk Retry */
-        readonly post: operations["issue_bulk_retry_api_v1_projects__slug__commands_bulk_retry_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/purge-queue": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Issue Purge Queue
-         * @description DESTRUCTIVE - requires admin role.
-         *
-         *     Removes every pending task from the named queue. The agent's
-         *     purge action refuses the destructive ``queue_delete``
-         *     fallback, so this is bounded to ``queue_purge`` semantics.
-         *
-         *     The caller passes ``observed_depth`` (the depth they confirmed
-         *     against) and the brain computes the keyed confirm token
-         *     server-side (M-7), or a pre-computed ``confirm_token``, or
-         *     ``force=True``. Without one of these the agent refuses to act.
-         */
-        readonly post: operations["issue_purge_queue_api_v1_projects__slug__commands_purge_queue_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/restart-worker": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Issue Restart Worker */
-        readonly post: operations["issue_restart_worker_api_v1_projects__slug__commands_restart_worker_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/pool-resize": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Issue Pool Resize
-         * @description Grow or shrink the worker pool by ``delta`` processes.
-         */
-        readonly post: operations["issue_pool_resize_api_v1_projects__slug__commands_pool_resize_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/add-consumer": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Issue Add Consumer
-         * @description Start consuming from an additional queue on a worker.
-         */
-        readonly post: operations["issue_add_consumer_api_v1_projects__slug__commands_add_consumer_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/cancel-consumer": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Issue Cancel Consumer
-         * @description Stop consuming from a queue on a worker.
-         */
-        readonly post: operations["issue_cancel_consumer_api_v1_projects__slug__commands_cancel_consumer_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/commands/rate-limit": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Issue Rate Limit
-         * @description Set or clear a per-task rate limit on one (or every) worker.
-         *
-         *     The target_id on the audit row is the task name, not the worker
-         *     name - the rate limit is a property of the task across the
-         *     cluster, not of the worker. Operators searching the audit log
-         *     for a noisy task want to find every rate-limit change against
-         *     that task in one query.
-         */
-        readonly post: operations["issue_rate_limit_api_v1_projects__slug__commands_rate_limit_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/bulk-retry-requests": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Create Bulk Retry Request
-         * @description Create or exactly replay one sealed durable request.
-         */
-        readonly post: operations["create_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/bulk-retry-requests/{request_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** Get Bulk Retry Request */
-        readonly get: operations["get_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/bulk-retry-requests/{request_id}/pause": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Pause Bulk Retry Request */
-        readonly post: operations["pause_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__pause_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/bulk-retry-requests/{request_id}/resume": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Resume Bulk Retry Request */
-        readonly post: operations["resume_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__resume_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -1459,196 +1300,7 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/projects/{slug}/schedules": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Schedules
-         * @description List schedules in a project, paginated.
-         *
-         *     Keyset cursor encoded as ``"<name>|<uuid_hex>"``. Pages are
-         *     capped at 500 rows; default 50 mirrors the dashboard's typical
-         *     table page size. Order is ``(name, id)`` so the same row never
-         *     appears on two pages even when names collide cross-project
-         *     (within a project ``name`` is unique by DB constraint).
-         */
-        readonly get: operations["list_schedules_api_v1_projects__slug__schedules_get"];
-        readonly put?: never;
-        /**
-         * Create Schedule
-         * @description Create a new schedule under the project.
-         *
-         *     Authorization: ADMIN. Creating a schedule is a privileged
-         *     operation - it can move money, send emails, etc.
-         */
-        readonly post: operations["create_schedule_api_v1_projects__slug__schedules_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/fires": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Schedule Fires
-         * @description Return the schedule's fire history, newest first.
-         *
-         *     Authorization: VIEWER (read-only). The fire history exposes
-         *     timestamps + status + latency, which any project member should
-         *     see (matches the existing schedule list/get permissions). The
-         *     error_message field is included verbatim - operators want the
-         *     debug detail. Args/kwargs are NOT included since the dashboard
-         *     has the schedule detail page for those.
-         *
-         *     Limit is capped at 1000 to prevent runaway queries; the
-         *     dashboard pages defaults to 50.
-         */
-        readonly get: operations["list_schedule_fires_api_v1_projects__slug__schedules__schedule_id__fires_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/misfires": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Schedule Misfires
-         * @description Return the schedule's detected misfires, newest first.
-         *
-         *     Authorization: VIEWER. A misfire is a system-detected "this enabled
-         *     schedule missed its slot" event (no who-did-what), so unlike the
-         *     general audit log (ADMIN) it is safe for any project member to see --
-         *     it is operational data about a schedule they can already read. The
-         *     most recent row is the schedule detail page's "last misfire".
-         *
-         *     Limit capped at 1000; the dashboard defaults to a short window.
-         */
-        readonly get: operations["list_schedule_misfires_api_v1_projects__slug__schedules__schedule_id__misfires_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/schedules/misfires": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Project Misfires
-         * @description Return every detected misfire across the project's schedules,
-         *     newest first.
-         *
-         *     Authorization: VIEWER. Same rationale as the per-schedule view
-         *     (:func:`list_schedule_misfires`): a misfire is system-detected
-         *     operational data about schedules the member can already read, so it
-         *     is safe for any project member. Unlike that endpoint this spans ALL
-         *     of the project's schedules, so each row carries its own
-         *     ``schedule_id`` read from the audit row's ``target_id`` (the misfire
-         *     detector writes that column as the schedule id).
-         *
-         *     This route is declared BEFORE ``GET /{schedule_id}`` so the literal
-         *     ``/misfires`` segment is matched instead of being coerced into the
-         *     ``schedule_id`` path param.
-         *
-         *     Limit capped at 1000; the dashboard defaults to a short window.
-         */
-        readonly get: operations["list_project_misfires_api_v1_projects__slug__schedules_misfires_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** Get Schedule */
-        readonly get: operations["get_schedule_api_v1_projects__slug__schedules__schedule_id__get"];
-        readonly put?: never;
-        readonly post?: never;
-        /**
-         * Delete Schedule
-         * @description Hard-delete the schedule. IDOR-safe (project-scoped lookup).
-         *
-         *     Cascades to ``pending_fires`` via FK. Authorization: ADMIN.
-         */
-        readonly delete: operations["delete_schedule_api_v1_projects__slug__schedules__schedule_id__delete"];
-        readonly options?: never;
-        readonly head?: never;
-        /**
-         * Update Schedule
-         * @description Partial update. Only fields present in the body are touched.
-         *
-         *     Authorization: ADMIN.
-         */
-        readonly patch: operations["update_schedule_api_v1_projects__slug__schedules__schedule_id__patch"];
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/enable": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Enable Schedule */
-        readonly post: operations["enable_schedule_api_v1_projects__slug__schedules__schedule_id__enable_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/disable": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Disable Schedule */
-        readonly post: operations["disable_schedule_api_v1_projects__slug__schedules__schedule_id__disable_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/trigger": {
+    readonly "/api/v1/projects/{slug}/bulk-retry-requests": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -1658,20 +1310,85 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Trigger Schedule Now
-         * @description Issue a one-shot ``schedule.trigger_now`` command.
-         *
-         *     The schedule itself is unchanged - its normal cadence is
-         *     untouched. The agent fires the underlying task once.
+         * Create Bulk Retry Request
+         * @description Create or exactly replay one sealed durable request.
          */
-        readonly post: operations["trigger_schedule_now_api_v1_projects__slug__schedules__schedule_id__trigger_post"];
+        readonly post: operations["create_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/projects/{slug}/schedules:import": {
+    readonly "/api/v1/projects/{slug}/bulk-retry-requests/{request_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** Get Bulk Retry Request */
+        readonly get: operations["get_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/bulk-retry-requests/{request_id}/pause": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Pause Bulk Retry Request */
+        readonly post: operations["pause_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__pause_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/bulk-retry-requests/{request_id}/resume": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Resume Bulk Retry Request */
+        readonly post: operations["resume_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__resume_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/commands": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** List Commands */
+        readonly get: operations["list_commands_api_v1_projects__slug__commands_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/commands/add-consumer": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -1681,27 +1398,34 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Import Schedules
-         * @description Bulk-import schedules from a migration tool.
-         *
-         *     Called by ``z4j-scheduler import --from <tool>``. Each row is
-         *     upserted by ``(project_id, scheduler, name)``. Re-imports with
-         *     matching ``source_hash`` are no-ops so the operator can re-run
-         *     the importer without flooding the audit log.
-         *
-         *     Authorization: project ADMIN. Schedule import is a privileged
-         *     operation - it adds new fire surfaces to a project, which can
-         *     move money, send emails, etc. ADMIN matches the existing
-         *     convention for membership / retention / token mutations.
+         * Issue Add Consumer
+         * @description Start consuming from an additional queue on a worker.
          */
-        readonly post: operations["import_schedules_api_v1_projects__slug__schedules_import_post"];
+        readonly post: operations["issue_add_consumer_api_v1_projects__slug__commands_add_consumer_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/projects/{slug}/schedules:diff": {
+    readonly "/api/v1/projects/{slug}/commands/bulk-retry": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Issue Bulk Retry */
+        readonly post: operations["issue_bulk_retry_api_v1_projects__slug__commands_bulk_retry_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/commands/cancel-consumer": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -1711,33 +1435,34 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Diff Schedules
-         * @description Preview what ``:import`` would do without applying it.
-         *
-         *     Same body as ``:import``. Returns four buckets:
-         *
-         *     - ``inserted`` - rows in the batch with no matching brain row.
-         *     - ``updated`` - rows with a matching brain row and a different
-         *       ``source_hash``. The ``current`` field carries the brain's
-         *       pre-update shape.
-         *     - ``unchanged`` - rows whose ``source_hash`` matches brain.
-         *     - ``deleted`` - only populated when ``mode="replace_for_source"``;
-         *       rows brain has under the resolved ``source_filter`` that the
-         *       batch dropped.
-         *
-         *     Authorization: project ADMIN. The diff itself is read-only but
-         *     surfaces the same data ``:import`` would mutate, so it inherits
-         *     the same role gate. (A separate "view diff as VIEWER" path could
-         *     be added later if operator UX demands it.)
+         * Issue Cancel Consumer
+         * @description Stop consuming from a queue on a worker.
          */
-        readonly post: operations["diff_schedules_api_v1_projects__slug__schedules_diff_post"];
+        readonly post: operations["issue_cancel_consumer_api_v1_projects__slug__commands_cancel_consumer_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/projects/{slug}/schedules:resync": {
+    readonly "/api/v1/projects/{slug}/commands/cancel-task": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Issue Cancel Task */
+        readonly post: operations["issue_cancel_task_api_v1_projects__slug__commands_cancel_task_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/commands/pool-resize": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -1747,64 +1472,114 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Resync Schedules
-         * @description Force every online agent in the project to re-emit a full
-         *     schedule inventory snapshot.
-         *
-         *     This is the dashboard's *Sync now* button. The brain dispatches a
-         *     ``schedule.resync`` command to each online agent that advertises
-         *     at least one scheduler adapter. On receipt, the agent calls
-         *     ``list_schedules()`` on every registered scheduler adapter
-         *     (celery-beat, apscheduler, rq-scheduler, arqcron, hueyperiodic,
-         *     taskiqscheduler) and emits one
-         *     :class:`~z4j_core.models.event.EventKind.SCHEDULE_SNAPSHOT` event
-         *     per adapter. The brain's event ingestor reconciles each snapshot
-         *     against the DB (insert / update / delete-missing) scoped to
-         *     ``(project, scheduler)``.
-         *
-         *     Use cases:
-         *
-         *     - First-time onboarding: existing celery-beat ``PeriodicTask``
-         *       rows that pre-date the agent install show up immediately
-         *       instead of waiting for the operator to edit-and-save each one.
-         *     - Recovery: schedules created via Django admin / SQL while the
-         *       agent was offline get reconciled the moment the operator
-         *       clicks the button (no Django reload needed).
-         *     - Drift checks: operator suspects the dashboard is stale →
-         *       one click re-asserts the agent's view as the source of truth.
-         *
-         *     Note that the agent ALSO does this on a periodic timer
-         *     (default 15 minutes) and at every reconnect, so most operators
-         *     never need to hit this endpoint by hand. It exists for the
-         *     *I want it now* case.
-         *
-         *     Returns immediately with HTTP 202. The actual snapshot events
-         *     arrive asynchronously and the dashboard's existing schedule
-         *     list query will reflect them on the next refetch.
+         * Issue Pool Resize
+         * @description Grow or shrink the worker pool by ``delta`` processes.
          */
-        readonly post: operations["resync_schedules_api_v1_projects__slug__schedules_resync_post"];
+        readonly post: operations["issue_pool_resize_api_v1_projects__slug__commands_pool_resize_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/schedulers": {
+    readonly "/api/v1/projects/{slug}/commands/purge-queue": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
             readonly path?: never;
             readonly cookie?: never;
         };
+        readonly get?: never;
+        readonly put?: never;
         /**
-         * List Fleet
-         * @description Return one entry per configured scheduler URL.
+         * Issue Purge Queue
+         * @description DESTRUCTIVE - requires admin role.
          *
-         *     Authorization is global ADMIN (not project-scoped). The fleet
-         *     is operator-level concern - any project admin sees the same
-         *     fleet, but only global admins (``user.is_admin``) can view it.
+         *     Removes every pending task from the named queue. The agent's
+         *     purge action refuses the destructive ``queue_delete``
+         *     fallback, so this is bounded to ``queue_purge`` semantics.
+         *
+         *     The caller passes ``observed_depth`` (the depth they confirmed
+         *     against) and the brain computes the keyed confirm token
+         *     server-side (M-7), or a pre-computed ``confirm_token``, or
+         *     ``force=True``. Without one of these the agent refuses to act.
          */
-        readonly get: operations["list_fleet_api_v1_schedulers_get"];
+        readonly post: operations["issue_purge_queue_api_v1_projects__slug__commands_purge_queue_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/commands/rate-limit": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Issue Rate Limit
+         * @description Set or clear a per-task rate limit on one (or every) worker.
+         *
+         *     The target_id on the audit row is the task name, not the worker
+         *     name - the rate limit is a property of the task across the
+         *     cluster, not of the worker. Operators searching the audit log
+         *     for a noisy task want to find every rate-limit change against
+         *     that task in one query.
+         */
+        readonly post: operations["issue_rate_limit_api_v1_projects__slug__commands_rate_limit_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/commands/restart-worker": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Issue Restart Worker */
+        readonly post: operations["issue_restart_worker_api_v1_projects__slug__commands_restart_worker_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/commands/retry-task": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Issue Retry Task */
+        readonly post: operations["issue_retry_task_api_v1_projects__slug__commands_retry_task_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/commands/{command_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** Get Command */
+        readonly get: operations["get_command_api_v1_projects__slug__commands__command_id__get"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -1813,27 +1588,15 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/projects/{slug}/audit": {
+    readonly "/api/v1/projects/{slug}/events": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
             readonly path?: never;
             readonly cookie?: never;
         };
-        /**
-         * List Audit
-         * @description List audit log entries for one project.
-         *
-         *     Requires admin role on the project - audit reads are
-         *     privileged because they can reveal who did what when, which
-         *     is itself sensitive.
-         *
-         *     When ``format`` is ``csv`` / ``json`` / ``xlsx`` the response
-         *     is a file download containing up to ``_EXPORT_ROW_CAP`` rows
-         *     that match the filter. Cursor + limit are ignored on the
-         *     export path - operators narrow via the filter params instead.
-         */
-        readonly get: operations["list_audit_api_v1_projects__slug__audit_get"];
+        /** List Events For Task */
+        readonly get: operations["list_events_for_task_api_v1_projects__slug__events_get"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -1842,7 +1605,7 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/activity": {
+    readonly "/api/v1/projects/{slug}/invitations": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -1850,107 +1613,51 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * List Activity
-         * @description List audit rows across every project the caller can see.
-         *
-         *     Admins see every row including brain-wide rows (no project_id);
-         *     non-admins see only rows whose project they hold a membership in.
+         * List Pending Invitations
+         * @description Admin-only: list non-accepted, non-revoked, non-expired invitations.
          */
-        readonly get: operations["list_activity_api_v1_activity_get"];
+        readonly get: operations["list_pending_invitations_api_v1_projects__slug__invitations_get"];
         readonly put?: never;
-        readonly post?: never;
+        /**
+         * Mint Invitation
+         * @description Admin-only: mint a single-use invitation token for ``email``.
+         */
+        readonly post: operations["mint_invitation_api_v1_projects__slug__invitations_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/projects/{slug}/stats": {
+    readonly "/api/v1/projects/{slug}/invitations/{invitation_id}": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
             readonly path?: never;
             readonly cookie?: never;
         };
-        /**
-         * Get Stats
-         * @description Return aggregated project statistics.
-         *
-         *     ``hours`` controls the time window for rate-based metrics
-         *     (failure rate, command counts). Accepts 1, 6, 24, 72, 168.
-         *     Defaults to 24.
-         */
-        readonly get: operations["get_stats_api_v1_projects__slug__stats_get"];
+        readonly get?: never;
         readonly put?: never;
         readonly post?: never;
-        readonly delete?: never;
+        /**
+         * Revoke Invitation
+         * @description Admin-only: revoke a pending invitation.
+         */
+        readonly delete: operations["revoke_invitation_api_v1_projects__slug__invitations__invitation_id__delete"];
         readonly options?: never;
         readonly head?: never;
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/projects/{slug}/trends": {
+    readonly "/api/v1/projects/{slug}/issues": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
             readonly path?: never;
             readonly cookie?: never;
         };
-        /**
-         * Get Trends
-         * @description Return per-bucket task outcome counts + avg runtime.
-         *
-         *     Only tasks with a non-null ``finished_at`` inside ``window`` are
-         *     included; in-flight (pending/started) tasks are excluded by
-         *     design - trend charts show completed work.
-         */
-        readonly get: operations["get_trends_api_v1_projects__slug__trends_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/home/summary": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * Get Summary
-         * @description Home dashboard summary - one blob the SPA renders as cards.
-         */
-        readonly get: operations["get_summary_api_v1_home_summary_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/home/recent-failures": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * Get Recent Failures
-         * @description Recent ``task.failed`` events across every visible project.
-         *
-         *     Keyset pagination on ``(occurred_at, id)`` - the second element
-         *     is required to break ties when multiple failures share an exact
-         *     millisecond (replay storms, batch retries). Without it the page
-         *     boundary silently drops or duplicates rows. The cursor is
-         *     encoded as ``"<iso8601>|<uuid_hex>"`` (R4 follow-up).
-         */
-        readonly get: operations["get_recent_failures_api_v1_home_recent_failures_get"];
+        /** List Issues */
+        readonly get: operations["list_issues_api_v1_projects__slug__issues_get"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -1993,86 +1700,6 @@ export interface paths {
         readonly head?: never;
         /** Update Membership */
         readonly patch: operations["update_membership_api_v1_projects__slug__memberships__membership_id__patch"];
-        readonly trace?: never;
-    };
-    readonly "/api/v1/users": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Users
-         * @description List every dashboard user. Bounded by ``limit``.
-         */
-        readonly get: operations["list_users_api_v1_users_get"];
-        readonly put?: never;
-        /** Create User */
-        readonly post: operations["create_user_api_v1_users_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/users/{user_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** Get User */
-        readonly get: operations["get_user_api_v1_users__user_id__get"];
-        readonly put?: never;
-        readonly post?: never;
-        /**
-         * Delete User
-         * @description Permanently delete a user.
-         *
-         *     FK cleanup: memberships / sessions / api_keys / preferences /
-         *     subscriptions CASCADE; audit_log.user_id and commands.issued_by
-         *     are SET NULL so historical records survive with an anonymised
-         *     actor.
-         *
-         *     Refuses to delete the acting admin (would log them out of the
-         *     operation) and the only remaining active admin (would lock the
-         *     instance out of admin UI). Callers that want a softer operation
-         *     should PATCH ``is_active=false`` instead - the Users page wires
-         *     the trash icon to this hard delete and the deactivate icon to
-         *     the soft path, so the operator picks the semantic they want.
-         */
-        readonly delete: operations["delete_user_api_v1_users__user_id__delete"];
-        readonly options?: never;
-        readonly head?: never;
-        /** Update User */
-        readonly patch: operations["update_user_api_v1_users__user_id__patch"];
-        readonly trace?: never;
-    };
-    readonly "/api/v1/users/{user_id}/password": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Reset Password
-         * @description Admin password reset.
-         *
-         *     Sets a fresh password hash, marks ``password_changed_at``,
-         *     and revokes every active session for the target user. The
-         *     ``password_changed_at`` anchor (B3) makes any session issued
-         *     before this point unusable even before the explicit revoke.
-         */
-        readonly post: operations["reset_password_api_v1_users__user_id__password_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
         readonly trace?: never;
     };
     readonly "/api/v1/projects/{slug}/notifications/channels": {
@@ -2136,24 +1763,6 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/projects/{slug}/notifications/channels/{channel_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        readonly post?: never;
-        /** Delete Channel */
-        readonly delete: operations["delete_channel_api_v1_projects__slug__notifications_channels__channel_id__delete"];
-        readonly options?: never;
-        readonly head?: never;
-        /** Update Channel */
-        readonly patch: operations["update_channel_api_v1_projects__slug__notifications_channels__channel_id__patch"];
-        readonly trace?: never;
-    };
     readonly "/api/v1/projects/{slug}/notifications/channels/test": {
         readonly parameters: {
             readonly query?: never;
@@ -2187,6 +1796,24 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/projects/{slug}/notifications/channels/{channel_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        readonly post?: never;
+        /** Delete Channel */
+        readonly delete: operations["delete_channel_api_v1_projects__slug__notifications_channels__channel_id__delete"];
+        readonly options?: never;
+        readonly head?: never;
+        /** Update Channel */
+        readonly patch: operations["update_channel_api_v1_projects__slug__notifications_channels__channel_id__patch"];
+        readonly trace?: never;
+    };
     readonly "/api/v1/projects/{slug}/notifications/channels/{channel_id}/test": {
         readonly parameters: {
             readonly query?: never;
@@ -2202,9 +1829,9 @@ export interface paths {
          *
          *     Uses the channel's stored config (including secrets the admin
          *     entered at create / update time), not anything the caller sends
-         *     in the body. The delivery is NOT logged to
-         *     ``notification_deliveries`` - same preflight semantics as the
-         *     unsaved variant.
+         *     in the body. The dispatch is logged to ``notification_deliveries``
+         *     with ``trigger="test.dispatch"`` and the saved channel identity,
+         *     matching the unsaved-config test's audit semantics.
          *
          *     Admin-only.
          */
@@ -2306,13 +1933,817 @@ export interface paths {
          *     data-loss risk. Operators who need long-term retention should
          *     forward via webhooks to an external log store.
          *
-         *     Every clear writes one row to the brain audit_log so a rogue
-         *     admin cannot silently delete delivery history to cover the
-         *     trail of a sensitive test dispatch. The audit row carries
-         *     the actor, the row count, and the optional ``before``
-         *     timestamp.
+         *     Every clear writes one row to the brain audit_log, so an admin
+         *     cannot use this endpoint to wipe the trail of a sensitive test
+         *     dispatch without leaving a record naming them. The audit row
+         *     carries the actor, the row count, and the optional ``before``
+         *     timestamp. That record is worth exactly what the audit log is
+         *     worth against the actor in question: it holds against anyone
+         *     working through the application, not against a role that can
+         *     write the audit tables directly.
          */
         readonly delete: operations["clear_deliveries_api_v1_projects__slug__notifications_deliveries_delete"];
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/queues": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** List Queues */
+        readonly get: operations["list_queues_api_v1_projects__slug__queues_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Schedules
+         * @description List schedules in a project, paginated.
+         *
+         *     Keyset cursor encoded as ``"<name>|<uuid_hex>"``. Pages are
+         *     capped at 500 rows; default 50 mirrors the dashboard's typical
+         *     table page size. Order is ``(name, id)`` so the same row never
+         *     appears on two pages even when names collide cross-project
+         *     (within a project ``name`` is unique by DB constraint).
+         */
+        readonly get: operations["list_schedules_api_v1_projects__slug__schedules_get"];
+        readonly put?: never;
+        /**
+         * Create Schedule
+         * @description Create a new schedule under the project.
+         *
+         *     Authorization: ADMIN. Creating a schedule is a privileged
+         *     operation - it can move money, send emails, etc.
+         */
+        readonly post: operations["create_schedule_api_v1_projects__slug__schedules_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/external-control-operations/{operation_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get External Schedule Control Operation
+         * @description Return the durable status named by an external-control Location.
+         */
+        readonly get: operations["get_external_schedule_control_operation_api_v1_projects__slug__schedules_external_control_operations__operation_id__get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/misfires": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Project Misfires
+         * @description Return every detected misfire across the project's schedules,
+         *     newest first.
+         *
+         *     Authorization: VIEWER. Same rationale as the per-schedule view
+         *     (:func:`list_schedule_misfires`): a misfire is system-detected
+         *     operational data about schedules the member can already read, so it
+         *     is safe for any project member. Unlike that endpoint this spans ALL
+         *     of the project's schedules, so each row carries its own
+         *     ``schedule_id`` read from the audit row's ``target_id`` (the misfire
+         *     detector writes that column as the schedule id).
+         *
+         *     This route is declared BEFORE ``GET /{schedule_id}`` so the literal
+         *     ``/misfires`` segment is matched instead of being coerced into the
+         *     ``schedule_id`` path param.
+         *
+         *     Limit capped at 1000; the dashboard defaults to a short window.
+         */
+        readonly get: operations["list_project_misfires_api_v1_projects__slug__schedules_misfires_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** Get Schedule */
+        readonly get: operations["get_schedule_api_v1_projects__slug__schedules__schedule_id__get"];
+        readonly put?: never;
+        readonly post?: never;
+        /**
+         * Delete Schedule
+         * @description Hard-delete the schedule. IDOR-safe (project-scoped lookup).
+         *
+         *     Cascades to ``pending_fires`` via FK. Authorization: ADMIN.
+         */
+        readonly delete: operations["delete_schedule_api_v1_projects__slug__schedules__schedule_id__delete"];
+        readonly options?: never;
+        readonly head?: never;
+        /**
+         * Update Schedule
+         * @description Partial update. Only fields present in the body are touched.
+         *
+         *     Authorization: ADMIN.
+         */
+        readonly patch: operations["update_schedule_api_v1_projects__slug__schedules__schedule_id__patch"];
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/disable": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Disable Schedule */
+        readonly post: operations["disable_schedule_api_v1_projects__slug__schedules__schedule_id__disable_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/enable": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Enable Schedule */
+        readonly post: operations["enable_schedule_api_v1_projects__slug__schedules__schedule_id__enable_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/fires": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Schedule Fires
+         * @description Return the schedule's fire history, newest first.
+         *
+         *     Authorization: VIEWER (read-only). The fire history exposes
+         *     timestamps + status + latency, which any project member should
+         *     see (matches the existing schedule list/get permissions). The
+         *     error_message field is included verbatim - operators want the
+         *     debug detail. Args/kwargs are NOT included since the dashboard
+         *     has the schedule detail page for those.
+         *
+         *     Limit is capped at 1000 to prevent runaway queries; the
+         *     dashboard pages defaults to 50.
+         */
+        readonly get: operations["list_schedule_fires_api_v1_projects__slug__schedules__schedule_id__fires_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/legacy-fire-grant": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Set Legacy Fire Grant
+         * @description Grant/revoke tokenless 1.7 cadence for one observed generation.
+         */
+        readonly post: operations["set_legacy_fire_grant_api_v1_projects__slug__schedules__schedule_id__legacy_fire_grant_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/misfires": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Schedule Misfires
+         * @description Return the schedule's detected misfires, newest first.
+         *
+         *     Authorization: VIEWER. A misfire is a system-detected "this enabled
+         *     schedule missed its slot" event (no who-did-what), so unlike the
+         *     general audit log (ADMIN) it is safe for any project member to see --
+         *     it is operational data about a schedule they can already read. The
+         *     most recent row is the schedule detail page's "last misfire".
+         *
+         *     Limit capped at 1000; the dashboard defaults to a short window.
+         */
+        readonly get: operations["list_schedule_misfires_api_v1_projects__slug__schedules__schedule_id__misfires_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/pause": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Pause Schedule
+         * @description Hold this schedule without retiring it.
+         */
+        readonly post: operations["pause_schedule_api_v1_projects__slug__schedules__schedule_id__pause_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/resolve-legacy-evidence": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Resolve Legacy Evidence
+         * @description Resolve exact receipt-NULL pending/fire evidence with no command.
+         */
+        readonly post: operations["resolve_legacy_evidence_api_v1_projects__slug__schedules__schedule_id__resolve_legacy_evidence_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/resolve-terminal-fire": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Resolve Terminal Fire
+         * @description Skip one exact ambiguous occurrence and resume without retrying it.
+         */
+        readonly post: operations["resolve_terminal_fire_api_v1_projects__slug__schedules__schedule_id__resolve_terminal_fire_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/resume": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Resume Schedule
+         * @description Release a hold placed by pause.
+         */
+        readonly post: operations["resume_schedule_api_v1_projects__slug__schedules__schedule_id__resume_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/{schedule_id}/trigger": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Trigger Schedule Now
+         * @description Fire one schedule once, now, because an operator asked.
+         *
+         *     This is an extra fire on top of the cadence and never one of its slots, so
+         *     nothing here moves the schedule's cursor: the next scheduled occurrence
+         *     still happens at its own time.
+         *
+         *     An operator hold stops it, and retirement does not, because the two say
+         *     different things. A pause holds the cadence during an incident and a
+         *     quarantine says the stored definition is not the accepted one, so both are
+         *     unresolved states that have to be cleared before this schedule may run at
+         *     all. Disabling retires the cadence and makes no claim about a run an
+         *     operator asks for by hand. "Off the timer, run it manually when I need it"
+         *     is a real workflow, it is what the Run button offers on every row including
+         *     the disabled ones, and it is what the public API promises, so a fire that
+         *     refused it would take a capability away rather than close a hole. A fire
+         *     from here never revives the cadence it was retired from, in the same way it
+         *     never advances the cadence of a live one.
+         *
+         *     A button that walked past a hold, though, would make pause mean "held until
+         *     somebody clicks", which is not a hold at all, and the operator who placed
+         *     it during an incident would have no way to see it had been overridden.
+         *     There is no channel here for overriding one on purpose either: the request
+         *     carries no body and no flag, so allowing it would be a silent override
+         *     rather than a deliberate one, and the second operator clicking Run may
+         *     never have seen the hold at all. The explicit override is resume, one
+         *     click, attributed, with a row naming who lifted it, which is why the
+         *     refusal says so.
+         *
+         *     The fire is dispatched from here in every configuration. Sending an
+         *     operator trigger out to z4j-scheduler and back was the earlier design and a
+         *     scheduler cannot carry it: it holds no hold state, and the fire it sends
+         *     back carries no cadence authority, so the brain refuses it. Firing it here
+         *     is also the only shape that is true, because the brain is what resolved
+         *     this schedule and what knows it may run.
+         *
+         *     The row is read under a lock that is held until the command is committed,
+         *     so "may this fire" and "this fire is enqueued" are one indivisible step
+         *     against a concurrent hold. Read without one, the two are separated by an
+         *     agent lookup, an audit write and an insert, and a hold committing anywhere
+         *     in that window is honoured by the check and then overtaken by the command:
+         *     the operator sees a hold in force and a fire dispatched under it, which is
+         *     the outcome the hold exists to prevent. The lock is the same one
+         *     ``set_paused`` takes, and in the same order, so whichever click gets there
+         *     first decides and the other one sees its result.
+         */
+        readonly post: operations["trigger_schedule_now_api_v1_projects__slug__schedules__schedule_id__trigger_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules:diff": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Diff Schedules
+         * @description Preview what ``:import`` would do without applying it.
+         *
+         *     Same body as ``:import``. Returns four buckets:
+         *
+         *     - ``inserted`` - rows in the batch with no matching brain row.
+         *     - ``updated`` - rows with a matching brain row and a different
+         *       ``source_hash``. The ``current`` field carries the brain's
+         *       pre-update shape.
+         *     - ``unchanged`` - rows whose ``source_hash`` matches brain.
+         *     - ``deleted`` - only populated when ``mode="replace_for_source"``;
+         *       rows brain has under the resolved ``source_filter`` that the
+         *       batch dropped.
+         *
+         *     Authorization: project ADMIN. The diff itself is read-only but
+         *     surfaces the same data ``:import`` would mutate, so it inherits
+         *     the same role gate. (A separate "view diff as VIEWER" path could
+         *     be added later if operator UX demands it.)
+         */
+        readonly post: operations["diff_schedules_api_v1_projects__slug__schedules_diff_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules:import": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Import Schedules
+         * @description Bulk-import schedules from a migration tool.
+         *
+         *     Called by ``z4j-scheduler import --from <tool>``. Each row is
+         *     upserted by ``(project_id, scheduler, name)``. Re-imports with
+         *     matching ``source_hash`` are no-ops so the operator can re-run
+         *     the importer without flooding the audit log.
+         *
+         *     Authorization: project ADMIN. Schedule import is a privileged
+         *     operation - it adds new fire surfaces to a project, which can
+         *     move money, send emails, etc. ADMIN matches the existing
+         *     convention for membership / retention / token mutations.
+         */
+        readonly post: operations["import_schedules_api_v1_projects__slug__schedules_import_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules:resync": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Resync Schedules
+         * @description Force every online agent in the project to re-emit a full
+         *     schedule inventory snapshot.
+         *
+         *     This is the dashboard's *Sync now* button. The brain dispatches a
+         *     ``schedule.resync`` command to each online agent that advertises
+         *     at least one scheduler adapter. On receipt, the agent calls
+         *     ``list_schedules()`` on every registered scheduler adapter
+         *     (celery-beat, apscheduler, rq-scheduler, arqcron, hueyperiodic,
+         *     taskiqscheduler) and emits one
+         *     :class:`~z4j_core.models.event.EventKind.SCHEDULE_SNAPSHOT` event
+         *     per adapter. The brain's event ingestor reconciles each snapshot
+         *     against the DB (insert / update / delete-missing) scoped to
+         *     ``(project, scheduler)``.
+         *
+         *     Use cases:
+         *
+         *     - First-time onboarding: existing celery-beat ``PeriodicTask``
+         *       rows that pre-date the agent install show up immediately
+         *       instead of waiting for the operator to edit-and-save each one.
+         *     - Recovery: schedules created via Django admin / SQL while the
+         *       agent was offline get reconciled the moment the operator
+         *       clicks the button (no Django reload needed).
+         *     - Drift checks: operator suspects the dashboard is stale →
+         *       one click re-asserts the agent's view as the source of truth.
+         *
+         *     Note that the agent ALSO does this on a periodic timer
+         *     (default 15 minutes) and at every reconnect, so most operators
+         *     never need to hit this endpoint by hand. It exists for the
+         *     *I want it now* case.
+         *
+         *     Returns immediately with HTTP 202. The actual snapshot events
+         *     arrive asynchronously and the dashboard's existing schedule
+         *     list query will reflect them on the next refetch.
+         */
+        readonly post: operations["resync_schedules_api_v1_projects__slug__schedules_resync_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/stats": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Stats
+         * @description Return aggregated project statistics.
+         *
+         *     ``hours`` controls the time window for rate-based metrics
+         *     (task outcomes, failure rate, and command outcomes). Accepts
+         *     1, 6, 24, 72, 168 and defaults to 24. ``window_hours`` reports
+         *     the effective value in the response. The historical ``*_24h``
+         *     field names are retained for API compatibility, but their values
+         *     use this selected window.
+         */
+        readonly get: operations["get_stats_api_v1_projects__slug__stats_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/tasks": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Tasks
+         * @description List tasks with filtering, search, pagination, and export.
+         *
+         *     New filters (Phase A):
+         *     - ``priority`` - comma-separated: ``?priority=critical,high``
+         *     - ``search`` - case-insensitive substring search across name,
+         *       queue, worker, and task id
+         *     - ``worker`` - exact match on worker_name
+         *     - ``until`` - upper bound on received_at (pair with ``since``)
+         *     - ``format`` - ``csv``, ``xlsx``, or ``json`` export (overrides pagination)
+         */
+        readonly get: operations["list_tasks_api_v1_projects__slug__tasks_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/tasks/bulk-delete": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Bulk Delete Tasks
+         * @description Delete task records from the brain database.
+         *
+         *     Supports two modes:
+         *     - By ID list: provide ``task_ids`` (up to 1000).
+         *     - By filter: provide ``filter_*`` params (deletes up to 10000).
+         *
+         *     This is a brain-side operation (no agent command needed).
+         *     Requires ADMIN role.
+         */
+        readonly post: operations["bulk_delete_tasks_api_v1_projects__slug__tasks_bulk_delete_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/tasks/{engine}/{task_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** Get Task */
+        readonly get: operations["get_task_api_v1_projects__slug__tasks__engine___task_id__get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/tasks/{engine}/{task_id}/tree": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Task Tree
+         * @description Return the full canvas (chain / group / chord) tree this task belongs to.
+         *
+         *     Looks up the requested task, walks to its root via
+         *     ``root_task_id`` (or treats the task as its own root if the
+         *     field is null), then returns every task in the project sharing
+         *     that root. Capped at 500 nodes so a runaway chain doesn't
+         *     return an unbounded blob; the response carries ``truncated:
+         *     true`` when the cap kicks in so the dashboard can show a
+         *     "showing first 500 of N" notice.
+         */
+        readonly get: operations["get_task_tree_api_v1_projects__slug__tasks__engine___task_id__tree_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/trends": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Trends
+         * @description Return per-bucket task outcome counts + avg runtime.
+         *
+         *     Only tasks with a non-null ``finished_at`` inside ``window`` are
+         *     included; in-flight (pending/started) tasks are excluded by
+         *     design - trend charts show completed work.
+         */
+        readonly get: operations["get_trends_api_v1_projects__slug__trends_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/workers": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** List Workers */
+        readonly get: operations["list_workers_api_v1_projects__slug__workers_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/workers/lint": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Lint Workers
+         * @description Flag worker configurations that lose or leak work.
+         *
+         *     Evaluates the configuration each worker already reports on its
+         *     heartbeat, so this costs one query and no new collection. Read-only and
+         *     advisory: nothing here changes a worker, and a finding is a prompt to
+         *     look rather than a fault.
+         */
+        readonly get: operations["lint_workers_api_v1_projects__slug__workers_lint_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/workers/{worker_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Worker Detail
+         * @description Get detailed worker info including inspect() data.
+         *
+         *     Uses the worker's UUID (not hostname) so URLs don't break on
+         *     special characters like ``@``.
+         */
+        readonly get: operations["get_worker_detail_api_v1_projects__slug__workers__worker_id__get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/schedulers": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Fleet
+         * @description Return one entry per configured scheduler URL.
+         *
+         *     Authorization is global ADMIN (not project-scoped). The fleet
+         *     is operator-level concern - any project admin sees the same
+         *     fleet, but only global admins (``user.is_admin``) can view it.
+         */
+        readonly get: operations["list_fleet_api_v1_schedulers_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/setup/complete": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Complete
+         * @description Verify the setup token and bootstrap the brain.
+         */
+        readonly post: operations["complete_api_v1_setup_complete_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/setup/status": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Status Endpoint
+         * @description Return whether the brain is in first-boot mode.
+         *
+         *     1.6.4 security tightening: authentication is now required EXCEPT
+         *     during the legitimate first-boot window. Pre-1.6.4 this endpoint
+         *     was anonymous-readable on every page load, which let a curious
+         *     attacker enumerate "this is z4j" + "it has been provisioned"
+         *     without ever logging in. 1.6.3's route audit flagged it as the
+         *     last SUSPICIOUS surface; 1.6.4 closes the gap.
+         *
+         *     The exception: when there are zero users in the DB (the genuine
+         *     first-boot window before an admin has been created), this endpoint
+         *     must respond anonymously so the dashboard chrome can render the
+         *     setup CTA without an auth loop. After the first admin is created
+         *     the endpoint returns 401 to anonymous callers and `200 {first_boot:
+         *     false}` to authenticated callers.
+         */
+        readonly get: operations["status_endpoint_api_v1_setup_status_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
         readonly patch?: never;
@@ -2376,24 +2807,6 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
-    readonly "/api/v1/user/channels/{channel_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        readonly post?: never;
-        /** Delete User Channel */
-        readonly delete: operations["delete_user_channel_api_v1_user_channels__channel_id__delete"];
-        readonly options?: never;
-        readonly head?: never;
-        /** Update User Channel */
-        readonly patch: operations["update_user_channel_api_v1_user_channels__channel_id__patch"];
-        readonly trace?: never;
-    };
     readonly "/api/v1/user/channels/test": {
         readonly parameters: {
             readonly query?: never;
@@ -2427,6 +2840,24 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/user/channels/{channel_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        readonly post?: never;
+        /** Delete User Channel */
+        readonly delete: operations["delete_user_channel_api_v1_user_channels__channel_id__delete"];
+        readonly options?: never;
+        readonly head?: never;
+        /** Update User Channel */
+        readonly patch: operations["update_user_channel_api_v1_user_channels__channel_id__patch"];
+        readonly trace?: never;
+    };
     readonly "/api/v1/user/channels/{channel_id}/test": {
         readonly parameters: {
             readonly query?: never;
@@ -2449,6 +2880,112 @@ export interface paths {
          *     matching the project-channel variant.
          */
         readonly post: operations["test_saved_user_channel_api_v1_user_channels__channel_id__test_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/user/deliveries": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List User Deliveries
+         * @description Personal delivery history across all of the user's projects.
+         *
+         *     Mirror of the project-scoped ``/projects/{slug}/notifications/
+         *     deliveries`` endpoint, scoped to the calling user. Returns
+         *     every notification delivered to the caller's personal subscriptions,
+         *     regardless of which project it came from. Delivery-time ownership is
+         *     snapshotted, so deleting a subscription cannot remove its rows from this
+         *     history. Optional ``project_slug`` filter narrows the view.
+         *
+         *     Includes deliveries from projects the user is no longer a
+         *     member of - the dashboard renders those rows with a "you
+         *     left this project" hint rather than hiding them, since
+         *     historical audit data should survive membership changes.
+         *
+         *     Pagination: keyset on ``(sent_at, id)``. Returns
+         *     ``{"items": [...], "next_cursor": ...}``. Each item carries
+         *     ``project_id`` + ``project_slug`` (nullable - NULL when the
+         *     project was deleted) so the dashboard can group by project
+         *     and badge ex-membership rows.
+         */
+        readonly get: operations["list_user_deliveries_api_v1_user_deliveries_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/user/notifications": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** List User Notifications */
+        readonly get: operations["list_user_notifications_api_v1_user_notifications_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/user/notifications/read-all": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Mark All User Notifications Read */
+        readonly post: operations["mark_all_user_notifications_read_api_v1_user_notifications_read_all_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/user/notifications/unread-count": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** User Unread Count */
+        readonly get: operations["user_unread_count_api_v1_user_notifications_unread_count_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/user/notifications/{notification_id}/read": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Mark User Notification Read */
+        readonly post: operations["mark_user_notification_read_api_v1_user_notifications__notification_id__read_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -2506,7 +3043,7 @@ export interface paths {
         readonly patch: operations["update_user_subscription_api_v1_user_subscriptions__sub_id__patch"];
         readonly trace?: never;
     };
-    readonly "/api/v1/user/deliveries": {
+    readonly "/api/v1/users": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -2514,128 +3051,54 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * List User Deliveries
-         * @description Personal delivery history across all of the user's projects.
-         *
-         *     Mirror of the project-scoped ``/projects/{slug}/notifications/
-         *     deliveries`` endpoint, scoped to the calling user. Returns
-         *     every notification that fired into one of the caller's
-         *     personal subscriptions, regardless of which project it came
-         *     from. Optional ``project_slug`` filter narrows the view.
-         *
-         *     Includes deliveries from projects the user is no longer a
-         *     member of - the dashboard renders those rows with a "you
-         *     left this project" hint rather than hiding them, since
-         *     historical audit data should survive membership changes.
-         *
-         *     Pagination: keyset on ``(sent_at, id)``. Returns
-         *     ``{"items": [...], "next_cursor": ...}``. Each item carries
-         *     ``project_id`` + ``project_slug`` (nullable - NULL when the
-         *     project was deleted) so the dashboard can group by project
-         *     and badge ex-membership rows.
+         * List Users
+         * @description List every dashboard user. Bounded by ``limit``.
          */
-        readonly get: operations["list_user_deliveries_api_v1_user_deliveries_get"];
+        readonly get: operations["list_users_api_v1_users_get"];
+        readonly put?: never;
+        /** Create User */
+        readonly post: operations["create_user_api_v1_users_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/users/{user_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** Get User */
+        readonly get: operations["get_user_api_v1_users__user_id__get"];
         readonly put?: never;
         readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/user/notifications": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** List User Notifications */
-        readonly get: operations["list_user_notifications_api_v1_user_notifications_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/user/notifications/unread-count": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /** User Unread Count */
-        readonly get: operations["user_unread_count_api_v1_user_notifications_unread_count_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/user/notifications/{notification_id}/read": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Mark User Notification Read */
-        readonly post: operations["mark_user_notification_read_api_v1_user_notifications__notification_id__read_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/user/notifications/read-all": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /** Mark All User Notifications Read */
-        readonly post: operations["mark_all_user_notifications_read_api_v1_user_notifications_read_all_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/admin/system/versions": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
         /**
-         * Get Versions Snapshot
-         * @description Return the brain's currently-cached versions snapshot.
+         * Delete User
+         * @description Permanently delete a user.
          *
-         *     Read-only. Used by the dashboard's Settings -> System card to
-         *     display the snapshot's age, source, and the configured
-         *     ``check_for_updates_url``. No network call.
+         *     FK cleanup: memberships / sessions / api_keys / preferences /
+         *     subscriptions CASCADE; audit_log.user_id and commands.issued_by
+         *     are SET NULL so historical records survive with an anonymised
+         *     actor.
+         *
+         *     Refuses to delete the acting admin (would log them out of the
+         *     operation) and the only remaining active admin (would lock the
+         *     instance out of admin UI). Callers that want a softer operation
+         *     should PATCH ``is_active=false`` instead - the Users page wires
+         *     the trash icon to this hard delete and the deactivate icon to
+         *     the soft path, so the operator picks the semantic they want.
          */
-        readonly get: operations["get_versions_snapshot_api_v1_admin_system_versions_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
+        readonly delete: operations["delete_user_api_v1_users__user_id__delete"];
         readonly options?: never;
         readonly head?: never;
-        readonly patch?: never;
+        /** Update User */
+        readonly patch: operations["update_user_api_v1_users__user_id__patch"];
         readonly trace?: never;
     };
-    readonly "/api/v1/admin/system/versions/check": {
+    readonly "/api/v1/users/{user_id}/password": {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -2645,186 +3108,16 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Check For Updates
-         * @description Operator-initiated remote refresh of the versions snapshot.
+         * Reset Password
+         * @description Admin password reset.
          *
-         *     Fetches ``Settings.version_check_url`` (default
-         *     ``https://raw.githubusercontent.com/z4jdev/z4j/main/versions.json``)
-         *     once, validates the response, and replaces the brain's in-memory
-         *     snapshot with the result. Returns the new snapshot for the
-         *     dashboard to render.
-         *
-         *     Failure modes (kept clean so the dashboard can show a useful
-         *     toast):
-         *
-         *     - ``Z4J_VERSION_CHECK_URL`` empty → 404 with reason
-         *       ``check_disabled``.
-         *     - URL is not ``https://`` → 409 (operator misconfig).
-         *     - Remote returns non-200, non-JSON, oversized, or fails
-         *       validation → 409 with the underlying error message.
-         *
-         *     On any failure the previously cached snapshot is unchanged.
-         *
-         *     See :mod:`z4j_brain.domain.version_check` for the validator +
-         *     fetch implementation.
+         *     Sets a fresh password hash, marks ``password_changed_at``,
+         *     and revokes every active session for the target user. The explicit
+         *     revoke is authoritative. ``password_changed_at`` is
+         *     defense in depth for older rows outside SQLite's one-second timestamp
+         *     precision edge.
          */
-        readonly post: operations["check_for_updates_api_v1_admin_system_versions_check_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/admin/settings": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * Get Effective Settings
-         * @description Return the brain's effective settings + per-field source labels.
-         *
-         *     Reads :attr:`fastapi.Request.app.state.settings` (the same
-         *     :class:`Settings` instance every other handler depends on),
-         *     iterates ``model_fields``, and emits one
-         *     :class:`SettingItem` per field. Secrets are masked. Sorted
-         *     alphabetically by field name for stable rendering.
-         */
-        readonly get: operations["get_effective_settings_api_v1_admin_settings_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/agent/events": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Agent Events
-         * @description Accept a batch of signed agent->brain frames over HTTPS.
-         */
-        readonly post: operations["agent_events_api_v1_agent_events_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/agent/commands": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * Agent Commands
-         * @description Long-poll for pending commands targeting this agent.
-         */
-        readonly get: operations["agent_commands_api_v1_agent_commands_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/invitations": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * List Pending Invitations
-         * @description Admin-only: list non-accepted, non-revoked, non-expired invitations.
-         */
-        readonly get: operations["list_pending_invitations_api_v1_projects__slug__invitations_get"];
-        readonly put?: never;
-        /**
-         * Mint Invitation
-         * @description Admin-only: mint a single-use invitation token for ``email``.
-         */
-        readonly post: operations["mint_invitation_api_v1_projects__slug__invitations_post"];
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/projects/{slug}/invitations/{invitation_id}": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        readonly post?: never;
-        /**
-         * Revoke Invitation
-         * @description Admin-only: revoke a pending invitation.
-         */
-        readonly delete: operations["revoke_invitation_api_v1_projects__slug__invitations__invitation_id__delete"];
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/invitations/preview": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        /**
-         * Preview Invitation
-         * @description Anonymous endpoint - lets the accept page render "invited to X".
-         */
-        readonly get: operations["preview_invitation_api_v1_invitations_preview_get"];
-        readonly put?: never;
-        readonly post?: never;
-        readonly delete?: never;
-        readonly options?: never;
-        readonly head?: never;
-        readonly patch?: never;
-        readonly trace?: never;
-    };
-    readonly "/api/v1/invitations/accept": {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly get?: never;
-        readonly put?: never;
-        /**
-         * Accept Invitation
-         * @description Anonymous endpoint - consumes the token + creates user + grants membership.
-         *
-         *     Everything runs in a single transaction so the four side-effects
-         *     (invitation stamped, user inserted, membership granted, default
-         *     subscriptions materialized) succeed or fail together. TOCTOU-safe
-         *     per audit H5: email uniqueness is re-checked inside the
-         *     transaction.
-         */
-        readonly post: operations["accept_invitation_api_v1_invitations_accept_post"];
+        readonly post: operations["reset_password_api_v1_users__user_id__password_post"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -2861,53 +3154,90 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/setup": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Setup Form
+         * @description Serve the inline HTML form.
+         *
+         *     Only available while ``users`` is empty. After the bootstrap
+         *     admin exists, returns 404 - the form has no business existing
+         *     after first boot. The token query parameter is intentionally
+         *     NOT used by the server; the JS reads it from
+         *     ``window.location.search`` and stuffs it into the hidden form
+         *     field. The server's only job is to gate visibility on the
+         *     first-boot flag.
+         *
+         *     Visibility also requires that an active token row exists.
+         *     Otherwise, between a successful ``complete()`` commit and
+         *     the user row becoming visible to a parallel reader (Postgres
+         *     replica lag), ``users.count() == 0`` could still be True
+         *     even though the setup is conceptually done; the form would
+         *     render referencing a stale URL, confusing UX and a small
+         *     information leak about install state. Tying visibility to
+         *     "active token AND users empty" closes the gap.
+         */
+        readonly get: operations["setup_form_setup_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /** ActivityItem */
         readonly ActivityItem: {
+            /** Action */
+            readonly action: string;
             /**
              * Id
              * Format: uuid
              */
             readonly id: string;
-            /** Project Id */
-            readonly project_id: string | null;
-            /** Project Slug */
-            readonly project_slug: string | null;
-            /** User Id */
-            readonly user_id: string | null;
-            /** Action */
-            readonly action: string;
-            /** Target Type */
-            readonly target_type: string;
-            /** Target Id */
-            readonly target_id: string | null;
-            /** Result */
-            readonly result: string;
-            /** Outcome */
-            readonly outcome: string | null;
             /** Metadata */
             readonly metadata: {
                 readonly [key: string]: unknown;
             };
-            /** Source Ip */
-            readonly source_ip: string | null;
             /**
              * Occurred At
              * Format: date-time
              */
             readonly occurred_at: string;
+            /** Outcome */
+            readonly outcome: string | null;
+            /** Project Id */
+            readonly project_id: string | null;
+            /** Project Slug */
+            readonly project_slug: string | null;
+            /** Result */
+            readonly result: string;
+            /** Source Ip */
+            readonly source_ip: string | null;
+            /** Target Id */
+            readonly target_id: string | null;
+            /** Target Type */
+            readonly target_type: string;
+            /** User Id */
+            readonly user_id: string | null;
         };
         /** ActivityListResponse */
         readonly ActivityListResponse: {
             /** Items */
             readonly items: readonly components["schemas"]["ActivityItem"][];
-            /** Next Before Cursor */
-            readonly next_before_cursor: string | null;
             /** Newest Cursor */
             readonly newest_cursor: string | null;
+            /** Next Before Cursor */
+            readonly next_before_cursor: string | null;
         };
         /**
          * AdminSettingsResponse
@@ -2915,68 +3245,68 @@ export interface components {
          */
         readonly AdminSettingsResponse: {
             /**
-             * Z4J Home
-             * @description Resolved ``$Z4J_HOME`` directory the brain is using. Where ``config.env`` and ``secret.env`` live.
-             */
-            readonly z4j_home: string;
-            /**
              * Settings
              * @description Every Settings field, sorted alphabetically by name for stable output across requests.
              */
             readonly settings: readonly components["schemas"]["SettingItem"][];
+            /**
+             * Z4J Home
+             * @description Resolved ``$Z4J_HOME`` directory the brain is using. Where ``config.env`` and ``secret.env`` live.
+             */
+            readonly z4j_home: string;
         };
         /** AgentPublic */
         readonly AgentPublic: {
             /**
-             * Id
-             * Format: uuid
+             * Agent Version
+             * @description z4j-core SemVer string the agent advertised in its hello frame (1.3.4+). Null when the agent has never connected or runs a pre-1.3.4 build that didn't populate the field.
              */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Name */
-            readonly name: string;
-            /** State */
-            readonly state: string;
-            /** Protocol Version */
-            readonly protocol_version: string;
-            /** Framework Adapter */
-            readonly framework_adapter: string;
-            /** Engine Adapters */
-            readonly engine_adapters: readonly string[];
-            /** Scheduler Adapters */
-            readonly scheduler_adapters: readonly string[];
+            readonly agent_version?: string | null;
             /** Capabilities */
             readonly capabilities: {
                 readonly [key: string]: unknown;
             };
-            /** Last Seen At */
-            readonly last_seen_at: string | null;
-            /** Last Connect At */
-            readonly last_connect_at: string | null;
             /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
-            /**
-             * Is Outdated
-             * @description True when the agent has connected at least once and its last advertised ``protocol_version`` is older than the brain's ``CURRENT_PROTOCOL``. Never-connected agents (``last_connect_at`` is null) report ``false`` because they have not advertised a real version yet.
-             */
-            readonly is_outdated: boolean;
+            /** Engine Adapters */
+            readonly engine_adapters: readonly string[];
+            /** Framework Adapter */
+            readonly framework_adapter: string;
             /**
              * Host Name
              * @description Operator-supplied host label sent by the agent in the hello frame's ``host.name`` field. Distinct from ``name`` (which is set at mint time on the brain side) - useful when one agent token is shared across multiple worker instances and you want per-instance labels in the dashboard. Null if the agent never set Z4J_AGENT_NAME.
              */
             readonly host_name?: string | null;
             /**
-             * Agent Version
-             * @description z4j-core SemVer string the agent advertised in its hello frame (1.3.4+). Null when the agent has never connected or runs a pre-1.0.3 build that didn't populate the field.
+             * Id
+             * Format: uuid
              */
-            readonly agent_version?: string | null;
+            readonly id: string;
+            /**
+             * Is Outdated
+             * @description True when the agent has connected at least once and its last advertised ``protocol_version`` is older than the brain's ``CURRENT_PROTOCOL``. Never-connected agents (``last_connect_at`` is null) report ``false`` because they have not advertised a real version yet. Agents that advertise a newer protocol also report ``false``: this flag means 'agent upgrade needed', not general version inequality; inspect ``protocol_version`` to identify a newer peer.
+             */
+            readonly is_outdated: boolean;
+            /** Last Connect At */
+            readonly last_connect_at: string | null;
+            /** Last Seen At */
+            readonly last_seen_at: string | null;
+            /** Name */
+            readonly name: string;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Protocol Version */
+            readonly protocol_version: string;
+            /** Scheduler Adapters */
+            readonly scheduler_adapters: readonly string[];
+            /** State */
+            readonly state: string;
             /**
              * Version Status
              * @description Comparison of ``agent_version`` against the brain's bundled (or operator-refreshed) versions snapshot. One of: ``current`` (agent matches the snapshot), ``outdated`` (agent older, same major - update available), ``newer_than_known`` (agent newer than the snapshot - the brain's snapshot is stale, refresh from Settings -> Check for updates), ``incompatible`` (major version mismatch), ``unknown`` (no agent_version reported, or the package is missing from the snapshot). Null if ``agent_version`` is null.
@@ -2988,71 +3318,72 @@ export interface components {
          * @description One row in the agent-workers list view.
          *
          *     Fields mirror the ``agent_workers`` table directly with one
-         *     addition: ``id`` is the row's UUID PK so URLs / row keys
-         *     stay stable across the (agent_id, worker_id) reassignments
-         *     that happen when workers cycle.
+         *     addition: ``id`` is the row's UUID PK. It stays stable while
+         *     the same ``(agent_id, worker_id)`` natural key is refreshed.
+         *     Reassigning or regenerating ``worker_id`` creates a new row with
+         *     a new UUID; the previous row remains as historical state.
          */
         readonly AgentWorkerPublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
             /**
              * Agent Id
              * Format: uuid
              */
             readonly agent_id: string;
             /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Worker Id */
-            readonly worker_id: string | null;
-            /** Role */
-            readonly role: string | null;
-            /** Framework */
-            readonly framework: string | null;
-            /** Pid */
-            readonly pid: number | null;
-            /** Started At */
-            readonly started_at: string | null;
-            /** State */
-            readonly state: string;
-            /** Last Seen At */
-            readonly last_seen_at: string | null;
-            /** Last Connect At */
-            readonly last_connect_at: string | null;
-            /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Framework */
+            readonly framework: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Last Connect At */
+            readonly last_connect_at: string | null;
+            /** Last Seen At */
+            readonly last_seen_at: string | null;
+            /** Pid */
+            readonly pid: number | null;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Role */
+            readonly role: string | null;
+            /** Started At */
+            readonly started_at: string | null;
+            /** State */
+            readonly state: string;
             /**
              * Updated At
              * Format: date-time
              */
             readonly updated_at: string;
+            /** Worker Id */
+            readonly worker_id: string | null;
         };
         /** Aggregate */
         readonly Aggregate: {
-            /** Tasks 24H */
-            readonly tasks_24h: number;
-            /** Failures 24H */
-            readonly failures_24h: number;
-            /** Failure Rate 24H */
-            readonly failure_rate_24h: number;
-            /** Workers Online */
-            readonly workers_online: number;
-            /** Workers Total */
-            readonly workers_total: number;
             /** Agents Online */
             readonly agents_online: number;
             /** Agents Total */
             readonly agents_total: number;
+            /** Failure Rate 24H */
+            readonly failure_rate_24h: number;
+            /** Failures 24H */
+            readonly failures_24h: number;
             /** Stuck Commands */
             readonly stuck_commands: number;
+            /** Tasks 24H */
+            readonly tasks_24h: number;
+            /** Workers Online */
+            readonly workers_online: number;
+            /** Workers Total */
+            readonly workers_total: number;
         };
         /**
          * ApiKeyCreated
@@ -3062,35 +3393,35 @@ export interface components {
          */
         readonly ApiKeyCreated: {
             /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /** Name */
-            readonly name: string;
-            /** Prefix */
-            readonly prefix: string;
-            /** Scopes */
-            readonly scopes: readonly string[];
-            /** Project Id */
-            readonly project_id: string | null;
-            /** Project Slug */
-            readonly project_slug: string | null;
-            /** Last Used At */
-            readonly last_used_at: string | null;
-            /** Last Used Ip */
-            readonly last_used_ip: string | null;
-            /** Expires At */
-            readonly expires_at: string | null;
-            /** Revoked At */
-            readonly revoked_at: string | null;
-            /** Revoked Reason */
-            readonly revoked_reason: string | null;
-            /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Expires At */
+            readonly expires_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Last Used At */
+            readonly last_used_at: string | null;
+            /** Last Used Ip */
+            readonly last_used_ip: string | null;
+            /** Name */
+            readonly name: string;
+            /** Prefix */
+            readonly prefix: string;
+            /** Project Id */
+            readonly project_id: string | null;
+            /** Project Slug */
+            readonly project_slug: string | null;
+            /** Revoked At */
+            readonly revoked_at: string | null;
+            /** Revoked Reason */
+            readonly revoked_reason: string | null;
+            /** Scopes */
+            readonly scopes: readonly string[];
             /** Token */
             readonly token: string;
         };
@@ -3100,55 +3431,55 @@ export interface components {
          */
         readonly ApiKeyPublic: {
             /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /** Name */
-            readonly name: string;
-            /** Prefix */
-            readonly prefix: string;
-            /** Scopes */
-            readonly scopes: readonly string[];
-            /** Project Id */
-            readonly project_id: string | null;
-            /** Project Slug */
-            readonly project_slug: string | null;
-            /** Last Used At */
-            readonly last_used_at: string | null;
-            /** Last Used Ip */
-            readonly last_used_ip: string | null;
-            /** Expires At */
-            readonly expires_at: string | null;
-            /** Revoked At */
-            readonly revoked_at: string | null;
-            /** Revoked Reason */
-            readonly revoked_reason: string | null;
-            /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Expires At */
+            readonly expires_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Last Used At */
+            readonly last_used_at: string | null;
+            /** Last Used Ip */
+            readonly last_used_ip: string | null;
+            /** Name */
+            readonly name: string;
+            /** Prefix */
+            readonly prefix: string;
+            /** Project Id */
+            readonly project_id: string | null;
+            /** Project Slug */
+            readonly project_slug: string | null;
+            /** Revoked At */
+            readonly revoked_at: string | null;
+            /** Revoked Reason */
+            readonly revoked_reason: string | null;
+            /** Scopes */
+            readonly scopes: readonly string[];
         };
         /** AttentionItem */
         readonly AttentionItem: {
+            /** Count */
+            readonly count?: number | null;
             /** Kind */
             readonly kind: string;
-            /** Severity */
-            readonly severity: string;
+            /** Message */
+            readonly message: string;
             /**
              * Project Id
              * Format: uuid
              */
             readonly project_id: string;
-            /** Project Slug */
-            readonly project_slug: string;
             /** Project Name */
             readonly project_name: string;
-            /** Message */
-            readonly message: string;
-            /** Count */
-            readonly count?: number | null;
+            /** Project Slug */
+            readonly project_slug: string;
+            /** Severity */
+            readonly severity: string;
         };
         /** AutomationSettings */
         readonly AutomationSettings: {
@@ -3160,18 +3491,23 @@ export interface components {
          * @description Delete tasks by explicit ID list or by filter.
          */
         readonly BulkDeleteRequest: {
-            /** Task Ids */
-            readonly task_ids?: readonly string[] | null;
-            /** Filter State */
-            readonly filter_state?: string | null;
             /** Filter Name */
             readonly filter_name?: string | null;
+            /** Filter Priority */
+            readonly filter_priority?: readonly components["schemas"]["TaskPriority"][] | null;
             /** Filter Queue */
             readonly filter_queue?: string | null;
+            /** Filter Search */
+            readonly filter_search?: string | null;
             /** Filter Since */
             readonly filter_since?: string | null;
+            readonly filter_state?: components["schemas"]["TaskState"] | null;
             /** Filter Until */
             readonly filter_until?: string | null;
+            /** Filter Worker */
+            readonly filter_worker?: string | null;
+            /** Task Ids */
+            readonly task_ids?: readonly string[] | null;
         };
         /** BulkDeleteResponse */
         readonly BulkDeleteResponse: {
@@ -3180,28 +3516,33 @@ export interface components {
         };
         /** BulkRetryCountsPublic */
         readonly BulkRetryCountsPublic: {
-            /** Total */
-            readonly total: number;
-            /** Pending */
-            readonly pending: number;
             /** Claimed */
             readonly claimed: number;
-            /** Unobserved */
-            readonly unobserved: number;
-            /** Succeeded */
-            readonly succeeded: number;
             /** Failed */
             readonly failed: number;
+            /** Pending */
+            readonly pending: number;
+            /** Succeeded */
+            readonly succeeded: number;
+            /** Total */
+            readonly total: number;
             /** Unknown */
             readonly unknown: number;
+            /** Unobserved */
+            readonly unobserved: number;
         };
         /**
          * BulkRetryRequest
          * @description Bulk retry request body.
          *
-         *     ``filter`` is forwarded to the agent verbatim. Common keys the
-         *     celery adapter understands: ``state``, ``queue``, ``name``,
-         *     ``since``, ``until``. ``max`` is hard-capped agent-side at 10000.
+         *     ``filter`` accepts only the selection keys in
+         *     :data:`CLIENT_ALLOWED_BULK_FILTER_KEYS`; executable and server-owned
+         *     keys are stripped and audit-recorded. This compatibility endpoint
+         *     requires a non-empty ``task_ids`` selection plus an explicit engine,
+         *     then deduplicates, caps, and ownership-checks those IDs before adding
+         *     server-derived task names and priorities. All-matching requests use
+         *     the versioned ``/bulk-retry-requests`` resource instead. ``max`` is
+         *     capped at 10 000 at the request boundary.
          */
         readonly BulkRetryRequest: {
             /**
@@ -3213,13 +3554,13 @@ export interface components {
             readonly filter?: {
                 readonly [key: string]: unknown;
             };
+            /** Idempotency Key */
+            readonly idempotency_key?: string | null;
             /**
              * Max
              * @default 1000
              */
             readonly max: number;
-            /** Idempotency Key */
-            readonly idempotency_key?: string | null;
         };
         /**
          * BulkRetryRequestCreate
@@ -3229,14 +3570,14 @@ export interface components {
          *     edge to a compatible session in this project.
          */
         readonly BulkRetryRequestCreate: {
-            /** Idempotency Key */
-            readonly idempotency_key: string;
             /** Agent Id */
             readonly agent_id?: string | null;
             /** Filter */
             readonly filter?: {
                 readonly [key: string]: unknown;
             };
+            /** Idempotency Key */
+            readonly idempotency_key: string;
             /**
              * Max
              * @default 1000
@@ -3245,30 +3586,12 @@ export interface components {
         };
         /** BulkRetryRequestPublic */
         readonly BulkRetryRequestPublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Idempotency Key */
-            readonly idempotency_key: string;
-            /** Status */
-            readonly status: string;
-            /** Control State */
-            readonly control_state: string;
-            /** Canonicalizer Version */
-            readonly canonicalizer_version: number;
             /** Canonical Digest */
             readonly canonical_digest: string;
-            /** Plan Digest */
-            readonly plan_digest: string;
-            /** Target Agent Id */
-            readonly target_agent_id: string | null;
+            /** Canonicalizer Version */
+            readonly canonicalizer_version: number;
+            /** Control State */
+            readonly control_state: string;
             readonly counts: components["schemas"]["BulkRetryCountsPublic"];
             /**
              * Created At
@@ -3276,17 +3599,35 @@ export interface components {
              */
             readonly created_at: string;
             /**
-             * Sealed At
-             * Format: date-time
-             */
-            readonly sealed_at: string;
-            /**
              * Deadline At
              * Format: date-time
              */
             readonly deadline_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Idempotency Key */
+            readonly idempotency_key: string;
             /** Last Progress At */
             readonly last_progress_at: string | null;
+            /** Plan Digest */
+            readonly plan_digest: string;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /**
+             * Sealed At
+             * Format: date-time
+             */
+            readonly sealed_at: string;
+            /** Status */
+            readonly status: string;
+            /** Target Agent Id */
+            readonly target_agent_id: string | null;
         };
         /** CancelTaskRequest */
         readonly CancelTaskRequest: {
@@ -3297,10 +3638,10 @@ export interface components {
             readonly agent_id: string;
             /** Engine */
             readonly engine: string;
-            /** Task Id */
-            readonly task_id: string;
             /** Idempotency Key */
             readonly idempotency_key?: string | null;
+            /** Task Id */
+            readonly task_id: string;
         };
         /** ChangePasswordRequest */
         readonly ChangePasswordRequest: {
@@ -3311,10 +3652,6 @@ export interface components {
         };
         /** ChannelCreate */
         readonly ChannelCreate: {
-            /** Name */
-            readonly name: string;
-            /** Type */
-            readonly type: string;
             /** Config */
             readonly config?: {
                 readonly [key: string]: unknown;
@@ -3324,6 +3661,10 @@ export interface components {
              * @default true
              */
             readonly is_active: boolean;
+            /** Name */
+            readonly name: string;
+            /** Type */
+            readonly type: string;
         };
         /**
          * ChannelImportFromUserRequest
@@ -3340,43 +3681,43 @@ export interface components {
          */
         readonly ChannelImportFromUserRequest: {
             /**
-             * User Channel Id
-             * Format: uuid
-             */
-            readonly user_channel_id: string;
-            /**
              * Name
              * @description Override the imported channel's name. Defaults to 'Copy of {original}' if omitted.
              */
             readonly name?: string | null;
+            /**
+             * User Channel Id
+             * Format: uuid
+             */
+            readonly user_channel_id: string;
         };
         /** ChannelPublic */
         readonly ChannelPublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Name */
-            readonly name: string;
-            /** Type */
-            readonly type: string;
             /** Config */
             readonly config: {
                 readonly [key: string]: unknown;
             };
-            /** Is Active */
-            readonly is_active: boolean;
             /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Is Active */
+            readonly is_active: boolean;
+            /** Name */
+            readonly name: string;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Type */
+            readonly type: string;
             /**
              * Updated At
              * Format: date-time
@@ -3394,12 +3735,12 @@ export interface components {
          *     payload. Nothing is written to the DB.
          */
         readonly ChannelTestRequest: {
-            /** Type */
-            readonly type: string;
             /** Config */
             readonly config?: {
                 readonly [key: string]: unknown;
             };
+            /** Type */
+            readonly type: string;
         };
         /**
          * ChannelTestResult
@@ -3411,25 +3752,25 @@ export interface components {
          *     and truncate further here so the dashboard card stays small.
          */
         readonly ChannelTestResult: {
-            /** Success */
-            readonly success: boolean;
-            /** Status Code */
-            readonly status_code?: number | null;
             /** Error */
             readonly error?: string | null;
             /** Response Body */
             readonly response_body?: string | null;
+            /** Status Code */
+            readonly status_code?: number | null;
+            /** Success */
+            readonly success: boolean;
         };
         /** ChannelUpdate */
         readonly ChannelUpdate: {
-            /** Name */
-            readonly name?: string | null;
             /** Config */
             readonly config?: {
                 readonly [key: string]: unknown;
             } | null;
             /** Is Active */
             readonly is_active?: boolean | null;
+            /** Name */
+            readonly name?: string | null;
         };
         /**
          * ClearDeliveriesResult
@@ -3448,45 +3789,45 @@ export interface components {
         };
         /** CommandPublic */
         readonly CommandPublic: {
+            /** Action */
+            readonly action: string;
+            /** Agent Id */
+            readonly agent_id: string | null;
+            /** Completed At */
+            readonly completed_at: string | null;
+            /** Dispatched At */
+            readonly dispatched_at: string | null;
+            /** Error */
+            readonly error: string | null;
             /**
              * Id
              * Format: uuid
              */
             readonly id: string;
             /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Agent Id */
-            readonly agent_id: string | null;
-            /** Issued By */
-            readonly issued_by: string | null;
-            /** Action */
-            readonly action: string;
-            /** Target Type */
-            readonly target_type: string;
-            /** Target Id */
-            readonly target_id: string | null;
-            /** Payload */
-            readonly payload: {
-                readonly [key: string]: unknown;
-            };
-            /** Status */
-            readonly status: string;
-            /** Result */
-            readonly result: unknown | null;
-            /** Error */
-            readonly error: string | null;
-            /**
              * Issued At
              * Format: date-time
              */
             readonly issued_at: string;
-            /** Dispatched At */
-            readonly dispatched_at: string | null;
-            /** Completed At */
-            readonly completed_at: string | null;
+            /** Issued By */
+            readonly issued_by: string | null;
+            /** Payload */
+            readonly payload: {
+                readonly [key: string]: unknown;
+            };
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Result */
+            readonly result: unknown | null;
+            /** Status */
+            readonly status: string;
+            /** Target Id */
+            readonly target_id: string | null;
+            /** Target Type */
+            readonly target_type: string;
             /**
              * Timeout At
              * Format: date-time
@@ -3499,33 +3840,49 @@ export interface components {
          *
          *     ``frames`` is a list of stringified v2 ``command`` frames -
          *     each already signed by the brain's :class:`FrameSigner` and
-         *     ready for the agent's :class:`FrameVerifier`. Empty list means
-         *     "long-poll timed out without a command"; the agent should
-         *     immediately re-poll.
+         *     ready for the agent's :class:`FrameVerifier`. An empty list means
+         *     no command was delivered in this response. That includes an explicit
+         *     non-claiming ``max_frames=0`` connect probe, a timeout/no-pending result,
+         *     and a concurrent-claim race in which another poll wins the selected row.
+         *     The agent should treat all of those cases identically and re-poll.
          */
         readonly CommandPullResponse: {
             /** Frames */
             readonly frames?: readonly string[];
         };
+        /**
+         * CommandStatus
+         * @description Lifecycle state of a command.
+         *
+         *     - ``pending`` - persisted, not yet sent to an agent.
+         *     - ``dispatched`` - sent to an agent, awaiting ack or result.
+         *     - ``completed`` - agent returned a successful result.
+         *     - ``failed`` - agent returned an error result.
+         *     - ``timeout`` - agent did not respond within the configured
+         *       ``timeout_at``.
+         *     - ``cancelled`` - a user cancelled the command before it completed.
+         * @enum {string}
+         */
+        readonly CommandStatus: "pending" | "dispatched" | "completed" | "failed" | "timeout" | "cancelled";
         /** CompleteRequest */
         readonly CompleteRequest: {
-            /** Token */
-            readonly token: string;
-            /** Email */
-            readonly email: string;
             /** Display Name */
             readonly display_name?: string | null;
+            /** Email */
+            readonly email: string;
             /** Password */
             readonly password: string;
+            /** Token */
+            readonly token: string;
         };
         /** CompleteResponse */
         readonly CompleteResponse: {
-            readonly user: components["schemas"]["UserPublic"];
             /**
              * Project Id
              * Format: uuid
              */
             readonly project_id: string;
+            readonly user: components["schemas"]["UserPublic"];
         };
         /**
          * ConsumerRequest
@@ -3537,12 +3894,12 @@ export interface components {
              * Format: uuid
              */
             readonly agent_id: string;
-            /** Worker Name */
-            readonly worker_name: string;
-            /** Queue */
-            readonly queue: string;
             /** Idempotency Key */
             readonly idempotency_key?: string | null;
+            /** Queue */
+            readonly queue: string;
+            /** Worker Name */
+            readonly worker_name: string;
         };
         /** CreateAgentRequest */
         readonly CreateAgentRequest: {
@@ -3553,42 +3910,45 @@ export interface components {
         readonly CreateAgentResponse: {
             readonly agent: components["schemas"]["AgentPublic"];
             /**
-             * Token
-             * @description Plaintext bearer token. Returned ONCE; not retrievable later.
-             */
-            readonly token: string;
-            /**
              * Hmac Secret
              * @description Per-project signing secret (urlsafe-base64, 32 raw bytes). Returned ONCE alongside the bearer token. Deterministically derived from the brain master via HMAC, so the brain re-derives the same value on every frame and never needs to store it. Operators paste both ``token`` and ``hmac_secret`` into their agent configuration; the agent refuses to start without ``hmac_secret``.
              */
             readonly hmac_secret: string;
+            /**
+             * Token
+             * @description Plaintext bearer token. Returned ONCE; not retrievable later.
+             */
+            readonly token: string;
         };
         /** CreateApiKeyRequest */
         readonly CreateApiKeyRequest: {
+            /**
+             * Expires In Days
+             * @description Key lifetime in days. Null means never expires.
+             */
+            readonly expires_in_days?: number | null;
             /** Name */
             readonly name: string;
-            /**
-             * Scopes
-             * @description Catalogue of allowed actions. See z4j_brain.auth.scopes.ALL_SCOPES for valid values. An empty list mints a powerless token.
-             */
-            readonly scopes?: readonly string[];
             /**
              * Project Id
              * @description Bind this token to a single project. When set, any request that targets a different project is rejected with 403, regardless of ``scopes``.
              */
             readonly project_id?: string | null;
             /**
-             * Expires In Days
-             * @description Key lifetime in days. Null means never expires.
+             * Scopes
+             * @description Catalogue of allowed actions. See z4j_brain.auth.scopes.ALL_SCOPES for valid values. An empty list mints a powerless token.
              */
-            readonly expires_in_days?: number | null;
+            readonly scopes?: readonly string[];
         };
         /** CreateProjectRequest */
         readonly CreateProjectRequest: {
-            /** Slug */
-            readonly slug: string;
-            /** Name */
-            readonly name: string;
+            /** Allowed Schedulers */
+            readonly allowed_schedulers?: readonly string[] | null;
+            /**
+             * Default Scheduler Owner
+             * @default z4j-scheduler
+             */
+            readonly default_scheduler_owner: string;
             /** Description */
             readonly description?: string | null;
             /**
@@ -3596,21 +3956,20 @@ export interface components {
              * @default production
              */
             readonly environment: string;
+            /** Name */
+            readonly name: string;
+            /** Slug */
+            readonly slug: string;
             /**
              * Timezone
              * @default UTC
              */
             readonly timezone: string;
-            /**
-             * Default Scheduler Owner
-             * @default z4j-scheduler
-             */
-            readonly default_scheduler_owner: string;
-            /** Allowed Schedulers */
-            readonly allowed_schedulers?: readonly string[] | null;
         };
         /** CreateUserRequest */
         readonly CreateUserRequest: {
+            /** Display Name */
+            readonly display_name?: string | null;
             /**
              * Email
              * Format: email
@@ -3618,27 +3977,113 @@ export interface components {
             readonly email: string;
             /** First Name */
             readonly first_name?: string | null;
-            /** Last Name */
-            readonly last_name?: string | null;
-            /** Display Name */
-            readonly display_name?: string | null;
-            /** Password */
-            readonly password: string;
             /**
              * Is Admin
              * @default false
              */
             readonly is_admin: boolean;
+            /** Last Name */
+            readonly last_name?: string | null;
+            /** Password */
+            readonly password: string;
             /**
              * Timezone
              * @default UTC
              */
             readonly timezone: string;
         };
+        /**
+         * DeepCheckResult
+         * @description One subsystem's answer. Which fields accompany ``status`` is the probe's.
+         *
+         *     Open rather than closed (``extra="allow"``) because a response model that
+         *     silently dropped a key it had not been told about would let a probe report
+         *     a detail the operator never sees, which is the failure this endpoint is
+         *     built not to have. The fields below are the ones the shipped probes emit,
+         *     so a generated client has them by name instead of by guess.
+         */
+        readonly DeepCheckResult: {
+            /**
+             * Activated
+             * @description Whether the audit chain's authenticated state was verified.
+             */
+            readonly activated?: boolean | null;
+            /**
+             * Detail
+             * @description Why this subsystem is not ok, and for a failed check which kind of failure it was: a named schema state, or the check exceeding its deadline or raising.
+             */
+            readonly detail?: string | null;
+            /**
+             * Expected
+             * @description The revision this build refuses to boot without.
+             */
+            readonly expected?: string | null;
+            /**
+             * Latency Ms
+             * @description Round-trip time of the probe's query, where it ran one.
+             */
+            readonly latency_ms?: number | null;
+            /**
+             * Revision
+             * @description The Alembic revision the database is stamped with.
+             */
+            readonly revision?: string | null;
+            /**
+             * Scope
+             * @description How much of a subsystem the check covered. ``state-only`` means the audit chain's state row was authenticated and ``audit_log`` was not read.
+             */
+            readonly scope?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            readonly status: "ok" | "degraded" | "failed";
+        } & {
+            readonly [key: string]: unknown;
+        };
+        /**
+         * DeepHealthCoverage
+         * @description What the verdict does and does not answer, carried in the response.
+         *
+         *     In the payload rather than in a docstring, because the reader who most
+         *     needs it is polling the endpoint and is not reading this file.
+         */
+        readonly DeepHealthCoverage: {
+            /** Detail */
+            readonly detail: string;
+            /**
+             * Startup Equivalent
+             * @description Whether this verdict is the one the boot path would give the same database. It is not, in either direction; ``detail`` says how.
+             */
+            readonly startup_equivalent: boolean;
+        };
+        /**
+         * DeepHealthResponse
+         * @description The deep report. Returned with both ``200`` and ``503``.
+         */
+        readonly DeepHealthResponse: {
+            /**
+             * Checks
+             * @description One entry per registered probe, keyed by subsystem name. A check that could not complete appears as failed rather than being omitted, because an omission reads as healthy.
+             */
+            readonly checks: {
+                readonly [key: string]: components["schemas"]["DeepCheckResult"];
+            };
+            readonly coverage: components["schemas"]["DeepHealthCoverage"];
+            /**
+             * Status
+             * @description The worst status among the checks. ``failed`` is the 503; ``degraded`` is a warning and still a 200.
+             * @enum {string}
+             */
+            readonly status: "ok" | "degraded" | "failed";
+        };
         /** DefaultSubscriptionCreate */
         readonly DefaultSubscriptionCreate: {
-            /** Trigger */
-            readonly trigger: string;
+            /**
+             * Cooldown Seconds
+             * @default 0
+             */
+            readonly cooldown_seconds: number;
             readonly filters?: components["schemas"]["z4j_brain__api__notifications__SubscriptionFilters"];
             /**
              * In App
@@ -3647,34 +4092,11 @@ export interface components {
             readonly in_app: boolean;
             /** Project Channel Ids */
             readonly project_channel_ids?: readonly string[];
-            /**
-             * Cooldown Seconds
-             * @default 0
-             */
-            readonly cooldown_seconds: number;
+            /** Trigger */
+            readonly trigger: string;
         };
         /** DefaultSubscriptionPublic */
         readonly DefaultSubscriptionPublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Trigger */
-            readonly trigger: string;
-            /** Filters */
-            readonly filters: {
-                readonly [key: string]: unknown;
-            };
-            /** In App */
-            readonly in_app: boolean;
-            /** Project Channel Ids */
-            readonly project_channel_ids: readonly string[];
             /** Cooldown Seconds */
             readonly cooldown_seconds: number;
             /**
@@ -3682,6 +4104,26 @@ export interface components {
              * Format: date-time
              */
             readonly created_at: string;
+            /** Filters */
+            readonly filters: {
+                readonly [key: string]: unknown;
+            };
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** In App */
+            readonly in_app: boolean;
+            /** Project Channel Ids */
+            readonly project_channel_ids: readonly string[];
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Trigger */
+            readonly trigger: string;
         };
         /**
          * DefaultSubscriptionUpdate
@@ -3694,15 +4136,15 @@ export interface components {
          *     partial-update shape.
          */
         readonly DefaultSubscriptionUpdate: {
-            /** Trigger */
-            readonly trigger?: string | null;
+            /** Cooldown Seconds */
+            readonly cooldown_seconds?: number | null;
             readonly filters?: components["schemas"]["z4j_brain__api__notifications__SubscriptionFilters"] | null;
             /** In App */
             readonly in_app?: boolean | null;
             /** Project Channel Ids */
             readonly project_channel_ids?: readonly string[] | null;
-            /** Cooldown Seconds */
-            readonly cooldown_seconds?: number | null;
+            /** Trigger */
+            readonly trigger?: string | null;
         };
         /**
          * DeliveryListPublic
@@ -3721,6 +4163,14 @@ export interface components {
         };
         /** DeliveryPublic */
         readonly DeliveryPublic: {
+            /** Channel Id */
+            readonly channel_id: string | null;
+            /** Channel Name */
+            readonly channel_name?: string | null;
+            /** Channel Type */
+            readonly channel_type?: string | null;
+            /** Error */
+            readonly error: string | null;
             /**
              * Id
              * Format: uuid
@@ -3728,37 +4178,29 @@ export interface components {
             readonly id: string;
             /** Project Id */
             readonly project_id?: string | null;
-            /** Subscription Id */
-            readonly subscription_id: string | null;
-            /** Channel Id */
-            readonly channel_id: string | null;
-            /** User Channel Id */
-            readonly user_channel_id: string | null;
-            /** Trigger */
-            readonly trigger: string;
-            /** Task Id */
-            readonly task_id: string | null;
-            /** Task Name */
-            readonly task_name: string | null;
-            /** Status */
-            readonly status: string;
             /** Response Code */
             readonly response_code: number | null;
-            /** Error */
-            readonly error: string | null;
             /**
              * Sent At
              * Format: date-time
              */
             readonly sent_at: string;
-            /** Channel Name */
-            readonly channel_name?: string | null;
-            /** Channel Type */
-            readonly channel_type?: string | null;
-            /** Triggered By User Id */
-            readonly triggered_by_user_id?: string | null;
+            /** Status */
+            readonly status: string;
+            /** Subscription Id */
+            readonly subscription_id: string | null;
+            /** Task Id */
+            readonly task_id: string | null;
+            /** Task Name */
+            readonly task_name: string | null;
+            /** Trigger */
+            readonly trigger: string;
             /** Triggered By Email */
             readonly triggered_by_email?: string | null;
+            /** Triggered By User Id */
+            readonly triggered_by_user_id?: string | null;
+            /** User Channel Id */
+            readonly user_channel_id: string | null;
         };
         /**
          * DiffEntry
@@ -3771,18 +4213,18 @@ export interface components {
          *     re-run reconcile without ``--dry-run``.
          */
         readonly DiffEntry: {
-            /** Name */
-            readonly name: string;
-            /** Scheduler */
-            readonly scheduler: string;
-            /** Proposed */
-            readonly proposed: {
-                readonly [key: string]: unknown;
-            };
             /** Current */
             readonly current: {
                 readonly [key: string]: unknown;
             };
+            /** Name */
+            readonly name: string;
+            /** Proposed */
+            readonly proposed: {
+                readonly [key: string]: unknown;
+            };
+            /** Scheduler */
+            readonly scheduler: string;
         };
         /**
          * DiffSchedulesResponse
@@ -3794,25 +4236,25 @@ export interface components {
          *     glance whether the diff is a no-op.
          */
         readonly DiffSchedulesResponse: {
-            /** Inserted */
-            readonly inserted: readonly components["schemas"]["DiffEntry"][];
-            /** Updated */
-            readonly updated: readonly components["schemas"]["DiffEntry"][];
-            /** Unchanged */
-            readonly unchanged: readonly components["schemas"]["DiffEntry"][];
             /** Deleted */
             readonly deleted: readonly components["schemas"]["DiffEntry"][];
+            /** Inserted */
+            readonly inserted: readonly components["schemas"]["DiffEntry"][];
             /** Summary */
             readonly summary: {
                 readonly [key: string]: number;
             };
+            /** Unchanged */
+            readonly unchanged: readonly components["schemas"]["DiffEntry"][];
+            /** Updated */
+            readonly updated: readonly components["schemas"]["DiffEntry"][];
         };
         /** DisableRequest */
         readonly DisableRequest: {
-            /** Password */
-            readonly password: string;
             /** Code */
             readonly code: string;
+            /** Password */
+            readonly password: string;
         };
         /** EnrollCompleteRequest */
         readonly EnrollCompleteRequest: {
@@ -3830,15 +4272,15 @@ export interface components {
         /** EnrollStartResponse */
         readonly EnrollStartResponse: {
             /**
-             * Secret Base32
-             * @description Raw secret, base32-encoded. Authenticator apps that cannot read the QR code's URL can be configured by typing this string.
-             */
-            readonly secret_base32: string;
-            /**
              * Provisioning Url
              * @description otpauth:// URL the dashboard renders as a QR code.
              */
             readonly provisioning_url: string;
+            /**
+             * Secret Base32
+             * @description Raw secret, base32-encoded. Authenticator apps that cannot read the QR code's URL can be configured by typing this string.
+             */
+            readonly secret_base32: string;
         };
         /** EventListResponse */
         readonly EventListResponse: {
@@ -3850,24 +4292,17 @@ export interface components {
         /** EventPublic */
         readonly EventPublic: {
             /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /**
              * Agent Id
              * Format: uuid
              */
             readonly agent_id: string;
             /** Engine */
             readonly engine: string;
-            /** Task Id */
-            readonly task_id: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
             /** Kind */
             readonly kind: string;
             /**
@@ -3879,6 +4314,68 @@ export interface components {
             readonly payload: {
                 readonly [key: string]: unknown;
             };
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Task Id */
+            readonly task_id: string;
+        };
+        /**
+         * ExternalScheduleControlOperationPublic
+         * @description Project-scoped status for one projection-authoritative control.
+         */
+        readonly ExternalScheduleControlOperationPublic: {
+            /**
+             * Command Id
+             * Format: uuid
+             */
+            readonly command_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            readonly created_at: string;
+            /** Desired Is Enabled */
+            readonly desired_is_enabled: boolean;
+            /** Epoch Number */
+            readonly epoch_number: number;
+            /**
+             * Epoch Uuid
+             * Format: uuid
+             */
+            readonly epoch_uuid: string;
+            /** Expected Accepted Sequence */
+            readonly expected_accepted_sequence: number;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Reserved Sequence */
+            readonly reserved_sequence: number | null;
+            /** Result Projection Id */
+            readonly result_projection_id: string | null;
+            /**
+             * Schedule Id
+             * Format: uuid
+             */
+            readonly schedule_id: string;
+            /** Source Key */
+            readonly source_key: string;
+            /** Status */
+            readonly status: string;
+            /**
+             * Stream Id
+             * Format: uuid
+             */
+            readonly stream_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            readonly updated_at: string;
         };
         /**
          * FleetEntry
@@ -3886,33 +4383,34 @@ export interface components {
          *
          *     ``ok`` distinguishes the three observable states:
          *
-         *     - ``True``: scheduler responded with a parseable /info payload.
-         *       ``info`` carries the full payload.
-         *     - ``False``: scheduler responded but the response was bad
-         *       (non-200, non-JSON, schema mismatch). ``error`` describes.
-         *     - ``None``: scheduler did not respond within the timeout.
-         *       ``error`` carries the connection error text.
+         *     - ``True``: scheduler returned HTTP 200 and a payload matching the
+         *       required /info schema. ``info`` carries the full payload, including
+         *       any additional fields introduced by compatible scheduler versions.
+         *     - ``False``: the configured URL was refused, or the scheduler responded
+         *       with a non-200, invalid JSON, or an invalid /info shape.
+         *     - ``None``: no HTTP response was obtained because the request timed out
+         *       or the transport failed. ``error`` describes the transport failure.
          */
         readonly FleetEntry: {
-            /** Url */
-            readonly url: string;
-            /** Ok */
-            readonly ok: boolean | null;
+            /** Error */
+            readonly error?: string | null;
             /** Info */
             readonly info?: {
                 readonly [key: string]: unknown;
             } | null;
-            /** Error */
-            readonly error?: string | null;
+            /** Ok */
+            readonly ok: boolean | null;
+            /** Url */
+            readonly url: string;
         };
         /** FleetResponse */
         readonly FleetResponse: {
+            /** Healthy */
+            readonly healthy: number;
             /** Schedulers */
             readonly schedulers: readonly components["schemas"]["FleetEntry"][];
             /** Total */
             readonly total: number;
-            /** Healthy */
-            readonly healthy: number;
         };
         /**
          * FrameUploadBody
@@ -3930,20 +4428,22 @@ export interface components {
         readonly FrameUploadResponse: {
             /** Accepted */
             readonly accepted: number;
-            /** Rejected */
-            readonly rejected: number;
+            /** Error Code */
+            readonly error_code?: string | null;
             /** Errors */
             readonly errors?: readonly string[];
+            /** Rejected */
+            readonly rejected: number;
         };
         /** GrantMembershipRequest */
         readonly GrantMembershipRequest: {
+            /** Role */
+            readonly role: string;
             /**
              * User Id
              * Format: uuid
              */
             readonly user_id: string;
-            /** Role */
-            readonly role: string;
         };
         /** HTTPValidationError */
         readonly HTTPValidationError: {
@@ -3952,12 +4452,12 @@ export interface components {
         };
         /** HomeSummaryPublic */
         readonly HomeSummaryPublic: {
-            readonly user: components["schemas"]["UserMini"];
             readonly aggregate: components["schemas"]["Aggregate"];
-            /** Projects */
-            readonly projects: readonly components["schemas"]["ProjectCard"][];
             /** Attention */
             readonly attention: readonly components["schemas"]["AttentionItem"][];
+            /** Projects */
+            readonly projects: readonly components["schemas"]["ProjectCard"][];
+            readonly user: components["schemas"]["UserMini"];
         };
         /**
          * ImportSchedulesRequest
@@ -3988,13 +4488,13 @@ export interface components {
          *     so we can raise the cap with safer semantics.
          */
         readonly ImportSchedulesRequest: {
-            /** Schedules */
-            readonly schedules: readonly components["schemas"]["ImportedScheduleIn"][];
             /**
              * Mode
              * @default upsert
              */
             readonly mode: string;
+            /** Schedules */
+            readonly schedules: readonly components["schemas"]["ImportedScheduleIn"][];
             /** Source Filter */
             readonly source_filter?: string | null;
         };
@@ -4011,14 +4511,6 @@ export interface components {
          *     semantics; always 0 in plain upsert mode.
          */
         readonly ImportSchedulesResponse: {
-            /** Inserted */
-            readonly inserted: number;
-            /** Updated */
-            readonly updated: number;
-            /** Unchanged */
-            readonly unchanged: number;
-            /** Failed */
-            readonly failed: number;
             /**
              * Deleted
              * @default 0
@@ -4031,6 +4523,14 @@ export interface components {
             readonly errors: {
                 readonly [key: string]: string;
             };
+            /** Failed */
+            readonly failed: number;
+            /** Inserted */
+            readonly inserted: number;
+            /** Unchanged */
+            readonly unchanged: number;
+            /** Updated */
+            readonly updated: number;
         };
         /**
          * ImportedScheduleIn
@@ -4049,28 +4549,27 @@ export interface components {
          *     Field caps mirror :class:`ScheduleCreateIn` (audit fix Apr 2026).
          */
         readonly ImportedScheduleIn: {
-            /** Name */
-            readonly name: string;
-            /** Engine */
-            readonly engine: string;
-            /** Kind */
-            readonly kind: string;
-            /** Expression */
-            readonly expression: string;
-            /** Task Name */
-            readonly task_name: string;
-            /**
-             * Timezone
-             * @default UTC
-             */
-            readonly timezone: string;
-            /** Queue */
-            readonly queue?: string | null;
             /**
              * Args
              * @default []
              */
             readonly args: readonly unknown[];
+            /**
+             * Catch Up
+             * @default skip
+             */
+            readonly catch_up: string;
+            /** Engine */
+            readonly engine: string;
+            /** Expression */
+            readonly expression: string;
+            /**
+             * Is Enabled
+             * @default true
+             */
+            readonly is_enabled: boolean;
+            /** Kind */
+            readonly kind: string;
             /**
              * Kwargs
              * @default {}
@@ -4078,16 +4577,12 @@ export interface components {
             readonly kwargs: {
                 readonly [key: string]: unknown;
             };
-            /**
-             * Catch Up
-             * @default skip
-             */
-            readonly catch_up: string;
-            /**
-             * Is Enabled
-             * @default true
-             */
-            readonly is_enabled: boolean;
+            /** Name */
+            readonly name: string;
+            /** Overlap Policy */
+            readonly overlap_policy?: string | null;
+            /** Queue */
+            readonly queue?: string | null;
             /** Scheduler */
             readonly scheduler?: string | null;
             /**
@@ -4097,27 +4592,34 @@ export interface components {
             readonly source: string;
             /** Source Hash */
             readonly source_hash?: string | null;
+            /** Task Name */
+            readonly task_name: string;
+            /**
+             * Timezone
+             * @default UTC
+             */
+            readonly timezone: string;
         };
         /** InvitationAcceptPublic */
         readonly InvitationAcceptPublic: {
+            /** Project Slug */
+            readonly project_slug: string;
+            /** Role */
+            readonly role: string;
             /**
              * User Id
              * Format: uuid
              */
             readonly user_id: string;
-            /** Project Slug */
-            readonly project_slug: string;
-            /** Role */
-            readonly role: string;
         };
         /** InvitationAcceptRequest */
         readonly InvitationAcceptRequest: {
-            /** Token */
-            readonly token: string;
             /** Display Name */
             readonly display_name: string;
             /** Password */
             readonly password: string;
+            /** Token */
+            readonly token: string;
         };
         /** InvitationCreateRequest */
         readonly InvitationCreateRequest: {
@@ -4142,12 +4644,6 @@ export interface components {
          * @description Mint response - includes the plaintext token exactly ONCE.
          */
         readonly InvitationMintPublic: {
-            readonly invitation: components["schemas"]["InvitationPublic"];
-            /**
-             * Token
-             * @description Plaintext invitation token. Shown ONCE - never again. Send this as part of the invite-accept URL (e.g. https://z4j.example.com/invite?token=<value>).
-             */
-            readonly token: string;
             /**
              * Accept Url Path
              * @description Suggested relative accept path with the token embedded.
@@ -4159,6 +4655,12 @@ export interface components {
              * @default false
              */
             readonly email_sent: boolean;
+            readonly invitation: components["schemas"]["InvitationPublic"];
+            /**
+             * Token
+             * @description Plaintext invitation token. Shown ONCE - never again. Put it in the fragment of the browser invite URL so it is not sent in the initial HTTP request or Referer header (e.g. https://z4j.example.com/invite#token=<value>).
+             */
+            readonly token: string;
         };
         /**
          * InvitationPreviewPublic
@@ -4172,50 +4674,67 @@ export interface components {
         readonly InvitationPreviewPublic: {
             /** Email */
             readonly email: string;
-            /** Role */
-            readonly role: string;
-            /** Project Slug */
-            readonly project_slug: string;
-            /** Project Name */
-            readonly project_name: string;
             /**
              * Expires At
              * Format: date-time
              */
             readonly expires_at: string;
+            /** Project Name */
+            readonly project_name: string;
+            /** Project Slug */
+            readonly project_slug: string;
+            /** Role */
+            readonly role: string;
+        };
+        /**
+         * InvitationPreviewRequest
+         * @description Bearer token submitted in a JSON body, never in the request URL.
+         *
+         *     The field deliberately has no Pydantic length constraint.  Every string,
+         *     including a malformed token, reaches the same HMAC lookup and generic
+         *     ``invalid_or_expired`` response instead of a validation branch that could
+         *     distinguish token states.  The global validation handler already redacts
+         *     non-string inputs from error responses.
+         */
+        readonly InvitationPreviewRequest: {
+            /**
+             * Token
+             * @description Plaintext invitation bearer token. Send only in this JSON request body; never place it in a URL, log field, or cache key.
+             */
+            readonly token: string;
         };
         /** InvitationPublic */
         readonly InvitationPublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Email */
-            readonly email: string;
-            /** Role */
-            readonly role: string;
-            /** Invited By */
-            readonly invited_by: string | null;
-            /**
-             * Expires At
-             * Format: date-time
-             */
-            readonly expires_at: string;
             /** Accepted At */
             readonly accepted_at: string | null;
-            /** Revoked At */
-            readonly revoked_at: string | null;
             /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Email */
+            readonly email: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            readonly expires_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Invited By */
+            readonly invited_by: string | null;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Revoked At */
+            readonly revoked_at: string | null;
+            /** Role */
+            readonly role: string;
         };
         /** IssueListResponse */
         readonly IssueListResponse: {
@@ -4226,28 +4745,67 @@ export interface components {
         };
         /** IssuePublic */
         readonly IssuePublic: {
+            /** Engine Count */
+            readonly engine_count: number;
+            /** Engines */
+            readonly engines: readonly string[];
             /** Fingerprint */
             readonly fingerprint: string;
-            /** Status */
-            readonly status: string;
+            /** First Seen */
+            readonly first_seen: string | null;
+            /** Last Seen */
+            readonly last_seen: string | null;
             /** Occurrences */
             readonly occurrences: number;
             /** Open Count */
             readonly open_count: number;
             /** Recovered Count */
             readonly recovered_count: number;
-            /** First Seen */
-            readonly first_seen: string | null;
-            /** Last Seen */
-            readonly last_seen: string | null;
-            /** Engine Count */
-            readonly engine_count: number;
-            /** Engines */
-            readonly engines: readonly string[];
             /** Sample Exception */
             readonly sample_exception: string | null;
             /** Sample Task Name */
             readonly sample_task_name: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            readonly status: "ongoing" | "recovered";
+        };
+        /**
+         * LegacyFireGrantIn
+         * @description Explicit operator authority for one tokenless scheduler generation.
+         */
+        readonly LegacyFireGrantIn: {
+            /**
+             * All Replicas Quiesced And Resynced
+             * @default false
+             */
+            readonly all_replicas_quiesced_and_resynced: boolean;
+            /** Allow */
+            readonly allow: boolean;
+            /**
+             * Observed Control Token
+             * Format: uuid
+             */
+            readonly observed_control_token: string;
+        };
+        /**
+         * LintFindingPublic
+         * @description One dangerous setting on one worker.
+         */
+        readonly LintFindingPublic: {
+            /** Detail */
+            readonly detail: string;
+            /** Remedy */
+            readonly remedy: string;
+            /** Rule Id */
+            readonly rule_id: string;
+            /** Setting */
+            readonly setting: string;
+            /** Severity */
+            readonly severity: string;
+            /** Title */
+            readonly title: string;
         };
         /** LoginRequest */
         readonly LoginRequest: {
@@ -4257,60 +4815,60 @@ export interface components {
             readonly password: string;
             /**
              * Remember Me
-             * @description When True the minted session uses ``session_remember_me_lifetime_seconds`` (default 30 days) instead of the standard absolute lifetime, and the idle timeout is skipped. Intended for homelab and single-operator installs where the dashboard sits on a trusted internal IP and re-authenticating every 30 minutes of idle is friction without security gain.
+             * @description When True the minted session uses ``session_remember_me_lifetime_seconds`` (default 30 days) instead of the standard absolute lifetime, and the idle timeout is skipped. Intended for homelab and single-operator installs where the dashboard sits on a trusted internal IP. This is an explicit convenience tradeoff: a stolen remembered cookie stays usable until its absolute expiry or server-side revocation.
              * @default false
              */
             readonly remember_me: boolean;
         };
         /** LoginResponse */
         readonly LoginResponse: {
-            readonly user: components["schemas"]["UserPublic"];
             /**
-             * Mfa Required
-             * @description True when the user has MFA enrolled AND a valid trust cookie was NOT presented. The dashboard should route to the MFA-verify page and POST /auth/mfa/verify before calling any other endpoint.
-             * @default false
+             * Mfa Enrollment Deadline
+             * @description End of the enrollment grace window (mfa_enforcement_started_at + Z4J_MFA_ENROLLMENT_GRACE_DAYS). Only set when mfa_enrollment_required is True. A deadline in the past means this cookie session is restricted to exactly GET /api/v1/auth/me, POST /api/v1/auth/logout, GET /api/v1/auth/mfa/status, POST /api/v1/auth/mfa/enroll-start, and POST /api/v1/auth/mfa/enroll-complete.
              */
-            readonly mfa_required: boolean;
+            readonly mfa_enrollment_deadline?: string | null;
             /**
              * Mfa Enrollment Required
-             * @description True when the operator's MFA enrollment-enforcement policy (Z4J_MFA_ENFORCE_FOR_ADMINS / Z4J_MFA_ENFORCE_FOR_ALL) targets this user and they have not enrolled yet. Within the grace window the dashboard should show a persistent enroll-by banner; once mfa_enrollment_deadline is in the past every endpoint outside the enrollment flow answers 403 with error code mfa_enrollment_required.
+             * @description True when the operator's MFA enrollment-enforcement policy (Z4J_MFA_ENFORCE_FOR_ADMINS / Z4J_MFA_ENFORCE_FOR_ALL) targets this user and they have not enrolled yet. Within the grace window the dashboard should show a persistent enroll-by banner; once mfa_enrollment_deadline is in the past this cookie session may call only GET /api/v1/auth/me, POST /api/v1/auth/logout, GET /api/v1/auth/mfa/status, POST /api/v1/auth/mfa/enroll-start, and POST /api/v1/auth/mfa/enroll-complete. Every other authenticated route answers 403 with error code mfa_enrollment_required.
              * @default false
              */
             readonly mfa_enrollment_required: boolean;
             /**
-             * Mfa Enrollment Deadline
-             * @description End of the enrollment grace window (mfa_enforcement_started_at + Z4J_MFA_ENROLLMENT_GRACE_DAYS). Only set when mfa_enrollment_required is True. A deadline in the past means this session is already restricted to the MFA-enrollment endpoints.
+             * Mfa Required
+             * @description True when the user has MFA enrolled AND a valid trust cookie was NOT presented. The dashboard should route to the MFA-verify page. Until verification succeeds, this cookie session may call only POST /api/v1/auth/mfa/verify, POST /api/v1/auth/logout, GET /api/v1/auth/me, and GET /api/v1/auth/mfa/status.
+             * @default false
              */
-            readonly mfa_enrollment_deadline?: string | null;
+            readonly mfa_required: boolean;
+            readonly user: components["schemas"]["UserPublic"];
         };
         /** MembershipPublic */
         readonly MembershipPublic: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            readonly created_at: string;
             /**
              * Id
              * Format: uuid
              */
             readonly id: string;
             /**
-             * User Id
-             * Format: uuid
-             */
-            readonly user_id: string;
-            /**
              * Project Id
              * Format: uuid
              */
             readonly project_id: string;
-            /** User Email */
-            readonly user_email: string;
-            /** User Display Name */
-            readonly user_display_name: string | null;
             /** Role */
             readonly role: string;
+            /** User Display Name */
+            readonly user_display_name: string | null;
+            /** User Email */
+            readonly user_email: string;
             /**
-             * Created At
-             * Format: date-time
+             * User Id
+             * Format: uuid
              */
-            readonly created_at: string;
+            readonly user_id: string;
         };
         /** MfaStatusResponse */
         readonly MfaStatusResponse: {
@@ -4318,19 +4876,19 @@ export interface components {
             readonly enrolled: boolean;
             /** Enrolled At */
             readonly enrolled_at: string | null;
-            /** Remaining Recovery Codes */
-            readonly remaining_recovery_codes: number;
+            /**
+             * Enrollment Deadline
+             * @description End of the enrollment grace window; None until the grace clock has been started by a login that observed the policy. After the deadline, non-exempt endpoints answer 403 with error code mfa_enrollment_required; status, whoami, logout, enroll-start, and enroll-complete remain reachable so the user can enroll or leave.
+             */
+            readonly enrollment_deadline?: string | null;
             /**
              * Enrollment Required
              * @description True when the operator's MFA enrollment-enforcement policy targets this user and they have not enrolled yet. The enrollment page reads this (the endpoint stays reachable even for a session that is past its grace deadline).
              * @default false
              */
             readonly enrollment_required: boolean;
-            /**
-             * Enrollment Deadline
-             * @description End of the enrollment grace window; None until the grace clock has been started by a login that observed the policy. A deadline in the past means every endpoint outside the enrollment flow answers 403 with error code mfa_enrollment_required.
-             */
-            readonly enrollment_deadline?: string | null;
+            /** Remaining Recovery Codes */
+            readonly remaining_recovery_codes: number;
         };
         /**
          * PasswordPolicyPublic
@@ -4345,19 +4903,19 @@ export interface components {
          *     sensitive.
          */
         readonly PasswordPolicyPublic: {
+            /** Character Class Names */
+            readonly character_class_names: readonly string[];
             /** Min Length */
             readonly min_length: number;
             /** Required Character Classes */
             readonly required_character_classes: number;
-            /** Character Class Names */
-            readonly character_class_names: readonly string[];
         };
         /** PasswordResetConfirmBody */
         readonly PasswordResetConfirmBody: {
-            /** Token */
-            readonly token: string;
             /** New Password */
             readonly new_password: string;
+            /** Token */
+            readonly token: string;
         };
         /** PasswordResetConfirmResponse */
         readonly PasswordResetConfirmResponse: {
@@ -4398,70 +4956,72 @@ export interface components {
              * Format: uuid
              */
             readonly agent_id: string;
-            /** Worker Name */
-            readonly worker_name: string;
             /** Delta */
             readonly delta: number;
             /** Idempotency Key */
             readonly idempotency_key?: string | null;
+            /** Worker Name */
+            readonly worker_name: string;
         };
         /** ProjectCard */
         readonly ProjectCard: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /** Slug */
-            readonly slug: string;
-            /** Name */
-            readonly name: string;
-            /** Environment */
-            readonly environment: string;
-            /** Role */
-            readonly role: string | null;
-            /** Tasks 24H */
-            readonly tasks_24h: number;
-            /** Failures 24H */
-            readonly failures_24h: number;
-            /** Failure Rate 24H */
-            readonly failure_rate_24h: number;
-            /** Workers Online */
-            readonly workers_online: number;
-            /** Workers Total */
-            readonly workers_total: number;
             /** Agents Online */
             readonly agents_online: number;
             /** Agents Total */
             readonly agents_total: number;
-            /** Stuck Commands */
-            readonly stuck_commands: number;
-            /** Last Activity At */
-            readonly last_activity_at: string | null;
+            /** Environment */
+            readonly environment: string;
+            /** Failure Rate 24H */
+            readonly failure_rate_24h: number;
+            /** Failures 24H */
+            readonly failures_24h: number;
             /** Health */
             readonly health: string;
-        };
-        /** ProjectPublic */
-        readonly ProjectPublic: {
             /**
              * Id
              * Format: uuid
              */
             readonly id: string;
-            /** Slug */
-            readonly slug: string;
+            /** Last Activity At */
+            readonly last_activity_at: string | null;
             /** Name */
             readonly name: string;
-            /** Description */
-            readonly description: string | null;
-            /** Environment */
-            readonly environment: string;
-            /** Timezone */
-            readonly timezone: string;
-            /** Is Active */
-            readonly is_active: boolean;
-            /** Default Scheduler Owner */
-            readonly default_scheduler_owner: string;
+            /** Role */
+            readonly role: string | null;
+            /** Slug */
+            readonly slug: string;
+            /** Stuck Commands */
+            readonly stuck_commands: number;
+            /** Tasks 24H */
+            readonly tasks_24h: number;
+            /** Workers Online */
+            readonly workers_online: number;
+            /** Workers Total */
+            readonly workers_total: number;
+        };
+        /**
+         * ProjectLintPublic
+         * @description Project-wide lint summary.
+         *
+         *     ``workers_not_evaluated`` is reported separately from a clean result on
+         *     purpose. A worker whose engine has no rules, or which reported no
+         *     configuration, has not been judged, and presenting that as "no problems
+         *     found" would overstate what the check actually knows.
+         */
+        readonly ProjectLintPublic: {
+            /** Findings By Severity */
+            readonly findings_by_severity: {
+                readonly [key: string]: number;
+            };
+            /** Workers */
+            readonly workers: readonly components["schemas"]["WorkerLintPublic"][];
+            /** Workers Evaluated */
+            readonly workers_evaluated: number;
+            /** Workers Not Evaluated */
+            readonly workers_not_evaluated: number;
+        };
+        /** ProjectPublic */
+        readonly ProjectPublic: {
             /** Allowed Schedulers */
             readonly allowed_schedulers?: readonly string[] | null;
             /**
@@ -4469,6 +5029,25 @@ export interface components {
              * Format: date-time
              */
             readonly created_at: string;
+            /** Default Scheduler Owner */
+            readonly default_scheduler_owner: string;
+            /** Description */
+            readonly description: string | null;
+            /** Environment */
+            readonly environment: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Is Active */
+            readonly is_active: boolean;
+            /** Name */
+            readonly name: string;
+            /** Slug */
+            readonly slug: string;
+            /** Timezone */
+            readonly timezone: string;
             /**
              * Updated At
              * Format: date-time
@@ -4508,12 +5087,8 @@ export interface components {
              * Format: uuid
              */
             readonly agent_id: string;
-            /** Queue */
-            readonly queue: string;
             /** Confirm Token */
             readonly confirm_token?: string | null;
-            /** Observed Depth */
-            readonly observed_depth?: number | null;
             /**
              * Force
              * @default false
@@ -4521,50 +5096,54 @@ export interface components {
             readonly force: boolean;
             /** Idempotency Key */
             readonly idempotency_key?: string | null;
+            /** Observed Depth */
+            readonly observed_depth?: number | null;
+            /** Queue */
+            readonly queue: string;
         };
         /**
          * QueueHealth
          * @description Per-queue health snapshot.
          */
         readonly QueueHealth: {
-            /** Name */
-            readonly name: string;
-            /** Engine */
-            readonly engine: string;
-            /** Pending Count */
-            readonly pending_count: number;
             /** Broker Type */
             readonly broker_type?: string | null;
+            /** Engine */
+            readonly engine: string;
             /** Last Seen At */
             readonly last_seen_at?: string | null;
+            /** Name */
+            readonly name: string;
+            /** Pending Count */
+            readonly pending_count: number;
         };
         /** QueuePublic */
         readonly QueuePublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Name */
-            readonly name: string;
-            /** Engine */
-            readonly engine: string;
             /** Broker Type */
             readonly broker_type: string | null;
             /** Broker Url Hint */
             readonly broker_url_hint: string | null;
-            /** Last Seen At */
-            readonly last_seen_at: string | null;
             /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Engine */
+            readonly engine: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Last Seen At */
+            readonly last_seen_at: string | null;
+            /** Name */
+            readonly name: string;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
         };
         /**
          * RateLimitRequest
@@ -4584,17 +5163,21 @@ export interface components {
              * Format: uuid
              */
             readonly agent_id: string;
-            /** Task Name */
-            readonly task_name: string;
-            /** Rate */
-            readonly rate: string;
-            /** Worker Name */
-            readonly worker_name?: string | null;
             /** Idempotency Key */
             readonly idempotency_key?: string | null;
+            /** Rate */
+            readonly rate: string;
+            /** Task Name */
+            readonly task_name: string;
+            /** Worker Name */
+            readonly worker_name?: string | null;
         };
         /** RecentFailurePublic */
         readonly RecentFailurePublic: {
+            /** Engine */
+            readonly engine: string;
+            /** Exception */
+            readonly exception: string | null;
             /**
              * Id
              * Format: uuid
@@ -4605,27 +5188,23 @@ export interface components {
              * Format: date-time
              */
             readonly occurred_at: string;
+            /** Priority */
+            readonly priority: string;
             /**
              * Project Id
              * Format: uuid
              */
             readonly project_id: string;
-            /** Project Slug */
-            readonly project_slug: string;
             /** Project Name */
             readonly project_name: string;
-            /** Engine */
-            readonly engine: string;
+            /** Project Slug */
+            readonly project_slug: string;
             /** Task Id */
             readonly task_id: string;
             /** Task Name */
             readonly task_name: string | null;
             /** Worker */
             readonly worker: string | null;
-            /** Exception */
-            readonly exception: string | null;
-            /** Priority */
-            readonly priority: string;
         };
         /** RecentFailuresPublic */
         readonly RecentFailuresPublic: {
@@ -4639,6 +5218,104 @@ export interface components {
             /** Recovery Codes */
             readonly recovery_codes: readonly string[];
         };
+        /** ResolveLegacyEvidenceIn */
+        readonly ResolveLegacyEvidenceIn: {
+            /**
+             * Enabled After Resolution
+             * @default true
+             */
+            readonly enabled_after_resolution: boolean;
+            /**
+             * Fire Id
+             * Format: uuid
+             */
+            readonly fire_id: string;
+            /**
+             * Observed Control Token
+             * Format: uuid
+             */
+            readonly observed_control_token: string;
+            /**
+             * Source Evidence Id
+             * Format: uuid
+             */
+            readonly source_evidence_id: string;
+            /** Source Evidence Kind */
+            readonly source_evidence_kind: string;
+            /** Work May Have Executed */
+            readonly work_may_have_executed: boolean;
+        };
+        /** ResolveLegacyEvidencePublic */
+        readonly ResolveLegacyEvidencePublic: {
+            /** Committed Revision */
+            readonly committed_revision: number | null;
+            /** Disposition */
+            readonly disposition: string;
+            /**
+             * Fire Id
+             * Format: uuid
+             */
+            readonly fire_id: string;
+            /** Resolution Control Token */
+            readonly resolution_control_token: string | null;
+            readonly schedule: components["schemas"]["SchedulePublic"] | null;
+            /**
+             * Source Evidence Id
+             * Format: uuid
+             */
+            readonly source_evidence_id: string;
+            /** Source Evidence Kind */
+            readonly source_evidence_kind: string;
+        };
+        /** ResolveTerminalFireIn */
+        readonly ResolveTerminalFireIn: {
+            /**
+             * Command Id
+             * Format: uuid
+             */
+            readonly command_id: string;
+            /**
+             * Enabled After Resolution
+             * @default true
+             */
+            readonly enabled_after_resolution: boolean;
+            readonly expected_status: components["schemas"]["CommandStatus"];
+            /**
+             * Fire Id
+             * Format: uuid
+             */
+            readonly fire_id: string;
+            /**
+             * Observed Control Token
+             * Format: uuid
+             */
+            readonly observed_control_token: string;
+            /** Work May Have Executed */
+            readonly work_may_have_executed: boolean;
+        };
+        /** ResolveTerminalFirePublic */
+        readonly ResolveTerminalFirePublic: {
+            /**
+             * Command Id
+             * Format: uuid
+             */
+            readonly command_id: string;
+            readonly command_status: components["schemas"]["CommandStatus"];
+            /** Committed Revision */
+            readonly committed_revision: number | null;
+            /** Disposition */
+            readonly disposition: string;
+            /**
+             * Fire Id
+             * Format: uuid
+             */
+            readonly fire_id: string;
+            /** Grant Carried */
+            readonly grant_carried: boolean;
+            /** Resolution Control Token */
+            readonly resolution_control_token: string | null;
+            readonly schedule: components["schemas"]["SchedulePublic"] | null;
+        };
         /** RestartWorkerRequest */
         readonly RestartWorkerRequest: {
             /**
@@ -4646,10 +5323,10 @@ export interface components {
              * Format: uuid
              */
             readonly agent_id: string;
-            /** Worker Name */
-            readonly worker_name: string;
             /** Idempotency Key */
             readonly idempotency_key?: string | null;
+            /** Worker Name */
+            readonly worker_name: string;
         };
         /**
          * ResyncSchedulesResponse
@@ -4676,33 +5353,29 @@ export interface components {
             readonly agent_id: string;
             /** Engine */
             readonly engine: string;
-            /** Task Id */
-            readonly task_id: string;
+            /** Eta Seconds */
+            readonly eta_seconds?: number | null;
+            /** Idempotency Key */
+            readonly idempotency_key?: string | null;
             /** Override Args */
             readonly override_args?: readonly unknown[] | null;
             /** Override Kwargs */
             readonly override_kwargs?: {
                 readonly [key: string]: unknown;
             } | null;
-            /** Eta Seconds */
-            readonly eta_seconds?: number | null;
-            /** Idempotency Key */
-            readonly idempotency_key?: string | null;
+            /** Task Id */
+            readonly task_id: string;
         };
         /** RuleCreateRequest */
         readonly RuleCreateRequest: {
-            /** Name */
-            readonly name: string;
-            /** Trigger */
-            readonly trigger: string;
-            /** Conditions */
-            readonly conditions?: {
-                readonly [key: string]: unknown;
-            };
             /** Actions */
             readonly actions?: readonly {
                 readonly [key: string]: unknown;
             }[];
+            /** Conditions */
+            readonly conditions?: {
+                readonly [key: string]: unknown;
+            };
             /**
              * Dry Run
              * @default true
@@ -4718,6 +5391,10 @@ export interface components {
              * @default 100
              */
             readonly max_executions_per_window: number;
+            /** Name */
+            readonly name: string;
+            /** Trigger */
+            readonly trigger: string;
             /**
              * Window Seconds
              * @default 3600
@@ -4731,71 +5408,71 @@ export interface components {
         };
         /** RulePublic */
         readonly RulePublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Name */
-            readonly name: string;
-            /** Is Enabled */
-            readonly is_enabled: boolean;
-            /** Dry Run */
-            readonly dry_run: boolean;
-            /** Trigger */
-            readonly trigger: string;
+            /** Actions */
+            readonly actions: readonly unknown[];
+            /** Cb Execution Count */
+            readonly cb_execution_count: number;
+            /** Cb Tripped */
+            readonly cb_tripped: boolean;
             /** Conditions */
             readonly conditions: {
                 readonly [key: string]: unknown;
             };
-            /** Actions */
-            readonly actions: readonly unknown[];
-            /** Max Executions Per Window */
-            readonly max_executions_per_window: number;
-            /** Window Seconds */
-            readonly window_seconds: number;
-            /** Cb Tripped */
-            readonly cb_tripped: boolean;
-            /** Cb Execution Count */
-            readonly cb_execution_count: number;
-            /** Created By */
-            readonly created_by: string | null;
             /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Created By */
+            readonly created_by: string | null;
+            /** Dry Run */
+            readonly dry_run: boolean;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Is Enabled */
+            readonly is_enabled: boolean;
+            /** Max Executions Per Window */
+            readonly max_executions_per_window: number;
+            /** Name */
+            readonly name: string;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Trigger */
+            readonly trigger: string;
             /**
              * Updated At
              * Format: date-time
              */
             readonly updated_at: string;
+            /** Window Seconds */
+            readonly window_seconds: number;
         };
         /** RuleUpdateRequest */
         readonly RuleUpdateRequest: {
-            /** Name */
-            readonly name?: string | null;
-            /** Trigger */
-            readonly trigger?: string | null;
-            /** Conditions */
-            readonly conditions?: {
-                readonly [key: string]: unknown;
-            } | null;
             /** Actions */
             readonly actions?: readonly {
                 readonly [key: string]: unknown;
             }[] | null;
+            /** Conditions */
+            readonly conditions?: {
+                readonly [key: string]: unknown;
+            } | null;
             /** Dry Run */
             readonly dry_run?: boolean | null;
             /** Is Enabled */
             readonly is_enabled?: boolean | null;
             /** Max Executions Per Window */
             readonly max_executions_per_window?: number | null;
+            /** Name */
+            readonly name?: string | null;
+            /** Trigger */
+            readonly trigger?: string | null;
             /** Window Seconds */
             readonly window_seconds?: number | null;
         };
@@ -4804,28 +5481,27 @@ export interface components {
          * @description Body for ``POST /schedules`` - operator-defined schedule.
          */
         readonly ScheduleCreateIn: {
-            /** Name */
-            readonly name: string;
-            /** Engine */
-            readonly engine: string;
-            /** Kind */
-            readonly kind: string;
-            /** Expression */
-            readonly expression: string;
-            /** Task Name */
-            readonly task_name: string;
-            /**
-             * Timezone
-             * @default UTC
-             */
-            readonly timezone: string;
-            /** Queue */
-            readonly queue?: string | null;
             /**
              * Args
              * @default []
              */
             readonly args: readonly unknown[];
+            /**
+             * Catch Up
+             * @default skip
+             */
+            readonly catch_up: string;
+            /** Engine */
+            readonly engine: string;
+            /** Expression */
+            readonly expression: string;
+            /**
+             * Is Enabled
+             * @default true
+             */
+            readonly is_enabled: boolean;
+            /** Kind */
+            readonly kind: string;
             /**
              * Kwargs
              * @default {}
@@ -4833,16 +5509,12 @@ export interface components {
             readonly kwargs: {
                 readonly [key: string]: unknown;
             };
-            /**
-             * Catch Up
-             * @default skip
-             */
-            readonly catch_up: string;
-            /**
-             * Is Enabled
-             * @default true
-             */
-            readonly is_enabled: boolean;
+            /** Name */
+            readonly name: string;
+            /** Overlap Policy */
+            readonly overlap_policy?: string | null;
+            /** Queue */
+            readonly queue?: string | null;
             /** Scheduler */
             readonly scheduler?: string | null;
             /**
@@ -4852,49 +5524,56 @@ export interface components {
             readonly source: string;
             /** Source Hash */
             readonly source_hash?: string | null;
+            /** Task Name */
+            readonly task_name: string;
+            /**
+             * Timezone
+             * @default UTC
+             */
+            readonly timezone: string;
         };
         /**
          * ScheduleFirePublic
          * @description One historical fire of a schedule (Phase 4 fire-history view).
          */
         readonly ScheduleFirePublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
+            /** Acked At */
+            readonly acked_at: string | null;
+            /** Command Id */
+            readonly command_id: string | null;
+            /** Error Code */
+            readonly error_code: string | null;
+            /** Error Message */
+            readonly error_message: string | null;
             /**
              * Fire Id
              * Format: uuid
              */
             readonly fire_id: string;
             /**
+             * Fired At
+             * Format: date-time
+             */
+            readonly fired_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Latency Ms */
+            readonly latency_ms: number | null;
+            /**
              * Schedule Id
              * Format: uuid
              */
             readonly schedule_id: string;
-            /** Command Id */
-            readonly command_id: string | null;
-            /** Status */
-            readonly status: string;
             /**
              * Scheduled For
              * Format: date-time
              */
             readonly scheduled_for: string;
-            /**
-             * Fired At
-             * Format: date-time
-             */
-            readonly fired_at: string;
-            /** Acked At */
-            readonly acked_at: string | null;
-            /** Latency Ms */
-            readonly latency_ms: number | null;
-            /** Error Code */
-            readonly error_code: string | null;
-            /** Error Message */
-            readonly error_message: string | null;
+            /** Status */
+            readonly status: string;
             /** Triggered By User Id */
             readonly triggered_by_user_id?: string | null;
         };
@@ -4909,87 +5588,97 @@ export interface components {
          */
         readonly ScheduleMisfirePublic: {
             /**
-             * Schedule Id
-             * Format: uuid
-             */
-            readonly schedule_id: string;
-            /**
              * Detected At
              * Format: date-time
              */
             readonly detected_at: string;
-            /** Expected Fire At */
-            readonly expected_fire_at: string | null;
-            /** Lateness Seconds */
-            readonly lateness_seconds: number | null;
-            /** Grace Seconds */
-            readonly grace_seconds: number | null;
-            /** Name */
-            readonly name: string | null;
             /** Engine */
             readonly engine: string | null;
+            /** Expected Fire At */
+            readonly expected_fire_at: string | null;
+            /** Grace Seconds */
+            readonly grace_seconds: number | null;
             /** Kind */
             readonly kind: string | null;
+            /** Lateness Seconds */
+            readonly lateness_seconds: number | null;
+            /** Name */
+            readonly name: string | null;
+            /**
+             * Schedule Id
+             * Format: uuid
+             */
+            readonly schedule_id: string;
         };
         /** SchedulePublic */
         readonly SchedulePublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Engine */
-            readonly engine: string;
-            /** Scheduler */
-            readonly scheduler: string;
-            /** Name */
-            readonly name: string;
-            /** Task Name */
-            readonly task_name: string;
-            /** Kind */
-            readonly kind: string;
-            /** Expression */
-            readonly expression: string;
-            /** Timezone */
-            readonly timezone: string;
-            /** Queue */
-            readonly queue: string | null;
-            /** Priority */
-            readonly priority: string;
             /** Args */
             readonly args: unknown;
-            /** Kwargs */
-            readonly kwargs: unknown;
-            /** Is Enabled */
-            readonly is_enabled: boolean;
-            /** Last Run At */
-            readonly last_run_at: string | null;
-            /** Next Run At */
-            readonly next_run_at: string | null;
-            /** Total Runs */
-            readonly total_runs: number;
-            /** External Id */
-            readonly external_id: string | null;
-            /**
-             * Created At
-             * Format: date-time
-             */
-            readonly created_at: string;
-            /**
-             * Updated At
-             * Format: date-time
-             */
-            readonly updated_at: string;
             /**
              * Catch Up
              * @default skip
              */
             readonly catch_up: string;
+            /** Control Token */
+            readonly control_token?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            readonly created_at: string;
+            /** Engine */
+            readonly engine: string;
+            /** Expression */
+            readonly expression: string;
+            /** External Id */
+            readonly external_id: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Is Enabled */
+            readonly is_enabled: boolean;
+            /** Kind */
+            readonly kind: string;
+            /** Kwargs */
+            readonly kwargs: unknown;
+            /** Last Run At */
+            readonly last_run_at: string | null;
+            /** Legacy Fire Control Token */
+            readonly legacy_fire_control_token?: string | null;
+            /** Name */
+            readonly name: string;
+            /** Next Run At */
+            readonly next_run_at: string | null;
+            /**
+             * Overlap Policy
+             * @default allow
+             */
+            readonly overlap_policy: string;
+            /** Paused At */
+            readonly paused_at?: string | null;
+            /** Priority */
+            readonly priority: string;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Quarantine Code */
+            readonly quarantine_code?: string | null;
+            /** Quarantine Control Token */
+            readonly quarantine_control_token?: string | null;
+            /** Quarantine Detail */
+            readonly quarantine_detail?: string | null;
+            /** Quarantined At */
+            readonly quarantined_at?: string | null;
+            /** Queue */
+            readonly queue: string | null;
+            /** Schedule Revision */
+            readonly schedule_revision?: number | null;
+            /** Scheduler */
+            readonly scheduler: string;
             /**
              * Source
              * @default dashboard
@@ -4997,6 +5686,17 @@ export interface components {
             readonly source: string;
             /** Source Hash */
             readonly source_hash?: string | null;
+            /** Task Name */
+            readonly task_name: string;
+            /** Timezone */
+            readonly timezone: string;
+            /** Total Runs */
+            readonly total_runs: number;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            readonly updated_at: string;
         };
         /**
          * ScheduleUpdateIn
@@ -5017,30 +5717,32 @@ export interface components {
          *     ``_validate_scheduler_in_allowlist`` before persisting it.
          */
         readonly ScheduleUpdateIn: {
-            /** Engine */
-            readonly engine?: string | null;
-            /** Kind */
-            readonly kind?: string | null;
-            /** Expression */
-            readonly expression?: string | null;
-            /** Task Name */
-            readonly task_name?: string | null;
-            /** Timezone */
-            readonly timezone?: string | null;
-            /** Queue */
-            readonly queue?: string | null;
             /** Args */
             readonly args?: readonly unknown[] | null;
+            /** Catch Up */
+            readonly catch_up?: string | null;
+            /** Engine */
+            readonly engine?: string | null;
+            /** Expression */
+            readonly expression?: string | null;
+            /** Is Enabled */
+            readonly is_enabled?: boolean | null;
+            /** Kind */
+            readonly kind?: string | null;
             /** Kwargs */
             readonly kwargs?: {
                 readonly [key: string]: unknown;
             } | null;
-            /** Catch Up */
-            readonly catch_up?: string | null;
-            /** Is Enabled */
-            readonly is_enabled?: boolean | null;
+            /** Overlap Policy */
+            readonly overlap_policy?: string | null;
+            /** Queue */
+            readonly queue?: string | null;
             /** Source Hash */
             readonly source_hash?: string | null;
+            /** Task Name */
+            readonly task_name?: string | null;
+            /** Timezone */
+            readonly timezone?: string | null;
         };
         /**
          * SchedulesListPublic
@@ -5071,10 +5773,16 @@ export interface components {
          * @description Served by ``GET /api-keys/scopes`` so the UI stays in sync.
          */
         readonly ScopeCatalogue: {
-            /** Scopes */
-            readonly scopes: readonly string[];
-            /** Admin Only */
+            /**
+             * Admin Only
+             * @description Subset that only a global-admin session may grant.
+             */
             readonly admin_only: readonly string[];
+            /**
+             * Scopes
+             * @description All scope names that may be requested at key-mint time.
+             */
+            readonly scopes: readonly string[];
         };
         /**
          * SessionPublic
@@ -5086,6 +5794,10 @@ export interface components {
              * Format: uuid
              */
             readonly id: string;
+            /** Ip At Issue */
+            readonly ip_at_issue: string;
+            /** Is Current */
+            readonly is_current: boolean;
             /**
              * Issued At
              * Format: date-time
@@ -5096,12 +5808,8 @@ export interface components {
              * Format: date-time
              */
             readonly last_seen_at: string;
-            /** Ip At Issue */
-            readonly ip_at_issue: string;
             /** User Agent At Issue */
             readonly user_agent_at_issue: string | null;
-            /** Is Current */
-            readonly is_current: boolean;
         };
         /** SessionRevokedResponse */
         readonly SessionRevokedResponse: {
@@ -5114,67 +5822,69 @@ export interface components {
          */
         readonly SettingItem: {
             /**
-             * Name
-             * @description Pydantic field name on Settings.
+             * Description
+             * @description Field description from the Pydantic model, or empty string when the field has no description set.
              */
-            readonly name: string;
-            /**
-             * Value
-             * @description String-rendered effective value. Always a string so the table renderer doesn't have to special-case ints, lists, dicts, etc. Secrets are rendered as ``***``.
-             */
-            readonly value: string;
-            /**
-             * Source
-             * @description Where the value came from: ``env``, ``config.env``, ``secret.env``, ``.env``, or ``default``. Mirrors ``z4j config show`` source labels.
-             */
-            readonly source: string;
+            readonly description: string;
             /**
              * Is Secret
              * @description True when the value was masked. Drives the dashboard's tooltip explaining why the cell shows ``***``.
              */
             readonly is_secret: boolean;
             /**
-             * Description
-             * @description Field description from the Pydantic model, or empty string when the field has no description set.
+             * Name
+             * @description Pydantic field name on Settings.
              */
-            readonly description: string;
+            readonly name: string;
+            /**
+             * Source
+             * @description Where the value came from: ``env``, ``config.env``, ``secret.env``, ``.env``, or ``default``. Mirrors ``z4j config show`` source labels.
+             */
+            readonly source: string;
+            /**
+             * Value
+             * @description String-rendered effective value. Always a string so the table renderer doesn't have to special-case ints, lists, dicts, etc. Secrets are rendered as ``***``.
+             */
+            readonly value: string;
         };
         /**
          * StatsResponse
          * @description The aggregated overview the dashboard's stat cards render.
          */
         readonly StatsResponse: {
-            readonly tasks_by_state: components["schemas"]["TaskStateCounts"];
-            /** Tasks Total */
-            readonly tasks_total: number;
-            /** Tasks Failed 24H */
-            readonly tasks_failed_24h: number;
-            /** Tasks Succeeded 24H */
-            readonly tasks_succeeded_24h: number;
-            /** Failure Rate 24H */
-            readonly failure_rate_24h: number;
-            /** Agents Online */
-            readonly agents_online: number;
             /** Agents Offline */
             readonly agents_offline: number;
-            /** Workers Online */
-            readonly workers_online: number;
-            /** Workers Offline */
-            readonly workers_offline: number;
-            /** Commands Pending */
-            readonly commands_pending: number;
+            /** Agents Online */
+            readonly agents_online: number;
             /** Commands Completed 24H */
             readonly commands_completed_24h: number;
             /** Commands Failed 24H */
             readonly commands_failed_24h: number;
+            /** Commands Pending */
+            readonly commands_pending: number;
             /** Commands Timeout 24H */
             readonly commands_timeout_24h: number;
+            /** Failure Rate 24H */
+            readonly failure_rate_24h: number;
             /**
              * Queue Depths
              * @default []
              */
             readonly queue_depths: readonly components["schemas"]["QueueHealth"][];
             readonly system_health?: components["schemas"]["SystemHealth"] | null;
+            readonly tasks_by_state: components["schemas"]["TaskStateCounts"];
+            /** Tasks Failed 24H */
+            readonly tasks_failed_24h: number;
+            /** Tasks Succeeded 24H */
+            readonly tasks_succeeded_24h: number;
+            /** Tasks Total */
+            readonly tasks_total: number;
+            /** Window Hours */
+            readonly window_hours: number;
+            /** Workers Offline */
+            readonly workers_offline: number;
+            /** Workers Online */
+            readonly workers_online: number;
         };
         /** StatusResponse */
         readonly StatusResponse: {
@@ -5186,19 +5896,19 @@ export interface components {
          * @description Overall system health assessment.
          */
         readonly SystemHealth: {
-            /** Status */
-            readonly status: string;
             /** Agents All Online */
             readonly agents_all_online: boolean;
-            /** Queue Depth Ok */
-            readonly queue_depth_ok: boolean;
-            /** Failure Rate Ok */
-            readonly failure_rate_ok: boolean;
             /**
              * Brain Db Ok
              * @default true
              */
             readonly brain_db_ok: boolean;
+            /** Failure Rate Ok */
+            readonly failure_rate_ok: boolean;
+            /** Queue Depth Ok */
+            readonly queue_depth_ok: boolean;
+            /** Status */
+            readonly status: string;
         };
         /** TaskListResponse */
         readonly TaskListResponse: {
@@ -5207,76 +5917,111 @@ export interface components {
             /** Next Cursor */
             readonly next_cursor: string | null;
         };
+        /**
+         * TaskPriority
+         * @description Business-level priority classification for task instances.
+         *
+         *     This is a z4j-side semantic layer - it does NOT control Celery
+         *     queue routing or execution order. It controls:
+         *
+         *     - **Notification routing**: critical failures page someone at
+         *       3am; low-priority failures just log.
+         *     - **Dashboard prominence**: critical tasks surface first.
+         *     - **SLA tracking**: critical tasks get tighter expected-duration
+         *       windows.
+         *     - **Export/filter**: operators filter by priority to find the
+         *       needle in the haystack.
+         *
+         *     Assigned via ``@z4j_meta(priority="critical")`` on the task
+         *     definition. Tasks without explicit priority default to NORMAL.
+         * @enum {string}
+         */
+        readonly TaskPriority: "critical" | "high" | "normal" | "low";
         /** TaskPublic */
         readonly TaskPublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Engine */
-            readonly engine: string;
-            /** Task Id */
-            readonly task_id: string;
-            /** Name */
-            readonly name: string;
-            /** Queue */
-            readonly queue: string | null;
-            /** State */
-            readonly state: string;
-            /**
-             * Priority
-             * @default normal
-             */
-            readonly priority: string;
             /** Args */
             readonly args: unknown | null;
-            /** Kwargs */
-            readonly kwargs: unknown | null;
-            /** Result */
-            readonly result: unknown | null;
-            /** Exception */
-            readonly exception: string | null;
-            /** Traceback */
-            readonly traceback: string | null;
-            /** Retry Count */
-            readonly retry_count: number;
-            /** Eta */
-            readonly eta: string | null;
-            /** Received At */
-            readonly received_at: string | null;
-            /** Started At */
-            readonly started_at: string | null;
-            /** Finished At */
-            readonly finished_at: string | null;
-            /** Runtime Ms */
-            readonly runtime_ms: number | null;
-            /** Worker Name */
-            readonly worker_name: string | null;
-            /** Parent Task Id */
-            readonly parent_task_id: string | null;
-            /** Root Task Id */
-            readonly root_task_id: string | null;
-            /** Tags */
-            readonly tags: readonly string[];
             /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Engine */
+            readonly engine: string;
+            /** Eta */
+            readonly eta: string | null;
+            /** Exception */
+            readonly exception: string | null;
+            /** Finished At */
+            readonly finished_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Kwargs */
+            readonly kwargs: unknown | null;
+            /** Name */
+            readonly name: string;
+            /** Parent Task Id */
+            readonly parent_task_id: string | null;
+            /**
+             * Priority
+             * @default normal
+             */
+            readonly priority: string;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Queue */
+            readonly queue: string | null;
+            /** Received At */
+            readonly received_at: string | null;
+            /** Result */
+            readonly result: unknown | null;
+            /** Retry Count */
+            readonly retry_count: number;
+            /** Root Task Id */
+            readonly root_task_id: string | null;
+            /** Runtime Ms */
+            readonly runtime_ms: number | null;
+            /** Started At */
+            readonly started_at: string | null;
+            /** State */
+            readonly state: string;
+            /** Tags */
+            readonly tags: readonly string[];
+            /** Task Id */
+            readonly task_id: string;
+            /** Traceback */
+            readonly traceback: string | null;
             /**
              * Updated At
              * Format: date-time
              */
             readonly updated_at: string;
+            /** Worker Name */
+            readonly worker_name: string | null;
         };
+        /**
+         * TaskState
+         * @description Lifecycle state of a task instance.
+         *
+         *     Values map directly to Celery task states plus a few z4j-specific
+         *     additions. Other queue engines' states are mapped to the closest
+         *     value at the adapter boundary.
+         * @enum {string}
+         */
+        readonly TaskState: "pending" | "received" | "started" | "success" | "failure" | "retry" | "revoked" | "rejected" | "unknown";
         /** TaskStateCounts */
         readonly TaskStateCounts: {
+            /**
+             * Failure
+             * @default 0
+             */
+            readonly failure: number;
             /**
              * Pending
              * @default 0
@@ -5288,20 +6033,10 @@ export interface components {
              */
             readonly received: number;
             /**
-             * Started
+             * Rejected
              * @default 0
              */
-            readonly started: number;
-            /**
-             * Success
-             * @default 0
-             */
-            readonly success: number;
-            /**
-             * Failure
-             * @default 0
-             */
-            readonly failure: number;
+            readonly rejected: number;
             /**
              * Retry
              * @default 0
@@ -5313,10 +6048,15 @@ export interface components {
              */
             readonly revoked: number;
             /**
-             * Rejected
+             * Started
              * @default 0
              */
-            readonly rejected: number;
+            readonly started: number;
+            /**
+             * Success
+             * @default 0
+             */
+            readonly success: number;
             /**
              * Unknown
              * @default 0
@@ -5328,20 +6068,20 @@ export interface components {
          * @description One node in the canvas-tree response.
          */
         readonly TaskTreeNode: {
-            /** Task Id */
-            readonly task_id: string;
-            /** Name */
-            readonly name: string;
-            /** State */
-            readonly state: string;
-            /** Parent Task Id */
-            readonly parent_task_id: string | null;
-            /** Root Task Id */
-            readonly root_task_id: string | null;
-            /** Received At */
-            readonly received_at: string | null;
             /** Finished At */
             readonly finished_at: string | null;
+            /** Name */
+            readonly name: string;
+            /** Parent Task Id */
+            readonly parent_task_id: string | null;
+            /** Received At */
+            readonly received_at: string | null;
+            /** Root Task Id */
+            readonly root_task_id: string | null;
+            /** State */
+            readonly state: string;
+            /** Task Id */
+            readonly task_id: string;
         };
         /**
          * TaskTreeResponse
@@ -5357,24 +6097,19 @@ export interface components {
          *     the root is the task itself.
          */
         readonly TaskTreeResponse: {
-            /** Root Task Id */
-            readonly root_task_id: string;
             /** Node Count */
             readonly node_count: number;
-            /** Truncated */
-            readonly truncated: boolean;
             /** Nodes */
             readonly nodes: readonly components["schemas"]["TaskTreeNode"][];
+            /** Root Task Id */
+            readonly root_task_id: string;
+            /** Truncated */
+            readonly truncated: boolean;
         };
         /** TrendBucket */
         readonly TrendBucket: {
-            /** T */
-            readonly t: string;
-            /**
-             * Success
-             * @default 0
-             */
-            readonly success: number;
+            /** Avg Runtime Ms */
+            readonly avg_runtime_ms?: number | null;
             /**
              * Failure
              * @default 0
@@ -5391,53 +6126,61 @@ export interface components {
              */
             readonly revoked: number;
             /**
+             * Success
+             * @default 0
+             */
+            readonly success: number;
+            /**
+             * T
+             * Format: date-time
+             */
+            readonly t: string;
+            /**
              * Total
              * @default 0
              */
             readonly total: number;
-            /** Avg Runtime Ms */
-            readonly avg_runtime_ms?: number | null;
         };
         /** TrendsResponse */
         readonly TrendsResponse: {
-            /** Window */
-            readonly window: string;
             /** Bucket */
             readonly bucket: string;
             /** Series */
             readonly series: readonly components["schemas"]["TrendBucket"][];
+            /** Window */
+            readonly window: string;
         };
         /** TrustedDevicePublic */
         readonly TrustedDevicePublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /** Label */
-            readonly label: string;
             /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
             /**
-             * Last Seen At
-             * Format: date-time
-             */
-            readonly last_seen_at: string;
-            /**
              * Expires At
              * Format: date-time
              */
             readonly expires_at: string;
-            /** Revoked At */
-            readonly revoked_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
             /**
              * Is Current
-             * @description True iff the inbound z4j_mfa_trust cookie matches this device row. Used by the dashboard to label the row 'this device' in the list.
+             * @description True iff the inbound z4j_mfa_trust cookie matches this device row and the row is unrevoked and unexpired. Used by the dashboard to label the active row 'this device'.
              */
             readonly is_current: boolean;
+            /** Label */
+            readonly label: string;
+            /**
+             * Last Seen At
+             * Format: date-time
+             */
+            readonly last_seen_at: string;
+            /** Revoked At */
+            readonly revoked_at: string | null;
         };
         /** TrustedDeviceRename */
         readonly TrustedDeviceRename: {
@@ -5464,75 +6207,75 @@ export interface components {
          *     remains the canonical render field (derived if absent).
          */
         readonly UpdateProfileRequest: {
+            /** Display Name */
+            readonly display_name?: string | null;
             /** First Name */
             readonly first_name?: string | null;
             /** Last Name */
             readonly last_name?: string | null;
-            /** Display Name */
-            readonly display_name?: string | null;
             /** Timezone */
             readonly timezone?: string | null;
         };
         /** UpdateProjectRequest */
         readonly UpdateProjectRequest: {
-            /** Slug */
-            readonly slug?: string | null;
-            /** Name */
-            readonly name?: string | null;
+            /** Allowed Schedulers */
+            readonly allowed_schedulers?: readonly string[] | null;
+            /** Default Scheduler Owner */
+            readonly default_scheduler_owner?: string | null;
             /** Description */
             readonly description?: string | null;
             /** Environment */
             readonly environment?: string | null;
+            /** Name */
+            readonly name?: string | null;
+            /** Slug */
+            readonly slug?: string | null;
             /** Timezone */
             readonly timezone?: string | null;
-            /** Default Scheduler Owner */
-            readonly default_scheduler_owner?: string | null;
-            /** Allowed Schedulers */
-            readonly allowed_schedulers?: readonly string[] | null;
         };
         /** UpdateUserRequest */
         readonly UpdateUserRequest: {
-            /** First Name */
-            readonly first_name?: string | null;
-            /** Last Name */
-            readonly last_name?: string | null;
             /** Display Name */
             readonly display_name?: string | null;
-            /** Is Admin */
-            readonly is_admin?: boolean | null;
+            /** First Name */
+            readonly first_name?: string | null;
             /** Is Active */
             readonly is_active?: boolean | null;
+            /** Is Admin */
+            readonly is_admin?: boolean | null;
+            /** Last Name */
+            readonly last_name?: string | null;
             /** Timezone */
             readonly timezone?: string | null;
         };
         /** UserAdminPublic */
         readonly UserAdminPublic: {
             /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /** Email */
-            readonly email: string;
-            /** First Name */
-            readonly first_name: string | null;
-            /** Last Name */
-            readonly last_name: string | null;
-            /** Display Name */
-            readonly display_name: string | null;
-            /** Is Admin */
-            readonly is_admin: boolean;
-            /** Is Active */
-            readonly is_active: boolean;
-            /** Timezone */
-            readonly timezone: string;
-            /** Last Login At */
-            readonly last_login_at: string | null;
-            /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Display Name */
+            readonly display_name: string | null;
+            /** Email */
+            readonly email: string;
+            /** First Name */
+            readonly first_name: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Is Active */
+            readonly is_active: boolean;
+            /** Is Admin */
+            readonly is_admin: boolean;
+            /** Last Login At */
+            readonly last_login_at: string | null;
+            /** Last Name */
+            readonly last_name: string | null;
+            /** Timezone */
+            readonly timezone: string;
             /**
              * Updated At
              * Format: date-time
@@ -5541,10 +6284,6 @@ export interface components {
         };
         /** UserChannelCreate */
         readonly UserChannelCreate: {
-            /** Name */
-            readonly name: string;
-            /** Type */
-            readonly type: string;
             /** Config */
             readonly config?: {
                 readonly [key: string]: unknown;
@@ -5554,6 +6293,10 @@ export interface components {
              * @default true
              */
             readonly is_active: boolean;
+            /** Name */
+            readonly name: string;
+            /** Type */
+            readonly type: string;
         };
         /**
          * UserChannelImportFromProjectRequest
@@ -5570,8 +6313,6 @@ export interface components {
          *     channel must belong to that project.
          */
         readonly UserChannelImportFromProjectRequest: {
-            /** Project Slug */
-            readonly project_slug: string;
             /**
              * Channel Id
              * Format: uuid
@@ -5582,31 +6323,33 @@ export interface components {
              * @description Override the imported channel's name. Defaults to 'Copy of {original}' if omitted.
              */
             readonly name?: string | null;
+            /** Project Slug */
+            readonly project_slug: string;
         };
         /** UserChannelPublic */
         readonly UserChannelPublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /** Name */
-            readonly name: string;
-            /** Type */
-            readonly type: string;
             /** Config */
             readonly config: {
                 readonly [key: string]: unknown;
             };
-            /** Is Verified */
-            readonly is_verified: boolean;
-            /** Is Active */
-            readonly is_active: boolean;
             /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Is Active */
+            readonly is_active: boolean;
+            /** Is Verified */
+            readonly is_verified: boolean;
+            /** Name */
+            readonly name: string;
+            /** Type */
+            readonly type: string;
             /**
              * Updated At
              * Format: date-time
@@ -5615,14 +6358,14 @@ export interface components {
         };
         /** UserChannelUpdate */
         readonly UserChannelUpdate: {
-            /** Name */
-            readonly name?: string | null;
             /** Config */
             readonly config?: {
                 readonly [key: string]: unknown;
             } | null;
             /** Is Active */
             readonly is_active?: boolean | null;
+            /** Name */
+            readonly name?: string | null;
         };
         /**
          * UserMePublic
@@ -5630,29 +6373,32 @@ export interface components {
          */
         readonly UserMePublic: {
             /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /** Email */
-            readonly email: string;
-            /** First Name */
-            readonly first_name: string | null;
-            /** Last Name */
-            readonly last_name: string | null;
-            /** Display Name */
-            readonly display_name: string | null;
-            /** Is Admin */
-            readonly is_admin: boolean;
-            /** Timezone */
-            readonly timezone: string;
-            /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
-            /** Memberships */
+            /** Display Name */
+            readonly display_name: string | null;
+            /** Email */
+            readonly email: string;
+            /** First Name */
+            readonly first_name: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Is Admin */
+            readonly is_admin: boolean;
+            /** Last Name */
+            readonly last_name: string | null;
+            /**
+             * Memberships
+             * @description Project-switcher memberships visible to this user. For a global admin these are synthesized with role=admin from at most the first 500 projects returned by the bounded project query; this field is not a complete project catalogue on installations above that cap.
+             */
             readonly memberships: readonly components["schemas"]["UserMembershipSummary"][];
+            /** Timezone */
+            readonly timezone: string;
         };
         /**
          * UserMembershipSummary
@@ -5681,20 +6427,31 @@ export interface components {
         };
         /** UserMini */
         readonly UserMini: {
+            /** Display Name */
+            readonly display_name: string | null;
+            /** Email */
+            readonly email: string;
             /**
              * Id
              * Format: uuid
              */
             readonly id: string;
-            /** Email */
-            readonly email: string;
-            /** Display Name */
-            readonly display_name: string | null;
             /** Is Admin */
             readonly is_admin: boolean;
         };
         /** UserNotificationPublic */
         readonly UserNotificationPublic: {
+            /** Body */
+            readonly body: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            readonly created_at: string;
+            /** Data */
+            readonly data: {
+                readonly [key: string]: unknown;
+            };
             /**
              * Id
              * Format: uuid
@@ -5705,27 +6462,16 @@ export interface components {
              * Format: uuid
              */
             readonly project_id: string;
-            /** Subscription Id */
-            readonly subscription_id: string | null;
-            /** Trigger */
-            readonly trigger: string;
-            /** Reason */
-            readonly reason: string;
-            /** Title */
-            readonly title: string;
-            /** Body */
-            readonly body: string | null;
-            /** Data */
-            readonly data: {
-                readonly [key: string]: unknown;
-            };
             /** Read At */
             readonly read_at: string | null;
-            /**
-             * Created At
-             * Format: date-time
-             */
-            readonly created_at: string;
+            /** Reason */
+            readonly reason: string;
+            /** Subscription Id */
+            readonly subscription_id: string | null;
+            /** Title */
+            readonly title: string;
+            /** Trigger */
+            readonly trigger: string;
         };
         /**
          * UserPublic
@@ -5737,37 +6483,35 @@ export interface components {
          */
         readonly UserPublic: {
             /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /** Email */
-            readonly email: string;
-            /** First Name */
-            readonly first_name: string | null;
-            /** Last Name */
-            readonly last_name: string | null;
-            /** Display Name */
-            readonly display_name: string | null;
-            /** Is Admin */
-            readonly is_admin: boolean;
-            /** Timezone */
-            readonly timezone: string;
-            /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Display Name */
+            readonly display_name: string | null;
+            /** Email */
+            readonly email: string;
+            /** First Name */
+            readonly first_name: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Is Admin */
+            readonly is_admin: boolean;
+            /** Last Name */
+            readonly last_name: string | null;
+            /** Timezone */
+            readonly timezone: string;
         };
         /** UserSubscriptionCreate */
         readonly UserSubscriptionCreate: {
             /**
-             * Project Id
-             * Format: uuid
+             * Cooldown Seconds
+             * @default 0
              */
-            readonly project_id: string;
-            /** Trigger */
-            readonly trigger: string;
+            readonly cooldown_seconds: number;
             readonly filters?: components["schemas"]["z4j_brain__api__user_notifications__SubscriptionFilters"];
             /**
              * In App
@@ -5776,26 +6520,6 @@ export interface components {
             readonly in_app: boolean;
             /** Project Channel Ids */
             readonly project_channel_ids?: readonly string[];
-            /** User Channel Ids */
-            readonly user_channel_ids?: readonly string[];
-            /**
-             * Cooldown Seconds
-             * @default 0
-             */
-            readonly cooldown_seconds: number;
-        };
-        /** UserSubscriptionPublic */
-        readonly UserSubscriptionPublic: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            readonly id: string;
-            /**
-             * User Id
-             * Format: uuid
-             */
-            readonly user_id: string;
             /**
              * Project Id
              * Format: uuid
@@ -5803,60 +6527,84 @@ export interface components {
             readonly project_id: string;
             /** Trigger */
             readonly trigger: string;
-            /** Filters */
-            readonly filters: {
-                readonly [key: string]: unknown;
-            };
-            /** In App */
-            readonly in_app: boolean;
-            /** Project Channel Ids */
-            readonly project_channel_ids: readonly string[];
             /** User Channel Ids */
-            readonly user_channel_ids: readonly string[];
-            /** Muted Until */
-            readonly muted_until: string | null;
+            readonly user_channel_ids?: readonly string[];
+        };
+        /** UserSubscriptionPublic */
+        readonly UserSubscriptionPublic: {
             /** Cooldown Seconds */
             readonly cooldown_seconds: number;
-            /** Last Fired At */
-            readonly last_fired_at: string | null;
-            /** Is Active */
-            readonly is_active: boolean;
             /**
              * Created At
              * Format: date-time
              */
             readonly created_at: string;
+            /** Filters */
+            readonly filters: {
+                readonly [key: string]: unknown;
+            };
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** In App */
+            readonly in_app: boolean;
+            /** Is Active */
+            readonly is_active: boolean;
+            /** Last Fired At */
+            readonly last_fired_at: string | null;
+            /** Muted Until */
+            readonly muted_until: string | null;
+            /** Project Channel Ids */
+            readonly project_channel_ids: readonly string[];
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Trigger */
+            readonly trigger: string;
             /**
              * Updated At
              * Format: date-time
              */
             readonly updated_at: string;
+            /** User Channel Ids */
+            readonly user_channel_ids: readonly string[];
+            /**
+             * User Id
+             * Format: uuid
+             */
+            readonly user_id: string;
         };
         /**
          * UserSubscriptionUpdate
          * @description Body for ``PATCH /user/subscriptions/{sub_id}``.
          *
-         *     Every field is optional; only keys actually present mutate the
-         *     row. v1.0.18 added ``trigger`` for parity with the project
-         *     default-subscription update endpoint - lets users rename a
-         *     subscription without delete-and-recreate.
+         *     Every field is optional. Non-null values mutate the row;
+         *     ``muted_until`` additionally treats an explicit JSON ``null`` as
+         *     "clear the mute", while omitting it preserves the existing value.
+         *     v1.0.18 added ``trigger`` for parity with the project default-
+         *     subscription update endpoint - lets users rename a subscription
+         *     without delete-and-recreate.
          */
         readonly UserSubscriptionUpdate: {
-            /** Trigger */
-            readonly trigger?: string | null;
+            /** Cooldown Seconds */
+            readonly cooldown_seconds?: number | null;
             readonly filters?: components["schemas"]["z4j_brain__api__user_notifications__SubscriptionFilters"] | null;
             /** In App */
             readonly in_app?: boolean | null;
-            /** Project Channel Ids */
-            readonly project_channel_ids?: readonly string[] | null;
-            /** User Channel Ids */
-            readonly user_channel_ids?: readonly string[] | null;
-            /** Cooldown Seconds */
-            readonly cooldown_seconds?: number | null;
-            /** Muted Until */
-            readonly muted_until?: string | null;
             /** Is Active */
             readonly is_active?: boolean | null;
+            /** Muted Until */
+            readonly muted_until?: string | null;
+            /** Project Channel Ids */
+            readonly project_channel_ids?: readonly string[] | null;
+            /** Trigger */
+            readonly trigger?: string | null;
+            /** User Channel Ids */
+            readonly user_channel_ids?: readonly string[] | null;
         };
         /**
          * UserSubscriptionsListPublic
@@ -5880,16 +6628,16 @@ export interface components {
         };
         /** ValidationError */
         readonly ValidationError: {
+            /** Context */
+            readonly ctx?: Record<string, never>;
+            /** Input */
+            readonly input?: unknown;
             /** Location */
             readonly loc: readonly (string | number)[];
             /** Message */
             readonly msg: string;
             /** Error Type */
             readonly type: string;
-            /** Input */
-            readonly input?: unknown;
-            /** Context */
-            readonly ctx?: Record<string, never>;
         };
         /** VerifyRequest */
         readonly VerifyRequest: {
@@ -5897,7 +6645,7 @@ export interface components {
             readonly code: string;
             /**
              * Remember Device
-             * @description If True, the brain mints a ``z4j_mfa_trust`` cookie bound to the device so subsequent logins from this browser skip the MFA second step until the cookie expires (default 30 days; configurable via ``Z4J_MFA_REMEMBER_DEVICE_DAYS``).
+             * @description If True, the brain mints a ``z4j_mfa_trust`` cookie whose hash is stored in a server-side row scoped to the user. A later login presenting that cookie skips the MFA second step until the cookie or server row expires (default 30 days; configurable via ``Z4J_MFA_REMEMBER_DEVICE_DAYS``).
              * @default false
              */
             readonly remember_device: boolean;
@@ -5909,49 +6657,30 @@ export interface components {
              * @default true
              */
             readonly ok: boolean;
+            /** Remaining Recovery Codes */
+            readonly remaining_recovery_codes?: number | null;
             /**
              * Used Recovery Code
              * @description True when a recovery code was redeemed. The dashboard uses this to prompt the user to regenerate codes.
              * @default false
              */
             readonly used_recovery_code: boolean;
-            /** Remaining Recovery Codes */
-            readonly remaining_recovery_codes?: number | null;
         };
         /**
          * VersionsSnapshotPublic
          * @description Slim DTO of the brain's currently-cached versions snapshot.
          */
         readonly VersionsSnapshotPublic: {
-            /** Schema Version */
-            readonly schema_version: number;
-            /**
-             * Generated At
-             * @description When the snapshot was minted (ISO-8601 UTC). For the bundled snapshot, this is the brain release date.
-             */
-            readonly generated_at: string;
-            /**
-             * Generated By
-             * @description Which release minted the snapshot, e.g. ``z4j@1.4.0``.
-             */
-            readonly generated_by: string;
             /**
              * Canonical Url
              * @description Self-reported source URL written into the snapshot at generation time. Operators can verify by visiting this URL in a browser.
              */
             readonly canonical_url: string;
             /**
-             * Packages
-             * @description Map of package name to latest known SemVer string.
+             * Check For Updates Url
+             * @description Configured ``Z4J_VERSION_CHECK_URL``. Empty string when the operator has disabled the check; the dashboard hides the *Check for updates* button in that case.
              */
-            readonly packages: {
-                readonly [key: string]: string;
-            };
-            /**
-             * Source
-             * @description Where the brain got the snapshot from: ``bundled`` (file shipped with the brain wheel) or ``remote`` (operator-initiated *Check for updates* fetched it from ``Z4J_VERSION_CHECK_URL``).
-             */
-            readonly source: string;
+            readonly check_for_updates_url: string;
             /**
              * Fetched At
              * @description When the operator-initiated remote refresh ran (UTC ISO-8601). Null if the brain is still on the bundled snapshot.
@@ -5963,136 +6692,173 @@ export interface components {
              */
             readonly fetched_from?: string | null;
             /**
-             * Check For Updates Url
-             * @description Configured ``Z4J_VERSION_CHECK_URL``. Empty string when the operator has disabled the check; the dashboard hides the *Check for updates* button in that case.
+             * Generated At
+             * @description When the snapshot was minted (ISO-8601 UTC). For the bundled snapshot, this is the brain release date.
              */
-            readonly check_for_updates_url: string;
+            readonly generated_at: string;
+            /**
+             * Generated By
+             * @description Which release minted the snapshot, e.g. ``z4j@1.4.0``.
+             */
+            readonly generated_by: string;
+            /**
+             * Packages
+             * @description Map of package name to latest known SemVer string.
+             */
+            readonly packages: {
+                readonly [key: string]: string;
+            };
+            /** Schema Version */
+            readonly schema_version: number;
+            /**
+             * Source
+             * @description Where the brain got the snapshot from: ``bundled`` (file shipped with the brain wheel) or ``remote`` (operator-initiated *Check for updates* fetched it from ``Z4J_VERSION_CHECK_URL``).
+             */
+            readonly source: string;
         };
         /**
          * WorkerDetailPublic
          * @description Extended worker data from control.inspect().
          */
         readonly WorkerDetailPublic: {
+            /** Active Tasks */
+            readonly active_tasks: number;
+            /** Concurrency */
+            readonly concurrency: number | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            readonly created_at: string;
+            /** Engine */
+            readonly engine: string;
+            /**
+             * Failed
+             * @default 0
+             */
+            readonly failed: number;
+            /** Hostname */
+            readonly hostname: string | null;
             /**
              * Id
              * Format: uuid
              */
             readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Engine */
-            readonly engine: string;
-            /** Name */
-            readonly name: string;
-            /** Hostname */
-            readonly hostname: string | null;
-            /** Pid */
-            readonly pid: number | null;
-            /** Concurrency */
-            readonly concurrency: number | null;
-            /** Queues */
-            readonly queues: readonly string[];
-            /** State */
-            readonly state: string;
             /** Last Heartbeat */
             readonly last_heartbeat: string | null;
             /** Load Average */
             readonly load_average?: readonly number[] | null;
-            /** Active Tasks */
-            readonly active_tasks: number;
+            /** Metadata */
+            readonly metadata?: {
+                readonly [key: string]: unknown;
+            };
+            /** Name */
+            readonly name: string;
+            /** Pid */
+            readonly pid: number | null;
             /**
              * Processed
              * @default 0
              */
             readonly processed: number;
             /**
-             * Failed
-             * @default 0
+             * Project Id
+             * Format: uuid
              */
-            readonly failed: number;
-            /**
-             * Succeeded
-             * @default 0
-             */
-            readonly succeeded: number;
+            readonly project_id: string;
+            /** Queues */
+            readonly queues: readonly string[];
             /**
              * Retried
              * @default 0
              */
             readonly retried: number;
+            /** State */
+            readonly state: string;
             /**
-             * Created At
-             * Format: date-time
+             * Succeeded
+             * @default 0
              */
-            readonly created_at: string;
+            readonly succeeded: number;
+        };
+        /**
+         * WorkerLintPublic
+         * @description Lint results for a single worker.
+         */
+        readonly WorkerLintPublic: {
+            /** Engine */
+            readonly engine: string;
+            /** Evaluated */
+            readonly evaluated: boolean;
+            /** Findings */
+            readonly findings: readonly components["schemas"]["LintFindingPublic"][];
+            /** Hostname */
+            readonly hostname: string | null;
             /**
-             * Metadata
-             * @default {}
+             * Worker Id
+             * Format: uuid
              */
-            readonly metadata: {
-                readonly [key: string]: unknown;
-            };
+            readonly worker_id: string;
+            /** Worker Name */
+            readonly worker_name: string;
         };
         /** WorkerPublic */
         readonly WorkerPublic: {
+            /** Active Tasks */
+            readonly active_tasks: number;
+            /** Concurrency */
+            readonly concurrency: number | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            readonly created_at: string;
+            /** Engine */
+            readonly engine: string;
+            /**
+             * Failed
+             * @default 0
+             */
+            readonly failed: number;
+            /** Hostname */
+            readonly hostname: string | null;
             /**
              * Id
              * Format: uuid
              */
             readonly id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            readonly project_id: string;
-            /** Engine */
-            readonly engine: string;
-            /** Name */
-            readonly name: string;
-            /** Hostname */
-            readonly hostname: string | null;
-            /** Pid */
-            readonly pid: number | null;
-            /** Concurrency */
-            readonly concurrency: number | null;
-            /** Queues */
-            readonly queues: readonly string[];
-            /** State */
-            readonly state: string;
             /** Last Heartbeat */
             readonly last_heartbeat: string | null;
             /** Load Average */
             readonly load_average?: readonly number[] | null;
-            /** Active Tasks */
-            readonly active_tasks: number;
+            /** Name */
+            readonly name: string;
+            /** Pid */
+            readonly pid: number | null;
             /**
              * Processed
              * @default 0
              */
             readonly processed: number;
             /**
-             * Failed
-             * @default 0
+             * Project Id
+             * Format: uuid
              */
-            readonly failed: number;
-            /**
-             * Succeeded
-             * @default 0
-             */
-            readonly succeeded: number;
+            readonly project_id: string;
+            /** Queues */
+            readonly queues: readonly string[];
             /**
              * Retried
              * @default 0
              */
             readonly retried: number;
+            /** State */
+            readonly state: string;
             /**
-             * Created At
-             * Format: date-time
+             * Succeeded
+             * @default 0
              */
-            readonly created_at: string;
+            readonly succeeded: number;
         };
         /**
          * SubscriptionFilters
@@ -6115,12 +6881,12 @@ export interface components {
         readonly z4j_brain__api__notifications__SubscriptionFilters: {
             /** Priority */
             readonly priority?: readonly ("critical" | "high" | "normal" | "low")[] | null;
+            /** Queue */
+            readonly queue?: string | null;
             /** Task Name */
             readonly task_name?: string | null;
             /** Task Name Pattern */
             readonly task_name_pattern?: string | null;
-            /** Queue */
-            readonly queue?: string | null;
         };
         /**
          * SubscriptionFilters
@@ -6143,12 +6909,12 @@ export interface components {
         readonly z4j_brain__api__user_notifications__SubscriptionFilters: {
             /** Priority */
             readonly priority?: readonly ("critical" | "high" | "normal" | "low")[] | null;
+            /** Queue */
+            readonly queue?: string | null;
             /** Task Name */
             readonly task_name?: string | null;
             /** Task Name Pattern */
             readonly task_name_pattern?: string | null;
-            /** Queue */
-            readonly queue?: string | null;
         };
     };
     responses: never;
@@ -6159,9 +6925,19 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    readonly health_api_v1_health_get: {
+    readonly list_activity_api_v1_activity_get: {
         readonly parameters: {
-            readonly query?: never;
+            readonly query?: {
+                readonly limit?: number;
+                /** @description Return only rows newer than this cursor. Use for live polling; the response's ``newest_cursor`` is the next ``since_cursor``. Format: ``<iso_occurred_at>|<uuid>``. */
+                readonly since_cursor?: string | null;
+                /** @description Return only rows older than this cursor. Use for backwards pagination; the response's ``next_before_cursor`` is the next ``before_cursor``. */
+                readonly before_cursor?: string | null;
+                /** @description Literal action-name prefix filter (LIKE metachars escaped). */
+                readonly action_prefix?: string | null;
+                /** @description Constrain to a single project slug (must be in caller's accessible set). */
+                readonly project_slug?: string | null;
+            };
             readonly header?: never;
             readonly path?: never;
             readonly cookie?: never;
@@ -6174,14 +6950,21 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": {
-                        readonly [key: string]: string;
-                    };
+                    readonly "application/json": components["schemas"]["ActivityListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
     };
-    readonly health_ready_api_v1_health_ready_get: {
+    readonly get_effective_settings_api_v1_admin_settings_get: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -6196,14 +6979,12 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": {
-                        readonly [key: string]: string;
-                    };
+                    readonly "application/json": components["schemas"]["AdminSettingsResponse"];
                 };
             };
         };
     };
-    readonly health_system_api_v1_health_system_get: {
+    readonly get_versions_snapshot_api_v1_admin_system_versions_get: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -6218,9 +6999,235 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": {
-                        readonly [key: string]: unknown;
-                    };
+                    readonly "application/json": components["schemas"]["VersionsSnapshotPublic"];
+                };
+            };
+        };
+    };
+    readonly check_for_updates_api_v1_admin_system_versions_check_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["VersionsSnapshotPublic"];
+                };
+            };
+        };
+    };
+    readonly agent_commands_api_v1_agent_commands_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly wait?: number;
+                readonly max_frames?: number;
+            };
+            readonly header?: {
+                readonly authorization?: string | null;
+                readonly "X-Z4J-Session-Nonce"?: string | null;
+                readonly "X-Z4J-Runtime-Features"?: string | null;
+                readonly "X-Z4J-Retry-Contracts"?: string | null;
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPullResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly agent_events_api_v1_agent_events_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: {
+                readonly authorization?: string | null;
+                readonly "X-Z4J-Session-Nonce"?: string | null;
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["FrameUploadBody"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["FrameUploadResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_api_keys_api_v1_api_keys_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["ApiKeyPublic"][];
+                };
+            };
+        };
+    };
+    readonly create_api_key_api_v1_api_keys_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["CreateApiKeyRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiKeyCreated"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_scopes_api_v1_api_keys_scopes_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ScopeCatalogue"];
+                };
+            };
+        };
+    };
+    readonly revoke_api_key_api_v1_api_keys__key_id__delete: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly key_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly change_password_api_v1_auth_change_password_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ChangePasswordRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["LoginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -6273,26 +7280,6 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content?: never;
-            };
-        };
-    };
-    readonly password_policy_api_v1_auth_policy_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["PasswordPolicyPublic"];
-                };
             };
         };
     };
@@ -6349,7 +7336,7 @@ export interface operations {
             };
         };
     };
-    readonly change_password_api_v1_auth_change_password_post: {
+    readonly disable_api_v1_auth_mfa_disable_post: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -6358,7 +7345,7 @@ export interface operations {
         };
         readonly requestBody: {
             readonly content: {
-                readonly "application/json": components["schemas"]["ChangePasswordRequest"];
+                readonly "application/json": components["schemas"]["DisableRequest"];
             };
         };
         readonly responses: {
@@ -6368,7 +7355,7 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["LoginResponse"];
+                    readonly "application/json": components["schemas"]["VerifyResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6378,143 +7365,6 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_sessions_api_v1_auth_sessions_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["SessionPublic"][];
-                };
-            };
-        };
-    };
-    readonly revoke_session_api_v1_auth_sessions__session_id__revoke_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly session_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["SessionRevokedResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly password_reset_request_api_v1_auth_password_reset_request_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["PasswordResetRequestBody"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["PasswordResetRequestResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly password_reset_confirm_api_v1_auth_password_reset_confirm_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["PasswordResetConfirmBody"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["PasswordResetConfirmResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly enroll_start_api_v1_auth_mfa_enroll_start_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["EnrollStartResponse"];
                 };
             };
         };
@@ -6552,18 +7402,14 @@ export interface operations {
             };
         };
     };
-    readonly verify_api_v1_auth_mfa_verify_post: {
+    readonly enroll_start_api_v1_auth_mfa_enroll_start_post: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
             readonly path?: never;
             readonly cookie?: never;
         };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["VerifyRequest"];
-            };
-        };
+        readonly requestBody?: never;
         readonly responses: {
             /** @description Successful Response */
             readonly 200: {
@@ -6571,49 +7417,7 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["VerifyResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly disable_api_v1_auth_mfa_disable_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["DisableRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["VerifyResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                    readonly "application/json": components["schemas"]["EnrollStartResponse"];
                 };
             };
         };
@@ -6698,35 +7502,6 @@ export interface operations {
             };
         };
     };
-    readonly revoke_trusted_device_api_v1_auth_mfa_trusted_devices__device_id__revoke_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly device_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 204: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     readonly rename_trusted_device_api_v1_auth_mfa_trusted_devices__device_id__patch: {
         readonly parameters: {
             readonly query?: never;
@@ -6762,27 +7537,36 @@ export interface operations {
             };
         };
     };
-    readonly status_endpoint_api_v1_setup_status_get: {
+    readonly revoke_trusted_device_api_v1_auth_mfa_trusted_devices__device_id__revoke_post: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
-            readonly path?: never;
+            readonly path: {
+                readonly device_id: string;
+            };
             readonly cookie?: never;
         };
         readonly requestBody?: never;
         readonly responses: {
             /** @description Successful Response */
-            readonly 200: {
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            readonly 422: {
                 headers: {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["StatusResponse"];
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
     };
-    readonly complete_api_v1_setup_complete_post: {
+    readonly verify_api_v1_auth_mfa_verify_post: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -6791,7 +7575,7 @@ export interface operations {
         };
         readonly requestBody: {
             readonly content: {
-                readonly "application/json": components["schemas"]["CompleteRequest"];
+                readonly "application/json": components["schemas"]["VerifyRequest"];
             };
         };
         readonly responses: {
@@ -6801,7 +7585,7 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["CompleteResponse"];
+                    readonly "application/json": components["schemas"]["VerifyResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6815,10 +7599,263 @@ export interface operations {
             };
         };
     };
-    readonly setup_form_setup_get: {
+    readonly password_reset_confirm_api_v1_auth_password_reset_confirm_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PasswordResetConfirmBody"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["PasswordResetConfirmResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly password_reset_request_api_v1_auth_password_reset_request_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PasswordResetRequestBody"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["PasswordResetRequestResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly password_policy_api_v1_auth_policy_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["PasswordPolicyPublic"];
+                };
+            };
+        };
+    };
+    readonly list_sessions_api_v1_auth_sessions_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["SessionPublic"][];
+                };
+            };
+        };
+    };
+    readonly revoke_other_sessions_api_v1_auth_sessions_revoke_others_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SessionRevokedResponse"];
+                };
+            };
+        };
+    };
+    readonly revoke_session_api_v1_auth_sessions__session_id__revoke_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly session_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SessionRevokedResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly health_api_v1_health_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": {
+                        readonly [key: string]: string;
+                    };
+                };
+            };
+        };
+    };
+    readonly health_deep_api_v1_health_deep_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description No check reported failed. Individual checks may report degraded, which is a warning rather than an outage. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DeepHealthResponse"];
+                };
+            };
+            /** @description At least one check reported failed. The body is the same shape as the 200 and names which subsystem, so a client reads the failure the same way it reads the success. */
+            readonly 503: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DeepHealthResponse"];
+                };
+            };
+        };
+    };
+    readonly health_ready_api_v1_health_ready_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": {
+                        readonly [key: string]: string;
+                    };
+                };
+            };
+        };
+    };
+    readonly health_system_api_v1_health_system_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": {
+                        readonly [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    readonly get_recent_failures_api_v1_home_recent_failures_get: {
         readonly parameters: {
             readonly query?: {
-                readonly token?: string;
+                readonly limit?: number;
+                readonly cursor?: string | null;
             };
             readonly header?: never;
             readonly path?: never;
@@ -6832,7 +7869,93 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": unknown;
+                    readonly "application/json": components["schemas"]["RecentFailuresPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_summary_api_v1_home_summary_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HomeSummaryPublic"];
+                };
+            };
+        };
+    };
+    readonly accept_invitation_api_v1_invitations_accept_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["InvitationAcceptRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["InvitationAcceptPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly preview_invitation_api_v1_invitations_preview_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["InvitationPreviewRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["InvitationPreviewPublic"];
                 };
             };
             /** @description Validation Error */
@@ -6994,6 +8117,41 @@ export interface operations {
             };
         };
     };
+    readonly list_agent_workers_api_v1_projects__slug__agent_workers_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly state?: string | null;
+                readonly role?: string | null;
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["AgentWorkerPublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     readonly list_agents_api_v1_projects__slug__agents_get: {
         readonly parameters: {
             readonly query?: never;
@@ -7090,122 +8248,18 @@ export interface operations {
             };
         };
     };
-    readonly list_scopes_api_v1_api_keys_scopes_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["ScopeCatalogue"];
-                };
-            };
-        };
-    };
-    readonly list_api_keys_api_v1_api_keys_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["ApiKeyPublic"][];
-                };
-            };
-        };
-    };
-    readonly create_api_key_api_v1_api_keys_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["CreateApiKeyRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 201: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["ApiKeyCreated"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly revoke_api_key_api_v1_api_keys__key_id__delete: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly key_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 204: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_tasks_api_v1_projects__slug__tasks_get: {
+    readonly list_audit_api_v1_projects__slug__audit_get: {
         readonly parameters: {
             readonly query?: {
-                readonly state?: string | null;
-                readonly priority?: string | null;
-                readonly name?: string | null;
-                readonly search?: string | null;
-                readonly queue?: string | null;
-                readonly worker?: string | null;
+                readonly action_prefix?: string | null;
+                readonly outcome?: string | null;
+                readonly user_id?: string | null;
                 readonly since?: string | null;
-                readonly until?: string | null;
                 readonly cursor?: string | null;
                 readonly limit?: number | null;
+                /** @description Optional export format. When set, pagination is ignored and the filtered result is returned as a file download. CSV and JSON are capped at 50 000 rows; XLSX is capped at 25 000 rows because the workbook is built in memory. */
                 readonly format?: string | null;
+                /** @description Comma-separated list of column names to include in the export. Only applies when ``format`` is set. Unknown names are silently ignored. */
                 readonly fields?: string | null;
             };
             readonly header?: never;
@@ -7222,825 +8276,7 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["TaskListResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_task_api_v1_projects__slug__tasks__engine___task_id__get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly engine: string;
-                readonly task_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["TaskPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_task_tree_api_v1_projects__slug__tasks__engine___task_id__tree_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly engine: string;
-                readonly task_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["TaskTreeResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly bulk_delete_tasks_api_v1_projects__slug__tasks_bulk_delete_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["BulkDeleteRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["BulkDeleteResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_events_for_task_api_v1_projects__slug__events_get: {
-        readonly parameters: {
-            readonly query: {
-                readonly engine: string;
-                readonly task_id: string;
-                readonly cursor?: string | null;
-                readonly limit?: number | null;
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["EventListResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_issues_api_v1_projects__slug__issues_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly engine?: string | null;
-                /** @description ongoing | recovered */
-                readonly status?: string | null;
-                /** @description time window */
-                readonly hours?: number | null;
-                readonly cursor?: string | null;
-                readonly limit?: number;
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["IssueListResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_workers_api_v1_projects__slug__workers_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["WorkerPublic"][];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_worker_detail_api_v1_projects__slug__workers__worker_id__get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly worker_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["WorkerDetailPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_agent_workers_api_v1_projects__slug__agent_workers_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly state?: string | null;
-                readonly role?: string | null;
-                readonly limit?: number;
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["AgentWorkerPublic"][];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_queues_api_v1_projects__slug__queues_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["QueuePublic"][];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_commands_api_v1_projects__slug__commands_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly status?: string | null;
-                readonly cursor?: string | null;
-                readonly limit?: number | null;
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandListResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_command_api_v1_projects__slug__commands__command_id__get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly command_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly issue_retry_task_api_v1_projects__slug__commands_retry_task_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["RetryTaskRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly issue_cancel_task_api_v1_projects__slug__commands_cancel_task_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["CancelTaskRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly issue_bulk_retry_api_v1_projects__slug__commands_bulk_retry_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["BulkRetryRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly issue_purge_queue_api_v1_projects__slug__commands_purge_queue_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["PurgeQueueRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly issue_restart_worker_api_v1_projects__slug__commands_restart_worker_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["RestartWorkerRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly issue_pool_resize_api_v1_projects__slug__commands_pool_resize_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["PoolResizeRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly issue_add_consumer_api_v1_projects__slug__commands_add_consumer_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["ConsumerRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly issue_cancel_consumer_api_v1_projects__slug__commands_cancel_consumer_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["ConsumerRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly issue_rate_limit_api_v1_projects__slug__commands_rate_limit_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["RateLimitRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly create_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["BulkRetryRequestCreate"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["BulkRetryRequestPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly request_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["BulkRetryRequestPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly pause_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__pause_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly request_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["BulkRetryRequestPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly resume_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__resume_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly request_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["BulkRetryRequestPublic"];
+                    readonly "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -8316,41 +8552,7 @@ export interface operations {
             };
         };
     };
-    readonly list_schedules_api_v1_projects__slug__schedules_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly limit?: number;
-                readonly cursor?: string | null;
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["SchedulesListPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly create_schedule_api_v1_projects__slug__schedules_post: {
+    readonly create_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests_post: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
@@ -8361,7 +8563,587 @@ export interface operations {
         };
         readonly requestBody: {
             readonly content: {
-                readonly "application/json": components["schemas"]["ScheduleCreateIn"];
+                readonly "application/json": components["schemas"]["BulkRetryRequestCreate"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BulkRetryRequestPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly request_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BulkRetryRequestPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly pause_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__pause_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly request_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BulkRetryRequestPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly resume_bulk_retry_request_api_v1_projects__slug__bulk_retry_requests__request_id__resume_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly request_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BulkRetryRequestPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_commands_api_v1_projects__slug__commands_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly status?: string | null;
+                readonly cursor?: string | null;
+                readonly limit?: number | null;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_add_consumer_api_v1_projects__slug__commands_add_consumer_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ConsumerRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_bulk_retry_api_v1_projects__slug__commands_bulk_retry_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["BulkRetryRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_cancel_consumer_api_v1_projects__slug__commands_cancel_consumer_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ConsumerRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_cancel_task_api_v1_projects__slug__commands_cancel_task_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["CancelTaskRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_pool_resize_api_v1_projects__slug__commands_pool_resize_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PoolResizeRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_purge_queue_api_v1_projects__slug__commands_purge_queue_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PurgeQueueRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_rate_limit_api_v1_projects__slug__commands_rate_limit_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["RateLimitRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_restart_worker_api_v1_projects__slug__commands_restart_worker_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["RestartWorkerRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_retry_task_api_v1_projects__slug__commands_retry_task_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["RetryTaskRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_command_api_v1_projects__slug__commands__command_id__get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly command_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_events_for_task_api_v1_projects__slug__events_get: {
+        readonly parameters: {
+            readonly query: {
+                readonly engine: string;
+                readonly task_id: string;
+                readonly cursor?: string | null;
+                readonly limit?: number | null;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["EventListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_pending_invitations_api_v1_projects__slug__invitations_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["InvitationPublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly mint_invitation_api_v1_projects__slug__invitations_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["InvitationCreateRequest"];
             };
         };
         readonly responses: {
@@ -8371,7 +9153,7 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                    readonly "application/json": components["schemas"]["InvitationMintPublic"];
                 };
             };
             /** @description Validation Error */
@@ -8385,146 +9167,13 @@ export interface operations {
             };
         };
     };
-    readonly list_schedule_fires_api_v1_projects__slug__schedules__schedule_id__fires_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly limit?: number;
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly schedule_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["ScheduleFirePublic"][];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_schedule_misfires_api_v1_projects__slug__schedules__schedule_id__misfires_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly limit?: number;
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly schedule_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["ScheduleMisfirePublic"][];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_project_misfires_api_v1_projects__slug__schedules_misfires_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly limit?: number;
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["ScheduleMisfirePublic"][];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_schedule_api_v1_projects__slug__schedules__schedule_id__get: {
+    readonly revoke_invitation_api_v1_projects__slug__invitations__invitation_id__delete: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
             readonly path: {
                 readonly slug: string;
-                readonly schedule_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["SchedulePublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly delete_schedule_api_v1_projects__slug__schedules__schedule_id__delete: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly schedule_id: string;
+                readonly invitation_id: string;
             };
             readonly cookie?: never;
         };
@@ -8548,344 +9197,16 @@ export interface operations {
             };
         };
     };
-    readonly update_schedule_api_v1_projects__slug__schedules__schedule_id__patch: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly schedule_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["ScheduleUpdateIn"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["SchedulePublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly enable_schedule_api_v1_projects__slug__schedules__schedule_id__enable_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly schedule_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["SchedulePublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly disable_schedule_api_v1_projects__slug__schedules__schedule_id__disable_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly schedule_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["SchedulePublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly trigger_schedule_now_api_v1_projects__slug__schedules__schedule_id__trigger_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-                readonly schedule_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["SchedulePublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly import_schedules_api_v1_projects__slug__schedules_import_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["ImportSchedulesRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["ImportSchedulesResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly diff_schedules_api_v1_projects__slug__schedules_diff_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["ImportSchedulesRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["DiffSchedulesResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly resync_schedules_api_v1_projects__slug__schedules_resync_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 202: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["ResyncSchedulesResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_fleet_api_v1_schedulers_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["FleetResponse"];
-                };
-            };
-        };
-    };
-    readonly list_audit_api_v1_projects__slug__audit_get: {
+    readonly list_issues_api_v1_projects__slug__issues_get: {
         readonly parameters: {
             readonly query?: {
-                readonly action_prefix?: string | null;
-                readonly outcome?: string | null;
-                readonly user_id?: string | null;
-                readonly since?: string | null;
+                readonly engine?: string | null;
+                /** @description ongoing | recovered */
+                readonly status?: ("ongoing" | "recovered") | null;
+                /** @description time window */
+                readonly hours?: number | null;
                 readonly cursor?: string | null;
-                readonly limit?: number | null;
-                /** @description Optional export format. When set, pagination is ignored and the full filter result (capped at 50 000 rows) is returned as a file download. */
-                readonly format?: string | null;
-                /** @description Comma-separated list of column names to include in the export. Only applies when ``format`` is set. Unknown names are silently ignored. */
-                readonly fields?: string | null;
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_activity_api_v1_activity_get: {
-        readonly parameters: {
-            readonly query?: {
                 readonly limit?: number;
-                /** @description Return only rows newer than this cursor. Use for live polling; the response's ``newest_cursor`` is the next ``since_cursor``. Format: ``<iso_occurred_at>|<uuid>``. */
-                readonly since_cursor?: string | null;
-                /** @description Return only rows older than this cursor. Use for backwards pagination; the response's ``next_before_cursor`` is the next ``before_cursor``. */
-                readonly before_cursor?: string | null;
-                /** @description Literal action-name prefix filter (LIKE metachars escaped). */
-                readonly action_prefix?: string | null;
-                /** @description Constrain to a single project slug (must be in caller's accessible set). */
-                readonly project_slug?: string | null;
-            };
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["ActivityListResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_stats_api_v1_projects__slug__stats_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly hours?: number;
             };
             readonly header?: never;
             readonly path: {
@@ -8901,93 +9222,7 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["StatsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_trends_api_v1_projects__slug__trends_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly window?: "1h" | "6h" | "24h" | "72h" | "7d";
-                readonly bucket?: "1m" | "5m" | "15m" | "1h" | "1d";
-            };
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["TrendsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_summary_api_v1_home_summary_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HomeSummaryPublic"];
-                };
-            };
-        };
-    };
-    readonly get_recent_failures_api_v1_home_recent_failures_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly limit?: number;
-                readonly cursor?: string | null;
-            };
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["RecentFailuresPublic"];
+                    readonly "application/json": components["schemas"]["IssueListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -9133,199 +9368,6 @@ export interface operations {
             };
         };
     };
-    readonly list_users_api_v1_users_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly limit?: number;
-                readonly offset?: number;
-            };
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["UserAdminPublic"][];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly create_user_api_v1_users_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["CreateUserRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 201: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["UserAdminPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly get_user_api_v1_users__user_id__get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly user_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["UserAdminPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly delete_user_api_v1_users__user_id__delete: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly user_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 204: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly update_user_api_v1_users__user_id__patch: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly user_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["UpdateUserRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["UserAdminPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly reset_password_api_v1_users__user_id__password_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly user_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["PasswordResetRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 204: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     readonly list_channels_api_v1_projects__slug__notifications_channels_get: {
         readonly parameters: {
             readonly query?: never;
@@ -9427,6 +9469,41 @@ export interface operations {
             };
         };
     };
+    readonly test_channel_config_api_v1_projects__slug__notifications_channels_test_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ChannelTestRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ChannelTestResult"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     readonly delete_channel_api_v1_projects__slug__notifications_channels__channel_id__delete: {
         readonly parameters: {
             readonly query?: never;
@@ -9480,41 +9557,6 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ChannelPublic"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly test_channel_config_api_v1_projects__slug__notifications_channels_test_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["ChannelTestRequest"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["ChannelTestResult"];
                 };
             };
             /** @description Validation Error */
@@ -9760,6 +9802,1085 @@ export interface operations {
             };
         };
     };
+    readonly list_queues_api_v1_projects__slug__queues_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["QueuePublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_schedules_api_v1_projects__slug__schedules_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: number;
+                readonly cursor?: string | null;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulesListPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly create_schedule_api_v1_projects__slug__schedules_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ScheduleCreateIn"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_external_schedule_control_operation_api_v1_projects__slug__schedules_external_control_operations__operation_id__get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly operation_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ExternalScheduleControlOperationPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_project_misfires_api_v1_projects__slug__schedules_misfires_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["ScheduleMisfirePublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_schedule_api_v1_projects__slug__schedules__schedule_id__get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly delete_schedule_api_v1_projects__slug__schedules__schedule_id__delete: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly update_schedule_api_v1_projects__slug__schedules__schedule_id__patch: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ScheduleUpdateIn"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly disable_schedule_api_v1_projects__slug__schedules__schedule_id__disable_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly enable_schedule_api_v1_projects__slug__schedules__schedule_id__enable_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_schedule_fires_api_v1_projects__slug__schedules__schedule_id__fires_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["ScheduleFirePublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly set_legacy_fire_grant_api_v1_projects__slug__schedules__schedule_id__legacy_fire_grant_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["LegacyFireGrantIn"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_schedule_misfires_api_v1_projects__slug__schedules__schedule_id__misfires_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["ScheduleMisfirePublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly pause_schedule_api_v1_projects__slug__schedules__schedule_id__pause_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly resolve_legacy_evidence_api_v1_projects__slug__schedules__schedule_id__resolve_legacy_evidence_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ResolveLegacyEvidenceIn"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ResolveLegacyEvidencePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly resolve_terminal_fire_api_v1_projects__slug__schedules__schedule_id__resolve_terminal_fire_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ResolveTerminalFireIn"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ResolveTerminalFirePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly resume_schedule_api_v1_projects__slug__schedules__schedule_id__resume_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly trigger_schedule_now_api_v1_projects__slug__schedules__schedule_id__trigger_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly schedule_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SchedulePublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly diff_schedules_api_v1_projects__slug__schedules_diff_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ImportSchedulesRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DiffSchedulesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly import_schedules_api_v1_projects__slug__schedules_import_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ImportSchedulesRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ImportSchedulesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly resync_schedules_api_v1_projects__slug__schedules_resync_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ResyncSchedulesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_stats_api_v1_projects__slug__stats_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly hours?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["StatsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_tasks_api_v1_projects__slug__tasks_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly state?: string | null;
+                readonly priority?: string | null;
+                readonly name?: string | null;
+                readonly search?: string | null;
+                readonly queue?: string | null;
+                readonly worker?: string | null;
+                readonly since?: string | null;
+                readonly until?: string | null;
+                readonly cursor?: string | null;
+                readonly limit?: number | null;
+                readonly format?: string | null;
+                readonly fields?: string | null;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TaskListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly bulk_delete_tasks_api_v1_projects__slug__tasks_bulk_delete_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["BulkDeleteRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BulkDeleteResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_task_api_v1_projects__slug__tasks__engine___task_id__get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly engine: string;
+                readonly task_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TaskPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_task_tree_api_v1_projects__slug__tasks__engine___task_id__tree_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly engine: string;
+                readonly task_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TaskTreeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_trends_api_v1_projects__slug__trends_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly window?: "1h" | "6h" | "24h" | "72h" | "7d";
+                readonly bucket?: "1m" | "5m" | "15m" | "1h" | "1d";
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TrendsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_workers_api_v1_projects__slug__workers_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["WorkerPublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly lint_workers_api_v1_projects__slug__workers_lint_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ProjectLintPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_worker_detail_api_v1_projects__slug__workers__worker_id__get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly worker_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["WorkerDetailPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_fleet_api_v1_schedulers_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["FleetResponse"];
+                };
+            };
+        };
+    };
+    readonly complete_api_v1_setup_complete_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["CompleteRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CompleteResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly status_endpoint_api_v1_setup_status_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["StatusResponse"];
+                };
+            };
+        };
+    };
     readonly list_user_channels_api_v1_user_channels_get: {
         readonly parameters: {
             readonly query?: never;
@@ -9846,6 +10967,39 @@ export interface operations {
             };
         };
     };
+    readonly test_user_channel_config_api_v1_user_channels_test_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ChannelTestRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ChannelTestResult"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     readonly delete_user_channel_api_v1_user_channels__channel_id__delete: {
         readonly parameters: {
             readonly query?: never;
@@ -9910,18 +11064,16 @@ export interface operations {
             };
         };
     };
-    readonly test_user_channel_config_api_v1_user_channels_test_post: {
+    readonly test_saved_user_channel_api_v1_user_channels__channel_id__test_post: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
-            readonly path?: never;
+            readonly path: {
+                readonly channel_id: string;
+            };
             readonly cookie?: never;
         };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["ChannelTestRequest"];
-            };
-        };
+        readonly requestBody?: never;
         readonly responses: {
             /** @description Successful Response */
             readonly 200: {
@@ -9943,13 +11095,15 @@ export interface operations {
             };
         };
     };
-    readonly test_saved_user_channel_api_v1_user_channels__channel_id__test_post: {
+    readonly list_user_deliveries_api_v1_user_deliveries_get: {
         readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly channel_id: string;
+            readonly query?: {
+                readonly limit?: number;
+                readonly cursor?: string | null;
+                readonly project_slug?: string | null;
             };
+            readonly header?: never;
+            readonly path?: never;
             readonly cookie?: never;
         };
         readonly requestBody?: never;
@@ -9960,8 +11114,107 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["ChannelTestResult"];
+                    readonly "application/json": unknown;
                 };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_user_notifications_api_v1_user_notifications_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly unread_only?: boolean;
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["UserNotificationPublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly mark_all_user_notifications_read_api_v1_user_notifications_read_all_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly user_unread_count_api_v1_user_notifications_unread_count_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["UnreadCountPublic"];
+                };
+            };
+        };
+    };
+    readonly mark_user_notification_read_api_v1_user_notifications__notification_id__read_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly notification_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             readonly 422: {
@@ -10104,12 +11357,11 @@ export interface operations {
             };
         };
     };
-    readonly list_user_deliveries_api_v1_user_deliveries_get: {
+    readonly list_users_api_v1_users_get: {
         readonly parameters: {
             readonly query?: {
                 readonly limit?: number;
-                readonly cursor?: string | null;
-                readonly project_slug?: string | null;
+                readonly offset?: number;
             };
             readonly header?: never;
             readonly path?: never;
@@ -10123,7 +11375,7 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": unknown;
+                    readonly "application/json": readonly components["schemas"]["UserAdminPublic"][];
                 };
             };
             /** @description Validation Error */
@@ -10137,281 +11389,16 @@ export interface operations {
             };
         };
     };
-    readonly list_user_notifications_api_v1_user_notifications_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly unread_only?: boolean;
-                readonly limit?: number;
-            };
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["UserNotificationPublic"][];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly user_unread_count_api_v1_user_notifications_unread_count_get: {
+    readonly create_user_api_v1_users_post: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["UnreadCountPublic"];
-                };
-            };
-        };
-    };
-    readonly mark_user_notification_read_api_v1_user_notifications__notification_id__read_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly notification_id: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 204: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly mark_all_user_notifications_read_api_v1_user_notifications_read_all_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 204: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    readonly get_versions_snapshot_api_v1_admin_system_versions_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["VersionsSnapshotPublic"];
-                };
-            };
-        };
-    };
-    readonly check_for_updates_api_v1_admin_system_versions_check_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["VersionsSnapshotPublic"];
-                };
-            };
-        };
-    };
-    readonly get_effective_settings_api_v1_admin_settings_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["AdminSettingsResponse"];
-                };
-            };
-        };
-    };
-    readonly agent_events_api_v1_agent_events_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: {
-                readonly authorization?: string | null;
-                readonly "X-Z4J-Session-Nonce"?: string | null;
-            };
             readonly path?: never;
             readonly cookie?: never;
         };
         readonly requestBody: {
             readonly content: {
-                readonly "application/json": components["schemas"]["FrameUploadBody"];
-            };
-        };
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["FrameUploadResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly agent_commands_api_v1_agent_commands_get: {
-        readonly parameters: {
-            readonly query?: {
-                readonly wait?: number;
-                readonly max_frames?: number;
-            };
-            readonly header?: {
-                readonly authorization?: string | null;
-                readonly "X-Z4J-Session-Nonce"?: string | null;
-                readonly "X-Z4J-Runtime-Features"?: string | null;
-                readonly "X-Z4J-Retry-Contracts"?: string | null;
-            };
-            readonly path?: never;
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["CommandPullResponse"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly list_pending_invitations_api_v1_projects__slug__invitations_get: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody?: never;
-        readonly responses: {
-            /** @description Successful Response */
-            readonly 200: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": readonly components["schemas"]["InvitationPublic"][];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    readonly mint_invitation_api_v1_projects__slug__invitations_post: {
-        readonly parameters: {
-            readonly query?: never;
-            readonly header?: never;
-            readonly path: {
-                readonly slug: string;
-            };
-            readonly cookie?: never;
-        };
-        readonly requestBody: {
-            readonly content: {
-                readonly "application/json": components["schemas"]["InvitationCreateRequest"];
+                readonly "application/json": components["schemas"]["CreateUserRequest"];
             };
         };
         readonly responses: {
@@ -10421,7 +11408,7 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["InvitationMintPublic"];
+                    readonly "application/json": components["schemas"]["UserAdminPublic"];
                 };
             };
             /** @description Validation Error */
@@ -10435,13 +11422,43 @@ export interface operations {
             };
         };
     };
-    readonly revoke_invitation_api_v1_projects__slug__invitations__invitation_id__delete: {
+    readonly get_user_api_v1_users__user_id__get: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
             readonly path: {
-                readonly slug: string;
-                readonly invitation_id: string;
+                readonly user_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["UserAdminPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly delete_user_api_v1_users__user_id__delete: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly user_id: string;
             };
             readonly cookie?: never;
         };
@@ -10465,16 +11482,20 @@ export interface operations {
             };
         };
     };
-    readonly preview_invitation_api_v1_invitations_preview_get: {
+    readonly update_user_api_v1_users__user_id__patch: {
         readonly parameters: {
-            readonly query: {
-                readonly token: string;
-            };
+            readonly query?: never;
             readonly header?: never;
-            readonly path?: never;
+            readonly path: {
+                readonly user_id: string;
+            };
             readonly cookie?: never;
         };
-        readonly requestBody?: never;
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["UpdateUserRequest"];
+            };
+        };
         readonly responses: {
             /** @description Successful Response */
             readonly 200: {
@@ -10482,7 +11503,7 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["InvitationPreviewPublic"];
+                    readonly "application/json": components["schemas"]["UserAdminPublic"];
                 };
             };
             /** @description Validation Error */
@@ -10496,27 +11517,27 @@ export interface operations {
             };
         };
     };
-    readonly accept_invitation_api_v1_invitations_accept_post: {
+    readonly reset_password_api_v1_users__user_id__password_post: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;
-            readonly path?: never;
+            readonly path: {
+                readonly user_id: string;
+            };
             readonly cookie?: never;
         };
         readonly requestBody: {
             readonly content: {
-                readonly "application/json": components["schemas"]["InvitationAcceptRequest"];
+                readonly "application/json": components["schemas"]["PasswordResetRequest"];
             };
         };
         readonly responses: {
             /** @description Successful Response */
-            readonly 201: {
+            readonly 204: {
                 headers: {
                     readonly [name: string]: unknown;
                 };
-                content: {
-                    readonly "application/json": components["schemas"]["InvitationAcceptPublic"];
-                };
+                content?: never;
             };
             /** @description Validation Error */
             readonly 422: {
@@ -10544,6 +11565,37 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    readonly setup_form_setup_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly token?: string;
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

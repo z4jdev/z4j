@@ -12,13 +12,15 @@ Design notes:
   write time (see ``z4j_brain.domain.automation.evaluator``), NOT an
   arbitrary expression sandbox, so there is no ReDoS or code-execution
   surface. This is the deliberate compliance-safe choice.
-- The condition / action / circuit-breaker CONFIG lives in JSONB
-  columns; the circuit-breaker STATE (rolling-window counter + tripped
-  flag) lives in dedicated columns maintained atomically by the action
-  executor.
+- The condition / action / circuit-breaker CONFIG lives in JSONB columns;
+  exact rolling-window admissions live in ``automation_rule_admissions``
+  while the current count, oldest retained timestamp, configuration epoch,
+  and tripped projection live on this row. The executor maintains them
+  atomically under this rule's row lock.
 - ``trigger`` is a plain string (not a native enum) so adding a trigger
   needs no migration -- the same convention as ``schedule_fires.status``
-  and the notification-vocabulary columns."""
+  and the notification-vocabulary columns.
+"""
 
 from __future__ import annotations
 
@@ -144,6 +146,38 @@ class AutomationRule(PKMixin, TimestampsMixin, Base):
     )
     #: Content hash for future declarative reconciliation.
     source_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: Monotonic execution-configuration epoch. Every supported mutation of
+    #: an execution-relevant field advances this value in the same locked
+    #: database write. Unlike a content hash it cannot return to an earlier
+    #: value after an edit-away/edit-back ABA sequence, so a dispatch selected
+    #: before either edit remains stale even when the final JSON is identical.
+    #:
+    #: This and ``cb_config_digest`` are appended by 0014. Their explicit sort
+    #: order keeps a consolidated fresh install byte-for-byte aligned with an
+    #: upgrade from the prior release.
+    config_revision: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        sort_order=1000,
+    )
+    #: SHA-256 of the execution-relevant configuration whose admissions are
+    #: stored in ``automation_rule_admissions``. A config change starts a new
+    #: breaker epoch atomically at the next claim; without this marker,
+    #: widening a window after old timestamps were pruned could not be an
+    #: exact rolling-window calculation.
+    #:
+    #: This declaration intentionally remains the last physical column: 0014
+    #: appends it after ``config_revision`` on an existing installation, and
+    #: the consolidated fresh path must produce the identical ordinal schema.
+    cb_config_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        # Mixin columns are collected after ordinary subclass columns.
+        # Explicitly sort this appended 0014 column after id/timestamps too.
+        sort_order=1001,
+    )
 
     __table_args__ = (
         UniqueConstraint(

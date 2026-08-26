@@ -15,6 +15,54 @@ import { useMe } from "@/hooks/use-auth";
 
 export type ProjectRole = "admin" | "operator" | "viewer";
 
+export type ProjectCapability =
+  | "view"
+  | "retry_task"
+  | "cancel_task"
+  | "delete_tasks"
+  | "bulk_action"
+  | "purge_queue"
+  | "operate_schedules"
+  | "admin_schedules"
+  /** @deprecated Use operate_schedules or admin_schedules for schedule UI. */
+  | "manage_schedules"
+  | "manage_automation"
+  | "manage_agents"
+  | "manage_members"
+  | "manage_channels"
+  | "manage_invitations";
+
+/** Pure role matrix shared by the hook and fail-sensitive unit tests. */
+export function canProjectRole(
+  role: ProjectRole | null,
+  action: ProjectCapability,
+): boolean {
+  if (role === null) return false;
+  if (role === "admin") return true;
+  if (role === "viewer") return action === "view";
+
+  // Operators can execute data-plane actions but cannot mutate admin-owned
+  // definitions or perform admin-only destructive operations.
+  switch (action) {
+    case "view":
+    case "retry_task":
+    case "cancel_task":
+    case "bulk_action":
+    case "purge_queue":
+    case "operate_schedules":
+    case "manage_schedules":
+    case "manage_automation":
+      return true;
+    case "delete_tasks":
+    case "admin_schedules":
+    case "manage_agents":
+    case "manage_members":
+    case "manage_channels":
+    case "manage_invitations":
+      return false;
+  }
+}
+
 /**
  * Returns the user's effective role on a given project, or ``null``
  * when they are not a member.
@@ -22,7 +70,9 @@ export type ProjectRole = "admin" | "operator" | "viewer";
  * Global (system) admins are treated as project admins on every
  * project - matches the backend's ``require_admin`` dependency.
  */
-export function useCurrentUserRole(slug: string | undefined): ProjectRole | null {
+export function useCurrentUserRole(
+  slug: string | undefined,
+): ProjectRole | null {
   const { data: me } = useMe();
   if (!me || !slug) return null;
   if (me.is_admin) return "admin";
@@ -54,34 +104,7 @@ export function useIsProjectMember(slug: string): boolean {
  */
 export function useCan(
   slug: string | undefined,
-  action:
-    | "view"
-    | "retry_task"
-    | "cancel_task"
-    | "bulk_action"
-    | "purge_queue"
-    | "manage_schedules"
-    | "manage_automation"
-    | "manage_agents"
-    | "manage_members"
-    | "manage_channels"
-    | "manage_invitations",
+  action: ProjectCapability,
 ): boolean {
-  const role = useCurrentUserRole(slug);
-  if (role === null) return false;
-  if (role === "admin") return true;
-  if (role === "operator") {
-    // Operators can do data-plane actions but NOT admin ones.
-    switch (action) {
-      case "manage_agents":
-      case "manage_members":
-      case "manage_channels":
-      case "manage_invitations":
-        return false;
-      default:
-        return true;
-    }
-  }
-  // Viewers: read-only.
-  return action === "view";
+  return canProjectRole(useCurrentUserRole(slug), action);
 }

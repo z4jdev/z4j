@@ -13,7 +13,8 @@ Two new behaviours land in this release:
    endpoint gained a ``trigger`` field for full parity with the
    project-defaults edit endpoint that landed in v1.0.18 alongside.
    Renaming defends the (user, project, trigger) uniqueness
-   invariant with a clean 409.
+   invariant with a clean 409. An explicit ``muted_until: null``
+   clears a mute while an omitted field preserves it.
 """
 
 from __future__ import annotations
@@ -103,6 +104,11 @@ async def _seed_basic(brain_app, settings: Settings):
                     is_admin=False,
                     is_active=True,
                 ),
+            ],
+        )
+        await s.flush()
+        s.add_all(
+            [
                 Session(
                     id=session_id,
                     user_id=user_id,
@@ -155,12 +161,14 @@ async def _seed_basic(brain_app, settings: Settings):
                 ),
             ]
         )
+        await s.flush()
         # Three deliveries: 2 to alpha sub, 1 to beta sub.
         now = datetime.now(UTC)
         for i, sub_id in enumerate([sub_alpha_id, sub_alpha_id, sub_beta_id]):
             s.add(
                 NotificationDelivery(
                     subscription_id=sub_id,
+                    recipient_user_id=user_id,
                     channel_id=(alpha_channel_id if sub_id == sub_alpha_id else None),
                     project_id=(alpha_id if sub_id == sub_alpha_id else beta_id),
                     trigger="task.failed",
@@ -275,6 +283,7 @@ class TestUserDeliveries:
                     is_active=True,
                 )
             )
+            await s.flush()
             s.add(
                 Membership(
                     user_id=other_user_id,
@@ -282,6 +291,7 @@ class TestUserDeliveries:
                     role=ProjectRole.VIEWER,
                 )
             )
+            await s.flush()
             s.add(
                 UserSubscription(
                     id=other_sub_id,
@@ -296,9 +306,11 @@ class TestUserDeliveries:
                     is_active=True,
                 )
             )
+            await s.flush()
             s.add(
                 NotificationDelivery(
                     subscription_id=other_sub_id,
+                    recipient_user_id=other_user_id,
                     project_id=seed["alpha_id"],
                     trigger="task.failed",
                     task_id="other-task",
@@ -316,6 +328,129 @@ class TestUserDeliveries:
             # Still 3 (the other user's delivery NOT included)
             assert len(body["items"]) == 3
             assert all(item["task_id"] != "other-task" for item in body["items"])
+
+    async def test_deleted_subscription_keeps_only_owners_history(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        """The recipient snapshot survives the subscription FK becoming NULL.
+
+        A second member on the same project must not gain access merely because
+        the live subscription row no longer exists to establish ownership.
+        """
+        from sqlalchemy import delete, select, text
+
+        seed = await _seed_basic(brain_app, settings)
+        other_user_id = uuid.uuid4()
+        other_session_id = uuid.uuid4()
+        other_csrf = secrets.token_urlsafe(32)
+        async with brain_app.state.db.session() as s:
+            hasher = PasswordHasher(settings)
+            s.add_all(
+                [
+                    User(
+                        id=other_user_id,
+                        email=f"o-{uuid.uuid4().hex[:8]}@example.com",
+                        password_hash=hasher.hash("correct horse battery staple 9"),
+                        is_admin=False,
+                        is_active=True,
+                    ),
+                ],
+            )
+            await s.flush()
+            s.add_all(
+                [
+                    Session(
+                        id=other_session_id,
+                        user_id=other_user_id,
+                        csrf_token=other_csrf,
+                        expires_at=datetime.now(UTC) + timedelta(hours=1),
+                        ip_at_issue="127.0.0.1",
+                        user_agent_at_issue="test",
+                    ),
+                    Membership(
+                        user_id=other_user_id,
+                        project_id=seed["alpha_id"],
+                        role=ProjectRole.VIEWER,
+                    ),
+                ],
+            )
+            await s.commit()
+
+        async with brain_app.state.db.session() as s:
+            assert await s.scalar(text("PRAGMA foreign_keys")) == 1
+            await s.execute(
+                delete(UserSubscription).where(
+                    UserSubscription.id == seed["sub_alpha_id"],
+                ),
+            )
+            await s.commit()
+
+        async with brain_app.state.db.session() as s:
+            deleted_sub_rows = (
+                (
+                    await s.execute(
+                        select(NotificationDelivery).where(
+                            NotificationDelivery.recipient_user_id == seed["user_id"],
+                            NotificationDelivery.project_id == seed["alpha_id"],
+                        ),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(deleted_sub_rows) == 2
+            assert all(row.subscription_id is None for row in deleted_sub_rows)
+
+        async with _client(brain_app, settings, seed) as client:
+            owner_response = await client.get("/api/v1/user/deliveries")
+        assert owner_response.status_code == 200, owner_response.text
+        assert len(owner_response.json()["items"]) == 3
+
+        other_seed = {
+            **seed,
+            "user_id": other_user_id,
+            "session_id": other_session_id,
+            "csrf": other_csrf,
+        }
+        async with _client(brain_app, settings, other_seed) as client:
+            other_response = await client.get("/api/v1/user/deliveries")
+        assert other_response.status_code == 200, other_response.text
+        assert other_response.json() == {"items": [], "next_cursor": None}
+
+    async def test_account_delete_nulls_delivery_ownership_fks(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        """Production SQLite connections enforce both owner SET NULL paths."""
+
+        from sqlalchemy import delete, select, text
+
+        seed = await _seed_basic(brain_app, settings)
+        async with brain_app.state.db.session() as session:
+            assert await session.scalar(text("PRAGMA foreign_keys")) == 1
+            await session.execute(delete(User).where(User.id == seed["user_id"]))
+            await session.commit()
+
+        async with brain_app.state.db.session() as session:
+            deliveries = (
+                (
+                    await session.execute(
+                        select(NotificationDelivery).where(
+                            NotificationDelivery.project_id.in_(
+                                [seed["alpha_id"], seed["beta_id"]],
+                            ),
+                        ),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(deliveries) == 3
+            assert all(row.subscription_id is None for row in deliveries)
+            assert all(row.recipient_user_id is None for row in deliveries)
 
     async def test_deliveries_for_left_project_still_visible(
         self,
@@ -456,6 +591,7 @@ class TestChannelTestInUserLog:
                     is_active=True,
                 )
             )
+            await s.flush()
             s.add(
                 Session(
                     id=other_session_id,
@@ -553,3 +689,37 @@ class TestUserSubscriptionTriggerRename:
             resp = await client.patch(url, json={"trigger": "task.failed"})
             assert resp.status_code == 409, resp.text
             assert "already have" in resp.json()["message"]
+
+    async def test_explicit_null_clears_muted_until_but_omission_preserves_it(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _seed_basic(brain_app, settings)
+        muted_until = datetime.now(UTC) + timedelta(hours=2)
+        async with brain_app.state.db.session() as session:
+            subscription = await session.get(
+                UserSubscription,
+                seed["sub_alpha_id"],
+            )
+            assert subscription is not None
+            subscription.muted_until = muted_until
+            await session.commit()
+
+        url = f"/api/v1/user/subscriptions/{seed['sub_alpha_id']}"
+        async with _client(brain_app, settings, seed) as client:
+            omitted = await client.patch(url, json={"is_active": False})
+            assert omitted.status_code == 200, omitted.text
+            assert omitted.json()["muted_until"] is not None
+
+            cleared = await client.patch(url, json={"muted_until": None})
+            assert cleared.status_code == 200, cleared.text
+            assert cleared.json()["muted_until"] is None
+
+        async with brain_app.state.db.session() as session:
+            subscription = await session.get(
+                UserSubscription,
+                seed["sub_alpha_id"],
+            )
+            assert subscription is not None
+            assert subscription.muted_until is None

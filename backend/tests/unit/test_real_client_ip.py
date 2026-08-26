@@ -50,6 +50,34 @@ class TestTrustedChain:
         r = TrustedProxyResolver(["10.0.0.0/8"])
         assert r.resolve(peer_ip="10.0.0.1", xff_header=None) == "10.0.0.1"
 
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            "not-an-ip",
+            "1.2.3.4, not-an-ip, 10.0.0.6",
+            "1.2.3.4,,10.0.0.6",
+            ",1.2.3.4",
+            "1.2.3.4,",
+            "1.2.3.4:443",
+            "1.2.3.4%forged-zone",
+            "2001:db8::1%eth0%extra",
+            "1.2.3.4\nforged-audit-text",
+        ],
+    )
+    def test_malformed_xff_chain_fails_closed_to_peer(self, malformed: str) -> None:
+        r = TrustedProxyResolver(["10.0.0.0/8"])
+        assert r.resolve(peer_ip="10.0.0.1", xff_header=malformed) == "10.0.0.1"
+
+    def test_valid_xff_is_returned_in_canonical_ip_form(self) -> None:
+        r = TrustedProxyResolver(["fc00::/7"])
+        assert (
+            r.resolve(
+                peer_ip="fc00::1",
+                xff_header="2001:0db8:0000:0000:0000:0000:0000:0001, fc00::5",
+            )
+            == "2001:db8::1"
+        )
+
 
 class TestEdgeCases:
     def test_invalid_cidr_raises_at_construction(self) -> None:

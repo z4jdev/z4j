@@ -10,6 +10,19 @@ The sweeper runs in two modes:
 These tests cover SQLite end-to-end. The Postgres trigger-bypass
 path is covered by ``test_audit_retention_postgres`` in B7
 integration (Postgres 18 container).
+
+Deliberately still on a ``create_all()`` schema. Two of this file's
+premises are states an activated database forbids by construction: it
+writes ``audit_log`` rows directly, which the Boundary-F INSERT trigger
+refuses unless they are signed active rows, and it dates them into the
+past, which a signed row cannot be -- the append clamps ``occurred_at``
+to just after the authenticated head, so on a migrated database every
+row is newer than any cutoff a sweep can compute. The branch under test
+is the keyless one as well: ``_do_sweep`` hands off to ``_do_sweep_v2``
+whenever ``audit_chain_secret`` is set, and the migrations refuse to run
+without that key. Converting would not move these tests onto the guards,
+it would replace them with tests of a different function. The
+authenticated sweep is covered by ``test_audit_chain_boundary_f.py``.
 """
 
 from __future__ import annotations

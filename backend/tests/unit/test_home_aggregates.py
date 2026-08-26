@@ -17,7 +17,11 @@ from __future__ import annotations
 
 import math
 
-from z4j_brain.api.home import _compute_health
+from z4j_brain.api.home import (
+    _bounded_failure_rate,
+    _compute_health,
+    _failure_attention_severity,
+)
 
 
 class TestFailureRateClamp:
@@ -25,16 +29,19 @@ class TestFailureRateClamp:
 
     @staticmethod
     def _rate(tasks: int, failures: int) -> float:
-        """Mirror the per-project calculation in
-        :func:`z4j_brain.api.home.get_summary`. Kept tiny on
-        purpose so a refactor of ``home.py`` that still produces
-        a sensible ratio keeps this test green.
-        """
-        return min(failures / tasks, 1.0) if tasks > 0 else 0.0
+        return _bounded_failure_rate(
+            tasks_24h=tasks,
+            failures_24h=failures,
+        )
 
-    def test_no_tasks_returns_zero(self) -> None:
+    def test_no_tasks_and_no_failures_returns_zero(self) -> None:
         assert self._rate(0, 0) == 0.0
-        assert self._rate(0, 5) == 0.0  # pre-24h failures, no receives yet
+
+    def test_failures_without_received_tasks_are_severe_but_bounded(self) -> None:
+        # A receive can predate the rolling window while its failure lands
+        # inside it. Reporting zero hid the only failure evidence available.
+        assert self._rate(0, 1) == 1.0
+        assert self._rate(0, 5) == 1.0
 
     def test_normal_failure_rate(self) -> None:
         assert self._rate(100, 3) == 0.03
@@ -54,6 +61,63 @@ class TestFailureRateClamp:
         # 0.0331 stays 0.0331 - clamp does not introduce rounding.
         r = self._rate(1000, 33)
         assert math.isclose(r, 0.033, rel_tol=1e-9)
+
+
+class TestFailureAttention:
+    def test_zero_denominator_failure_is_critical(self) -> None:
+        rate = _bounded_failure_rate(tasks_24h=0, failures_24h=1)
+        assert (
+            _failure_attention_severity(
+                tasks_24h=0,
+                failures_24h=1,
+                failure_rate_24h=rate,
+            )
+            == "critical"
+        )
+
+    def test_ordinary_low_volume_rate_remains_noise_gated(self) -> None:
+        assert (
+            _failure_attention_severity(
+                tasks_24h=10,
+                failures_24h=1,
+                failure_rate_24h=0.1,
+            )
+            is None
+        )
+
+    def test_meaningful_volume_uses_rate_severity(self) -> None:
+        assert (
+            _failure_attention_severity(
+                tasks_24h=100,
+                failures_24h=6,
+                failure_rate_24h=0.06,
+            )
+            == "warning"
+        )
+        assert (
+            _failure_attention_severity(
+                tasks_24h=100,
+                failures_24h=21,
+                failure_rate_24h=0.21,
+            )
+            == "critical"
+        )
+
+    def test_zero_denominator_failure_degrades_health(self) -> None:
+        assert (
+            _compute_health(
+                failure_rate_24h=_bounded_failure_rate(
+                    tasks_24h=0,
+                    failures_24h=1,
+                ),
+                stuck_commands=0,
+                agents_online=0,
+                agents_total=0,
+                tasks_24h=0,
+                workers_online=0,
+            )
+            == "degraded"
+        )
 
 
 class TestHealthHeuristic:

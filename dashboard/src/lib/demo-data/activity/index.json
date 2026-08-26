@@ -4,104 +4,105 @@
       "id": "01900000-0000-4001-a000-000000000001",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "project_slug": "django.example.com",
-      "user_id": "00000000-0000-4000-8000-000000000001",
-      "action": "task.failed",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "command.issue.retry_task",
       "target_type": "task",
-      "target_id": "d99c42a6-6b76-5058-a0b5-c3c861c4f801",
+      "target_id": "celery:d99c42a6-6b76-5058-a0b5-c3c861c4f801",
       "result": "success",
       "outcome": "allow",
       "metadata": {
-        "task_name": "emails.send_scheduled_campaigns",
-        "exception": "ConnectionError: smtp.example.com:587 connection refused"
+        "command_id": "c0000000-0000-4001-9000-000000000001",
+        "agent_id": "10000000-0000-4002-a000-000000000004",
+        "idempotency_key": null
       },
-      "source_ip": "203.0.113.10",
-      "occurred_at": "2026-05-13T10:42:18.000000+00:00"
+      "source_ip": "203.0.113.42",
+      "occurred_at_offset_s": -95
     },
     {
       "id": "01900000-0000-4001-a000-000000000002",
-      "project_id": "00000000-0000-4000-9000-000000000002",
-      "project_slug": "fastapi.example.com",
+      "project_id": null,
+      "project_slug": null,
       "user_id": "00000000-0000-4000-8000-000000000001",
       "action": "user.mfa_verified",
       "target_type": "user",
-      "target_id": "admin@example.com",
+      "target_id": "00000000-0000-4000-8000-000000000001",
       "result": "success",
       "outcome": "allow",
-      "metadata": {"method": "totp"},
+      "metadata": {},
       "source_ip": "203.0.113.10",
-      "occurred_at": "2026-05-13T10:39:01.000000+00:00"
+      "occurred_at_offset_s": -292
     },
     {
       "id": "01900000-0000-4001-a000-000000000003",
       "project_id": "00000000-0000-4000-9000-000000000001",
-      "project_slug": "default",
+      "project_slug": "example.com",
       "user_id": "00000000-0000-4000-8000-000000000002",
-      "action": "subscription.created",
-      "target_type": "subscription",
-      "target_id": "00000000-0000-4000-7000-000000000010",
+      "action": "notifications.default.create",
+      "target_type": "project_default_subscription",
+      "target_id": "c0000000-0000-4000-9000-000000000002",
       "result": "success",
       "outcome": "allow",
       "metadata": {
-        "trigger": "task.failed",
-        "channel_type": "teams",
-        "channel_name": "Ops on-call"
+        "trigger": "agent.offline",
+        "in_app": true,
+        "channel_count": 1,
+        "cooldown_seconds": 300
       },
       "source_ip": "203.0.113.42",
-      "occurred_at": "2026-05-13T10:35:44.000000+00:00"
+      "occurred_at_offset_s": -697
     },
     {
       "id": "01900000-0000-4001-a000-000000000004",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "project_slug": "django.example.com",
-      "user_id": "00000000-0000-4000-8000-000000000003",
-      "action": "command.issued",
-      "target_type": "command",
-      "target_id": "00000000-0000-4000-6000-000000000aaa",
+      "user_id": "00000000-0000-4000-8000-000000000006",
+      "action": "command.issue.bulk_retry",
+      "target_type": "bulk",
+      "target_id": null,
       "result": "success",
       "outcome": "allow",
       "metadata": {
-        "action": "retry",
-        "task_id": "d99c42a6-6b76-5058-a0b5-c3c861c4f801",
-        "by_user": "ops@example.com"
+        "command_id": "c0000000-0000-400a-9000-00000000000a",
+        "agent_id": "10000000-0000-4002-a000-000000000007",
+        "idempotency_key": null
       },
       "source_ip": "203.0.113.42",
-      "occurred_at": "2026-05-13T10:33:55.000000+00:00"
+      "occurred_at_offset_s": -806
     },
     {
       "id": "01900000-0000-4001-a000-000000000005",
       "project_id": "00000000-0000-4000-9000-000000000002",
       "project_slug": "fastapi.example.com",
-      "user_id": "00000000-0000-4000-8000-000000000003",
-      "action": "notification.dispatched",
-      "target_type": "notification_delivery",
-      "target_id": "00000000-0000-4000-6000-000000000ddd",
+      "user_id": "00000000-0000-4000-8000-000000000004",
+      "action": "notifications.channel.test",
+      "target_type": "notification_channel",
+      "target_id": "50000000-0000-4001-e000-000000000002",
       "result": "success",
       "outcome": "allow",
       "metadata": {
-        "trigger": "agent.offline",
-        "channel_type": "slack",
-        "response_code": 200
+        "type": "discord",
+        "destination_summary": "discord.com/api/webhooks/...",
+        "ok": true
       },
       "source_ip": "203.0.113.10",
-      "occurred_at": "2026-05-13T10:30:12.000000+00:00"
+      "occurred_at_offset_s": -1028
     },
     {
       "id": "01900000-0000-4001-a000-000000000006",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "project_slug": "django.example.com",
       "user_id": "00000000-0000-4000-8000-000000000001",
-      "action": "channel.created",
+      "action": "notifications.channel.create",
       "target_type": "notification_channel",
-      "target_id": "00000000-0000-4000-6000-000000000eee",
+      "target_id": "50000000-0000-4002-e000-000000000002",
       "result": "success",
       "outcome": "allow",
       "metadata": {
-        "type": "teams",
-        "name": "Ops on-call",
-        "destination_summary": "contoso.webhook.office.com (workflow)"
+        "name": "engineering-slack",
+        "type": "slack"
       },
       "source_ip": "203.0.113.42",
-      "occurred_at": "2026-05-13T10:25:48.000000+00:00"
+      "occurred_at_offset_s": -1352
     },
     {
       "id": "01900000-0000-4001-a000-000000000007",
@@ -109,27 +110,32 @@
       "project_slug": null,
       "user_id": "00000000-0000-4000-8000-000000000001",
       "action": "auth.login",
-      "target_type": "session",
-      "target_id": "00000000-0000-4000-5000-000000000001",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000001",
       "result": "success",
       "outcome": "allow",
-      "metadata": {"method": "password+mfa"},
+      "metadata": {},
       "source_ip": "203.0.113.10",
-      "occurred_at": "2026-05-13T10:24:00.000000+00:00"
+      "occurred_at_offset_s": -1458
     },
     {
       "id": "01900000-0000-4001-a000-000000000008",
-      "project_id": "00000000-0000-4000-9000-000000000001",
-      "project_slug": "default",
-      "user_id": "00000000-0000-4000-8000-000000000002",
-      "action": "schedule.fired",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "project_slug": "tasks.example.com",
+      "user_id": null,
+      "action": "schedule.fire.accepted",
       "target_type": "schedule",
-      "target_id": "00000000-0000-4000-4000-000000000abc",
+      "target_id": "30000000-0000-4003-c000-000000000001",
       "result": "success",
       "outcome": "allow",
-      "metadata": {"task_name": "reports.daily_rollup", "kind": "cron"},
-      "source_ip": "203.0.113.42",
-      "occurred_at": "2026-05-13T10:00:00.000000+00:00"
+      "metadata": {
+        "fire_id": "f0000000-0000-4000-b000-000000000001",
+        "command_id": "c0000000-0000-4001-9000-000000000001",
+        "acceptance_revision": 42,
+        "buffered": false
+      },
+      "source_ip": null,
+      "occurred_at_offset_s": -1938
     }
   ],
   "next_before_cursor": null,

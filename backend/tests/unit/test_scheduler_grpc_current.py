@@ -1,3 +1,18 @@
+"""Current-protocol (Boundary-D) scheduler gRPC surface.
+
+These run against a MIGRATED database rather than a create_all() one.
+Every guard this protocol depends on -- the change-log envelope, the
+revision allocator, the fire and command transition rules -- lives in a
+migration and not in the ORM metadata, so a create_all() schema accepts
+sequences an operator's database refuses outright. Running here is the
+only way a test can see the difference.
+
+A handful of cases stay on a create_all() schema on purpose: they exist
+to construct states the guards forbid (a torn change log, a revision
+watermark moved by hand, a command dragged straight to a terminal
+status). Each says so at its own definition.
+"""
+
 from __future__ import annotations
 
 import secrets
@@ -50,6 +65,8 @@ from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
 from z4j_brain.scheduler_grpc.protocol import current_capabilities
 from z4j_brain.settings import Settings
 
+from tests.unit._schedule_seeding import project_external_schedule
+
 
 class RpcAbortError(RuntimeError):
     def __init__(self, code: grpc.StatusCode, details: str) -> None:
@@ -71,36 +88,16 @@ class Context:
         return {}
 
 
-@pytest.fixture
-async def current_service() -> AsyncIterator[tuple[SchedulerServiceImpl, DatabaseManager, Project]]:
-    settings = Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
-        secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-        session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-        environment="dev",
-        log_json=False,
-    )
-    engine = create_async_engine(
-        settings.database_url,
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    database = DatabaseManager(engine)
+async def _build_service(
+    database: DatabaseManager,
+    settings: Settings,
+) -> AsyncIterator[tuple[SchedulerServiceImpl, DatabaseManager, Project]]:
+    """Seed one reserved-owner schedule plus an online agent, and serve it."""
+
     project = Project(id=uuid.uuid4(), slug="current", name="Current")
     async with database.session() as session:
-        session.add_all(
-            [
-                project,
-                ScheduleRevisionState(
-                    singleton_id=SCHEDULE_REVISION_SINGLETON_ID,
-                    current_revision=0,
-                    change_log_pruned_through=0,
-                ),
-            ],
-        )
-        await session.commit()
+        session.add(project)
+        await session.flush()
         await ScheduleControlRepository(session).create_current(
             project_id=project.id,
             data={
@@ -146,7 +143,121 @@ async def current_service() -> AsyncIterator[tuple[SchedulerServiceImpl, Databas
         )
         await session.commit()
     yield service, database, project
-    await engine.dispose()
+
+
+@pytest.fixture
+async def current_service(
+    migrated_db_url: str,
+    migrated_audit_chain_secret: str,
+) -> AsyncIterator[tuple[SchedulerServiceImpl, DatabaseManager, Project]]:
+    settings = Settings(
+        database_url=migrated_db_url,
+        secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated and refuses an audit
+        # row that carries no chain authentication.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
+        environment="dev",
+        log_json=False,
+    )
+    # A migrated database, not a create_all() one. The revision singleton and
+    # every transition guard arrive with the migration, so nothing is seeded
+    # by hand here.
+    engine = create_async_engine(settings.database_url)
+    try:
+        async for served in _build_service(DatabaseManager(engine), settings):
+            yield served
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def create_all_service() -> AsyncIterator[
+    tuple[SchedulerServiceImpl, DatabaseManager, Project]
+]:
+    """The same service on a guard-free schema.
+
+    For the cases that exist to construct states an activated database
+    forbids. Each user of this fixture explains at its own definition why it
+    cannot move; nothing else in this file may take it.
+    """
+    settings = Settings(
+        database_url="sqlite+aiosqlite:///:memory:",
+        secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        environment="dev",
+        log_json=False,
+    )
+    engine = create_async_engine(
+        settings.database_url,
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    database = DatabaseManager(engine)
+    async with database.session() as session:
+        session.add(
+            ScheduleRevisionState(
+                singleton_id=SCHEDULE_REVISION_SINGLETON_ID,
+                current_revision=0,
+                change_log_pruned_through=0,
+            ),
+        )
+        await session.commit()
+    try:
+        async for served in _build_service(database, settings):
+            yield served
+    finally:
+        await engine.dispose()
+
+
+async def _agent_claims_and_acks(
+    service: SchedulerServiceImpl,
+    database: DatabaseManager,
+    project: Project,
+    command_id: uuid.UUID,
+) -> None:
+    """Take one command to DISPATCHED the way an agent takes it there.
+
+    An activated database refuses a hand-written command status: the
+    transition guard demands the delivery-claim evidence that goes with it,
+    so "pretend it was delivered" has to actually claim and acknowledge.
+    """
+    dispatcher = CommandDispatcher(
+        settings=service._settings,
+        registry=AsyncMock(),
+        audit=service._audit,
+    )
+    async with database.session() as session:
+        candidate = await session.get(Command, command_id)
+        assert candidate is not None
+        assert candidate.agent_id is not None
+        is_current, claimed = await CommandRepository(
+            session,
+        ).claim_current_schedule_delivery(
+            command_id,
+            project_id=project.id,
+            agent_id=candidate.agent_id,
+            transport_kind="websocket",
+            registry_owner_id=uuid.uuid4(),
+            session_generation=uuid.uuid4().hex,
+            timeout_seconds=60,
+        )
+        assert is_current is True
+        assert claimed is not None
+        assert claimed.delivery_claim_token is not None
+        await dispatcher.handle_ack(
+            commands=CommandRepository(session),
+            command_id=command_id,
+            project_id=project.id,
+            agent_id=candidate.agent_id,
+            transport_kind="websocket",
+            registry_owner_id=uuid.uuid4(),
+            session_generation=uuid.uuid4().hex,
+            delivery_claim_token=str(claimed.delivery_claim_token),
+        )
+        await session.commit()
 
 
 async def _only_schedule(database: DatabaseManager):
@@ -275,8 +386,13 @@ async def test_granted_tokenless_fire_is_receipt_bound_and_idempotent(
         )
         assert fire.observed_control_token is None
         assert fire.receipt_control_token == token
-        command.status = CommandStatus.DISPATCHED
+        command_id = command.id
         await session.commit()
+
+    # The agent takes it. The replay below has to be a replay of a DELIVERED
+    # occurrence, which on an activated database means the real claim and ack
+    # rather than a status assignment.
+    await _agent_claims_and_acks(service, database, project, command_id)
 
     service._dispatcher.deliver_persisted.reset_mock()  # type: ignore[union-attr]
     replay = await service.FireSchedule(request, Context())
@@ -446,9 +562,20 @@ async def test_revoked_tokenless_buffer_is_staled_without_delivery(
 
 
 async def test_granted_tokenless_terminal_resolution_carries_grant_one_generation(
-    current_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
+    create_all_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
 ) -> None:
-    service, database, project = current_service
+    """A legacy occurrence that failed OUTSIDE the brain's terminal machinery.
+
+    Deliberately NOT on the migrated schema. The subject is a command sitting
+    at FAILED with no terminal hold behind it: legacy evidence that may or may
+    not have executed, which is exactly what operator resolution exists for.
+    An activated database refuses to manufacture that ("invalid schedule
+    command transition"), and the only in-product route to FAILED is
+    ``handle_result``, which records the hold and so destroys the state under
+    test. The row reaches an operator's database by surviving activation, not
+    by being written after it.
+    """
+    service, database, project = create_all_service
     row = await _only_schedule(database)
     token = row.control_token
     assert token is not None
@@ -931,9 +1058,19 @@ async def test_scheduler_ack_without_command_is_limited_to_buffered_history(
 
 
 async def test_migrated_legacy_ack_is_history_only_after_activation(
-    current_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
+    create_all_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
 ) -> None:
-    service, database, project = current_service
+    """A pre-activation fire row, acked after activation.
+
+    Deliberately NOT on the migrated schema, and the name says why: the row
+    under test is one that MIGRATED IN. An activated database refuses to
+    create a fire without a receipt tuple ("current schedule fire receipt
+    tuple is required"), which is precisely the shape that pre-1.8 history
+    has. Seeding it on an activated schema is impossible by construction, and
+    dropping the case would drop the only coverage of what an operator's
+    surviving history does when a scheduler acks it.
+    """
+    service, database, project = create_all_service
     schedule = await _only_schedule(database)
     fire_id = derive_scheduler_fire_id(
         schedule.id,
@@ -1105,7 +1242,7 @@ async def test_agent_receipts_own_current_terminal_state(
     service._audit.record.assert_awaited_once()  # type: ignore[union-attr]
 
 
-async def test_current_agent_result_rejects_replacement_without_claim_token(
+async def test_current_agent_timeout_and_unclaimed_replacement_are_rejected(
     current_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
 ) -> None:
     service, database, project = current_service
@@ -1144,6 +1281,7 @@ async def test_current_agent_result_rejects_replacement_without_claim_token(
         claim_token = str(claimed.delivery_claim_token)
         await session.commit()
 
+    audit_calls_before_timeout = service._audit.record.await_count  # type: ignore[union-attr]
     async with database.session() as session:
         await dispatcher.handle_result(
             commands=CommandRepository(session),
@@ -1164,6 +1302,9 @@ async def test_current_agent_result_rejects_replacement_without_claim_token(
         command = await session.get(Command, command_id)
         assert command is not None
         assert command.status == CommandStatus.DISPATCHED
+        assert command.result is None
+        assert command.error is None
+    assert service._audit.record.await_count == audit_calls_before_timeout  # type: ignore[union-attr]
 
     async with database.session() as session:
         await dispatcher.handle_result(
@@ -1452,12 +1593,22 @@ async def test_cadence_timeout_audit_failure_rolls_back_entire_transition(
     ],
 )
 async def test_current_fire_replay_table_is_exhaustive(
-    current_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
+    create_all_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
     status: CommandStatus,
     expected_disposition: int,
     terminal: bool,
 ) -> None:
-    service, database, _project = current_service
+    """Every CommandStatus, not just the ones a happy path can reach.
+
+    Deliberately NOT on the migrated schema. This is a totality table over the
+    enum: it forces the command into each status in turn so a status added
+    later cannot fall through the replay classifier unclassified. Several of
+    those cells are unreachable by any legitimate transition (that is the
+    point), and an activated database refuses to write them. Driving each cell
+    through its real flow would convert a totality proof into a handful of
+    flow tests and lose the cells that have no flow.
+    """
+    service, database, _project = create_all_service
     row = await _only_schedule(database)
     request = _current_fire_request(row)
     accepted = await service.FireSchedule(request, Context())
@@ -1863,27 +2014,16 @@ async def test_watch_orders_relevant_change_then_filtered_checkpoint(
     current_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
 ) -> None:
     service, database, project = current_service
-    async with database.session() as session:
-        session.add(
-            ScheduleChangeLog(
-                revision=2,
-                project_id=project.id,
-                schedule_id=uuid.uuid4(),
-                schedule_owner="celery-beat",
-                change_kind="upsert",
-                protocol_version=SCHEDULE_CHANGE_PROTOCOL_VERSION,
-                snapshot={"filtered": True},
-                occurred_at=datetime(2026, 1, 1, 12, 6, tzinfo=UTC),
-            ),
-        )
-        await session.execute(
-            update(ScheduleRevisionState)
-            .where(
-                ScheduleRevisionState.singleton_id == SCHEDULE_REVISION_SINGLETON_ID,
-            )
-            .values(current_revision=2),
-        )
-        await session.commit()
+    # A real celery-beat-owned schedule, landed through the external
+    # projection path. That appends a foreign-owner 'gap' envelope at
+    # revision 2 and moves the watermark with it, which is the only way an
+    # activated database ever grows a change this watch must filter.
+    await project_external_schedule(
+        database,
+        project_id=project.id,
+        name="filtered",
+        occurred_at=datetime(2026, 1, 1, 12, 6, tzinfo=UTC),
+    )
 
     stream = service.WatchSchedulesV2(
         pb.WatchSchedulesV2Request(
@@ -1909,14 +2049,14 @@ async def test_watch_below_pruned_boundary_is_out_of_range(
     current_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
 ) -> None:
     service, database, project = current_service
-    async with database.session() as session:
-        await session.execute(
-            update(ScheduleRevisionState)
-            .where(
-                ScheduleRevisionState.singleton_id == SCHEDULE_REVISION_SINGLETON_ID,
-            )
-            .values(change_log_pruned_through=1),
+    # Pruned through the repository rather than by moving the watermark: the
+    # boundary and the surviving prefix have to agree, and the guard is what
+    # makes them agree. A watermark set by hand is a state no operator has.
+    async with database.session(write=True) as session:
+        pruned = await ScheduleControlRepository(session).prune_change_log(
+            through_revision=1,
         )
+        assert pruned == 1
         await session.commit()
 
     stream = service.WatchSchedulesV2(
@@ -1933,9 +2073,18 @@ async def test_watch_below_pruned_boundary_is_out_of_range(
 
 
 async def test_watch_malformed_relevant_envelope_is_data_loss(
-    current_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
+    create_all_service: tuple[SchedulerServiceImpl, DatabaseManager, Project],
 ) -> None:
-    service, database, project = current_service
+    """A change-log envelope whose snapshot is not a schedule.
+
+    Deliberately NOT on the migrated schema. The insert guard refuses an
+    envelope whose snapshot does not carry the matching schedule revision, so
+    a torn envelope cannot be written to an activated database at all. It can
+    still be READ from one -- corruption, a partial restore, a hand-edit -- and
+    what the watch stream does when it meets one (abort DATA_LOSS rather than
+    stream a lie) is worth pinning precisely because the guards cannot.
+    """
+    service, database, project = create_all_service
     row = await _only_schedule(database)
     async with database.session() as session:
         session.add(

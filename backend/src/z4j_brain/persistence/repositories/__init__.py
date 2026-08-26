@@ -37,8 +37,10 @@ from z4j_brain.persistence.repositories.automation_firing_outbox import (
     AutomationFiringOutboxRepository,
 )
 from z4j_brain.persistence.repositories.automation_rule import (
+    AutomationRuleDispatchCandidate,
     AutomationRuleRepository,
     CircuitDecision,
+    dispatch_candidate,
 )
 from z4j_brain.persistence.repositories.bulk_retry_requests import (
     BulkRetryRequestRepository,
@@ -96,6 +98,7 @@ __all__ = [
     "ApiKeyRepository",
     "AuditLogRepository",
     "AutomationFiringOutboxRepository",
+    "AutomationRuleDispatchCandidate",
     "AutomationRuleRepository",
     "BaseRepository",
     "BulkRetryRequestRepository",
@@ -125,5 +128,6 @@ __all__ = [
     "UserRepository",
     "UserSubscriptionRepository",
     "WorkerRepository",
+    "dispatch_candidate",
     "upsert_imported_schedule",
 ]

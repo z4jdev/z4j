@@ -357,7 +357,7 @@ async def _resolve_sealed_plan(
     from z4j_brain.persistence.repositories import AgentRepository, TaskRepository
 
     if body.agent_id is not None:
-        agent = await AgentRepository(db_session).get(body.agent_id)
+        agent = await AgentRepository(db_session).get_live(body.agent_id)
         if agent is None or agent.project_id != project_id:
             raise HTTPException(status_code=404, detail="agent not found in this project")
 
@@ -407,10 +407,7 @@ async def _resolve_sealed_plan(
             tasks,
             effective_filter=effective_filter,
             maximum=body.max,
-            max_frame_bytes=min(
-                int(settings.max_ws_frame_bytes),
-                int(settings.ws_max_frame_bytes),
-            ),
+            max_frame_bytes=settings.effective_ws_max_frame_bytes,
         )
     except SelectionLimitExceededError as exc:
         raise HTTPException(

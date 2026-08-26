@@ -3,13 +3,23 @@
     {
       "id": "c0000000-0000-4001-9000-000000000001",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000002",
+      "agent_id": "10000000-0000-4001-a000-000000000003",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "retry-task",
+      "action": "retry_task",
       "target_type": "task",
-      "target_id": "celery-6420c6e71e8b",
+      "target_id": "arq:7b347b5eac2f5edc8e1d77d8e606efc4",
       "payload": {
-        "task_id": "celery-7c4f9a2e"
+        "engine": "arq",
+        "task_id": "7b347b5eac2f5edc8e1d77d8e606efc4",
+        "task_name": "webhooks.deliver",
+        "args": null,
+        "kwargs": null,
+        "override_args": [
+          "evt_9f21c4"
+        ],
+        "override_kwargs": {
+          "attempt": 4
+        }
       },
       "status": "completed",
       "result": null,
@@ -22,14 +32,14 @@
     {
       "id": "c0000000-0000-4002-9000-000000000002",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000002",
+      "agent_id": "10000000-0000-4001-a000-000000000003",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "cancel-task",
+      "action": "cancel_task",
       "target_type": "task",
-      "target_id": "celery-800c4911064f",
+      "target_id": "arq:ffd15961d2635afba3b99a269446af51",
       "payload": {
-        "task_id": "celery-aa11bb22",
-        "terminate": true
+        "engine": "arq",
+        "task_id": "ffd15961d2635afba3b99a269446af51"
       },
       "status": "completed",
       "result": null,
@@ -42,13 +52,14 @@
     {
       "id": "c0000000-0000-4003-9000-000000000003",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000002",
-      "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "pool-resize",
-      "target_type": "worker",
-      "target_id": "worker-1@hostname",
+      "agent_id": "10000000-0000-4001-a000-000000000004",
+      "issued_by": null,
+      "action": "reconcile_task",
+      "target_type": "task",
+      "target_id": "45ae7c1b662e5879a14345429d302247",
       "payload": {
-        "delta": 4
+        "task_id": "45ae7c1b662e5879a14345429d302247",
+        "engine": "arq"
       },
       "status": "completed",
       "result": null,
@@ -61,15 +72,23 @@
     {
       "id": "c0000000-0000-4004-9000-000000000004",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000001",
+      "agent_id": "10000000-0000-4001-a000-000000000004",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "restart-worker",
-      "target_type": "worker",
-      "target_id": "worker-stale@hostname",
-      "payload": {},
+      "action": "retry_task",
+      "target_type": "task",
+      "target_id": "arq:3c090680a0545a219977147e8a1e1204",
+      "payload": {
+        "engine": "arq",
+        "task_id": "3c090680a0545a219977147e8a1e1204",
+        "task_name": "webhooks.flush_dead_letter",
+        "args": null,
+        "kwargs": null,
+        "override_args": null,
+        "override_kwargs": null
+      },
       "status": "failed",
       "result": null,
-      "error": "worker 'worker-stale@hostname' not found in agent registry",
+      "error": "refusing polyfill retry: this engine has no native retry and the brain stores the original arguments redacted, so BOTH override_args and override_kwargs must be supplied explicitly (use empty values for a no-argument or no-keyword task).",
       "issued_at_offset_s": -7200,
       "dispatched_at_offset_s": -7198,
       "completed_at_offset_s": -7196,
@@ -80,13 +99,17 @@
       "project_id": "00000000-0000-4000-9000-000000000002",
       "agent_id": "10000000-0000-4001-a000-000000000003",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "revoke-task",
+      "action": "rate_limit",
       "target_type": "task",
-      "target_id": "celery-6f30f75954ce",
-      "payload": {},
+      "target_id": "webhooks.deliver",
+      "payload": {
+        "task_name": "webhooks.deliver",
+        "rate": "30/m",
+        "worker_name": "worker-1@worker-1.fastapi.example.com"
+      },
       "status": "failed",
       "result": null,
-      "error": "task already in 'success' state; revoke is a no-op",
+      "error": "adapter 'arq' does not support action 'rate_limit'",
       "issued_at_offset_s": -2700,
       "dispatched_at_offset_s": -2699,
       "completed_at_offset_s": -2697,
@@ -95,13 +118,15 @@
     {
       "id": "c0000000-0000-4006-9000-000000000006",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000002",
+      "agent_id": "10000000-0000-4001-a000-000000000001",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "add-consumer",
-      "target_type": "worker",
-      "target_id": "worker-1@hostname",
+      "action": "schedule.trigger_now",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4001-c000-000000000002",
       "payload": {
-        "queue": "billing.high"
+        "schedule_id": "webhooks.flush_dead_letter",
+        "schedule_name": "webhooks.flush_dead_letter",
+        "external_id": "arq-cron:webhooks.flush_dead_letter"
       },
       "status": "dispatched",
       "result": null,
@@ -114,14 +139,12 @@
     {
       "id": "c0000000-0000-4007-9000-000000000007",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000003",
+      "agent_id": "10000000-0000-4001-a000-000000000001",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "trigger-schedule",
-      "target_type": "schedule",
-      "target_id": "sched-bc2ebc94",
-      "payload": {
-        "schedule_id": "billing-daily-rollup"
-      },
+      "action": "schedule.resync",
+      "target_type": "project",
+      "target_id": "fastapi.example.com",
+      "payload": {},
       "status": "dispatched",
       "result": null,
       "error": null,
@@ -135,11 +158,12 @@
       "project_id": "00000000-0000-4000-9000-000000000002",
       "agent_id": null,
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "cancel-consumer",
-      "target_type": "worker",
-      "target_id": "worker-2@hostname",
+      "action": "cancel_task",
+      "target_type": "task",
+      "target_id": "arq:eec09795efcf54a6ab612d204bc64724",
       "payload": {
-        "queue": "low-priority"
+        "engine": "arq",
+        "task_id": "eec09795efcf54a6ab612d204bc64724"
       },
       "status": "pending",
       "result": null,
@@ -152,15 +176,18 @@
     {
       "id": "c0000000-0000-4009-9000-000000000009",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000001",
-      "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "ping-agent",
-      "target_type": "agent",
-      "target_id": "10000000-0000-4001-a000-000000000001",
-      "payload": {},
+      "agent_id": "10000000-0000-4001-a000-000000000003",
+      "issued_by": null,
+      "action": "reconcile_task",
+      "target_type": "task",
+      "target_id": "481aa444306a593c8061e7ce5dd3c622",
+      "payload": {
+        "task_id": "481aa444306a593c8061e7ce5dd3c622",
+        "engine": "arq"
+      },
       "status": "timeout",
       "result": null,
-      "error": "no ack from agent within 60s timeout window",
+      "error": "command timed out before agent responded",
       "issued_at_offset_s": -340,
       "dispatched_at_offset_s": -339,
       "completed_at_offset_s": null,
@@ -169,16 +196,17 @@
     {
       "id": "c0000000-0000-400a-9000-00000000000a",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000002",
+      "agent_id": "10000000-0000-4001-a000-000000000003",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "bulk-retry",
-      "target_type": "task",
+      "action": "bulk_retry",
+      "target_type": "bulk",
       "target_id": null,
       "payload": {
         "filter": {
+          "engine": "arq",
           "state": "failure"
         },
-        "max": 500
+        "max": 200
       },
       "status": "cancelled",
       "result": null,
@@ -191,13 +219,13 @@
     {
       "id": "c0000000-0000-400b-9000-00000000000b",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000002",
+      "agent_id": "10000000-0000-4001-a000-000000000004",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "clear-failed-tasks",
-      "target_type": "task",
-      "target_id": null,
+      "action": "restart_worker",
+      "target_type": "worker",
+      "target_id": "worker-2@worker-2.fastapi.example.com",
       "payload": {
-        "older_than_hours": 24
+        "worker_name": "worker-2@worker-2.fastapi.example.com"
       },
       "status": "completed",
       "result": null,
@@ -210,12 +238,22 @@
     {
       "id": "c0000000-0000-400c-9000-00000000000c",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "agent_id": "10000000-0000-4001-a000-000000000001",
+      "agent_id": "10000000-0000-4001-a000-000000000003",
       "issued_by": "00000000-0000-4000-8000-000000000001",
-      "action": "reload-config",
-      "target_type": "agent",
-      "target_id": "10000000-0000-4001-a000-000000000001",
-      "payload": {},
+      "action": "retry_task",
+      "target_type": "task",
+      "target_id": "arq:d569efd9cec452eb840420fdc12191d0",
+      "payload": {
+        "engine": "arq",
+        "task_id": "d569efd9cec452eb840420fdc12191d0",
+        "task_name": "exports.purge_old_files",
+        "args": null,
+        "kwargs": null,
+        "override_args": [],
+        "override_kwargs": {
+          "older_than_days": 30
+        }
+      },
       "status": "completed",
       "result": null,
       "error": null,

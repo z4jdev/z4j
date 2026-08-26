@@ -1,4 +1,20 @@
-"""Boundary-D transactional revision state and immutable visibility log."""
+"""Boundary-D transactional revision state and schedule visibility log.
+
+A schedule row cannot change without allocating a fresh revision here and
+landing the matching ``schedule_change_log`` entry in the same transaction,
+and the database refuses a transition that arrives without both. That
+covers every writer reaching the table through the application: the
+dashboard, the REST API, declarative config, and any adapter including a
+downgraded one. It is what makes the log a usable record of what changed
+and in which order.
+
+It does not hold against a role with direct write access to these tables.
+On PostgreSQL the triggers authorize on session configuration values any
+client can set, so such a role can allocate the revision, insert the
+change-log entry and update the schedule itself. Rows here are append-only
+because the guard rejects the alternatives, not because anything stops a
+writer that can reach the table underneath it (see ``docs/SECURITY.md``).
+"""
 
 from __future__ import annotations
 
@@ -81,7 +97,12 @@ class ScheduleRevisionState(Base):
 
 
 class ScheduleChangeLog(Base):
-    """One immutable upsert, delete tombstone, or filtered global gap."""
+    """One upsert, delete tombstone, or filtered global gap.
+
+    The guard admits an INSERT at the allocated revision and nothing else,
+    so through the application a row is written once and never revised. A
+    role writing the table directly is outside what that guard reaches.
+    """
 
     __tablename__ = "schedule_change_log"
 

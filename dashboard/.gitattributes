@@ -6,3 +6,7 @@
 # a Windows working tree, which broke the check on all Linux checkouts.)
 src/lib/openapi-types.gen.ts text eol=lf
 src/lib/openapi-snapshot.json text eol=lf
+
+# The generated route tree is a tracked release-build input and is likewise
+# compared byte-for-byte after regeneration.
+src/routeTree.gen.ts text eol=lf

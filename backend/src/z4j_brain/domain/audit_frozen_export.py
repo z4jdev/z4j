@@ -12,9 +12,12 @@ module implements the only non-reset path allowed to delete them:
 * the spool remains the crash authority until the operator explicitly
   acknowledges the destination digest and requests cleanup.
 
-The filesystem protocol uses POSIX directory-relative, no-follow opens or the
-native Windows handle/ACL implementation.  It never falls back to
-pathname-only operations.
+Security-critical file opens, reads, writes, and spool deletion use POSIX
+directory-relative no-follow operations or the native Windows handle/ACL
+implementation. Cleanup is not wholly pathname-free: it performs bounded
+directory enumeration and final empty-directory removal by pathname, bracketed
+by held-directory identity checks. Those cleanup operations never select or
+recursively remove unverified file content.
 """
 
 from __future__ import annotations

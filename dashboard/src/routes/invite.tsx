@@ -1,10 +1,10 @@
 /**
- * Public `/invite?token=...` accept page.
+ * Public `/invite#token=...` accept page.
  *
  * An invitee lands here from the admin's shared invite link. We:
  *
- * 1. Validate the token via ``/api/v1/invitations/preview`` (GET,
- *    anonymous) and render "you've been invited to X".
+ * 1. Validate the token via ``/api/v1/invitations/preview`` (anonymous
+ *    JSON-body POST) and render "you've been invited to X".
  * 2. Collect display name + password.
  * 3. POST to ``/api/v1/invitations/accept`` - the server creates the
  *    user, grants membership, and stamps the invitation as
@@ -14,13 +14,8 @@
  * Deliberately NOT under ``/_authenticated/*`` - the invitee is not
  * logged in yet. Token validity IS the auth.
  */
-import { useState } from "react";
-import {
-  createFileRoute,
-  Link,
-  useNavigate,
-  useSearch,
-} from "@tanstack/react-router";
+import { useLayoutEffect, useState } from "react";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { AlertCircle, CheckCircle2, LogIn } from "lucide-react";
 import { toast } from "sonner";
 
@@ -36,19 +31,49 @@ import {
 } from "@/hooks/use-invitations";
 import { ApiError } from "@/lib/api";
 
-interface InviteSearch {
-  token?: string;
-}
-
 export const Route = createFileRoute("/invite")({
   component: InvitePage,
-  validateSearch: (search: Record<string, unknown>): InviteSearch => ({
-    token: typeof search.token === "string" ? search.token : undefined,
-  }),
 });
 
+export function invitationTokenFromHash(hash: string): string | undefined {
+  return /^#token=([A-Za-z0-9_-]{43})$/.exec(hash)?.[1];
+}
+
+/** Remove secret-bearing and unsupported URL data without adding history. */
+export function scrubInvitationLocation(): void {
+  if (typeof window === "undefined") return;
+  if (!window.location.search && !window.location.hash) return;
+  window.history.replaceState(
+    window.history.state,
+    "",
+    window.location.pathname || "/invite",
+  );
+}
+
+/** Render an API failure without ever reflecting the bearer token. */
+export function safeInvitationErrorMessage(
+  error: unknown,
+  ...secrets: string[]
+): string {
+  const message =
+    error instanceof ApiError
+      ? error.message
+      : error instanceof Error
+        ? error.message
+        : "Accept failed";
+  return secrets.reduce(
+    (safe, secret) =>
+      secret && safe.includes(secret)
+        ? safe.replaceAll(secret, "[redacted]")
+        : safe,
+    message,
+  );
+}
+
 function InvitePage() {
-  const { token } = useSearch({ from: "/invite" });
+  const [token, setToken] = useState<string | undefined>(() =>
+    invitationTokenFromHash(window.location.hash),
+  );
   const navigate = useNavigate();
   const preview = useInvitationPreview(token);
   const accept = useAcceptInvitation();
@@ -56,6 +81,17 @@ function InvitePage() {
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
+
+  useLayoutEffect(() => {
+    scrubInvitationLocation();
+    const refresh = () => {
+      const nextToken = invitationTokenFromHash(window.location.hash);
+      scrubInvitationLocation();
+      setToken(nextToken);
+    };
+    window.addEventListener("hashchange", refresh);
+    return () => window.removeEventListener("hashchange", refresh);
+  }, []);
 
   if (!token) {
     return (
@@ -109,10 +145,7 @@ function InvitePage() {
       // does not set a session (matches the invite flow's spec).
       navigate({ to: "/login" });
     } catch (err) {
-      const msg = err instanceof ApiError
-        ? err.message
-        : err instanceof Error ? err.message : "Accept failed";
-      toast.error(msg);
+      toast.error(safeInvitationErrorMessage(err, token, password));
     }
   };
 
@@ -178,11 +211,7 @@ function InvitePage() {
               onChange={(e) => setPasswordConfirm(e.target.value)}
             />
           </div>
-          <Button
-            type="submit"
-            className="w-full"
-            disabled={accept.isPending}
-          >
+          <Button type="submit" className="w-full" disabled={accept.isPending}>
             {accept.isPending ? "Creating account…" : "Accept invitation"}
           </Button>
         </form>
@@ -207,13 +236,7 @@ function InviteShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function ErrorView({
-  title,
-  message,
-}: {
-  title: string;
-  message: string;
-}) {
+function ErrorView({ title, message }: { title: string; message: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-start gap-3">

@@ -66,18 +66,20 @@ class SetupResult:
 class SetupService:
     """First-boot orchestration.
 
-    The brain instantiates one of these in the lifespan startup
-    hook and calls :meth:`is_first_boot` + :meth:`mint_token`. The
-    setup endpoint instantiates a request-scoped instance and calls
+    The brain creates one process-wide instance in the lifespan startup hook.
+    Startup calls :meth:`is_first_boot` and :meth:`mint_token`; the setup
+    endpoint resolves that same instance from ``app.state`` and calls
     :meth:`complete`.
 
     The per-IP rate limiter is sourced from the ``audit_log`` table
     so it survives worker restarts AND is consistent across multiple
-    uvicorn workers. Every failed setup attempt writes a
-    ``setup.attempt`` row with the source IP; the budget query
-    counts those rows in the sliding window. Defends against the
-    unlikely case of someone brute-forcing the 256-bit token from
-    a single source.
+    uvicorn workers. Eligible failures attempt to write a ``setup.attempt``
+    row with the source IP until the budget is exhausted; budget-rejected
+    retries deliberately do not extend the window. In the production path a
+    dedicated session makes a successfully written failure row independent of
+    the request transaction. If that write fails, the best-effort fallback
+    uses the request session and can be rolled back with the request. The query
+    counts only rows that were actually persisted in the sliding window.
     """
 
     __slots__ = ("_audit", "_db_manager", "_hasher", "_secret", "_settings")
@@ -124,7 +126,7 @@ class SetupService:
 
         Returns ``(plaintext_token, expires_at)``. The plaintext is
         the only place this token ever exists in cleartext - the
-        startup hook prints it to stdout once and never persists it.
+        startup hook prints it to stderr once and never persists it.
 
         Side effect: deletes every existing row in
         ``first_boot_tokens``. There must be at most one valid
@@ -160,7 +162,7 @@ class SetupService:
     ) -> SetupResult:
         """Verify the token + bootstrap the brain.
 
-        Steps (all inside the caller's transaction):
+        Successful bootstrap steps (all inside the caller's transaction):
         1. Per-IP rate limit check.
         2. Re-check ``users`` is still empty.
         3. Read the active token row.
@@ -175,8 +177,8 @@ class SetupService:
         11. Delete the token row (single-use).
         12. Audit ``setup.completed``.
 
-        Any failure raises a brain exception. The endpoint maps
-        these to 410 / 422 / 429 / 409 / 503.
+        Any failure raises the corresponding domain exception for the API's
+        central error mapper.
         """
         if not await self._check_attempt_budget(audit_log, ip):
             # Deliberately do NOT write a setup.attempt audit row here.
@@ -192,8 +194,9 @@ class SetupService:
 
             raise RateLimitExceeded(
                 "too many setup attempts from this address. "
-                "Wait 15 minutes for the rate-limit window to clear, "
-                "or restart the brain to mint a fresh setup token.",
+                "Wait 15 minutes for the audit-backed rate-limit window "
+                "to clear. Restarting the brain or minting another token "
+                "does not reset this attempt budget.",
             )
 
         # Re-check the user count BEFORE consulting the token table.
@@ -228,7 +231,7 @@ class SetupService:
             )
             raise NotFoundError(
                 "No active setup token. Restart the brain to mint a "
-                "fresh setup URL, or run `z4j-brain reset-setup` to "
+                "fresh setup URL, or run `z4j reset-setup` to "
                 "explicitly reset the bootstrap state.",
                 details={"reason": "no_active_token"},
             )
@@ -243,7 +246,8 @@ class SetupService:
                 reason="expired",
             )
             raise NotFoundError(
-                "Setup token has expired (15-minute lifetime). "
+                "Setup token has expired "
+                f"(configured lifetime: {self._settings.first_boot_token_ttl_seconds} seconds). "
                 "Restart the brain to mint a fresh setup URL.",
                 details={"reason": "expired"},
             )
@@ -263,7 +267,7 @@ class SetupService:
                 "This setup link is from a previous server run. The "
                 "current server has minted a new token - check your "
                 "terminal for the latest setup URL printed at startup, "
-                "or run `z4j-brain reset-setup` to mint a fresh one.",
+                "or run `z4j reset-setup` to mint a fresh one.",
                 details={"reason": "invalid_token"},
             )
 
@@ -440,14 +444,14 @@ class SetupService:
     ) -> None:
         """Record a failed setup attempt.
 
-        Uses a DEDICATED short-lived session when a db_manager
-        was wired in at construction time, so the failure row
-        survives a rollback of the caller's transaction. Without
-        this, an exception in the success path further down
-        ``complete()`` would also wipe the failure audit,
-        leaving no trace AND under-counting the attempt budget.
-        Falls back to the caller's session when no db_manager
-        is available (CLI path, tests).
+        Uses a DEDICATED short-lived session when a db_manager was wired in at
+        construction time. A successful dedicated write is committed before
+        returning and therefore survives rollback of the caller's transaction.
+        If opening, writing, or committing that session fails, this method
+        makes one best-effort write through the caller's session instead; that
+        fallback is not durable until the caller commits and may be lost when
+        the request transaction rolls back. The CLI path and some tests have no
+        db_manager and use only that caller-session path.
         """
         if self._db_manager is not None:
             try:

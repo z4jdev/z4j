@@ -10,7 +10,6 @@
  */
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import type { ColumnDef } from "@tanstack/react-table";
 import {
   GitCompare,
   History,
@@ -29,7 +28,7 @@ import { TaskPriorityBadge } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
 import { useConfirm } from "@/components/domain/confirm-dialog";
 import { ScheduleFormDialog } from "@/components/domain/schedule-form-dialog";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type DataTableColumnDef } from "@/components/ui/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -62,15 +61,23 @@ export const Route = createFileRoute(
 });
 
 const SCHEDULE_KINDS: ScheduleKind[] = ["cron", "interval", "solar", "clocked"];
+const scheduleRowId = (row: SchedulePublic) => row.id;
 
 function SchedulesPage() {
   const { slug } = Route.useParams();
-  const { data: schedules, isLoading, isFetching, refetch } = useSchedules(slug);
+  const {
+    data: schedules,
+    isLoading,
+    isFetching,
+    refetch,
+  } = useSchedules(slug);
   const toggle = useToggleSchedule(slug);
   const trigger = useTriggerSchedule(slug);
   const deleteSched = useDeleteSchedule(slug);
   const resync = useScheduleResync(slug);
   const { confirm, dialog: confirmDialog } = useConfirm();
+  const canOperate = useCan(slug, "operate_schedules");
+  const canAdminister = useCan(slug, "admin_schedules");
 
   // Form-dialog state. Single component handles both create and
   // edit; ``editing`` carries the row when in edit mode.
@@ -113,6 +120,7 @@ function SchedulesPage() {
   }, [schedules, kindFilter, enabledFilter, searchQuery]);
 
   async function onToggle(scheduleId: string, enabled: boolean) {
+    if (!canOperate) return;
     try {
       await toggle.mutateAsync({ scheduleId, enabled });
       toast.success(enabled ? "schedule enabled" : "schedule disabled");
@@ -124,6 +132,7 @@ function SchedulesPage() {
   }
 
   async function onTrigger(scheduleId: string) {
+    if (!canOperate) return;
     try {
       await trigger.mutateAsync(scheduleId);
       toast.success("trigger command issued");
@@ -135,11 +144,13 @@ function SchedulesPage() {
   }
 
   function onEdit(s: SchedulePublic) {
+    if (!canAdminister) return;
     setEditing(s);
     setFormOpen(true);
   }
 
   function onCreate() {
+    if (!canAdminister) return;
     setEditing(undefined);
     setFormOpen(true);
   }
@@ -155,6 +166,7 @@ function SchedulesPage() {
   // was offline). Returns 202 - the snapshot events arrive
   // async; the hook auto-refetches at 0s and 3s.
   async function onResync() {
+    if (!canAdminister) return;
     try {
       const result = await resync.mutateAsync();
       const adapters =
@@ -205,6 +217,7 @@ function SchedulesPage() {
   }
 
   async function onBulkEnable(rows: SchedulePublic[], clear: () => void) {
+    if (!canOperate) return;
     await _runBulk(
       rows.filter((r) => !r.is_enabled),
       "enable",
@@ -214,6 +227,7 @@ function SchedulesPage() {
   }
 
   async function onBulkDisable(rows: SchedulePublic[], clear: () => void) {
+    if (!canOperate) return;
     await _runBulk(
       rows.filter((r) => r.is_enabled),
       "disable",
@@ -223,28 +237,24 @@ function SchedulesPage() {
   }
 
   async function onBulkTrigger(rows: SchedulePublic[], clear: () => void) {
-    await _runBulk(
-      rows,
-      "trigger",
-      (s) => trigger.mutateAsync(s.id),
-      clear,
-    );
+    if (!canOperate) return;
+    await _runBulk(rows, "trigger", (s) => trigger.mutateAsync(s.id), clear);
   }
 
   function onBulkDelete(rows: SchedulePublic[], clear: () => void) {
+    if (!canAdminister) return;
     confirm({
       title: `Delete ${rows.length} schedule${rows.length === 1 ? "" : "s"}?`,
       description: (
         <>
           This permanently removes the selected schedules. Any{" "}
-          <code>pending_fires</code> rows attached to them are
-          cascaded; fire history is preserved.{" "}
+          <code>pending_fires</code> rows attached to them are cascaded; fire
+          history is preserved.{" "}
           {rows.some((r) => r.source !== "dashboard") && (
             <>
-              <strong>Heads up:</strong> some selected rows have a
-              non-dashboard source, they may be re-created on the
-              next reconcile pass unless you also remove them
-              upstream.
+              <strong>Heads up:</strong> some selected rows have a non-dashboard
+              source, they may be re-created on the next reconcile pass unless
+              you also remove them upstream.
             </>
           )}
         </>
@@ -256,20 +266,21 @@ function SchedulesPage() {
   }
 
   function onDelete(s: SchedulePublic) {
+    if (!canAdminister) return;
     confirm({
       title: `Delete schedule "${s.name}"?`,
       description: (
         <>
           This permanently removes the schedule and any{" "}
-          <code>pending_fires</code> rows attached to it. The schedule's
-          fire history (last 30 days by default) is kept for forensics.
+          <code>pending_fires</code> rows attached to it. The schedule's fire
+          history (last 30 days by default) is kept for forensics.
           {s.source !== "dashboard" && (
             <>
               {" "}
               <strong>Heads up:</strong> this schedule has{" "}
               <code>source={s.source}</code>. Deleting it here will be
-              re-created on the next reconcile pass from that source
-              unless you also remove it from the upstream config.
+              re-created on the next reconcile pass from that source unless you
+              also remove it from the upstream config.
             </>
           )}
         </>
@@ -288,7 +299,6 @@ function SchedulesPage() {
     });
   }
 
-  const canManage = useCan(slug, "manage_schedules");
   const { data: misfires } = useProjectMisfires(slug);
   const columns = useScheduleColumns({
     slug,
@@ -297,7 +307,15 @@ function SchedulesPage() {
     onEdit,
     onDelete,
     triggerPending: trigger.isPending,
-    canManage,
+    canOperate,
+    canAdminister,
+  });
+  const scheduleSelectionScopeKey = JSON.stringify({
+    slug,
+    kind: kindFilter,
+    enabled: enabledFilter,
+    source: "all",
+    search: searchQuery,
   });
 
   const filterToolbar = (
@@ -353,13 +371,13 @@ function SchedulesPage() {
         description="manage every schedule the z4j-scheduler ticks for this project"
         actions={
           <div className="flex items-center gap-2">
-            {canManage && (
+            {canAdminister && (
               <Button size="sm" onClick={onCreate}>
                 <Plus className="size-4" />
                 New schedule
               </Button>
             )}
-            {canManage && (
+            {canAdminister && (
               <Button
                 variant="outline"
                 size="sm"
@@ -380,7 +398,7 @@ function SchedulesPage() {
                 Sync now
               </Button>
             )}
-            {canManage && (
+            {canAdminister && (
               <Button asChild variant="outline" size="sm">
                 <Link
                   to="/projects/$slug/schedules/reconcile"
@@ -391,10 +409,7 @@ function SchedulesPage() {
                 </Link>
               </Button>
             )}
-            <RefreshButton
-              onRefresh={() => refetch()}
-              pending={isFetching}
-            />
+            <RefreshButton onRefresh={() => refetch()} pending={isFetching} />
           </div>
         }
       />
@@ -404,17 +419,15 @@ function SchedulesPage() {
           <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
           <div className="min-w-0">
             <div className="font-medium">
-              {misfires.length}{" "}
-              {misfires.length === 1 ? "misfire" : "misfires"} in the last 24h
+              {misfires.length} {misfires.length === 1 ? "misfire" : "misfires"}{" "}
+              in the last 24h
             </div>
             <div className="truncate text-xs text-muted-foreground">
               An enabled schedule fired late past its grace window (a dead or
               partitioned scheduler is the usual cause):{" "}
               {Array.from(
                 new Set(
-                  misfires
-                    .map((m) => m.name)
-                    .filter((n): n is string => !!n),
+                  misfires.map((m) => m.name).filter((n): n is string => !!n),
                 ),
               )
                 .slice(0, 6)
@@ -450,16 +463,29 @@ function SchedulesPage() {
           columns={columns}
           data={filteredSchedules}
           enableSelection
+          getRowId={scheduleRowId}
+          selectionScopeKey={scheduleSelectionScopeKey}
           enableSorting
           totalLabel={`${filteredSchedules.length} schedule${filteredSchedules.length === 1 ? "" : "s"}`}
           toolbar={(ctx) =>
             ctx.selectedCount > 0 ? (
               <BulkActionToolbar
-                ctx={ctx as { selectedRows: SchedulePublic[]; selectedCount: number; clearSelection: () => void }}
-                canManage={canManage}
+                ctx={
+                  ctx as {
+                    selectedRows: SchedulePublic[];
+                    selectedCount: number;
+                    clearSelection: () => void;
+                  }
+                }
+                canOperate={canOperate}
+                canAdminister={canAdminister}
                 onBulkEnable={(rows) => onBulkEnable(rows, ctx.clearSelection)}
-                onBulkDisable={(rows) => onBulkDisable(rows, ctx.clearSelection)}
-                onBulkTrigger={(rows) => onBulkTrigger(rows, ctx.clearSelection)}
+                onBulkDisable={(rows) =>
+                  onBulkDisable(rows, ctx.clearSelection)
+                }
+                onBulkTrigger={(rows) =>
+                  onBulkTrigger(rows, ctx.clearSelection)
+                }
                 onBulkDelete={(rows) => onBulkDelete(rows, ctx.clearSelection)}
               />
             ) : (
@@ -469,12 +495,14 @@ function SchedulesPage() {
         />
       )}
 
-      <ScheduleFormDialog
-        slug={slug}
-        open={formOpen}
-        onClose={() => setFormOpen(false)}
-        existing={editing}
-      />
+      {canAdminister && (
+        <ScheduleFormDialog
+          slug={slug}
+          open={formOpen}
+          onClose={() => setFormOpen(false)}
+          existing={editing}
+        />
+      )}
       {confirmDialog}
     </PageShell>
   );
@@ -491,7 +519,8 @@ function useScheduleColumns({
   onEdit,
   onDelete,
   triggerPending,
-  canManage,
+  canOperate,
+  canAdminister,
 }: {
   slug: string;
   onToggle: (scheduleId: string, enabled: boolean) => void;
@@ -499,8 +528,9 @@ function useScheduleColumns({
   onEdit: (s: SchedulePublic) => void;
   onDelete: (s: SchedulePublic) => void;
   triggerPending: boolean;
-  canManage: boolean;
-}): ColumnDef<SchedulePublic, unknown>[] {
+  canOperate: boolean;
+  canAdminister: boolean;
+}): DataTableColumnDef<SchedulePublic>[] {
   return useMemo(
     () => [
       {
@@ -620,7 +650,7 @@ function useScheduleColumns({
           <Switch
             checked={row.original.is_enabled}
             onCheckedChange={(checked) => onToggle(row.original.id, checked)}
-            disabled={!canManage}
+            disabled={!canOperate}
           />
         ),
         enableSorting: false,
@@ -629,45 +659,60 @@ function useScheduleColumns({
         id: "actions",
         header: "",
         cell: ({ row }: { row: { original: SchedulePublic } }) => {
-          if (!canManage) return null;
+          if (!canOperate && !canAdminister) return null;
           const s = row.original;
           return (
             <div className="flex items-center justify-end gap-1">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onTrigger(s.id)}
-                disabled={triggerPending}
-                title="Trigger this schedule now"
-              >
-                <Play className="size-3" />
-                Run
-              </Button>
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8"
-                onClick={() => onEdit(s)}
-                title="Edit"
-              >
-                <Pencil className="size-3.5" />
-              </Button>
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                onClick={() => onDelete(s)}
-                title="Delete"
-              >
-                <Trash2 className="size-3.5" />
-              </Button>
+              {canOperate && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onTrigger(s.id)}
+                  disabled={triggerPending}
+                  title="Trigger this schedule now"
+                >
+                  <Play className="size-3" />
+                  Run
+                </Button>
+              )}
+              {canAdminister && (
+                <>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8"
+                    onClick={() => onEdit(s)}
+                    title="Edit"
+                  >
+                    <Pencil className="size-3.5" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    onClick={() => onDelete(s)}
+                    title="Delete"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                </>
+              )}
             </div>
           );
         },
         enableSorting: false,
       },
     ],
-    [slug, onToggle, onTrigger, onEdit, onDelete, triggerPending, canManage],
+    [
+      slug,
+      onToggle,
+      onTrigger,
+      onEdit,
+      onDelete,
+      triggerPending,
+      canOperate,
+      canAdminister,
+    ],
   );
 }
 
@@ -776,7 +821,8 @@ export { CatchUpBadge, SourceBadge };
  */
 function BulkActionToolbar({
   ctx,
-  canManage,
+  canOperate,
+  canAdminister,
   onBulkEnable,
   onBulkDisable,
   onBulkTrigger,
@@ -787,7 +833,8 @@ function BulkActionToolbar({
     selectedCount: number;
     clearSelection: () => void;
   };
-  canManage: boolean;
+  canOperate: boolean;
+  canAdminister: boolean;
   onBulkEnable: (rows: SchedulePublic[]) => void;
   onBulkDisable: (rows: SchedulePublic[]) => void;
   onBulkTrigger: (rows: SchedulePublic[]) => void;
@@ -797,11 +844,9 @@ function BulkActionToolbar({
   const disableCount = ctx.selectedRows.filter((r) => r.is_enabled).length;
   return (
     <div className="flex items-center gap-3 rounded-md bg-primary/10 px-4 py-2">
-      <span className="text-sm font-medium">
-        {ctx.selectedCount} selected
-      </span>
+      <span className="text-sm font-medium">{ctx.selectedCount} selected</span>
       <div className="ml-auto flex items-center gap-2">
-        {canManage && (
+        {canOperate && (
           <>
             <Button
               variant="outline"
@@ -841,17 +886,19 @@ function BulkActionToolbar({
             >
               Disable {disableCount > 0 ? `(${disableCount})` : ""}
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 gap-1 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
-              onClick={() => onBulkDelete(ctx.selectedRows)}
-              title="Delete all selected schedules"
-            >
-              <Trash2 className="size-3" />
-              Delete
-            </Button>
           </>
+        )}
+        {canAdminister && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+            onClick={() => onBulkDelete(ctx.selectedRows)}
+            title="Delete all selected schedules"
+          >
+            <Trash2 className="size-3" />
+            Delete
+          </Button>
         )}
         <Button
           variant="ghost"

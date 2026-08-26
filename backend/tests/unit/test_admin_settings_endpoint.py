@@ -11,6 +11,7 @@ admin-route tests.
 
 from __future__ import annotations
 
+import json
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
+from z4j_brain.api.admin_settings import _normalize_source
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
@@ -25,6 +27,10 @@ from z4j_brain.persistence import models  # noqa: F401  - register mappers
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import Session, User
 from z4j_brain.settings import Settings
+
+
+def test_runtime_cli_source_is_rendered_as_environment() -> None:
+    assert _normalize_source("runtime/CLI (Z4J_BIND_HOST)") == "env"
 
 
 @pytest.fixture
@@ -88,7 +94,9 @@ async def _seed_user(
             ip_at_issue="127.0.0.1",
             user_agent_at_issue="test",
         )
-        s.add_all([user, session_row])
+        s.add(user)
+        await s.flush()
+        s.add(session_row)
         await s.commit()
 
     return {
@@ -178,12 +186,27 @@ class TestAdminSettingsEndpoint:
         assert "secret" in by_name
         assert by_name["secret"]["is_secret"] is True
         assert by_name["secret"]["value"] == "***"
+        assert by_name["database_url"]["is_secret"] is True
+        assert by_name["database_url"]["value"] == "***"
+
+        # A non-credential URL remains useful to an administrator. This
+        # negative control prevents the redaction rule from masking every
+        # URL-shaped setting just to protect database credentials.
+        assert by_name["public_url"]["is_secret"] is False
+        assert by_name["public_url"]["value"] == settings.public_url
+
+        # Composite values are startup-compatible JSON, not Python repr.
+        # Copying this value into an env file must survive the same decoder
+        # used during process startup.
+        assert json.loads(by_name["allowed_hosts"]["value"]) == settings.allowed_hosts
+        assert "'" not in by_name["allowed_hosts"]["value"]
 
         # Secrets must NEVER appear in cleartext anywhere in the body,
         # even partially. This pins the "secrets never cross the wire"
         # invariant in a single grep-the-response check.
         cleartext = settings.secret.get_secret_value()
         assert cleartext not in r.text
+        assert settings.database_url not in r.text
 
         # Sorted alphabetically.
         names = [row["name"] for row in body["settings"]]

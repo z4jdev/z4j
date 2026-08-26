@@ -17,9 +17,28 @@ SNAPSHOT_FORMAT_VERSION = 1
 _DEFAULT_ANCHOR = datetime(2000, 1, 1, tzinfo=UTC)
 
 
+class ScheduleWireError(ValueError):
+    """A stored snapshot cannot answer what this projection has to decide."""
+
+
 def _read(source: Mapping[str, Any] | Any, field: str, default: Any = None) -> Any:
+    # A stored snapshot is the whole of what a watching scheduler ever learns
+    # about the row, so a field the envelope omits is a field the scheduler
+    # decides without. Substituting a default turns "the envelope did not say"
+    # into a confident answer, and the confident answer is the dangerous one:
+    # an absent hold reads as "not held" and every scheduler that learns state
+    # by watching keeps ticking a schedule an operator stopped.
+    #
+    # Refusing here rather than naming the fields that matter is deliberate.
+    # Any field this projection reads is by definition one the envelope has to
+    # carry, so the requirement follows the code instead of a second list that
+    # can fall behind it. A live row is a different case: every column exists,
+    # and the defaults below are the encoding's own, not a stand-in for
+    # missing evidence.
     if isinstance(source, Mapping):
-        return source.get(field, default)
+        if field not in source:
+            raise ScheduleWireError(f"schedule snapshot omits {field}")
+        return source[field]
     return getattr(source, field, default)
 
 
@@ -56,8 +75,20 @@ def schedule_to_pb(
     control_token = _read(source, "control_token")
     quarantine_token = _read(source, "quarantine_control_token")
     desired_enabled = bool(_read(source, "is_enabled", False))
-    effectively_enabled = desired_enabled and not (
-        control_token is not None and quarantine_token == control_token
+    # A held or quarantined schedule is projected as not-enabled rather than
+    # given a field of its own. Every scheduler already skips an entry that is
+    # not enabled (tick/engine.py), including versions built before either
+    # state existed, so this is what actually stops the tick.
+    #
+    # The brain refusing the fire is the backstop, not the mechanism. A
+    # scheduler that still ticks a held schedule gets FIRE_RETRYABLE_OR
+    # _AMBIGUOUS back, which means retry, so refusing alone would have turned
+    # "fires while held" into "retries under back-off until resume". The
+    # scheduler has to not ask in the first place.
+    effectively_enabled = (
+        desired_enabled
+        and not (control_token is not None and quarantine_token == control_token)
+        and _read(source, "paused_at") is None
     )
     return pb.Schedule(
         id=str(_read(source, "id")),
@@ -177,6 +208,7 @@ def stable_snapshot_digest(
 
 __all__ = [
     "SNAPSHOT_FORMAT_VERSION",
+    "ScheduleWireError",
     "schedule_to_pb",
     "stable_snapshot_digest",
 ]

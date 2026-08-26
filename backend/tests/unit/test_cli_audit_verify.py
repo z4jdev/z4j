@@ -20,6 +20,16 @@ shrinking it drives the EXACT loop the default runs without seeding
 1000+ rows. The regression pinned here: a tamper BEYOND the first
 page must be detected (the pre-fix verifier loaded a single slice
 and silently skipped every row past the cap).
+
+Deliberately still on a ``create_all()`` schema. ``_run_audit_verify``
+branches on ``audit_chain_secret``: with a key it runs the Boundary-F
+verifier and reports "verified active: N", without one it runs the keyset
+walk whose output every assertion below matches. More to the point, every
+case here is a tamper -- a field edited without re-signing, a row deleted,
+a prefix truncated -- and an activated database refuses all three at the
+trigger, so on a migrated schema there would be nothing left for the CLI
+to detect. Covered separately: ``test_audit_chain_boundary_f.py`` drives
+the Boundary-F verifier.
 """
 
 from __future__ import annotations
@@ -40,6 +50,17 @@ from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import AuditLog
 from z4j_brain.persistence.repositories import AuditLogRepository
 from z4j_brain.settings import Settings
+
+
+def test_reseal_help_names_the_real_rotation_setting(capsys) -> None:  # type: ignore[no-untyped-def]
+    from z4j_brain.cli import main
+
+    with pytest.raises(SystemExit) as raised:
+        main(["audit", "reseal-watermark", "--help"])
+    assert raised.value.code == 0
+    output = capsys.readouterr().out
+    assert "Z4J_PREVIOUS_SECRETS" in output
+    assert "Z4J_SECRETS_PREVIOUS" not in output
 
 
 @pytest.fixture
@@ -71,7 +92,7 @@ def cli_settings(
     monkeypatch.delenv("Z4J_AUDIT_CHAIN_PREVIOUS_SECRETS", raising=False)
     # A developer's rotation-window var would add extra verify
     # secrets; drop it so the test is hermetic.
-    monkeypatch.delenv("Z4J_SECRETS_PREVIOUS", raising=False)
+    monkeypatch.delenv("Z4J_PREVIOUS_SECRETS", raising=False)
     # _bootstrap_env_for_management_commands would setdefault this
     # OUTSIDE monkeypatch's restore list; set it here so the value
     # is restored after the test.

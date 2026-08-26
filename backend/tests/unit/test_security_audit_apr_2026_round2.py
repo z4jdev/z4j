@@ -7,10 +7,13 @@ introduced in the deep-audit follow-up batch.
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from types import MethodType, SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -463,7 +466,7 @@ class TestAckStateMachineR6:
         from z4j_brain.persistence.base import Base
         from z4j_brain.persistence.database import DatabaseManager
         from z4j_brain.persistence.enums import ScheduleKind
-        from z4j_brain.persistence.models import Project, Schedule, ScheduleFire
+        from z4j_brain.persistence.models import Project, Schedule, ScheduleFire, User
         from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
         from z4j_brain.settings import Settings
 
@@ -486,6 +489,16 @@ class TestAckStateMachineR6:
         fire_id = fire_id if fire_id is not None else _cadence_fire_id()
         async with db.session() as s:
             s.add(Project(id=project_id, slug="proj", name="Proj"))
+            if triggered_by is not None:
+                s.add(
+                    User(
+                        id=triggered_by,
+                        email=f"manual-{triggered_by}@example.com",
+                        password_hash="unused-test-hash",
+                        is_active=True,
+                    )
+                )
+            await s.flush()
             s.add(
                 Schedule(
                     id=schedule_id,
@@ -505,6 +518,7 @@ class TestAckStateMachineR6:
                     total_runs=0,
                 )
             )
+            await s.flush()
             s.add(
                 ScheduleFire(
                     fire_id=fire_id,
@@ -717,6 +731,53 @@ class TestWatchSchedulesConcurrencyCap:
 # =====================================================================
 
 
+class _WatchAbortError(RuntimeError):
+    pass
+
+
+class _WatchContext:
+    def __init__(self, cn: str) -> None:
+        self.cn = cn
+        self.status = None
+
+    async def abort(self, status, message: str) -> None:
+        self.status = status
+        raise _WatchAbortError(message)
+
+    def cancelled(self) -> bool:
+        return False
+
+
+def _watch_service(*, global_cap: int = 1, per_cert_cap: int = 4):
+    from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
+
+    service = object.__new__(SchedulerServiceImpl)
+    service._settings = SimpleNamespace(
+        scheduler_grpc_cn_project_bindings={},
+        scheduler_grpc_watch_max_per_cert=per_cert_cap,
+    )
+    service._db = SimpleNamespace(
+        engine=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
+    )
+    service._watch_global_cap = global_cap
+    service._watch_global_count = 0
+    service._watch_global_lock = asyncio.Lock()
+    service._watch_per_cert_count = defaultdict(int)
+    service._watch_per_cert_lock = asyncio.Lock()
+    return service
+
+
+def _patch_watch_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    from z4j_brain.scheduler_grpc import binding
+
+    monkeypatch.setattr(binding, "extract_peer_cns", lambda context: {context.cn})
+    monkeypatch.setattr(
+        binding,
+        "filter_project_ids_by_binding",
+        AsyncMock(return_value=None),
+    )
+
+
 class TestWatchSchedulesCounterUnderLock:
     """Round-10 audit fix -Sched-H1 (Apr 2026).
 
@@ -736,147 +797,142 @@ class TestWatchSchedulesCounterUnderLock:
     body (no acquire-then-cancel gap).
     """
 
-    def test_handlers_no_longer_uses_wait_for_sem_acquire(self) -> None:
-        """The racy ``wait_for(sem.acquire(), 0)`` pattern is gone.
+    @pytest.mark.asyncio
+    async def test_global_rejection_and_stream_close_do_not_leak_slots(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import grpc
+        from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
 
-        Strips comment + docstring lines before the substring check
-        so the explanatory comment block (which intentionally
-        names the pre-fix expression) doesn't trip the assertion.
-        """
-        from pathlib import Path
+        _patch_watch_binding(monkeypatch)
+        service = _watch_service(global_cap=1, per_cert_cap=4)
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "scheduler_grpc"
-            / "handlers.py"
-        ).read_text()
+        async def polling(_self, **_kwargs):
+            yield pb.ScheduleEvent(resume_token="ready")
 
-        # Strip comment lines (full-line `#` and trailing `# ...`).
-        # We keep code intact so an actual call still gets caught.
-        code_lines = []
-        in_docstring = False
-        for raw in src.splitlines():
-            stripped = raw.lstrip()
-            # Toggle docstring blocks on triple-quote lines (rough
-            # but good enough for this repo's style).
-            triple_count = stripped.count('"""')
-            if in_docstring:
-                if triple_count >= 1:
-                    in_docstring = False
-                continue
-            if triple_count == 1 and not stripped.endswith('"""'):
-                in_docstring = True
-                continue
-            if triple_count >= 2:
-                # Single-line docstring, skip it.
-                continue
-            if stripped.startswith("#"):
-                continue
-            # Trailing inline comment.
-            if " #" in raw:
-                raw = raw.split(" #", 1)[0]  # noqa: PLW2901  normalized in-loop
-            code_lines.append(raw)
-        code = "\n".join(code_lines)
+        service._watch_via_polling = MethodType(polling, service)
+        first = service.WatchSchedules(pb.WatchSchedulesRequest(), _WatchContext("cert-a"))
+        await anext(first)
+        assert service._watch_global_count == 1
+        assert service._watch_per_cert_count == {"cert-a": 1}
 
-        # The exact pre-fix expression must not reappear in code.
-        assert "wait_for(self._watch_global_sem.acquire()" not in code
-        # The semaphore attribute itself shouldn't even exist for
-        # the WatchSchedules cap any more, counter under lock is
-        # the contract.
-        assert "_watch_global_sem" not in code
+        rejected_context = _WatchContext("cert-b")
+        rejected = service.WatchSchedules(pb.WatchSchedulesRequest(), rejected_context)
+        with pytest.raises(_WatchAbortError, match="concurrent stream cap"):
+            await anext(rejected)
+        assert rejected_context.status is grpc.StatusCode.RESOURCE_EXHAUSTED
+        assert service._watch_global_count == 1
+        assert "cert-b" not in service._watch_per_cert_count
 
-    def test_handlers_uses_counter_under_lock(self) -> None:
-        """Increment is atomic under the global lock."""
-        from pathlib import Path
+        await first.aclose()
+        assert service._watch_global_count == 0
+        assert dict(service._watch_per_cert_count) == {}
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "scheduler_grpc"
-            / "handlers.py"
-        ).read_text()
-        assert "_watch_global_count" in src
-        assert "_watch_global_lock" in src
-        assert "self._watch_global_count += 1" in src
-        # The decrement must be reachable through the shielded
-        # release helper.
-        assert "_release_watch_slot" in src
+    @pytest.mark.asyncio
+    async def test_per_cert_rejection_preserves_the_live_stream(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
 
-    def test_release_is_shielded(self) -> None:
-        """The decrement runs under ``asyncio.shield`` so a cancel
-        landing on the lock-acquire await can't strand the slot."""
-        from pathlib import Path
+        _patch_watch_binding(monkeypatch)
+        service = _watch_service(global_cap=4, per_cert_cap=1)
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "scheduler_grpc"
-            / "handlers.py"
-        ).read_text()
-        # The shield wraps the release helper.
-        assert "asyncio.shield(" in src
-        assert "self._release_watch_slot(" in src
+        async def polling(_self, **_kwargs):
+            yield pb.ScheduleEvent(resume_token="ready")
 
-    def test_release_helper_decrements_both_counters(self) -> None:
-        """Symmetric decrement of global + per-cert under their own
-        locks. A bug here re-introduces the leak even though the
-        outer try/finally looks right."""
-        from pathlib import Path
+        service._watch_via_polling = MethodType(polling, service)
+        first = service.WatchSchedules(pb.WatchSchedulesRequest(), _WatchContext("same-cert"))
+        await anext(first)
+        second = service.WatchSchedules(pb.WatchSchedulesRequest(), _WatchContext("same-cert"))
+        with pytest.raises(_WatchAbortError, match="per-cert"):
+            await anext(second)
+        assert service._watch_global_count == 1
+        assert service._watch_per_cert_count == {"same-cert": 1}
+        await first.aclose()
+        assert service._watch_global_count == 0
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "scheduler_grpc"
-            / "handlers.py"
-        ).read_text()
-        # Locate the helper body and assert it touches both
-        # counters.
-        helper_start = src.index("async def _release_watch_slot(")
-        helper_body = src[helper_start : helper_start + 2000]
-        assert "self._watch_global_count -= 1" in helper_body
-        assert "self._watch_per_cert_count[cert_cn] -= 1" in helper_body
+    @pytest.mark.asyncio
+    async def test_cancelled_stream_eventually_releases_both_slots(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
 
-    def test_negative_counter_is_logged_loud(self) -> None:
-        """Defensive assertion: the helper resets the counter to 0
-        on negative AND logs at ERROR. A negative counter is a
-        code bug (release called more than acquire), not a runtime
-        condition the operator can fix."""
-        from pathlib import Path
+        _patch_watch_binding(monkeypatch)
+        service = _watch_service()
+        entered = asyncio.Event()
+        never = asyncio.Event()
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "scheduler_grpc"
-            / "handlers.py"
-        ).read_text()
-        helper_start = src.index("async def _release_watch_slot(")
-        helper_body = src[helper_start : helper_start + 2000]
-        assert "self._watch_global_count < 0" in helper_body
-        assert "logger.error" in helper_body
-        # The reset itself.
-        assert "self._watch_global_count = 0" in helper_body
+        async def polling(_self, **_kwargs):
+            entered.set()
+            await never.wait()
+            if False:  # pragma: no cover - makes this an async generator
+                yield pb.ScheduleEvent()
 
-    def test_init_seeds_counter_at_zero(self) -> None:
-        """The constructor must initialise the counter to 0, a
-        leftover semaphore-only init would leave the attribute
-        missing and the first acquire would AttributeError."""
-        from pathlib import Path
+        service._watch_via_polling = MethodType(polling, service)
+        stream = service.WatchSchedules(pb.WatchSchedulesRequest(), _WatchContext("cancelled"))
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert service._watch_global_count == 1
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        for _ in range(10):
+            if service._watch_global_count == 0:
+                break
+            await asyncio.sleep(0)
+        assert service._watch_global_count == 0
+        assert dict(service._watch_per_cert_count) == {}
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "scheduler_grpc"
-            / "handlers.py"
-        ).read_text()
-        assert "self._watch_global_count: int = 0" in src
-        assert "self._watch_global_cap = " in src
+    @pytest.mark.asyncio
+    async def test_release_helper_decrements_both_runtime_counters(self) -> None:
+        service = _watch_service()
+        service._watch_global_count = 1
+        service._watch_per_cert_count["cert"] = 1
+
+        await service._release_watch_slot("cert")
+
+        assert service._watch_global_count == 0
+        assert dict(service._watch_per_cert_count) == {}
+
+    @pytest.mark.asyncio
+    async def test_negative_counter_is_logged_and_reset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from z4j_brain.scheduler_grpc import handlers
+
+        service = _watch_service()
+        service._watch_per_cert_count["cert"] = 1
+        error = MagicMock()
+        monkeypatch.setattr(handlers.logger, "error", error)
+        await service._release_watch_slot("cert")
+        assert service._watch_global_count == 0
+        error.assert_called_once()
+        assert "went negative" in error.call_args.args[0]
+
+    def test_constructor_seeds_runtime_counters(self) -> None:
+        from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
+        from z4j_brain.settings import Settings
+
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+            session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+            environment="dev",
+            scheduler_grpc_watch_max_concurrent=3,
+        )
+        service = SchedulerServiceImpl(
+            settings=settings,
+            db=object(),  # type: ignore[arg-type]
+            command_dispatcher=object(),  # type: ignore[arg-type]
+            audit_service=object(),  # type: ignore[arg-type]
+        )
+        assert service._watch_global_cap == 3
+        assert service._watch_global_count == 0
+        assert dict(service._watch_per_cert_count) == {}
 
 
 # =====================================================================
@@ -890,34 +946,126 @@ class TestN1BatchLookups:
     per row. Post-fix: a single ``tuple_(scheduler, name).in_(...)``
     query loads the entire batch.
 
-    We assert at the source level rather than counting actual SQL
-    queries because the loop structure is the contract; a future
-    refactor that re-introduces row-by-row SELECTs should trip the
-    suite even if the test fixture is too small to manifest the
-    perf regression.
+    These call the production handlers with large batches and count the
+    session's actual execute calls.
     """
 
-    def test_import_handler_uses_tuple_in_for_failure_recovery(
+    @staticmethod
+    def _body(count: int, *, mode: str):
+        from z4j_brain.api.schedules import ImportSchedulesRequest
+
+        return ImportSchedulesRequest(
+            mode=mode,
+            source_filter="declarative_django" if mode == "replace_for_source" else None,
+            schedules=[
+                {
+                    "name": f"schedule-{index}",
+                    "engine": "celery",
+                    "kind": "cron",
+                    "expression": "* * * * *",
+                    "task_name": f"tasks.job_{index}",
+                    "source": "declarative_django",
+                }
+                for index in range(count)
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_import_failure_recovery_uses_one_existing_row_query(
         self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from pathlib import Path
+        from starlette.requests import Request
+        from z4j_brain.api import schedules as routes
+        from z4j_brain.persistence import repositories
+        from z4j_brain.persistence.repositories import ScheduleRepository
 
-        src = (
-            Path(__file__).resolve().parents[2] / "src" / "z4j_brain" / "api" / "schedules.py"
-        ).read_text()
-        # The fixed-up import handler builds existing_id_map from a
-        # single tuple_(...).in_(batch_keys) lookup before the loop.
-        assert "tuple_(Schedule.scheduler, Schedule.name).in_(" in src
-        assert "existing_id_map" in src
+        count = 40
+        ids = [uuid.uuid4() for _ in range(count)]
+        lookup = SimpleNamespace(
+            all=lambda: [
+                ("z4j-scheduler", f"schedule-{index}", ids[index]) for index in range(count)
+            ],
+        )
+        session = SimpleNamespace(
+            execute=AsyncMock(return_value=lookup),
+            commit=AsyncMock(),
+        )
+        project = SimpleNamespace(
+            id=uuid.uuid4(),
+            slug="batch",
+            is_active=True,
+            default_scheduler_owner="z4j-scheduler",
+            allowed_schedulers=[],
+        )
+        projects = SimpleNamespace(get_by_slug=AsyncMock(return_value=project))
+        user = SimpleNamespace(id=uuid.uuid4(), is_admin=True)
+        audit = SimpleNamespace(record=AsyncMock())
+        delete_batch = AsyncMock(return_value=0)
+        monkeypatch.setattr(
+            repositories,
+            "upsert_imported_schedule",
+            AsyncMock(side_effect=ValueError("invalid imported row")),
+        )
+        monkeypatch.setattr(ScheduleRepository, "delete_by_source_except", delete_batch)
+        monkeypatch.setattr(
+            routes,
+            "_acquire_replace_for_source_lock",
+            AsyncMock(return_value=False),
+        )
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/v1/projects/batch/schedules:import",
+                "headers": [],
+            },
+        )
 
-    def test_diff_handler_uses_tuple_in(self) -> None:
-        from pathlib import Path
+        response = await routes.import_schedules(
+            slug="batch",
+            body=self._body(count, mode="replace_for_source"),
+            request=request,
+            user=user,
+            memberships=object(),
+            projects=projects,
+            audit_log=object(),
+            audit=audit,
+            db_session=session,
+            ip="127.0.0.1",
+        )
 
-        src = (
-            Path(__file__).resolve().parents[2] / "src" / "z4j_brain" / "api" / "schedules.py"
-        ).read_text()
-        assert "diff_batch_keys" in src
-        assert "existing_rows: dict[tuple[str, str], Schedule] = {}" in src
+        assert response.failed == count
+        session.execute.assert_awaited_once()
+        assert delete_batch.await_args.kwargs["keep_ids"] == set(ids)
+
+    @pytest.mark.asyncio
+    async def test_diff_large_batch_uses_one_existing_row_query(self) -> None:
+        from z4j_brain.api import schedules as routes
+
+        empty_scalars = SimpleNamespace(all=lambda: [])
+        session = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(scalars=lambda: empty_scalars),
+            ),
+        )
+        project = SimpleNamespace(
+            id=uuid.uuid4(),
+            slug="batch",
+            is_active=True,
+            default_scheduler_owner="z4j-scheduler",
+        )
+        response = await routes.diff_schedules(
+            slug="batch",
+            body=self._body(75, mode="upsert"),
+            user=SimpleNamespace(id=uuid.uuid4(), is_admin=True),
+            memberships=object(),
+            projects=SimpleNamespace(get_by_slug=AsyncMock(return_value=project)),
+            db_session=session,
+        )
+
+        assert response.summary["insert"] == 75
+        session.execute.assert_awaited_once()
 
 
 # =====================================================================

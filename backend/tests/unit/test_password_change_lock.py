@@ -1,19 +1,21 @@
-"""Tests for the Batch-3 H6 fix: concurrent change_password serialises
-via ``UserRepository.lock_for_password_change``.
+"""Tests for password-change row locking.
 
-SQLite doesn't honour ``SELECT ... FOR UPDATE`` at the row level, but
-the method itself must still (a) run without error and (b) issue the
-statement. On Postgres it serialises two parallel transactions.
+SQLite covers the repository's ordinary contract.  The final, PostgreSQL-
+gated test opens two independent transactions and proves that the second one
+cannot acquire the same user's lock until the first transaction releases it.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.schema import CreateSchema, DropSchema
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import User
@@ -91,18 +93,115 @@ class TestLockForPasswordChange:
         assert refreshed.password_hash.endswith("$c$d")
         assert refreshed.password_changed_at is not None
 
-    async def test_serialisation_semantic_documented(
-        self,
-        session: AsyncSession,
-        user: User,
-    ) -> None:
-        """On Postgres, two concurrent transactions both calling
-        ``lock_for_password_change`` would serialise. SQLite has no
-        row-level locks so this test can only document the
-        behavioural contract - the method is present and callable
-        on the repo. The Postgres race is covered by integration
-        tests under Z4J_TEST_POSTGRES_URL."""
-        repo = UserRepository(session)
-        # Two sequential calls on SQLite - no deadlock.
-        await repo.lock_for_password_change(user.id)
-        await repo.lock_for_password_change(user.id)
+
+@pytest.mark.asyncio
+async def test_postgres_serialises_two_independent_password_transactions() -> None:
+    raw_url = os.environ.get("Z4J_TEST_POSTGRES_URL")
+    if not raw_url:
+        pytest.skip("set Z4J_TEST_POSTGRES_URL to exercise PostgreSQL row locking")
+    database_url = raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    schema_name = f"z4j_password_lock_{uuid.uuid4().hex}"
+    admin_engine = create_async_engine(database_url)
+    pg_engine = None
+    schema_created = False
+    user_id = uuid.uuid4()
+    contender_started = asyncio.Event()
+    contender_acquired = asyncio.Event()
+    contender: asyncio.Task[None] | None = None
+    primary_error: BaseException | None = None
+
+    try:
+        # This unit-suite lane receives a fresh PostgreSQL server, not a
+        # migrated z4j database.  Create only the table this lock contract
+        # needs, inside a run-unique schema.  Setting search_path on every
+        # test-engine connection keeps both independent transactions away
+        # from any pre-existing public tables or data at the explicit URL.
+        async with admin_engine.begin() as admin:
+            await admin.execute(CreateSchema(schema_name))
+        schema_created = True
+
+        pg_engine = create_async_engine(
+            database_url,
+            connect_args={"server_settings": {"search_path": schema_name}},
+        )
+        factory = sessionmaker(pg_engine, class_=AsyncSession, expire_on_commit=False)
+        async with pg_engine.begin() as setup:
+            await setup.execute(text("CREATE TABLE users (id uuid PRIMARY KEY)"))
+            await setup.execute(
+                text("INSERT INTO users (id) VALUES (:user_id)"),
+                {"user_id": user_id},
+            )
+
+        async def contend() -> None:
+            async with factory() as second:
+                contender_started.set()
+                await UserRepository(second).lock_for_password_change(user_id)
+                contender_acquired.set()
+                await second.rollback()
+
+        async with factory() as first:
+            await UserRepository(first).lock_for_password_change(user_id)
+            contender = asyncio.create_task(contend())
+            await asyncio.wait_for(contender_started.wait(), timeout=2)
+
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.shield(contender_acquired.wait()),
+                    timeout=0.2,
+                )
+
+            await first.commit()
+            await asyncio.wait_for(asyncio.shield(contender), timeout=2)
+            assert contender_acquired.is_set()
+    except BaseException as exc:
+        # Do not let teardown failures replace the assertion or database
+        # failure that brought us here.  The finally block adds cleanup
+        # failures as notes and this bare re-raise preserves the traceback.
+        primary_error = exc
+        raise
+    finally:
+        cleanup_errors: list[BaseException] = []
+
+        if contender is not None:
+            cancelled_for_cleanup = not contender.done()
+            if cancelled_for_cleanup:
+                contender.cancel()
+            try:
+                await contender
+            except asyncio.CancelledError as exc:
+                if not cancelled_for_cleanup and exc is not primary_error:
+                    cleanup_errors.append(exc)
+            except BaseException as exc:
+                if exc is not primary_error:
+                    cleanup_errors.append(exc)
+
+        if pg_engine is not None:
+            try:
+                await pg_engine.dispose()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+
+        if schema_created:
+            try:
+                async with admin_engine.begin() as admin:
+                    await admin.execute(DropSchema(schema_name, cascade=True, if_exists=True))
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+
+        try:
+            await admin_engine.dispose()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+        if cleanup_errors:
+            if primary_error is not None:
+                for cleanup_error in cleanup_errors:
+                    primary_error.add_note(
+                        f"PostgreSQL test cleanup also failed: {cleanup_error!r}"
+                    )
+            else:
+                raise BaseExceptionGroup(
+                    "PostgreSQL password-lock test cleanup failed",
+                    cleanup_errors,
+                )

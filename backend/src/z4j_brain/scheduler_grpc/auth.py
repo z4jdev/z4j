@@ -1,14 +1,12 @@
-"""mTLS for the brain-side ``SchedulerService``.
+"""Certificate support for the brain-side ``SchedulerService``.
 
-Defense-in-depth: gRPC's TLS layer already validates that the client
-cert was signed by the operator-configured CA bundle. This module
-adds a second check on every RPC: extract the cert subject's CN +
-SANs and verify they match a configured allow-list. That stops a
-case where the operator's CA mint-procedure leaks - a stolen cert
-issued by the same CA but for a different service still gets
-rejected at the application boundary.
+In the production mTLS mode, gRPC validates that the client certificate was
+signed by the operator-configured CA. When a CN/SAN allow-list is configured,
+this module adds a second check on every RPC. With an empty allow-list the
+service uses the explicit "trust the CA" model instead. The development-only
+plaintext mode bypasses both certificate checks.
 
-Phase 1 surface:
+Public surface:
 
 - :func:`mint_scheduler_cert` - CLI helper that produces a fresh
   cert + key pair for an operator to install on a scheduler instance.
@@ -24,13 +22,9 @@ Operator workflow:
 1. Brain operator runs ``z4j mint-scheduler-cert --name
    scheduler-1 --out-dir /etc/z4j/scheduler-1/`` once per scheduler
    instance.
-2. Adds ``scheduler-1`` to ``Z4J_SCHEDULER_GRPC_ALLOWED_CNS``.
+2. Optionally adds ``scheduler-1`` to
+   ``Z4J_SCHEDULER_GRPC_ALLOWED_CNS`` for defense in depth.
 3. Restarts brain, deploys the certs to the scheduler host.
-
-A future Phase 2 enhancement adds a ``schedulers`` table so this
-allow-list is dynamic + revocable from the dashboard. v1 keeps it
-in env config for simplicity - the operator already manages the
-CA + bind-port via env, so adding a CN list is no extra friction.
 """
 
 from __future__ import annotations
@@ -81,9 +75,8 @@ def mint_scheduler_cert(
     """Mint a fresh mTLS client cert for a scheduler instance.
 
     Args:
-        name: CN + DNS SAN of the cert. The brain's interceptor
-            checks this against the configured allow-list, so it
-            must match an entry in ``Z4J_SCHEDULER_GRPC_ALLOWED_CNS``.
+        name: CN + DNS SAN of the cert. When the optional Brain allow-list is
+            configured, this value must match one of its entries.
         ca_cert_pem: PEM-encoded CA certificate that will sign.
         ca_key_pem: PEM-encoded CA private key.
         validity_days: How long the cert stays valid.

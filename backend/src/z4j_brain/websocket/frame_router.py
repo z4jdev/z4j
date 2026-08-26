@@ -43,6 +43,9 @@ from z4j_core.transport.frames import (
 )
 
 from z4j_brain.domain.event_ingestor import _is_transient_db_error
+from z4j_brain.persistence.agent_authority import (
+    acquire_agent_authority_xact_lock,
+)
 
 
 class FrameOutcome(Enum):
@@ -67,12 +70,16 @@ class FrameOutcome(Enum):
     * ``UPGRADE_REQUIRED`` -- an authenticated legacy schedule event reached
       an active Boundary-D brain. The frame stays unconfirmed and the
       WebSocket peer receives a typed fatal upgrade response.
+    * ``REVOKED`` -- the durable agent marker was revoked after this transport
+      authenticated. No frame authority remains; withhold acknowledgement and
+      make the transport terminate/re-authenticate.
     """
 
     DURABLE = "durable"
     TRANSIENT = "transient"
     DROP = "drop"
     UPGRADE_REQUIRED = "upgrade_required"
+    REVOKED = "revoked"
 
     @property
     def confirmed(self) -> bool:
@@ -80,6 +87,7 @@ class FrameOutcome(Enum):
         return self not in {
             FrameOutcome.TRANSIENT,
             FrameOutcome.UPGRADE_REQUIRED,
+            FrameOutcome.REVOKED,
         }
 
 
@@ -122,7 +130,7 @@ _HAS_RULES_TTL_SECONDS = 15.0
 # Celery conf keys (``broker_url``, ``result_backend``,
 # ``broker_transport_options``, ``beat_schedule``, ...) into the brain
 # DB, where they would be exposed to ProjectRole.VIEWER over the worker
-# detail endpoint. Round-7 audit finding. Keep the two lists in
+# detail endpoint. Keep the two lists in
 # sync; the audit-suite scans for divergence is a TODO for 1.7.
 _WORKER_CONF_ALLOWLIST: frozenset[str] = frozenset(
     {
@@ -449,7 +457,7 @@ class FrameRouter:
                     frame_type=getattr(out, "type", None),
                 )
 
-    async def dispatch(self, frame: Frame) -> FrameOutcome:
+    async def dispatch(self, frame: Frame) -> FrameOutcome:  # noqa: PLR0911, PLR0912
         """Route ``frame`` to the right service. Never raises.
 
         Returns a :class:`FrameOutcome`. For an ``event_batch`` the outcome
@@ -465,8 +473,10 @@ class FrameRouter:
         DURABLE and DROP count accepted; TRANSIENT retries; and
         UPGRADE_REQUIRED remains unconfirmed with a typed fatal response.
         On the WebSocket path event_batch acks are emitted inside
-        :meth:`_handle_event_batch`; control frames are confirmed on send by
-        the agent, so the gateway ignores this return for them.
+        :meth:`_handle_event_batch`. Control frames are confirmed on send by
+        the agent, so the gateway ignores their ordinary delivery verdicts,
+        but it consumes ``REVOKED`` for every frame type and terminates the
+        established connection.
 
         The whole body (INCLUDING the event_batch path) is inside the
         try/except so ``dispatch`` truly NEVER raises: the WS ingest worker
@@ -479,20 +489,28 @@ class FrameRouter:
             if isinstance(frame, EventBatchFrame):
                 return await self._handle_event_batch(frame)
             if isinstance(frame, HeartbeatFrame):
-                await self._handle_heartbeat(frame)
+                if not await self._handle_heartbeat(frame):
+                    return FrameOutcome.REVOKED
             elif isinstance(frame, CommandAckFrame):
-                await self._handle_command_ack(frame)
+                if not await self._handle_command_ack(frame):
+                    return FrameOutcome.REVOKED
             elif isinstance(frame, CommandResultFrame):
-                await self._handle_command_result(frame)
+                if not await self._handle_command_result(frame):
+                    return FrameOutcome.REVOKED
             elif isinstance(frame, AgentStatusFrame):
-                await self._handle_agent_status(frame)
+                if not await self._handle_agent_status(frame):
+                    return FrameOutcome.REVOKED
             elif isinstance(frame, RegistryDeltaFrame):
+                if not await self._agent_is_live():
+                    return FrameOutcome.REVOKED
                 # B5 wires this into the task discovery pipeline.
                 logger.debug(
                     "z4j frame_router: registry_delta received (logged-only in B4)",
                     agent_id=str(self._agent_id),
                 )
             else:
+                if not await self._agent_is_live():
+                    return FrameOutcome.REVOKED
                 logger.warning(
                     "z4j frame_router: unhandled frame type",
                     frame_type=getattr(frame, "type", None),
@@ -510,6 +528,13 @@ class FrameRouter:
             return outcome
         return FrameOutcome.DURABLE
 
+    async def _agent_is_live(self) -> bool:
+        """Revalidate established-session authority for every inbound frame."""
+        from z4j_brain.persistence.repositories import AgentRepository
+
+        async with self._db.session() as session:
+            return await AgentRepository(session).get_live(self._agent_id) is not None
+
     # ------------------------------------------------------------------
     # event_batch
     # ------------------------------------------------------------------
@@ -522,9 +547,13 @@ class FrameRouter:
         null / a non-list). The caller runs this INSIDE its try so a malformed
         payload classifies as a DROP (and the finally still acks it), rather
         than ``list(non_list)`` silently coercing a str/dict into invalid
-        elements that ingest to nothing yet ack DURABLE (round-9 LOW).
+        elements that ingest to nothing yet ack DURABLE.
         """
-        raw_events = frame.payload.events
+        # ``model_construct`` on the verified WS fast path can bypass the
+        # declared non-null/list field type, so keep this runtime boundary
+        # intentionally dynamic rather than letting static narrowing erase the
+        # malformed/null handling below.
+        raw_events: Any = frame.payload.events
         if raw_events is None:
             # Absent / null == an empty batch (the schema default is an
             # empty list). Nothing to ingest, commits cleanly -> DURABLE.
@@ -558,7 +587,7 @@ class FrameRouter:
           transiently skipped, OR ingest/commit hit a transient DB error
           (deadlock, pool timeout). The ack is withheld (WS) / the frame
           counts rejected (long-poll) so the agent re-sends; the committed
-          events dedup on the replay (-panel-HIGH).
+          events dedup on the replay.
         * ``DROP``      -- ingest/commit failed for a PERMANENT reason (a
           deterministic constraint / data error at commit that recurs on
           every replay). The batch is dropped-and-acked (logged loudly) so
@@ -590,15 +619,15 @@ class FrameRouter:
         # maximum (``EventBatchPayload.events`` max_length, z4j_core frames),
         # so no protocol-legal frame is silently truncated while its ack
         # confirms the whole frame by id -- which would lose the tail
-        # (/round-8-external). The downstream notification/automation
+        # of the frame. The downstream notification/automation
         # fan-out is independently bounded (detached-task cap + semaphores +
         # durable outbox), so this does not reopen the amplification concern.
         event_batch_cap = 5_000
 
         accepted_count = 0
-        # The NEW (non-duplicate) events this batch actually ingested.
-        # Automation fires only on these so an agent-reconnect buffer
-        # re-flush (same event_ids) cannot re-fire a rule N times.
+        # Hook-safe NEW events: duplicates and task lifecycle events whose
+        # stale/conflicting projection was rejected are excluded. Durable-row
+        # ACK accounting is tracked independently in ``accepted_count``.
         new_events: list[dict[str, Any]] = []
         committed = False
         outcome = FrameOutcome.TRANSIENT
@@ -608,11 +637,20 @@ class FrameRouter:
         # ``payload.events`` may be null/non-list); a failure there is then
         # classified -> DROP and the finally STILL emits the ack, so the
         # agent confirms+deletes the malformed frame instead of the WS
-        # ingest worker silently withholding it forever (round-8 external).
+        # ingest worker silently withholding it forever.
         events: list[dict[str, Any]] = []
         try:
-            events = self._extract_events(frame, event_batch_cap)
-            async with self._db.session() as session:
+            async with self._db.session(write=True) as session:
+                # The advisory authority mutex and all event inserts share one
+                # transaction. It serialises PostgreSQL ingest against revoke
+                # without taking Agent -> Stream/Schedule row locks in the
+                # inverse order of command claims. SQLite's BEGIN IMMEDIATE
+                # supplies the same durable ordering.
+                await acquire_agent_authority_xact_lock(session, self._agent_id)
+                if await AgentRepository(session).get_live(self._agent_id) is None:
+                    outcome = FrameOutcome.REVOKED
+                    return outcome  # finally reads the named verdict
+                events = self._extract_events(frame, event_batch_cap)
                 result = await self._ingestor.ingest_batch(
                     events=events,
                     project_id=self._project_id,
@@ -624,19 +662,19 @@ class FrameRouter:
                     worker_repo=WorkerRepository(session),
                 )
                 new_events = result.new_events
-                accepted_count = len(new_events)
+                accepted_count = result.inserted_count
                 await session.commit()
                 committed = True
                 # Emit the deferred Prometheus increments only NOW, after the
                 # commit durably persisted the rows -- a transient rollback
                 # before this point discards them, so a re-send counts each row
-                # exactly once (round-9 external LOW). Best-effort inside.
+                # exactly once. Best-effort inside.
                 result.emit_metrics()
                 # DURABLE only when nothing was transiently skipped. A
                 # transient skip means the committed events are real (they
                 # dedup on replay) but the batch must NOT be confirmed, so
                 # the agent re-sends and the skipped event gets another
-                # chance (-panel-HIGH).
+                # chance.
                 if result.upgrade_required:
                     outcome = FrameOutcome.UPGRADE_REQUIRED
                     if self._send_frame is not None:
@@ -679,8 +717,8 @@ class FrameRouter:
             # withholds the ack for a re-send, while a PERMANENT one (a
             # deterministic constraint / data error that recurs every
             # replay) is dropped-and-acked so the agent does not loop on
-            # this batch forever (round-8: a persistent partial-200 /
-            # withheld-ack on the no-drop transient path wedged the agent).
+            # this batch forever: a persistent partial-200 / withheld-ack
+            # on the no-drop transient path wedged the agent.
             if _is_transient_db_error(exc):
                 outcome = FrameOutcome.TRANSIENT
                 logger.warning(
@@ -715,14 +753,14 @@ class FrameRouter:
                 # built via ``model_construct`` (HMAC verified, Pydantic
                 # constraints bypassed), so a buggy/compromised agent's
                 # >64-char, non-str, or MISSING ``id`` would otherwise raise a
-                # strict ValidationError HERE (in the finally) and, before 's
-                # try-wrap, crash the WS ingest worker. Normalise the id
-                # to a str ONCE: a None / non-str id becomes "" (round-9 LOW),
+                # strict ValidationError HERE (in the finally) and, without
+                # the try-wrap, crash the WS ingest worker. Normalise the id
+                # to a str ONCE: a None / non-str id becomes "",
                 # which the agent's _handle_event_batch_ack ignores -> it
                 # re-sends and the brain dedups, rather than a misleading
                 # "None" acked_id.
                 #
-                # SCOPED LIMITATION (round-10 external LOW): this is crash-
+                # SCOPED LIMITATION: this is crash-
                 # HARDENING, not a full protocol-level fix. An empty (or
                 # over-64 truncated) acked_id does NOT correlate to a buffer
                 # entry, so the agent re-sends and the brain DEDUPES rather than
@@ -795,7 +833,7 @@ class FrameRouter:
         """Await a best-effort post-commit side effect, swallowing errors.
 
         The caller has already committed the batch; a hook failure must
-        not propagate (see ``_handle_event_batch`` /).
+        not propagate (see ``_handle_event_batch``).
         """
         try:
             await coro
@@ -811,15 +849,21 @@ class FrameRouter:
     # heartbeat
     # ------------------------------------------------------------------
 
-    async def _handle_heartbeat(self, frame: HeartbeatFrame) -> None:  # noqa: PLR0912, PLR0915  heartbeat handler
+    async def _handle_heartbeat(self, frame: HeartbeatFrame) -> bool:  # noqa: PLR0912, PLR0915  heartbeat handler
         from z4j_brain.persistence.repositories import (
             AgentRepository,
             AgentWorkerRepository,
             QueueRepository,
         )
 
-        async with self._db.session() as session:
+        async with self._db.session(write=True) as session:
             agents_repo = AgentRepository(session)
+            # Keep the authority mutex through every heartbeat-derived write.
+            # Unlike an Agent row lock this cannot invert a later domain row
+            # lock; SQLite's BEGIN IMMEDIATE is the equivalent write gate.
+            await acquire_agent_authority_xact_lock(session, self._agent_id)
+            if await agents_repo.get_live(self._agent_id) is None:
+                return False
             await agents_repo.touch_heartbeat(self._agent_id)
             # Promote state back to online if it was
             # wrongly pinned to offline by a late mark_offline that
@@ -841,6 +885,11 @@ class FrameRouter:
             # The agent sends keys like "celery.queue_depths" with
             # a dict of {queue_name: depth}.
             adapter_health = frame.payload.adapter_health or {}
+            # Queue depth is a snapshot, so order it by the signed source-frame
+            # timestamp rather than by database lock/commit order. Production
+            # v2 frames always carry ``ts`` (the verifier requires it); the
+            # fallback keeps direct legacy/test calls well-defined.
+            queue_depth_observed_at = frame.ts or datetime.now(UTC)
             # Cap the number of adapter_health top-level keys we'll
             # iterate. Nominal
             # production load is single-digit (one per engine + a
@@ -885,9 +934,8 @@ class FrameRouter:
                             queue_repo = QueueRepository(session)
                             # 1.5.1: sort by queue name so concurrent
                             # heartbeats walk the row-lock acquisition
-                            # path in the same order. Round 18 surfaced
-                            # 6 ``UPDATE queues`` deadlocks under 200/s
-                            # burst (docs/perf/1.5.1-round17-gate-result.md);
+                            # path in the same order. A 200/s burst
+                            # surfaced 6 ``UPDATE queues`` deadlocks;
                             # different agents send depths.items() in
                             # different dict-insertion orders, opening
                             # a deadlock cycle on overlapping queue
@@ -906,6 +954,7 @@ class FrameRouter:
                                             engine=engine_name,
                                             name=str(queue_name),
                                             pending_count=q_depth,
+                                            observed_at=queue_depth_observed_at,
                                         )
                                 except Exception:
                                     logger.debug(
@@ -945,7 +994,7 @@ class FrameRouter:
             # connect time). NEVER read project_id from frame.payload
             # or anywhere on the wire; an attacker who controls a
             # signed agent could otherwise upsert rows into a sibling
-            # project's worker table. (1.6.0 round-2 audit Medium-3:
+            # project's worker table. (The boundary is here:
             # cross-tenant routing boundary made explicit.)
             #
             # Project worker details from control.inspect() data.
@@ -983,11 +1032,12 @@ class FrameRouter:
                             for hostname, data in details.items():
                                 if not isinstance(data, dict):
                                     continue
-                                stats = data.get("stats", {})
+                                stats = data.get("stats")
                                 if isinstance(stats, str):
                                     stats = _json.loads(stats)
-                                pool = stats.get("pool", {}) if isinstance(stats, dict) else {}
-                                rusage = stats.get("rusage", {}) if isinstance(stats, dict) else {}
+                                if not isinstance(stats, dict):
+                                    stats = None
+                                pool = stats.get("pool") if stats is not None else None
 
                                 row: dict[str, Any] = {
                                     "project_id": self._project_id,
@@ -997,38 +1047,53 @@ class FrameRouter:
                                     "last_heartbeat": frame.payload.last_flush_at
                                     or datetime.now(UTC),
                                     "hostname": hostname,
-                                    "worker_metadata": {
-                                        "stats": stats,
-                                        "active": data.get("active", []),
-                                        "active_queues": data.get("active_queues", []),
-                                        "registered": data.get("registered", []),
-                                        # SECURITY: re-apply the
-                                        # allowlist defense-in-depth so
-                                        # a misbehaving / downgraded /
-                                        # malicious adapter cannot
-                                        # persist credentialed Celery
-                                        # conf keys into the JSONB
-                                        # column, where they would be
-                                        # exposed to VIEWER role via
-                                        # ``GET /api/v1/projects/{slug}/workers/{worker_id}``.
-                                        "conf": _filter_worker_conf(
-                                            data.get("conf", {}),
-                                        ),
-                                    },
                                 }
+                                # Every field below comes from a SEPARATE Celery
+                                # inspect broadcast, each with its own timeout, so
+                                # one worker can answer for its stats and miss the
+                                # same round's queues. Report only what this round
+                                # actually collected. An unanswered broadcast
+                                # written out as an empty result reads as "this
+                                # worker has nothing" rather than "this agent did
+                                # not look", and nothing downstream can tell the
+                                # two apart afterwards to preserve what an earlier
+                                # heartbeat already established.
+                                metadata: dict[str, Any] = {}
+                                if stats is not None:
+                                    metadata["stats"] = stats
+                                for report in ("active", "active_queues", "registered"):
+                                    reported = data.get(report)
+                                    if isinstance(reported, list):
+                                        metadata[report] = reported
+                                # The agent allowlists its own conf before sending
+                                # it; this applies the allowlist a second time on
+                                # arrival so a downgraded or hostile adapter cannot
+                                # land a credentialed Celery setting in a column
+                                # the workers endpoint serves to every project
+                                # VIEWER.
+                                collected_conf = _filter_worker_conf(
+                                    data.get("conf"),
+                                )
+                                if collected_conf:
+                                    metadata["conf"] = collected_conf
+                                if metadata:
+                                    row["worker_metadata"] = metadata
                                 # Pool info
                                 if isinstance(pool, dict):
-                                    row["concurrency"] = pool.get(
+                                    concurrency = pool.get(
                                         "max-concurrency",
-                                        pool.get("processes", None),
+                                        pool.get("processes"),
                                     )
-                                    row["pid"] = stats.get("pid")
+                                    if concurrency is not None:
+                                        row["concurrency"] = concurrency
+                                if stats is not None and stats.get("pid") is not None:
+                                    row["pid"] = stats["pid"]
                                 # Active tasks
-                                active = data.get("active", [])
+                                active = metadata.get("active")
                                 if isinstance(active, list):
                                     row["active_tasks"] = len(active)
                                 # Active queues
-                                aq = data.get("active_queues", [])
+                                aq = metadata.get("active_queues")
                                 if isinstance(aq, list):
                                     queue_list = [
                                         q.get("name", "") for q in aq if isinstance(q, dict)
@@ -1041,36 +1106,47 @@ class FrameRouter:
                                     queue_names_to_touch.extend(
                                         q for q in queue_list if isinstance(q, str) and q
                                     )
-                                # Load average
-                                if isinstance(rusage, dict):
+                                # Load average is a stats field. Keying it off
+                                # rusage instead dropped it for any platform that
+                                # reports one without the other.
+                                if stats is not None:
                                     loadavg = stats.get("loadavg")
                                     if isinstance(loadavg, list):
                                         row["load_average"] = loadavg
                                 bulk_rows.append(row)
 
                             if bulk_rows:
-                                # Bulk upsert in one statement, with
-                                # the same savepoint + per-row fallback
-                                # discipline used in EventIngestor.
-                                # Defense in depth: if the bulk path
-                                # raises (deadlock or otherwise), fall
-                                # back to the original per-row
-                                # savepointed loop for this batch only.
-                                from sqlalchemy.exc import OperationalError
-
+                                # Bulk upsert in one statement, with the same
+                                # savepoint + per-row fallback discipline
+                                # EventIngestor uses, and for the same reason:
+                                # worker liveness is observability, and no
+                                # fault in writing it is worth losing the
+                                # observations.
+                                #
+                                # The fallback catches everything the bulk
+                                # statement can raise, not one class of it.
+                                # Naming ``OperationalError`` covered the
+                                # deadlock this fallback was written for and
+                                # nothing else, so any other fault -- a batch
+                                # whose rows the one statement cannot express,
+                                # an agent-supplied name a column bound
+                                # rejects -- escaped the handler and took the
+                                # WHOLE batch with it, silently, on a path
+                                # that runs every ten seconds per agent. The
+                                # per-row path below is slower and lands the
+                                # rows it can.
                                 try:
                                     async with session.begin_nested():
                                         await worker_repo.upsert_from_events_bulk(
                                             bulk_rows,
                                         )
-                                except OperationalError:
+                                except Exception as exc:
                                     logger.warning(
                                         "z4j frame_router: bulk worker "
-                                        "upsert hit OperationalError "
-                                        "(likely deadlock); falling back "
-                                        "per-row",
+                                        "upsert failed; falling back per-row",
                                         engine=engine,
                                         worker_count=len(bulk_rows),
+                                        error=type(exc).__name__,
                                     )
                                     for row in bulk_rows:
                                         try:
@@ -1121,6 +1197,7 @@ class FrameRouter:
                                             project_id=self._project_id,
                                             engine=engine,
                                             name=qname,
+                                            observed_at=queue_depth_observed_at,
                                         )
                                 except Exception:
                                     logger.exception(
@@ -1132,12 +1209,13 @@ class FrameRouter:
                         )
 
             await session.commit()
+        return True
 
     # ------------------------------------------------------------------
     # agent_status (Phase H, 1.5.0+)
     # ------------------------------------------------------------------
 
-    async def _handle_agent_status(self, frame: AgentStatusFrame) -> None:
+    async def _handle_agent_status(self, frame: AgentStatusFrame) -> bool:
         """Persist one agent self-report snapshot to ``agent_status_history``.
 
         The frame's ``payload`` is dumped to a JSON-friendly dict and
@@ -1174,7 +1252,10 @@ class FrameRouter:
                     agent_id=str(self._agent_id),
                     cap_per_minute=_AGENT_STATUS_RATE_PER_MINUTE,
                 )
-            return
+            # Rate limiting drops the payload but cannot bypass revocation:
+            # otherwise a revoked peer could keep this socket alive forever
+            # by sending only over-limit status frames.
+            return await self._agent_is_live()
         if self._agent_status_overflow_active:
             # Falling edge: report the burst size and reset.
             logger.info(
@@ -1205,7 +1286,12 @@ class FrameRouter:
         payload_dict = frame.payload.model_dump(mode="json")
 
         try:
-            async with self._db.session() as session:
+            async with self._db.session(write=True) as session:
+                from z4j_brain.persistence.repositories import AgentRepository
+
+                await acquire_agent_authority_xact_lock(session, self._agent_id)
+                if await AgentRepository(session).get_live(self._agent_id) is None:
+                    return False
                 await AgentStatusHistoryRepository(session).insert(
                     project_id=self._project_id,
                     agent_id=self._agent_id,
@@ -1220,6 +1306,7 @@ class FrameRouter:
                 agent_id=str(self._agent_id),
                 project_id=str(self._project_id),
             )
+        return True
 
     # ------------------------------------------------------------------
     # command_ack / command_result
@@ -1230,7 +1317,7 @@ class FrameRouter:
         label: str,
         command_id: UUID,
         persist: Callable[[AsyncSession], Awaitable[None]],
-    ) -> None:
+    ) -> bool:
         """Persist a fire-and-forget control frame with bounded retry.
 
         The agent deletes the control frame on send, so a transient DB
@@ -1244,9 +1331,18 @@ class FrameRouter:
         for attempt in range(_CONTROL_FRAME_DB_RETRIES):
             try:
                 async with self._db.session(write=True) as session:
+                    from z4j_brain.persistence.repositories import AgentRepository
+
+                    # ``persist`` may lock a Schedule or external Stream. Use
+                    # the shared advisory authority mutex, never Agent FOR
+                    # UPDATE, so claim's canonical Schedule/Stream -> Agent
+                    # row order cannot deadlock with this inbound path.
+                    await acquire_agent_authority_xact_lock(session, self._agent_id)
+                    if await AgentRepository(session).get_live(self._agent_id) is None:
+                        return False
                     await persist(session)
                     await session.commit()
-                return
+                return True
             except Exception as exc:
                 last_exc = exc
                 transient = _is_transient_db_error(exc)
@@ -1267,12 +1363,13 @@ class FrameRouter:
         # type checker happy about last_exc's use.
         if last_exc is not None:  # pragma: no cover
             raise last_exc
+        return False  # pragma: no cover
 
-    async def _handle_command_ack(self, frame: CommandAckFrame) -> None:
+    async def _handle_command_ack(self, frame: CommandAckFrame) -> bool:
         try:
             command_id = UUID(frame.id)
         except ValueError:
-            return
+            return await self._agent_is_live()
         from z4j_brain.persistence.repositories import CommandRepository
 
         async def _persist(session: AsyncSession) -> None:
@@ -1287,14 +1384,16 @@ class FrameRouter:
                 delivery_claim_token=(frame.payload.delivery_claim_token),
             )
 
-        await self._run_control_persist("command_ack", command_id, _persist)
+        if not await self._run_control_persist("command_ack", command_id, _persist):
+            return False
         await self._publish_command_change()
+        return True
 
-    async def _handle_command_result(self, frame: CommandResultFrame) -> None:
+    async def _handle_command_result(self, frame: CommandResultFrame) -> bool:
         try:
             command_id = UUID(frame.id)
         except ValueError:
-            return
+            return await self._agent_is_live()
         from z4j_brain.persistence.repositories import (
             AuditLogRepository,
             CommandRepository,
@@ -1316,8 +1415,10 @@ class FrameRouter:
                 delivery_claim_token=(frame.payload.delivery_claim_token),
             )
 
-        await self._run_control_persist("command_result", command_id, _persist)
+        if not await self._run_control_persist("command_result", command_id, _persist):
+            return False
         await self._publish_command_change()
+        return True
 
     # ------------------------------------------------------------------
     # Dashboard publish helpers
@@ -1340,7 +1441,7 @@ class FrameRouter:
         The detached tasks each open their own DB session (sessions
         are not safe to share across tasks). A class-level set holds
         strong references so Python doesn't GC the task before the
-        coroutine finishes (audit P-10 same-pattern fix).
+        coroutine finishes.
         Backpressure: if the pending set exceeds
         ``_MAX_PENDING_NOTIFICATION_TASKS`` we log + drop (event
         ingestion under burst takes priority over notification

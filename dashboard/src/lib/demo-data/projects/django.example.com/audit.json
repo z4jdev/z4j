@@ -4,13 +4,18 @@
       "id": "40000000-0000-4002-d000-000000000001",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "user_id": null,
-      "action": "alert.fired",
+      "action": "schedule.circuit_breaker.tripped",
       "target_type": "schedule",
       "target_id": "30000000-0000-4002-c000-000000000002",
-      "result": "warning",
-      "outcome": null,
+      "result": "success",
+      "outcome": "deny",
       "event_id": null,
-      "metadata": {"alert": "schedule_consecutive_failures", "schedule_name": "emails.send_scheduled_campaigns", "consecutive_failures": 4},
+      "metadata": {
+        "name": "emails.send_scheduled_campaigns",
+        "scheduler": "django-celery-beat",
+        "engine": "celery",
+        "consecutive_failures": 4
+      },
       "source_ip": null,
       "user_agent": null,
       "occurred_at_offset_s": -120
@@ -19,13 +24,20 @@
       "id": "40000000-0000-4002-d000-000000000002",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "user_id": null,
-      "action": "agent.heartbeat_lost",
+      "action": "agent.offline_detected",
       "target_type": "agent",
       "target_id": "10000000-0000-4002-a000-000000000007",
-      "result": "warning",
-      "outcome": null,
+      "result": "failed",
+      "outcome": "error",
       "event_id": null,
-      "metadata": {"agent_name": "worker-emails-1", "last_seen_seconds_ago": 480},
+      "metadata": {
+        "name": "worker-emails-1",
+        "framework_adapter": "django",
+        "engine_adapters": [
+          "celery"
+        ],
+        "last_seen_at_offset_s": -480
+      },
       "source_ip": null,
       "user_agent": null,
       "occurred_at_offset_s": -300
@@ -34,13 +46,17 @@
       "id": "40000000-0000-4002-d000-000000000003",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "user_id": "00000000-0000-4000-8000-000000000005",
-      "action": "task.retry",
+      "action": "command.issue.retry_task",
       "target_type": "task",
-      "target_id": "20000000-0000-4002-b000-000000000001",
+      "target_id": "celery:d99c42a6-6b76-5058-a0b5-c3c861c4f801",
       "result": "success",
-      "outcome": null,
+      "outcome": "allow",
       "event_id": null,
-      "metadata": {"task_name": "emails.send_scheduled_campaigns"},
+      "metadata": {
+        "command_id": "c0000000-0000-4001-9000-000000000001",
+        "agent_id": "10000000-0000-4002-a000-000000000004",
+        "idempotency_key": null
+      },
       "source_ip": "198.51.100.22",
       "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
       "occurred_at_offset_s": -360
@@ -49,11 +65,11 @@
       "id": "40000000-0000-4002-d000-000000000004",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "user_id": "00000000-0000-4000-8000-000000000005",
-      "action": "login.success",
+      "action": "auth.login",
       "target_type": "user",
       "target_id": "00000000-0000-4000-8000-000000000005",
       "result": "success",
-      "outcome": null,
+      "outcome": "allow",
       "event_id": null,
       "metadata": {},
       "source_ip": "198.51.100.22",
@@ -68,9 +84,13 @@
       "target_type": "schedule",
       "target_id": "30000000-0000-4002-c000-000000000003",
       "result": "success",
-      "outcome": null,
+      "outcome": "allow",
       "event_id": null,
-      "metadata": {"name": "search.reindex_recent_changes", "field_changed": "kwargs.window_seconds"},
+      "metadata": {
+        "fields_changed": [
+          "kwargs"
+        ]
+      },
       "source_ip": "203.0.113.42",
       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
       "occurred_at_offset_s": -86400
@@ -79,13 +99,15 @@
       "id": "40000000-0000-4002-d000-000000000006",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "user_id": "00000000-0000-4000-8000-000000000001",
-      "action": "agent.create",
+      "action": "agent.token.minted",
       "target_type": "agent",
       "target_id": "10000000-0000-4002-a000-000000000005",
       "result": "success",
-      "outcome": null,
+      "outcome": "allow",
       "event_id": null,
-      "metadata": {"agent_name": "worker-default-2"},
+      "metadata": {
+        "name": "worker-default-2"
+      },
       "source_ip": "203.0.113.42",
       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
       "occurred_at_offset_s": -7776000
@@ -94,13 +116,15 @@
       "id": "40000000-0000-4002-d000-000000000007",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "user_id": "00000000-0000-4000-8000-000000000001",
-      "action": "membership.grant",
+      "action": "membership.granted",
       "target_type": "user",
       "target_id": "00000000-0000-4000-8000-000000000005",
       "result": "success",
-      "outcome": null,
+      "outcome": "allow",
       "event_id": null,
-      "metadata": {"role": "operator", "email": "dave@example.com"},
+      "metadata": {
+        "role": "operator"
+      },
       "source_ip": "203.0.113.42",
       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
       "occurred_at_offset_s": -15552000
@@ -109,13 +133,16 @@
       "id": "40000000-0000-4002-d000-000000000008",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "user_id": "00000000-0000-4000-8000-000000000001",
-      "action": "notification_channel.create",
+      "action": "notifications.channel.create",
       "target_type": "notification_channel",
       "target_id": "50000000-0000-4002-e000-000000000001",
       "result": "success",
-      "outcome": null,
+      "outcome": "allow",
       "event_id": null,
-      "metadata": {"kind": "pagerduty", "name": "platform-oncall"},
+      "metadata": {
+        "name": "platform-oncall",
+        "type": "pagerduty"
+      },
       "source_ip": "203.0.113.42",
       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
       "occurred_at_offset_s": -25920000

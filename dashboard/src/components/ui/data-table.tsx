@@ -7,13 +7,22 @@
  * move. This follows the Shopify admin pattern used by enterprise
  * dashboards where power users rely on muscle memory.
  */
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  columnSizingFeature,
+  columnVisibilityFeature,
+  createSortedRowModel,
   flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
-  useReactTable,
+  rowSelectionFeature,
+  rowSortingFeature,
+  sortFn_alphanumeric,
+  sortFn_datetime,
+  sortFn_text,
+  tableFeatures,
+  useTable,
   type ColumnDef,
+  type RowData,
+  type RowSelectionState,
   type SortingState,
 } from "@tanstack/react-table";
 import {
@@ -53,10 +62,28 @@ export interface BulkActionContext<TData> {
   showSelectAllPages: boolean;
 }
 
-interface DataTableProps<TData> {
-  columns: ColumnDef<TData, unknown>[];
+export const dataTableFeatures = tableFeatures({
+  columnSizingFeature,
+  columnVisibilityFeature,
+  rowSelectionFeature,
+  rowSortingFeature,
+  sortFns: {
+    alphanumeric: sortFn_alphanumeric,
+    datetime: sortFn_datetime,
+    text: sortFn_text,
+  },
+  sortedRowModel: createSortedRowModel(),
+});
+
+export type DataTableColumnDef<TData extends RowData> = ColumnDef<
+  typeof dataTableFeatures,
+  TData,
+  unknown
+>;
+
+interface DataTableBaseProps<TData extends RowData> {
+  columns: DataTableColumnDef<TData>[];
   data: TData[];
-  enableSelection?: boolean;
   enableSorting?: boolean;
   pageSize?: number;
   pageSizeOptions?: number[];
@@ -77,10 +104,62 @@ interface DataTableProps<TData> {
   toolbar?: (ctx: BulkActionContext<TData>) => React.ReactNode;
 }
 
-export function DataTable<TData>({
+type DataTableSelectionProps<TData extends RowData> =
+  | {
+      enableSelection: true;
+      /** Stable entity identity. Positional row ids are unsafe for bulk actions. */
+      getRowId: (row: TData) => string;
+      /**
+       * Identity of the exact selection scope (project + filters + page).
+       * Changing it remounts the controlled selection state before another
+       * destructive action can observe stale intent.
+       */
+      selectionScopeKey: string;
+    }
+  | {
+      enableSelection?: false;
+      getRowId?: (row: TData) => string;
+      selectionScopeKey?: string;
+    };
+
+type DataTableProps<TData extends RowData> = DataTableBaseProps<TData> &
+  DataTableSelectionProps<TData>;
+
+/**
+ * Keep non-selectable tables source-compatible while making stable identity
+ * mandatory for every selectable table. The keyed inner component resets both
+ * explicit and all-pages selection synchronously when the caller's selection
+ * scope changes.
+ */
+export function DataTable<TData extends RowData>(props: DataTableProps<TData>) {
+  const [sorting, setSorting] = useState<SortingState>([]);
+
+  if (
+    props.enableSelection &&
+    (typeof props.getRowId !== "function" || !props.selectionScopeKey)
+  ) {
+    throw new Error(
+      "Selectable DataTable requires getRowId and a non-empty selectionScopeKey",
+    );
+  }
+
+  return (
+    <DataTableInner
+      key={
+        props.enableSelection ? props.selectionScopeKey : "selection-disabled"
+      }
+      {...props}
+      sorting={sorting}
+      setSorting={setSorting}
+    />
+  );
+}
+
+function DataTableInner<TData extends RowData>({
   columns,
   data,
   enableSelection = false,
+  getRowId,
   enableSorting = true,
   pageSize = 50,
   pageSizeOptions = [10, 25, 50, 100],
@@ -94,16 +173,77 @@ export function DataTable<TData>({
   onSelectionChange,
   totalCount,
   toolbar,
-}: DataTableProps<TData>) {
-  const [sorting, setSorting] = useState<SortingState>([]);
-  const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
+  sorting,
+  setSorting,
+}: DataTableProps<TData> & {
+  sorting: SortingState;
+  setSorting: React.Dispatch<React.SetStateAction<SortingState>>;
+}) {
+  const [storedRowSelection, setStoredRowSelection] =
+    useState<RowSelectionState>({});
   const [allPagesSelected, setAllPagesSelected] = useState(false);
 
-  const allColumns: ColumnDef<TData, unknown>[] = enableSelection
+  const rowById = useMemo(() => {
+    const rows = new Map<string, TData>();
+    if (!enableSelection) return rows;
+    if (!getRowId) {
+      throw new Error("Selectable DataTable has no stable row-id resolver");
+    }
+    for (const row of data) {
+      const id = getRowId(row);
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error(
+          "Selectable DataTable row ids must be non-empty strings",
+        );
+      }
+      if (rows.has(id)) {
+        throw new Error(
+          `Selectable DataTable contains duplicate row id: ${id}`,
+        );
+      }
+      rows.set(id, row);
+    }
+    return rows;
+  }, [data, enableSelection, getRowId]);
+
+  // Reconcile retained intent against the current entities, not their array
+  // positions. Reordering preserves selection; a removed entity disappears
+  // from the effective state immediately and is pruned from retained state.
+  const rowSelection = useMemo<RowSelectionState>(() => {
+    if (!enableSelection) return {};
+    return Object.fromEntries(
+      Object.entries(storedRowSelection).filter(
+        ([id, selected]) => selected && rowById.has(id),
+      ),
+    );
+  }, [enableSelection, rowById, storedRowSelection]);
+  const storedSelectionKey = JSON.stringify(
+    Object.keys(storedRowSelection)
+      .filter((id) => storedRowSelection[id])
+      .sort(),
+  );
+  const reconciledSelectionKey = JSON.stringify(
+    Object.keys(rowSelection).sort(),
+  );
+
+  useEffect(() => {
+    if (!enableSelection || storedSelectionKey === reconciledSelectionKey) {
+      return;
+    }
+    setStoredRowSelection(rowSelection);
+  }, [
+    enableSelection,
+    reconciledSelectionKey,
+    rowSelection,
+    storedSelectionKey,
+  ]);
+
+  const allColumns: DataTableColumnDef<TData>[] = enableSelection
     ? [selectionColumn<TData>(), ...columns]
     : columns;
 
-  const table = useReactTable({
+  const table = useTable({
+    features: dataTableFeatures,
     data,
     columns: allColumns,
     state: { sorting, rowSelection },
@@ -111,33 +251,72 @@ export function DataTable<TData>({
     onRowSelectionChange: (updater) => {
       const next =
         typeof updater === "function" ? updater(rowSelection) : updater;
-      setRowSelection(next);
-      if (onSelectionChange) {
-        const selectedRows = Object.keys(next)
-          .filter((k) => next[k])
-          .map((k) => data[parseInt(k, 10)])
-          .filter(Boolean);
-        onSelectionChange(selectedRows);
-      }
+      setStoredRowSelection(
+        Object.fromEntries(
+          Object.entries(next).filter(
+            ([id, selected]) => selected && rowById.has(id),
+          ),
+        ),
+      );
+      // A checkbox change while "all pages" is active narrows the intent back
+      // to an explicit stable-id selection; it must not silently retain the
+      // broader destructive scope.
+      setAllPagesSelected(false);
     },
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: enableSorting ? getSortedRowModel() : undefined,
+    getRowId,
+    enableSorting,
     enableRowSelection: enableSelection,
+    // V9 enables inclusive Shift-range selection by default. This component
+    // intentionally preserves the V8 checkbox semantics: each click changes
+    // only the addressed stable row id.
+    enableRowRangeSelection: false,
   });
 
-  const rawSelectedCount = Object.values(rowSelection).filter(Boolean).length;
+  const explicitSelectedRows = useMemo(
+    () =>
+      Object.keys(rowSelection)
+        .filter((id) => rowSelection[id])
+        .map((id) => rowById.get(id))
+        .filter((row): row is TData => row !== undefined),
+    [rowById, rowSelection],
+  );
+  const selectedRows = useMemo(
+    () => (allPagesSelected ? data : explicitSelectedRows),
+    [allPagesSelected, data, explicitSelectedRows],
+  );
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  const selectedRowsRef = useRef(selectedRows);
+  const lastNotifiedSelectionKeyRef = useRef<string | undefined>(undefined);
+  const selectionNotificationKey = allPagesSelected
+    ? `all:${JSON.stringify([...rowById.keys()].sort())}`
+    : `explicit:${reconciledSelectionKey}`;
+
+  // Keep the latest render values for the semantic notification below. This
+  // ref-only effect may run for new callback/array identities, but cannot feed
+  // a parent render loop; the following effect is keyed only by selected IDs.
+  useEffect(() => {
+    onSelectionChangeRef.current = onSelectionChange;
+    selectedRowsRef.current = selectedRows;
+  }, [onSelectionChange, selectedRows]);
+
+  useEffect(() => {
+    if (
+      !enableSelection ||
+      lastNotifiedSelectionKeyRef.current === selectionNotificationKey
+    ) {
+      return;
+    }
+    lastNotifiedSelectionKeyRef.current = selectionNotificationKey;
+    onSelectionChangeRef.current?.(selectedRowsRef.current);
+  }, [enableSelection, selectionNotificationKey]);
+
+  const rawSelectedCount = explicitSelectedRows.length;
   const selectedCount = allPagesSelected
     ? (totalCount ?? data.length)
     : rawSelectedCount;
-  const selectedRows = allPagesSelected
-    ? data
-    : Object.keys(rowSelection)
-        .filter((k) => rowSelection[k])
-        .map((k) => data[parseInt(k, 10)])
-        .filter(Boolean);
 
   const clearSelection = () => {
-    setRowSelection({});
+    setStoredRowSelection({});
     setAllPagesSelected(false);
   };
 
@@ -215,9 +394,7 @@ export function DataTable<TData>({
                 <TableRow
                   key={row.id}
                   data-state={row.getIsSelected() && "selected"}
-                  className={cn(
-                    row.getIsSelected() && "bg-primary/5",
-                  )}
+                  className={cn(row.getIsSelected() && "bg-primary/5")}
                 >
                   {row.getVisibleCells().map((cell) => (
                     <TableCell key={cell.id}>
@@ -310,7 +487,7 @@ export function DataTable<TData>({
 // Selection column
 // ---------------------------------------------------------------------------
 
-function selectionColumn<TData>(): ColumnDef<TData, unknown> {
+function selectionColumn<TData extends RowData>(): DataTableColumnDef<TData> {
   return {
     id: "select",
     header: ({ table }) => (

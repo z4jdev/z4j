@@ -781,6 +781,35 @@ def canonical_frozen_row_snapshot(row: AuditLog) -> dict[str, Any]:
     )
 
 
+def frozen_row_snapshot_or_defect(
+    row: AuditLog,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Canonicalize one frozen row, or name why it cannot be canonicalized.
+
+    Every other caller of :func:`canonical_frozen_row_snapshot` is about to
+    sign, export, or activate, and for those refusing outright is the only
+    safe answer to a row that has lost its canonical form. A verifier has the
+    opposite contract: it is asked how bad the damage is, and a row it cannot
+    canonicalize IS damage. Letting the raise escape discards every finding
+    gathered before it and leaves the caller unable to tell a corrupted chain
+    from a database that was briefly unreachable.
+
+    Canonicalization itself is not reimplemented here, so the two answers can
+    never drift into disagreeing about what canonical means.
+    """
+
+    try:
+        return canonical_frozen_row_snapshot(row), None
+    except Exception as exc:
+        # Deliberately not narrowed to AuditChainIntegrityError. Persisted
+        # values that violate the canonical form badly enough reach the
+        # normalizers as the wrong type entirely, and a verifier that only
+        # survives the failures somebody enumerated is a verifier that still
+        # crashes on the row nobody predicted. The type is kept in the text so
+        # a structural violation stays distinguishable from a crash.
+        return None, f"{type(exc).__name__}: {exc}"
+
+
 __all__ = [
     "AUDIT_PREPARATION_FORMAT_VERSION",
     "AUDIT_ROW_HMAC_VERSION",
@@ -801,6 +830,7 @@ __all__ = [
     "compute_preparation_mac",
     "compute_row_hmac",
     "compute_state_mac",
+    "frozen_row_snapshot_or_defect",
     "frozen_snapshot_digest",
     "make_empty_chain_state",
     "normalize_ip",

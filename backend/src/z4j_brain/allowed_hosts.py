@@ -47,8 +47,9 @@ def get_path() -> Path:
 def read_persisted() -> list[str]:
     """Load the persisted allow-list. Returns ``[]`` if the file is missing.
 
-    Strips comments and blank lines. Preserves operator-supplied order.
-    Lower-cases hostnames so duplicates with different casing collapse.
+    Strips comments and blank lines. Preserves operator-supplied order and the
+    spelling of the first occurrence. Duplicate hostnames collapse using a
+    case-insensitive comparison.
     """
     path = get_path()
     if not path.exists():
@@ -77,9 +78,10 @@ def read_persisted() -> list[str]:
 def write_persisted(hosts: list[str]) -> None:
     """Replace the file's contents with ``hosts``. Idempotent.
 
-    Atomic via tmpfile + rename so an interrupted write doesn't corrupt
-    the existing file. Sets the file mode to 0o644 - hosts are not
-    secrets, but the directory itself is operator-owned.
+    The final tmpfile replacement is atomic on supported filesystems. If that
+    replacement fails, the existing file is preserved and the error is raised.
+    Sets the file mode to 0o644 - hosts are not secrets, but the directory
+    itself is operator-owned.
     """
     path = get_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,11 +97,13 @@ def write_persisted(hosts: list[str]) -> None:
     try:
         tmp.replace(path)
     except OSError:
-        # On Windows, replace can fail if the destination exists in some
-        # contexts; fall back to write + remove.
-        if path.exists():
-            path.unlink()
-        tmp.replace(path)
+        # Never unlink the destination as a fallback. In particular, Windows
+        # can refuse replacement while another process holds the file; an
+        # unlink-then-replace retry would create an interruption window in
+        # which the operator's existing allow-list no longer exists.
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     with contextlib.suppress(OSError):
         path.chmod(0o644)
 

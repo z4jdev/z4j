@@ -80,7 +80,7 @@ _BUCKET_SECONDS = {
 
 
 class TrendBucket(BaseModel):
-    t: str  # ISO-8601 bucket start timestamp
+    t: datetime  # UTC-aware ISO-8601 bucket start timestamp
     success: int = 0
     failure: int = 0
     retry: int = 0
@@ -99,10 +99,12 @@ def _bucket_expr(session: AsyncSession, bucket_seconds: int):
     """Return a dialect-appropriate bucket-start expression for
     ``Task.finished_at``.
 
-    Uses ``date_trunc`` on Postgres for the 1m/5m/15m/1h/1d case by
-    computing ``to_timestamp(floor(epoch / N) * N)``; on SQLite we
-    use the same epoch-floor trick via ``strftime('%s', ...)``.
-    Both return a timezone-aware timestamp.
+    On Postgres, computes ``to_timestamp(floor(epoch / N) * N)``;
+    on SQLite, uses the same epoch-floor approach via
+    ``strftime('%s', ...)``.
+    PostgreSQL returns a timezone-aware timestamp. SQLite's
+    ``datetime`` function returns a naive UTC value; the response
+    materializer below explicitly attaches UTC before serialization.
     """
     from sqlalchemy import Integer, cast
 
@@ -126,6 +128,27 @@ def _bucket_expr(session: AsyncSession, bucket_seconds: int):
     epoch = cast(func.strftime("%s", Task.finished_at), Integer)
     bucketed_epoch = (epoch // bucket_seconds) * bucket_seconds
     return func.datetime(bucketed_epoch, "unixepoch")
+
+
+def _normalize_bucket_timestamp(value: datetime | str) -> datetime:
+    """Return a bucket timestamp as an aware UTC ``datetime``.
+
+    PostgreSQL returns the ``to_timestamp`` expression as an aware
+    ``datetime``. SQLite returns its ``datetime`` expression as a raw
+    ``YYYY-MM-DD HH:MM:SS`` string. Normalizing both shapes here keeps the
+    public response identical across the supported database dialects.
+    """
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        raw = str(value)
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        timestamp = datetime.fromisoformat(raw)
+
+    if timestamp.tzinfo is None:
+        return timestamp.replace(tzinfo=UTC)
+    return timestamp.astimezone(UTC)
 
 
 @router.get("", response_model=TrendsResponse)
@@ -175,7 +198,8 @@ async def get_trends(
                 b_expr,
                 Task.state,
                 func.count(Task.id).label("cnt"),
-                func.avg(Task.runtime_ms).label("avg_ms"),
+                func.sum(Task.runtime_ms).label("runtime_sum"),
+                func.count(Task.runtime_ms).label("runtime_cnt"),
             )
             .where(
                 Task.project_id == project.id,
@@ -195,32 +219,30 @@ async def get_trends(
         )
     ).all()
 
-    # Materialize buckets in a dict keyed by ISO string.
-    buckets: dict[str, TrendBucket] = {}
-    running_runtime_sum: dict[str, float] = {}
-    running_runtime_count: dict[str, int] = {}
-    for b, state, cnt, avg_ms in rows:
-        # b may come back as a naive datetime on SQLite; stamp UTC.
-        if isinstance(b, datetime):
-            t = b if b.tzinfo else b.replace(tzinfo=UTC)
-            key = t.isoformat()
-        else:
-            # Postgres to_timestamp returns an aware datetime already.
-            key = str(b)
+    # Materialize buckets in a dict keyed by one normalized UTC datetime.
+    buckets: dict[datetime, TrendBucket] = {}
+    running_runtime_sum: dict[datetime, int] = {}
+    running_runtime_count: dict[datetime, int] = {}
+    for b, state, cnt, runtime_sum, runtime_cnt in rows:
+        key = _normalize_bucket_timestamp(b)
         bucket_row = buckets.setdefault(key, TrendBucket(t=key))
         state_name = state.value if hasattr(state, "value") else str(state)
         setattr(bucket_row, state_name, int(cnt))
         bucket_row.total += int(cnt)
-        if avg_ms is not None:
-            running_runtime_sum[key] = running_runtime_sum.get(key, 0.0) + float(avg_ms) * int(cnt)
-            running_runtime_count[key] = running_runtime_count.get(key, 0) + int(cnt)
+        non_null_runtime_count = int(runtime_cnt)
+        if runtime_sum is not None and non_null_runtime_count > 0:
+            running_runtime_sum[key] = running_runtime_sum.get(key, 0) + int(runtime_sum)
+            running_runtime_count[key] = running_runtime_count.get(key, 0) + non_null_runtime_count
 
     for key, bucket_row in buckets.items():
         n = running_runtime_count.get(key, 0)
         if n > 0:
-            bucket_row.avg_runtime_ms = int(running_runtime_sum[key] / n)
+            total_runtime = running_runtime_sum[key]
+            bucket_row.avg_runtime_ms = (
+                total_runtime // n if total_runtime >= 0 else -((-total_runtime) // n)
+            )
 
-    series = sorted(buckets.values(), key=lambda b: b.t)
+    series = sorted(buckets.values(), key=lambda row: row.t)
     return TrendsResponse(window=window, bucket=bucket, series=series)
 
 

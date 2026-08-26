@@ -4,12 +4,12 @@ Exposes application-level counters, gauges, and histograms for
 Grafana dashboards. The endpoint is mounted at the root (NOT
 under ``/api/v1``) so Prometheus scrape configs use a stable path.
 
-Authorization: optional bearer-token guard. Set
-``Z4J_METRICS_AUTH_TOKEN`` and the endpoint requires
-``Authorization: Bearer <token>``; leave it unset to keep the
-legacy "open" behaviour, with a boot-time warning reminding the
-operator to either set a token or block ``/metrics`` at the
-reverse proxy (Caddy / nginx). Audit 2026-04-24 Medium-1.
+Authorization is fail-secure by default. A configured
+``Z4J_METRICS_AUTH_TOKEN`` requires ``Authorization: Bearer <token>``.
+Without a token the endpoint returns HTTP 401 unless the operator explicitly
+sets ``Z4J_METRICS_PUBLIC=1`` for a closed-network deployment. A fresh
+self-contained SQLite installation auto-mints and persists a token; other
+deployments must configure one explicitly. Audit 2026-04-24 Medium-1.
 
 Metric naming follows the Prometheus convention:
 ``z4j_{component}_{metric}_{unit}``.
@@ -610,6 +610,25 @@ z4j_audit_retention_last_deleted = Gauge(
     multiprocess_mode="mostrecent",
 )
 
+z4j_audit_chain_verifications_total = Counter(
+    "z4j_audit_chain_verifications_total",
+    "Scheduled audit-chain verification runs, by outcome. "
+    "'failed' means the chain did not verify and needs investigation; "
+    "'error' means the run could not complete, which is a different "
+    "problem and must not be read as evidence of tampering.",
+    labelnames=("outcome",),
+    registry=registry,
+)
+
+z4j_audit_chain_rows_verified = Gauge(
+    "z4j_audit_chain_rows_verified",
+    "Rows walked by the most recent audit-chain verification.",
+    registry=registry,
+    # Multiprocess: only the leader runs this, but "most recent" is still
+    # the right blend if replicas rotate leadership between scrapes.
+    multiprocess_mode="mostrecent",
+)
+
 z4j_wal_checkpoint_pages_last = Gauge(
     "z4j_wal_checkpoint_pages_last",
     "Pages checkpointed in the most recent WAL checkpoint pass "
@@ -836,14 +855,14 @@ def _check_metrics_auth(request: Request, settings: Settings) -> None:
       the risk.
     - ``settings.metrics_auth_token`` set -> require
       ``Authorization: Bearer <token>``. The token is either
-      operator-provided (``Z4J_METRICS_AUTH_TOKEN``) or auto-minted on
-      first boot and persisted to ``~/.z4j/secret.env`` alongside
-      ``Z4J_SECRET`` / ``Z4J_SESSION_SECRET``.
+      operator-provided (``Z4J_METRICS_AUTH_TOKEN``) or, for a fresh
+      self-contained SQLite installation, auto-minted on first boot and
+      persisted to ``~/.z4j/secret.env`` alongside ``Z4J_SECRET`` /
+      ``Z4J_SESSION_SECRET``.
     - neither -> return 401 with an instructional detail pointing at
-      ``z4j metrics-token`` and ``Z4J_METRICS_PUBLIC``. This branch is
-      unreachable on a normally-bootstrapped install because the CLI
-      entry point auto-mints; it exists for defense-in-depth in test
-      rigs or custom bootstrappers that skip the CLI.
+      ``Z4J_METRICS_AUTH_TOKEN`` and ``Z4J_METRICS_PUBLIC``. This can occur
+      in explicitly configured PostgreSQL deployments and in custom
+      bootstrappers that do not use the packaged SQLite bootstrap.
 
     The prior policy (1.0.11 / 1.0.12) was the inverse: unset token
     meant "serve without auth" and just logged a warning. Every fresh
@@ -862,8 +881,7 @@ def _check_metrics_auth(request: Request, settings: Settings) -> None:
             detail=(
                 "metrics: not configured. Either set Z4J_METRICS_AUTH_TOKEN "
                 "and scrape with `Authorization: Bearer <token>`, or set "
-                "Z4J_METRICS_PUBLIC=1 for closed-network deployments. "
-                "Run `z4j metrics-token` to print the auto-minted token."
+                "Z4J_METRICS_PUBLIC=1 for closed-network deployments."
             ),
             headers={"WWW-Authenticate": "Bearer"},
         )

@@ -12,7 +12,7 @@
  * (see brain api/schedules.py). The endpoint requires ADMIN to
  * mirror :import's role gate.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   AlertTriangle,
@@ -43,10 +43,8 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  useScheduleDiff,
-  useScheduleImport,
-} from "@/hooks/use-schedules";
+import { useScheduleDiff, useScheduleImport } from "@/hooks/use-schedules";
+import { useCan } from "@/hooks/use-memberships";
 import { ApiError } from "@/lib/api";
 import type {
   ScheduleDiffEntry,
@@ -77,6 +75,81 @@ const PLACEHOLDER = `[
 
 function ReconcilePage() {
   const { slug } = Route.useParams();
+  const canAdminister = useCan(slug, "admin_schedules");
+
+  if (!canAdminister) {
+    return (
+      <PageShell>
+        <Link
+          to="/projects/$slug/schedules"
+          params={{ slug }}
+          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="size-3" />
+          back to schedules
+        </Link>
+        <PageHeader
+          title="Reconciliation diff"
+          icon={GitCompare}
+          description="Preview and apply declarative schedule reconciliation"
+        />
+        <EmptyState
+          icon={AlertTriangle}
+          title="admin access required"
+          description="Only project administrators can preview or apply schedule reconciliation."
+        />
+      </PageShell>
+    );
+  }
+
+  return <ReconcileAdminPage key={slug} slug={slug} />;
+}
+
+interface ReconciliationPreview {
+  generation: number;
+  request: ScheduleDiffRequest;
+  result: ScheduleDiffResponse;
+}
+
+function freezeJsonValue(value: unknown): void {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) {
+    return;
+  }
+  for (const nested of Object.values(value)) {
+    freezeJsonValue(nested);
+  }
+  Object.freeze(value);
+}
+
+function frozenRequestSnapshot(
+  mode: ScheduleDiffRequest["mode"],
+  sourceFilter: string,
+  schedules: Array<Record<string, unknown>>,
+): ScheduleDiffRequest {
+  // The textarea is JSON, so a JSON round trip gives this request its own
+  // object graph. Freezing that graph prevents later UI or library code from
+  // changing the body between preview and apply.
+  const clonedSchedules = JSON.parse(JSON.stringify(schedules)) as Array<
+    Record<string, unknown>
+  >;
+  const request: ScheduleDiffRequest = {
+    mode,
+    source_filter: sourceFilter || undefined,
+    schedules: clonedSchedules,
+  };
+  freezeJsonValue(request);
+  return request;
+}
+
+function frozenResultSnapshot(
+  result: ScheduleDiffResponse,
+): ScheduleDiffResponse {
+  const snapshot = JSON.parse(JSON.stringify(result)) as ScheduleDiffResponse;
+  freezeJsonValue(snapshot);
+  return snapshot;
+}
+
+function ReconcileAdminPage({ slug }: { slug: string }) {
   const diff = useScheduleDiff(slug);
   const importSchedules = useScheduleImport(slug);
   const { confirm, dialog: confirmDialog } = useConfirm();
@@ -85,6 +158,16 @@ function ReconcilePage() {
   const [mode, setMode] = useState<ScheduleDiffRequest["mode"]>("upsert");
   const [sourceFilter, setSourceFilter] = useState("");
   const [parseError, setParseError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<ReconciliationPreview | null>(null);
+  const latestGeneration = useRef(0);
+
+  const invalidatePreview = () => {
+    // Increment synchronously as well as hiding the panel. A confirmation that
+    // was already open therefore cannot apply after its input authority has
+    // changed, even before React commits the state update.
+    latestGeneration.current += 1;
+    setPreview(null);
+  };
 
   // Parse the textarea on every keystroke so the operator gets
   // immediate feedback if their JSON is malformed - no silent
@@ -113,26 +196,42 @@ function ReconcilePage() {
       toast.error("Fix the JSON first");
       return;
     }
-    if (mode === "replace_for_source" && !sourceFilter && parsedSchedules.length === 0) {
+    if (
+      mode === "replace_for_source" &&
+      !sourceFilter &&
+      parsedSchedules.length === 0
+    ) {
       toast.error(
         "replace_for_source with an empty batch needs an explicit source_filter",
       );
       return;
     }
+    const generation = latestGeneration.current + 1;
+    latestGeneration.current = generation;
+    setPreview(null);
+    const request = frozenRequestSnapshot(mode, sourceFilter, parsedSchedules);
+
     try {
-      await diff.mutateAsync({
-        mode,
-        source_filter: sourceFilter || undefined,
-        schedules: parsedSchedules,
+      const result = await diff.mutateAsync(request);
+      // Two previews can overlap through rapid clicks, programmatic callers, or
+      // a future UI that permits another Run while one is pending. Only the
+      // latest still-valid request may become Apply authority.
+      if (latestGeneration.current !== generation) return;
+      setPreview({
+        generation,
+        request,
+        result: frozenResultSnapshot(result),
       });
     } catch (err) {
+      if (latestGeneration.current !== generation) return;
+      setPreview(null);
       const message =
         err instanceof ApiError ? err.message : (err as Error).message;
       toast.error(`diff failed: ${message}`);
     }
   }
 
-  const result = diff.data;
+  const result = preview?.result;
 
   /**
    * Apply the same body that produced ``result`` via :import. The
@@ -143,30 +242,36 @@ function ReconcilePage() {
    * "you typed it twice"; the dashboard gate is the modal.
    */
   function onApply() {
-    if (!parsedSchedules || !result) return;
+    if (!preview || preview.generation !== latestGeneration.current) return;
 
-    const summary = result.summary;
-    const destructive = mode === "replace_for_source" && summary.delete > 0;
+    const previewGeneration = preview.generation;
+    const previewRequest = preview.request;
+    const summary = preview.result.summary;
+    const destructive =
+      previewRequest.mode === "replace_for_source" && summary.delete > 0;
     confirm({
       title: destructive
         ? `Apply diff and delete ${summary.delete} schedule${summary.delete === 1 ? "" : "s"}?`
         : `Apply diff (${summary.insert + summary.update} change${summary.insert + summary.update === 1 ? "" : "s"})?`,
       description: (
         <>
-          About to apply: <strong>{summary.insert} insert</strong> /
-          {" "}<strong>{summary.update} update</strong> /
-          {" "}<strong>{summary.unchanged} unchanged</strong>
+          About to apply: <strong>{summary.insert} insert</strong> /{" "}
+          <strong>{summary.update} update</strong> /{" "}
+          <strong>{summary.unchanged} unchanged</strong>
           {destructive && (
             <>
-              {" "}/ <strong className="text-destructive">{summary.delete} delete</strong>
+              {" "}
+              /{" "}
+              <strong className="text-destructive">
+                {summary.delete} delete
+              </strong>
             </>
           )}
           .{" "}
           {destructive && (
             <>
-              The deletes are permanent. Run the diff again from
-              the same source after applying to confirm the result
-              matches your expectation.
+              The deletes are permanent. Run the diff again from the same source
+              after applying to confirm the result matches your expectation.
             </>
           )}
         </>
@@ -174,12 +279,12 @@ function ReconcilePage() {
       variant: destructive ? "destructive" : "default",
       confirmLabel: destructive ? "Apply + delete" : "Apply",
       onConfirm: async () => {
+        if (latestGeneration.current !== previewGeneration) {
+          toast.error("The reconciliation inputs changed. Run the diff again.");
+          return;
+        }
         try {
-          const r = await importSchedules.mutateAsync({
-            mode,
-            source_filter: sourceFilter || undefined,
-            schedules: parsedSchedules,
-          });
+          const r = await importSchedules.mutateAsync(previewRequest);
           const failedCount = r.failed;
           if (failedCount > 0) {
             toast.warning(
@@ -226,9 +331,10 @@ function ReconcilePage() {
               <Label htmlFor="mode">Mode</Label>
               <Select
                 value={mode}
-                onValueChange={(v) =>
-                  setMode(v as ScheduleDiffRequest["mode"])
-                }
+                onValueChange={(v) => {
+                  invalidatePreview();
+                  setMode(v as ScheduleDiffRequest["mode"]);
+                }}
               >
                 <SelectTrigger id="mode">
                   <SelectValue />
@@ -245,28 +351,32 @@ function ReconcilePage() {
               <Label htmlFor="source-filter">
                 Source filter{" "}
                 <span className="text-xs font-normal text-muted-foreground">
-                  (optional, used by replace_for_source to scope the
-                  delete bucket)
+                  (optional, used by replace_for_source to scope the delete
+                  bucket)
                 </span>
               </Label>
               <Input
                 id="source-filter"
                 placeholder="declarative:django"
                 value={sourceFilter}
-                onChange={(e) => setSourceFilter(e.target.value)}
+                onChange={(e) => {
+                  invalidatePreview();
+                  setSourceFilter(e.target.value);
+                }}
               />
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="schedules-json">
-              Schedules (JSON array)
-            </Label>
+            <Label htmlFor="schedules-json">Schedules (JSON array)</Label>
             <Textarea
               id="schedules-json"
               className="min-h-[240px] font-mono text-xs"
               placeholder={PLACEHOLDER}
               value={pasted}
-              onChange={(e) => setPasted(e.target.value)}
+              onChange={(e) => {
+                invalidatePreview();
+                setPasted(e.target.value);
+              }}
               spellCheck={false}
             />
             {parseError && (
@@ -302,7 +412,7 @@ function ReconcilePage() {
         <DiffResultPanel
           result={result}
           onApply={onApply}
-          applyDisabled={importSchedules.isPending || !parsedSchedules}
+          applyDisabled={importSchedules.isPending}
           applyPending={importSchedules.isPending}
         />
       )}
@@ -380,11 +490,7 @@ function DiffResultPanel({
   );
 }
 
-function SummaryBar({
-  summary,
-}: {
-  summary: ScheduleDiffResponse["summary"];
-}) {
+function SummaryBar({ summary }: { summary: ScheduleDiffResponse["summary"] }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <SummaryPill kind="insert" label="insert" count={summary.insert} />
@@ -402,19 +508,15 @@ function SummaryBar({
   );
 }
 
-const KIND_STYLE: Record<
-  "insert" | "update" | "delete" | "unchanged",
-  string
-> = {
-  insert:
-    "border-green-500/40 bg-green-500/10 text-green-700 dark:text-green-400",
-  update:
-    "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-400",
-  delete:
-    "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-400",
-  unchanged:
-    "border-muted-foreground/20 bg-muted text-muted-foreground",
-};
+const KIND_STYLE: Record<"insert" | "update" | "delete" | "unchanged", string> =
+  {
+    insert:
+      "border-green-500/40 bg-green-500/10 text-green-700 dark:text-green-400",
+    update:
+      "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-400",
+    delete: "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-400",
+    unchanged: "border-muted-foreground/20 bg-muted text-muted-foreground",
+  };
 
 function SummaryPill({
   kind,
@@ -461,7 +563,10 @@ function DiffBucket({
         <CardTitle className="flex items-center gap-2 text-sm">
           <Icon className={cn("size-4", KIND_STYLE[kind].split(" ").pop())} />
           {title}
-          <Badge variant="outline" className={cn("text-[10px]", KIND_STYLE[kind])}>
+          <Badge
+            variant="outline"
+            className={cn("text-[10px]", KIND_STYLE[kind])}
+          >
             {entries.length}
           </Badge>
         </CardTitle>
@@ -472,16 +577,16 @@ function DiffBucket({
       {open && (
         <CardContent>
           {entries.length === 0 && (
-            <EmptyState
-              icon={Icon}
-              title="no rows"
-              description={emptyText}
-            />
+            <EmptyState icon={Icon} title="no rows" description={emptyText} />
           )}
           {entries.length > 0 && (
             <div className="space-y-3">
               {entries.map((entry) => (
-                <DiffEntryCard key={`${entry.scheduler}/${entry.name}`} kind={kind} entry={entry} />
+                <DiffEntryCard
+                  key={`${entry.scheduler}/${entry.name}`}
+                  kind={kind}
+                  entry={entry}
+                />
               ))}
             </div>
           )}
@@ -562,7 +667,9 @@ function DiffEntryCard({
 }
 
 function FieldsTable({ values }: { values: Record<string, unknown> }) {
-  const ordered = Object.entries(values).filter(([, v]) => v !== null && v !== undefined && v !== "");
+  const ordered = Object.entries(values).filter(
+    ([, v]) => v !== null && v !== undefined && v !== "",
+  );
   return (
     <div className="space-y-0.5 font-mono text-[11px]">
       {ordered.map(([key, value]) => (
@@ -583,10 +690,7 @@ function computeFieldDiffs(
   // and source_hash (which obviously differs, since that's why we're
   // here - no need to render it).
   const SKIP = new Set(["name", "scheduler", "source_hash"]);
-  const keys = new Set([
-    ...Object.keys(current),
-    ...Object.keys(proposed),
-  ]);
+  const keys = new Set([...Object.keys(current), ...Object.keys(proposed)]);
   const out: Array<{ key: string; current: unknown; proposed: unknown }> = [];
   for (const key of keys) {
     if (SKIP.has(key)) continue;

@@ -122,7 +122,13 @@ class BulkRetryRequest(PKMixin, Base):
 
 
 class BulkRetryRequestChild(PKMixin, Base):
-    """One immutable child payload in a durable outbox."""
+    """One child payload in a durable outbox, written once by convention.
+
+    Nothing in the application revises a child after the parent request is
+    expanded. That is a convention this code keeps, not a database guard:
+    unlike the schedule-control and audit tables, no trigger refuses UPDATE
+    or DELETE here.
+    """
 
     __tablename__ = "bulk_retry_request_children"
 

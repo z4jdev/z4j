@@ -16,28 +16,26 @@ Why bother:
 
 How it works:
 
-- Postgres: opens ONE transaction per batch, ``SET LOCAL
-  z4j.audit_sweep = 'on'`` (the trigger function added in
-  ``2026_05_01_0015_audit_sweep`` permits DELETE iff that GUC is
-  on), then ``DELETE FROM audit_log WHERE occurred_at < cutoff``
-  in batches. ``SET LOCAL`` dies at COMMIT/ROLLBACK so each
-  batch's GUC scope is contained. A
-  ``pg_try_advisory_lock(hashtext('z4j.audit_sweep'))`` at the
-  top of the pass means only one brain replica holds the sweep
-  at a time, the others see the lock fail and skip the pass
-  cleanly. (Audit fix MED-15.)
+- Legacy/keyless Postgres: opens one outer transaction for the capped
+  pass and takes ``pg_try_advisory_xact_lock`` once. Each bounded DELETE
+  runs inside a SAVEPOINT and repeats ``SET LOCAL z4j.audit_sweep = 'on'``;
+  both the GUC and advisory lock remain scoped to the outer transaction,
+  which commits all successful batches together. The authenticated v2
+  path instead opens a transaction and takes the advisory/chain locks for
+  each batch.
 - SQLite: no trigger; plain DELETE. Most homelabs run SQLite,
-  so this is the common path. SQLite is single-writer so the
-  advisory-lock dance is unnecessary.
+  so this is the common path. The legacy and authenticated paths commit
+  each batch independently; SQLite's writer serialization replaces the
+  Postgres advisory-lock coordination.
 
 The sweep runs on a fixed cadence
 (``audit_retention_sweep_interval_seconds``, default 3600s = 1h).
-Each pass deletes in batches of
-``audit_retention_sweep_batch_size`` to avoid long-running
-transactions, AND caps the *whole* pass at
+Each pass uses statements bounded by
+``audit_retention_sweep_batch_size`` and caps the *whole* pass at
 ``audit_retention_sweep_max_per_pass`` so a multi-million-row
-backlog doesn't run as one runaway transaction window. Errors
-are logged but never crash the task; the next tick retries.
+backlog cannot make the legacy Postgres outer transaction or any
+other pass unbounded. Errors are logged but never crash the task;
+the next tick retries.
 
 The hash chain (``prev_row_hmac``) breaks at the boundary where
 old rows are deleted. Verification of the surviving chain still
@@ -51,9 +49,10 @@ agent_status is high-frequency observability data, more like the
 event stream than the audit trail, so it shares the events
 retention knob). The agent_status sweep runs in the same pass as
 the audit sweep so operators only have one cadence to tune. The
-sweeper class name is unchanged for backward compatibility; the
-agent_status pass is implemented as an adjacent helper that
-shares the same advisory-lock + cap discipline.
+sweeper class name is unchanged for backward compatibility. The
+agent-status helper has the same batch and per-pass caps, but runs
+in its own per-batch sessions and does not take the audit sweep's
+advisory lock.
 """
 
 from __future__ import annotations
@@ -85,7 +84,7 @@ logger = logging.getLogger("z4j.brain.audit_retention")
 #: Postgres advisory-lock key for cross-worker sweep coordination.
 #: Computed from ``hashtext('z4j.audit_sweep')``, any int32 will
 #: do, but using ``hashtext`` keeps it readable in the migration's
-#: comments. Audit fix MED-15.
+#: comments.
 _SWEEP_ADVISORY_LOCK_KEY: int = 0x7A346A41  # "z4jaA" stable seed
 
 
@@ -172,10 +171,10 @@ class AuditRetentionSweeper:
     async def stop(self) -> None:
         """Signal the task to exit and wait briefly for it.
 
-        Audit fix CRIT-2: ``CancelledError`` raised into ``stop()``
-        from the outer lifespan (e.g. uvicorn shutdown timeout)
-        propagates up, it MUST NOT be swallowed, otherwise the
-        cancellation never reaches the parent and shutdown stalls.
+        ``CancelledError`` raised into ``stop()`` from the outer
+        lifespan (e.g. uvicorn shutdown timeout) propagates up, it
+        MUST NOT be swallowed, otherwise the cancellation never
+        reaches the parent and shutdown stalls.
         We catch ``TimeoutError`` (the wait_for budget elapsed) and
         broad ``Exception`` (the task itself raised) but explicitly
         re-raise ``CancelledError``.
@@ -279,11 +278,13 @@ class AuditRetentionSweeper:
     async def _do_sweep(self) -> int:
         """Execute one pass.
 
-        Per-batch transactions keep the WAL footprint bounded.
-        Postgres advisory-locks the sweep so multiple workers
-        don't fight. Caps at
-        ``audit_retention_sweep_max_per_pass`` rows per pass
-        to avoid a runaway transaction window.
+        Legacy Postgres holds one transaction-scoped advisory lock and
+        one outer transaction across the capped pass; individual batches
+        are SAVEPOINTs, not separately committed transactions. Legacy
+        SQLite commits each batch independently. The authenticated v2
+        implementation delegated to above also commits per batch on both
+        dialects. Every branch caps the pass at
+        ``audit_retention_sweep_max_per_pass`` rows.
         """
         assert self._db is not None
         assert self._settings is not None
@@ -389,7 +390,7 @@ class AuditRetentionSweeper:
 
         # Record the HMAC-chain prune boundary so `z4j audit verify`
         # does not permanently false-positive on the first surviving row
-        # once retention has deleted the genesis row. (1.7 audit.)
+        # once retention has deleted the genesis row.
         if total:
             await self._record_prune_watermark()
 
@@ -765,9 +766,14 @@ class AuditRetentionSweeper:
             boundary = await repo.get_oldest_prev_row_hmac()
             if boundary is None:
                 return
-            # Store the watermark authenticated to the master secret so a
-            # DB-write adversary cannot re-anchor the chain past a
-            # prefix-truncation (see ``_watermark_mac``).
+            # Store the watermark authenticated to the master secret, which
+            # is not in the database, so re-anchoring the chain past a
+            # prefix-truncation takes a value the brain actually signed
+            # (see ``_watermark_mac``). That raises the cost of inventing a
+            # new boundary, not of restoring an older real one: a role that
+            # can write this row can put back a watermark from an earlier
+            # sweep and delete the rows after it, and the MAC still checks
+            # out because it was genuine when it was written.
             await repo.set_prune_watermark(boundary, secret=secret)
             await session.commit()
 
@@ -786,10 +792,11 @@ class AuditRetentionSweeper:
 
         Unlike the audit_log path there is no DB-level mutation
         guard to bypass: ``agent_status_history`` is plain
-        append-only by application convention. The Postgres path
-        therefore skips the ``SET LOCAL`` GUC dance but still uses
-        the advisory-lock pattern when other replicas might race
-        on the same table.
+        append-only by application convention. This helper uses one
+        committed session per batch on both dialects and does not
+        acquire the audit sweep advisory lock. Concurrent replicas can
+        therefore race over candidate rows; each bounded DELETE remains
+        authoritative for its own returned row count.
         """
         assert self._db is not None
         assert self._settings is not None

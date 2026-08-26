@@ -376,7 +376,7 @@ class PendingFiresRepository:
             changed=True,
         )
 
-    async def replay_current(  # noqa: PLR0911, PLR0912
+    async def replay_current(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         *,
         pending_id: UUID,
@@ -466,12 +466,23 @@ class PendingFiresRepository:
                 pending,
                 fire=fire,
             )
+        if schedule.paused_at is not None:
+            # A buffered fire that was accepted before the hold must not run
+            # after it. Replay is the one path where the decision to fire and
+            # the act of firing are separated in time, so it is the path where
+            # a hold placed in between is most likely to be missed.
+            return CurrentPendingFireTransition(
+                "schedule_paused",
+                pending,
+                fire=fire,
+            )
 
         agent_result = await self.session.execute(
             select(Agent)
             .where(
                 Agent.id == agent_id,
                 Agent.project_id == pending.project_id,
+                Agent.revoked_at.is_(None),
             )
             .with_for_update(),
         )

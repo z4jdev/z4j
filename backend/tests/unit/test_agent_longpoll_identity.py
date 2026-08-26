@@ -66,6 +66,7 @@ async def agent_ids(settings: Settings, brain_app) -> dict[str, uuid.UUID]:
     agent_id = uuid.uuid4()
     async with brain_app.state.db.session() as s:
         s.add(Project(id=project_id, slug="lp-project", name="LP"))
+        await s.flush()
         s.add(
             Agent(
                 id=agent_id,
@@ -295,3 +296,115 @@ async def test_current_cadence_longpoll_requires_and_binds_session_nonce(
             )
             == frozen_deadline
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("generic_first", [True, False])
+async def test_mixed_current_and_generic_batch_preserves_order_and_claims_both(
+    client,
+    agent_ids,
+    brain_app,
+    generic_first: bool,
+) -> None:
+    """Split authority transactions must not reorder or drop the batch."""
+    now = datetime.now(UTC)
+    schedule_id = uuid.uuid4()
+    fire_id = uuid.uuid4()
+    control_token = uuid.uuid4()
+    execution_fire_id = derive_execution_fire_id(fire_id, control_token)
+    first_at = now
+    second_at = now + timedelta(seconds=1)
+    async with brain_app.state.db.session(write=True) as session:
+        session.add(
+            Schedule(
+                id=schedule_id,
+                project_id=agent_ids["project_id"],
+                engine="celery",
+                scheduler="z4j-scheduler",
+                name=f"mixed-current-{generic_first}",
+                task_name="jobs.mixed",
+                kind=ScheduleKind.INTERVAL,
+                expression="5m",
+                timezone="UTC",
+                args=[],
+                kwargs={},
+                is_enabled=True,
+            ),
+        )
+        current, created = await CommandRepository(
+            session,
+        ).insert_current_schedule_fire(
+            project_id=agent_ids["project_id"],
+            agent_id=agent_ids["agent_id"],
+            schedule_id=schedule_id,
+            fire_id=fire_id,
+            scheduled_for=now,
+            observed_control_token=control_token,
+            receipt_control_token=control_token,
+            execution_fire_id=execution_fire_id,
+            acceptance_revision=2,
+            definition_digest="e" * 64,
+            expected_revision=1,
+            expected_last_run_at=None,
+            expected_next_run_at=now,
+            prepared_next_run_at=now + timedelta(minutes=5),
+            payload={
+                "fire_id": str(execution_fire_id),
+                "task_name": "jobs.mixed",
+            },
+            timeout_at=now + timedelta(minutes=5),
+            initial_claim_deadline=now + timedelta(minutes=1),
+        )
+        assert created is True
+        generic = Command(
+            project_id=agent_ids["project_id"],
+            agent_id=agent_ids["agent_id"],
+            issued_by=None,
+            action="cancel_task",
+            target_type="task",
+            target_id="celery:mixed",
+            payload={"engine": "celery", "task_id": "mixed"},
+            timeout_at=now + timedelta(minutes=5),
+        )
+        session.add(generic)
+        current.issued_at = second_at if generic_first else first_at
+        generic.issued_at = first_at if generic_first else second_at
+        await session.commit()
+        current_id = current.id
+        generic_id = generic.id
+
+    nonce = f"mixed-order-{generic_first}"
+    delivered = await client.get(
+        "/api/v1/agent/commands",
+        params={"wait": 0, "max_frames": 2},
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": nonce,
+        },
+    )
+    assert delivered.status_code == 200
+    frames = [parse_frame(raw) for raw in delivered.json()["frames"]]
+    expected = [generic_id, current_id] if generic_first else [current_id, generic_id]
+    assert [uuid.UUID(frame.id) for frame in frames] == expected
+
+    async with brain_app.state.db.session() as session:
+        current = await session.get(Command, current_id)
+        generic = await session.get(Command, generic_id)
+        assert current is not None and generic is not None
+        assert current.status == CommandStatus.DISPATCHED
+        assert current.delivery_transport_kind == "longpoll"
+        assert current.delivery_claim_token is not None
+        assert generic.status == CommandStatus.DISPATCHED
+        assert generic.delivery_transport_kind is None
+        assert generic.delivery_claim_token is None
+
+    second = await client.get(
+        "/api/v1/agent/commands",
+        params={"wait": 0, "max_frames": 2},
+        headers={
+            "Authorization": f"Bearer {AGENT_TOKEN}",
+            "X-Z4J-Session-Nonce": nonce,
+        },
+    )
+    assert second.status_code == 200
+    assert second.json() == {"frames": []}

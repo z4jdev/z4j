@@ -273,22 +273,6 @@ class TestAuditForwarderSwallowedCoverage:
 # ---------------------------------------------------------------------------
 
 
-class TestActivityFeedUserScopedRowVisibility:
-    """A non-admin user has MFA / auth audit rows that carry
-    ``project_id=NULL`` because they aren't project-scoped. The
-    pre-Round-5 filter excluded these. The fix widens the
-    filter so the user sees their OWN user-scoped rows (e.g.,
-    their own MFA enroll) even though no project_id is set."""
-
-    def test_filter_clause_documents_intent(self) -> None:
-        """Source-level pin so a future refactor that drops the
-        ``user_id == user.id`` arm fails this test. The query
-        builder runs end-to-end in the existing
-        test_activity_endpoint.py suite under SQLAlchemy."""
-        from pathlib import Path
-
-        src = Path(__file__).resolve().parent.parent.parent / "src/z4j_brain/api/activity.py"
-        text = src.read_text(encoding="utf-8")
-        # The clause must include the OR with user-scoped rows.
-        assert "AuditLog.project_id.is_(None)" in text
-        assert "AuditLog.user_id == user.id" in text
+# User-scoped activity visibility is exercised through the HTTP endpoint in
+# ``test_activity_endpoint.py::TestActivityScopeEnforcement``.  It intentionally
+# lives with the other scope cases instead of being represented by source text.

@@ -1,0 +1,7 @@
+The z4j 1.9.0 production Python closure is intentionally unfinalized.
+
+The security-age cutoff is 2026-08-23T04:14:39.107Z.  Until the two native
+runtime locks, build-backend locks, exact wheelhouse OCI descriptors,
+reproducible local-wheel readbacks, cadence probes, SBOMs, advisory receipts,
+and detached finalization receipt have been produced and reviewed, both the
+release workflow and Dockerfiles must fail closed.

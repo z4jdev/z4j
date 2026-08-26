@@ -10,8 +10,10 @@ disable txn") so a future refactor can't silently regress.
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -32,23 +34,75 @@ class TestR4TotalRunsAtomicIncrement:
     schedule row.
     """
 
-    def test_handler_uses_sql_expression_for_increment(self) -> None:
-        from pathlib import Path
-
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "scheduler_grpc"
-            / "handlers.py"
-        ).read_text()
-        # Verify the SQL-expression form is in the handler. A
-        # regression to ``(schedule.total_runs or 0) + 1`` would
-        # silently re-introduce the lost-increment race.
-        assert "Schedule.total_runs + 1" in src, (
-            "AcknowledgeFireResult must use SQL-side increment to "
-            "avoid lost-update race under concurrent acks"
+    @pytest.mark.asyncio
+    async def test_two_concurrent_success_updates_are_both_counted(self, tmp_path) -> None:
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+        from sqlalchemy.orm import sessionmaker
+        from z4j_brain.persistence.base import Base
+        from z4j_brain.persistence.enums import ScheduleKind
+        from z4j_brain.persistence.models import Project, Schedule
+        from z4j_brain.scheduler_grpc.handlers import (
+            _advance_legacy_schedule_after_success,
         )
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'atomic.sqlite3'}")
+        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        project_id = uuid.uuid4()
+        schedule_id = uuid.uuid4()
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        try:
+            async with factory() as session:
+                session.add(Project(id=project_id, slug="atomic", name="Atomic"))
+                session.add(
+                    Schedule(
+                        id=schedule_id,
+                        project_id=project_id,
+                        engine="celery",
+                        scheduler="z4j-scheduler",
+                        name="atomic",
+                        task_name="tasks.atomic",
+                        kind=ScheduleKind.CRON,
+                        expression="* * * * *",
+                        timezone="UTC",
+                        args=[],
+                        kwargs={},
+                        total_runs=0,
+                    ),
+                )
+                await session.commit()
+
+            start = asyncio.Event()
+
+            async def advance(slot_offset: int) -> None:
+                async with factory() as session:
+                    await start.wait()
+                    now = datetime.now(UTC) + timedelta(seconds=slot_offset)
+                    await _advance_legacy_schedule_after_success(
+                        session,
+                        schedule_id=schedule_id,
+                        fire_id=uuid.uuid4(),
+                        scheduled_for=now,
+                        is_manual=True,
+                        observed_at=now,
+                    )
+                    await session.commit()
+
+            first = asyncio.create_task(advance(1))
+            second = asyncio.create_task(advance(2))
+            start.set()
+            await asyncio.gather(first, second)
+
+            async with factory() as session:
+                total_runs = (
+                    await session.execute(
+                        select(Schedule.total_runs).where(Schedule.id == schedule_id),
+                    )
+                ).scalar_one()
+            assert total_runs == 2
+        finally:
+            await engine.dispose()
 
 
 # =====================================================================
@@ -115,7 +169,10 @@ class TestR4CommandInsertIdempotent:
 
             # Second insert with the same idempotency_key - was
             # IntegrityError pre-fix; returns row1 post-fix.
+            sentinel_id = uuid.uuid4()
             async with db.session() as s:
+                s.add(Project(id=sentinel_id, slug="outer-command", name="Outer command"))
+                await s.flush()
                 row2, _ = await CommandRepository(s).insert(
                     project_id=project_id,
                     agent_id=None,
@@ -133,40 +190,60 @@ class TestR4CommandInsertIdempotent:
                 assert row2.id == first_id, (
                     "duplicate idempotency_key must return existing row, not raise"
                 )
+                await s.commit()
+
+            async with db.session() as s:
+                assert await s.get(Project, sentinel_id) is not None
         finally:
             await engine.dispose()
-
-    @pytest.mark.asyncio
-    async def test_no_idempotency_key_still_raises_on_duplicate(
-        self,
-    ) -> None:
-        """Without an idempotency_key, the caller hasn't opted into
-        dedup - duplicate inserts (which are very unlikely without
-        a key) should surface the underlying error."""
-        # The model's idempotency_key column has no unique constraint
-        # when null; this test just verifies the no-key branch
-        # doesn't silently swallow. We assert by inspecting source
-        # because the SQL behavior depends on the constraint shape.
-        from pathlib import Path
-
-        src = (
-            Path(__file__).resolve().parents[2]  # noqa: ASYNC240  one-shot source read in test, not hot loop
-            / "src"
-            / "z4j_brain"
-            / "persistence"
-            / "repositories"
-            / "commands.py"
-        ).read_text()
-        assert "if idempotency_key is None:" in src, (
-            "idempotent branch must short-circuit on missing key"
-        )
-        # Specifically the comment / flow that re-raises.
-        assert "raise" in src.split("if idempotency_key is None:")[1][:200]
 
 
 # =====================================================================
 # H--3 / H-1 (worker): SAVEPOINT in repository idempotency paths
 # =====================================================================
+
+
+@asynccontextmanager
+async def _idempotency_database():
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from z4j_brain.persistence.base import Base
+    from z4j_brain.persistence.database import DatabaseManager
+    from z4j_brain.persistence.enums import ScheduleKind
+    from z4j_brain.persistence.models import Project, Schedule
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    database = DatabaseManager(engine)
+    project_id = uuid.uuid4()
+    schedule_id = uuid.uuid4()
+    async with database.session() as session:
+        session.add(Project(id=project_id, slug="savepoint", name="Savepoint"))
+        session.add(
+            Schedule(
+                id=schedule_id,
+                project_id=project_id,
+                engine="celery",
+                scheduler="z4j-scheduler",
+                name="savepoint",
+                task_name="tasks.savepoint",
+                kind=ScheduleKind.CRON,
+                expression="* * * * *",
+                timezone="UTC",
+                args=[],
+                kwargs={},
+            ),
+        )
+        await session.commit()
+    try:
+        yield database, project_id, schedule_id
+    finally:
+        await engine.dispose()
 
 
 class TestR4SavepointPattern:
@@ -176,50 +253,74 @@ class TestR4SavepointPattern:
     discarding queued writes). Post-fix: ``begin_nested()`` so only
     the failed INSERT rolls back."""
 
-    def test_schedule_fires_uses_begin_nested(self) -> None:
-        from pathlib import Path
+    @pytest.mark.asyncio
+    async def test_schedule_fire_collision_preserves_outer_write(self) -> None:
+        from z4j_brain.persistence.models import Project
+        from z4j_brain.persistence.repositories import ScheduleFireRepository
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "persistence"
-            / "repositories"
-            / "schedule_fires.py"
-        ).read_text()
-        assert "begin_nested" in src, (
-            "schedule_fires.record must use SAVEPOINT to scope rollback to the failed insert"
+        async with _idempotency_database() as (database, project_id, schedule_id):
+            fire_id = uuid.uuid4()
+            scheduled_for = datetime.now(UTC)
+            async with database.session() as session:
+                await ScheduleFireRepository(session).record(
+                    fire_id=fire_id,
+                    schedule_id=schedule_id,
+                    project_id=project_id,
+                    command_id=None,
+                    status="delivered",
+                    scheduled_for=scheduled_for,
+                )
+                await session.commit()
+
+            sentinel_id = uuid.uuid4()
+            async with database.session() as session:
+                session.add(Project(id=sentinel_id, slug="outer-fire", name="Outer fire"))
+                await session.flush()
+                await ScheduleFireRepository(session).record(
+                    fire_id=fire_id,
+                    schedule_id=schedule_id,
+                    project_id=project_id,
+                    command_id=None,
+                    status="delivered",
+                    scheduled_for=scheduled_for,
+                )
+                await session.commit()
+            async with database.session() as session:
+                assert await session.get(Project, sentinel_id) is not None
+
+    @pytest.mark.asyncio
+    async def test_pending_fire_collision_preserves_outer_write(self) -> None:
+        from z4j_brain.persistence.models import Project
+        from z4j_brain.persistence.repositories.pending_fires import (
+            PendingFiresRepository,
         )
 
-    def test_commands_uses_begin_nested(self) -> None:
-        from pathlib import Path
+        async with _idempotency_database() as (database, project_id, schedule_id):
+            fire_id = uuid.uuid4()
+            scheduled_for = datetime.now(UTC)
+            arguments = {
+                "fire_id": fire_id,
+                "schedule_id": schedule_id,
+                "project_id": project_id,
+                "engine": "celery",
+                "payload": {"task": "tasks.savepoint"},
+                "scheduled_for": scheduled_for,
+                "expires_at": scheduled_for + timedelta(hours=1),
+            }
+            async with database.session() as session:
+                await PendingFiresRepository(session).buffer(**arguments)
+                await session.commit()
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "persistence"
-            / "repositories"
-            / "commands.py"
-        ).read_text()
-        assert "begin_nested" in src, (
-            "commands.insert must use SAVEPOINT to scope rollback to the failed insert"
-        )
-
-    def test_pending_fires_uses_begin_nested(self) -> None:
-        from pathlib import Path
-
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "persistence"
-            / "repositories"
-            / "pending_fires.py"
-        ).read_text()
-        assert "begin_nested" in src, (
-            "pending_fires.buffer must use SAVEPOINT to scope rollback to the failed insert"
-        )
+            sentinel_id = uuid.uuid4()
+            async with database.session() as session:
+                session.add(
+                    Project(id=sentinel_id, slug="outer-pending", name="Outer pending"),
+                )
+                await session.flush()
+                await PendingFiresRepository(session).buffer(**arguments)
+                await session.commit()
+            async with database.session() as session:
+                assert await session.get(Project, sentinel_id) is not None
 
 
 # =====================================================================

@@ -1,42 +1,41 @@
-# pnpm 11+ settings home.
-#
-# pnpm 11 stopped reading the "pnpm" field from package.json (onlyBuiltDependencies,
-# auditConfig, ...) and reads them here instead. This file restores the
-# supply-chain hardening that used to live in package.json.
-#
-# The dashboard is one package, but an explicit root keeps this file valid for
-# the pinned pnpm 9 CI jobs as well as pnpm 11.
+# pnpm 11.22 project authority. pnpm 11 reads project settings here;
+# .npmrc is retained only for npm-compatible script blocking and registry TLS.
 packages:
   - "."
 
-# Supply-chain hardening: keep the built-dependency allowlist EMPTY so NO
-# transitive package may run a build / install / postinstall script. The most
-# common npm supply-chain payload fires from a compromised dep's postinstall;
-# blocking all of them closes that vector. .npmrc also sets ignore-scripts=true
-# + enable-pre-post-scripts=false as defense in depth.
-onlyBuiltDependencies: []
+# Registry and transport policy.
+registry: https://registry.npmjs.org/
+strictSsl: true
 
-# esbuild (pulled transitively by vite / router-plugin / tailwind) ships a build
-# script, but it does NOT need it: its platform binary arrives as an optional
-# dependency, so the SPA builds correctly with the script blocked. Declaring the
-# decision explicitly (false = do NOT run its build) keeps the script blocked AND
-# makes `pnpm install --frozen-lockfile` exit 0 -- an UNdeclared ignored-build
-# makes pnpm 11 exit 1, which would fail CI.
+# Dependency layout and lock discipline.
+hoist: false
+shamefullyHoist: false
+preferFrozenLockfile: true
+
+# Supply-chain quarantine. Missing publish timestamps fail closed, and the
+# independent scripts/check-lockfile-age.py gate verifies committed locks.
+minimumReleaseAge: 4320
+minimumReleaseAgeIgnoreMissingTime: false
+minimumReleaseAgeStrict: true
+
+# Lifecycle scripts are denied twice: ignore every lifecycle hook, then make
+# every package currently known to declare one an explicit false decision.
+# Unknown future build scripts remain unreviewed and fail strictDepBuilds.
+ignoreScripts: true
+enablePrePostScripts: false
+strictDepBuilds: true
+dangerouslyAllowAllBuilds: false
 allowBuilds:
   esbuild: false
+  fsevents: false
 
-# Force vulnerable build-chain dependencies to patched releases. The current
-# brace-expansion advisory affects both transitive branches in this lockfile,
-# so the override deliberately covers the package rather than one parent.
-# esbuild < 0.28.1 (GHSA-g7r4-m6w7-qqqr) lets any website send requests to the
-# local esbuild dev server and read the response. Dev-time only -- esbuild's dev
-# server never runs in the shipped SPA bundle or Docker image -- but pinning it
-# keeps the audit clean. Pin exact (0.x minors can break) rather than a range;
-# revisit on vite bumps.
+# Bounded security floors; they may move to later fixes within the same line.
 overrides:
-  brace-expansion: 5.0.8
-  esbuild: 0.28.1
-  "js-yaml@>=4.0.0 <4.3.0": 4.3.0
+  brace-expansion: ">=5.0.9 <6"
+  undici: ">=7.29.0 <8"
+  esbuild: ">=0.28.1 <0.29"
+  "js-yaml@>=4.0.0 <4.3.1": ">=4.3.1 <5"
+  "nanoid@<3.3.18": ">=3.3.18 <4"
 
 auditConfig:
   ignoreCves: []

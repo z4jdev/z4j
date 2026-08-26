@@ -1,0 +1,1073 @@
+{
+  "format": "z4j-rollback-compat-image-lock-v1",
+  "lock_version": 1,
+  "identity": {
+    "application_version": "1.8.2",
+    "rollback_target": "1.9.0",
+    "compatibility_python": "3.14.7",
+    "purpose": "unchanged 1.8.2 application bytes on the 1.9.0 Python patch carrier"
+  },
+  "tag_policy": {
+    "repository": "docker.io/z4jdev/z4j",
+    "sole_public_tag": "1.8.2-py3.14.7-rollback-1.9.0",
+    "operators_must_use_digest": true,
+    "forbidden_tags": [
+      "1.8.2",
+      "1.8",
+      "latest"
+    ],
+    "existing_tag_policy": "normal promotion requires 404 and refuses every 200; recovery requires 200 at the exact qualified digest and performs no tag mutation; every other status or transport failure is fatal"
+  },
+  "reproducibility": {
+    "source_date_epoch": 1787184000,
+    "source_date_utc": "2026-08-20T00:00:00Z",
+    "dockerfile_frontend": "docker.io/docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d",
+    "network_package_operations_permitted": false
+  },
+  "source_release": {
+    "annotated_tag": "refs/tags/v1.8.2",
+    "tag_object_sha1": "ca60bf9013ec923b64e13123c19b2bb55c798550",
+    "commit_sha1": "891d66f77cd87b93311eaf2ed8189e1780430e2c",
+    "tree_sha1": "0913546d59a4661ca2f2e17512ec2acfc46305ea",
+    "pyproject_sha256": "0b9682203d832a56158a31f8d194a1eb9a4cff977598adb568ea0152d6f70230",
+    "dockerfile_sha256": "49d71830e7d1aa08665bf0721fda9b4c4e5ebb8ae7c613006855070823c48905",
+    "normalized_source_tree_sha256": "a00e6a52685e2daf3f9f6c6cd9edc9596748f55fcf1349fefd6fc7b420309f55"
+  },
+  "released_image": {
+    "reference": "docker.io/z4jdev/z4j@sha256:ed2dac96f24b4ea42fcc89e76f459035365229d62f9d8efe916741cfd9373c03",
+    "index": {
+      "digest": "sha256:ed2dac96f24b4ea42fcc89e76f459035365229d62f9d8efe916741cfd9373c03",
+      "raw_size": 1609
+    },
+    "expected_oci_labels": {
+      "org.opencontainers.image.version": "1.8.2",
+      "org.opencontainers.image.revision": "891d66f77cd87b93311eaf2ed8189e1780430e2c"
+    },
+    "platforms": {
+      "amd64": {
+        "manifest": {
+          "digest": "sha256:c37418f7f41e8478739c65c66a1f6438b03ff65841d61f35c2833dc145899c0f",
+          "size": 1820
+        },
+        "config": {
+          "digest": "sha256:0a0a9a11b1d2edc702d9ba32e35ecfe502935746df573e5cbec5a30e5bb69ced",
+          "size": 11363
+        },
+        "layers": [
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:062e450697faa5f02a3a74eba9864ee4d79bc9cfbd65769fc6cdff2c05c6a053",
+            "size": 29780905
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:e4ef6bf557b964af2625a37b765b3c8890f7a5fca6a4fd8f58d70db1adfe164e",
+            "size": 1293273
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:5b2fb5800bc41ebae70b49dde01f5b018473be472f0980e152c26e993ce86f1c",
+            "size": 12335539
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:e643ab40c29e592ca9672a5b9b1e47d6845fe849c459585dc999772f60034d18",
+            "size": 248
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:b007783797d23039f11e4be540e2c1c03b572e68d3bcbe1911d1beac80d1db16",
+            "size": 3566808
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:87742bb02a20e247c625a23b0938f88aa7f509f62813468b624f602c2c34947b",
+            "size": 1626975
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:353ca9a97f957332e7ae26484fd4719be6a25c168c0d76629b2bc9d06eef6181",
+            "size": 45578434
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+            "size": 32
+          }
+        ],
+        "source_copy_layer": "sha256:b007783797d23039f11e4be540e2c1c03b572e68d3bcbe1911d1beac80d1db16",
+        "package_install_layer": "sha256:353ca9a97f957332e7ae26484fd4719be6a25c168c0d76629b2bc9d06eef6181",
+        "site_packages": {
+          "sha256": "31707f73fe7a64e3c969362d4f03501e26abe920bc2e8bd7278c5185c4ded371",
+          "files": 4879,
+          "directories": 578,
+          "symlinks": 0,
+          "bytes": 159128028
+        },
+        "tini_static": {
+          "path": "/usr/bin/tini-static",
+          "sha256": "cc5aa4571d1ec88f939a98b2242dfd8d7e28a51f0840886c11e65441e25cd460"
+        }
+      },
+      "arm64": {
+        "manifest": {
+          "digest": "sha256:daf8624f494394c09148a570dda31efa72dfd50e885cfeb7e2c208089e80e7f1",
+          "size": 1820
+        },
+        "config": {
+          "digest": "sha256:7c05afac4a2a3981672181cf5ef0fbefd94302459345a70598bc296d8063d4e0",
+          "size": 11368
+        },
+        "layers": [
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:59f54fbcd984beca03fd8b78569fa57268ecf78d291c0b6fe1623c2467f5a075",
+            "size": 30143705
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:19873ad5d03358f70dc3d26ae8681995556c9460236f0428c85ee988bd6b1dd0",
+            "size": 1274125
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:db4514f465560e8d05f29c11f802ef829ec918c7bb405fe7ec76dd6460588add",
+            "size": 12246520
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:c879017f1fa945a043946db5f45d5ec18a205a5e6fa076a8b12748b7861d166c",
+            "size": 249
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:82d3fd078740d863f7a64a3c07ecbc4bd040804338440bd3c0b3da475843109a",
+            "size": 3566810
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:3d63a0ec90d81cef633493fb5a2a6f9a796d3f6756fed879cc1c18a1839bd161",
+            "size": 1602781
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:45acda53a2f7151e1ad51a10b0b7cdce1f6681cbca029024e315b4ce37b43501",
+            "size": 46953180
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+            "size": 32
+          }
+        ],
+        "source_copy_layer": "sha256:82d3fd078740d863f7a64a3c07ecbc4bd040804338440bd3c0b3da475843109a",
+        "package_install_layer": "sha256:45acda53a2f7151e1ad51a10b0b7cdce1f6681cbca029024e315b4ce37b43501",
+        "site_packages": {
+          "sha256": "11e56474ced2ae57bb347dfa4741e2042ee2d72a1bb01ef46475a014e9bb59be",
+          "files": 4880,
+          "directories": 578,
+          "symlinks": 0,
+          "bytes": 165868293
+        },
+        "tini_static": {
+          "path": "/usr/bin/tini-static",
+          "sha256": "dde7612356523ede811aeb5537b0529d2efeedecc9a685f25e08e978c3633320"
+        }
+      }
+    }
+  },
+  "python_carrier": {
+    "reference": "docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4",
+    "index": {
+      "digest": "sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4",
+      "raw_size": 10365
+    },
+    "source_revision": "228f71e70a42ba9f9a092321b971031603bb88ff",
+    "python_source_tar_sha256": "3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81",
+    "platforms": {
+      "amd64": {
+        "manifest": {
+          "digest": "sha256:d6e0850f13fda0e2305d4c3c1c2f7930fe1042d34ddd958e49bba6ef685d0bb2",
+          "size": 1745
+        },
+        "config": {
+          "digest": "sha256:a41c1f663be90eb31af9864d1e1ccdaa91b6af11776b7ade1c05915e76da7aea",
+          "size": 4934
+        },
+        "layers": [
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:26c307b5e35a59ce911f5fde5b9458120ec8734e831ea2da5649a9ad14abfd3d",
+            "size": 29780765
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:dffb4b798a6df3be3b89117d1026a04483f34d7b92bc5195dbdede170ccd80e7",
+            "size": 1293282
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:e757cd4ee070fadfeed1db082db828a80bebd1bab3f9d3ea66bb084bfe289046",
+            "size": 12363513
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:a8bc142d2ea15036628cbe2ebcd94b3227a771ef46cc6d151726409801c02214",
+            "size": 249
+          }
+        ],
+        "stdlib_excluding_site_packages": {
+          "sha256": "4be63bff256d8a525846aa381eb05bcf2ed2eacb046945cb2ce8ddbce9df7f43",
+          "files": 788,
+          "directories": 108,
+          "symlinks": 0,
+          "bytes": 20367450
+        },
+        "python_bin": {
+          "/usr/local/bin/python": {
+            "type": "symlink",
+            "mode": "0777",
+            "target": "python3"
+          },
+          "/usr/local/bin/python-config": {
+            "type": "symlink",
+            "mode": "0777",
+            "target": "python3-config"
+          },
+          "/usr/local/bin/python3": {
+            "type": "symlink",
+            "mode": "0777",
+            "target": "python3.14"
+          },
+          "/usr/local/bin/python3-config": {
+            "type": "symlink",
+            "mode": "0777",
+            "target": "python3.14-config"
+          },
+          "/usr/local/bin/python3.14": {
+            "type": "file",
+            "mode": "0755",
+            "size": 14472,
+            "sha256": "30a7def0b3e8d24a36d3829202717542bef124c0a40608b2232b7c837b271bc9"
+          },
+          "/usr/local/bin/python3.14-config": {
+            "type": "file",
+            "mode": "0755",
+            "size": 3127,
+            "sha256": "f29ba240f637f402420905b85ee80170b95b74c1c6a757f26ac49bdbda6c6f6f"
+          }
+        }
+      },
+      "arm64": {
+        "manifest": {
+          "digest": "sha256:c65a4a1140b75416bbc7f28807f82a3746bd6567645d5848123b6a6587f86962",
+          "size": 1747
+        },
+        "config": {
+          "digest": "sha256:462b4d0ce92fd7559a84feb2d3ab4eca3b741c5a1a375e28cce7fd8900659688",
+          "size": 4949
+        },
+        "layers": [
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:1b7200988f192e72703c70486d494e2457935ac9b0f031ac09eb115b01a12d45",
+            "size": 30143609
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:4359aa406a407773fe9a8537e3e734ad1d2e0628c0b65f7b9305e04a1fd1658b",
+            "size": 1274100
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:1a300b9bb723233ae1460602ef0a7e15b9f610a17ae3d4ce18436dcf8a0a07c2",
+            "size": 12271912
+          },
+          {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "sha256:cf223c371e9f3dff9345439519d5fd4393d58e8990632a560bc3c33f84e0b0c3",
+            "size": 249
+          }
+        ],
+        "stdlib_excluding_site_packages": {
+          "sha256": "477494243bfee4f343d1f97460de3b453078a6b9032238eaa3e4ec55e75100ea",
+          "files": 788,
+          "directories": 108,
+          "symlinks": 0,
+          "bytes": 23066103
+        },
+        "python_bin": {
+          "/usr/local/bin/python": {
+            "type": "symlink",
+            "mode": "0777",
+            "target": "python3"
+          },
+          "/usr/local/bin/python-config": {
+            "type": "symlink",
+            "mode": "0777",
+            "target": "python3-config"
+          },
+          "/usr/local/bin/python3": {
+            "type": "symlink",
+            "mode": "0777",
+            "target": "python3.14"
+          },
+          "/usr/local/bin/python3-config": {
+            "type": "symlink",
+            "mode": "0777",
+            "target": "python3.14-config"
+          },
+          "/usr/local/bin/python3.14": {
+            "type": "file",
+            "mode": "0755",
+            "size": 67680,
+            "sha256": "c73c526e9bfa0d217b548ce27c576f1628a55fa0f4b65b1f6f0a142e2cd530a1"
+          },
+          "/usr/local/bin/python3.14-config": {
+            "type": "file",
+            "mode": "0755",
+            "size": 3129,
+            "sha256": "3a8d6168566ddf3e299157bd7acb96bf57bcdb50780ff35193403c0967350669"
+          }
+        }
+      }
+    }
+  },
+  "candidate_image": {
+    "repository": "docker.io/z4jdev/z4j",
+    "public_tag": "1.8.2-py3.14.7-rollback-1.9.0",
+    "finalized": false,
+    "index": {
+      "digest": null,
+      "size": null
+    },
+    "platforms": {
+      "amd64": {
+        "manifest": {
+          "digest": null,
+          "size": null
+        },
+        "config": {
+          "digest": null,
+          "size": null
+        }
+      },
+      "arm64": {
+        "manifest": {
+          "digest": null,
+          "size": null
+        },
+        "config": {
+          "digest": null,
+          "size": null
+        }
+      }
+    },
+    "release_receipt_sha256": null,
+    "qualification_durable_evidence": null,
+    "qualification_receipt_format": "z4j-rollback-compat-qualification-receipt-v1",
+    "release_receipt_semantics": "sha256 of canonical manifest-independent qualification receipt; never a receipt that hashes this manifest",
+    "finalization_receipt_format": "z4j-rollback-compat-finalization-receipt-v1",
+    "promotion_evidence_format": "z4j-rollback-compat-promotion-evidence-v1",
+    "recovery_evidence_format": "z4j-rollback-compat-recovery-evidence-v1",
+    "release_evidence_index_format": "z4j-rollback-compat-release-evidence-index-v1",
+    "finalization_rule": "qualification builds and seals one untagged digest while finalized=false; source finalization sets finalized=true and copies only the qualification receipt's exact index/platform/config descriptors and SHA-256; finalization rereads those original bytes, authenticates the exact preconfigured Docker Hub immutable-tag rule, and emits a detached receipt before create-only sole-tag promotion"
+  },
+  "runtime_content": {
+    "site_packages_root": "/usr/local/lib/python3.14/site-packages",
+    "extension_import_prerequisites": {
+      "rule": "modules that must be imported before a compiled extension will load. psycopg ships its backend as a separate psycopg_binary distribution whose modules refuse to import standalone, so verifying them in isolation checks an import path nobody uses. Declaring the prerequisite here keeps the check exhaustive and reviewable: an extension with an undeclared prerequisite still fails.",
+      "psycopg_binary._psycopg": [
+        "psycopg"
+      ],
+      "psycopg_binary.pq": [
+        "psycopg"
+      ]
+    },
+    "substitution_rule": "every distribution is the released image's bytes except those listed in substituted_distributions, which the recipe replaces from a digest-pinned wheel in the build context. The carrier exists to equal the CANDIDATE's cadence closure, not the released image's runtime, which is already why the interpreter is 3.14.7 rather than the 3.14.6 that image shipped. A substitution is admissible only when it is required for that equality and leaves application_content unchanged.",
+    "substituted_distributions": [
+      {
+        "name": "tzdata",
+        "released_image_version": "2026.1",
+        "carrier_version": "2026.3",
+        "reason": "the candidate pins IANA 2026c; unchanged 1.8 code accepts exactly one local cadence fingerprint, so the restamp ceremony is only honest when carrier and candidate compute the same one",
+        "wheel": {
+          "filename": "tzdata-2026.3-py2.py3-none-any.whl",
+          "sha256": "dc096730c87af6cab1b171c9d532be840741ff5d459015e7f6947bd7d7e54931",
+          "size": 348168
+        },
+        "replaced_paths": [
+          "/usr/local/lib/python3.14/site-packages/tzdata",
+          "/usr/local/lib/python3.14/site-packages/tzdata-2026.1.dist-info"
+        ]
+      }
+    ],
+    "carrier_site_packages": {
+      "amd64": {
+        "sha256": "e8a771ec580ede73183e9f3256a0f6735388d542699c34d671482f7589942cbd",
+        "files": 4878,
+        "directories": 578,
+        "symlinks": 0,
+        "bytes": 159122638
+      },
+      "arm64": {
+        "sha256": "15a38efefcca01f49c6c3c1b98675d56ec70e7f906b5be2e7a4e79c2a3e9879c",
+        "files": 4879,
+        "directories": 578,
+        "symlinks": 0,
+        "bytes": 165862903
+      }
+    },
+    "site_tree_framing": "sorted entries: L\\0rel\\0mode-octal\\0target\\n; D\\0rel\\0mode-octal\\n; F\\0rel\\0mode-octal\\0length-decimal\\0sha256-hex\\n",
+    "distributions": [
+      {
+        "name": "Mako",
+        "version": "1.3.12"
+      },
+      {
+        "name": "MarkupSafe",
+        "version": "3.0.3"
+      },
+      {
+        "name": "PyJWT",
+        "version": "2.13.0"
+      },
+      {
+        "name": "PyYAML",
+        "version": "6.0.3"
+      },
+      {
+        "name": "Pygments",
+        "version": "2.20.0"
+      },
+      {
+        "name": "SQLAlchemy",
+        "version": "2.0.51"
+      },
+      {
+        "name": "aiohappyeyeballs",
+        "version": "2.7.1"
+      },
+      {
+        "name": "aiohttp",
+        "version": "3.14.3"
+      },
+      {
+        "name": "aiosignal",
+        "version": "1.4.0"
+      },
+      {
+        "name": "aiosmtplib",
+        "version": "5.1.2"
+      },
+      {
+        "name": "aiosqlite",
+        "version": "0.22.1"
+      },
+      {
+        "name": "alembic",
+        "version": "1.18.5"
+      },
+      {
+        "name": "annotated-doc",
+        "version": "0.0.5"
+      },
+      {
+        "name": "annotated-types",
+        "version": "0.8.0"
+      },
+      {
+        "name": "anyio",
+        "version": "4.14.2"
+      },
+      {
+        "name": "argon2-cffi",
+        "version": "25.1.0"
+      },
+      {
+        "name": "argon2-cffi-bindings",
+        "version": "25.1.0"
+      },
+      {
+        "name": "astral",
+        "version": "3.2"
+      },
+      {
+        "name": "asyncpg",
+        "version": "0.31.0"
+      },
+      {
+        "name": "attrs",
+        "version": "26.1.0"
+      },
+      {
+        "name": "certifi",
+        "version": "2026.7.22"
+      },
+      {
+        "name": "cffi",
+        "version": "2.1.0"
+      },
+      {
+        "name": "click",
+        "version": "8.4.2"
+      },
+      {
+        "name": "croniter",
+        "version": "6.2.2"
+      },
+      {
+        "name": "cryptography",
+        "version": "49.0.0"
+      },
+      {
+        "name": "dnspython",
+        "version": "2.8.0"
+      },
+      {
+        "name": "email-validator",
+        "version": "2.3.0"
+      },
+      {
+        "name": "fastapi",
+        "version": "0.141.1"
+      },
+      {
+        "name": "frozenlist",
+        "version": "1.8.0"
+      },
+      {
+        "name": "greenlet",
+        "version": "3.5.4"
+      },
+      {
+        "name": "grpcio",
+        "version": "1.83.0"
+      },
+      {
+        "name": "grpcio-tools",
+        "version": "1.83.0"
+      },
+      {
+        "name": "h11",
+        "version": "0.16.0"
+      },
+      {
+        "name": "httpcore",
+        "version": "1.0.9"
+      },
+      {
+        "name": "httptools",
+        "version": "0.8.0"
+      },
+      {
+        "name": "httpx",
+        "version": "0.28.1"
+      },
+      {
+        "name": "idna",
+        "version": "3.18"
+      },
+      {
+        "name": "itsdangerous",
+        "version": "2.2.0"
+      },
+      {
+        "name": "markdown-it-py",
+        "version": "4.2.0"
+      },
+      {
+        "name": "mdurl",
+        "version": "0.1.2"
+      },
+      {
+        "name": "multidict",
+        "version": "6.7.1"
+      },
+      {
+        "name": "pip",
+        "version": "26.1.2"
+      },
+      {
+        "name": "prometheus_client",
+        "version": "0.26.0"
+      },
+      {
+        "name": "propcache",
+        "version": "0.5.2"
+      },
+      {
+        "name": "protobuf",
+        "version": "7.35.1"
+      },
+      {
+        "name": "psycopg",
+        "version": "3.3.4"
+      },
+      {
+        "name": "psycopg-binary",
+        "version": "3.3.4"
+      },
+      {
+        "name": "pycparser",
+        "version": "3.0"
+      },
+      {
+        "name": "pydantic",
+        "version": "2.13.4"
+      },
+      {
+        "name": "pydantic-settings",
+        "version": "2.14.2"
+      },
+      {
+        "name": "pydantic_core",
+        "version": "2.46.4"
+      },
+      {
+        "name": "python-dateutil",
+        "version": "2.9.0.post0"
+      },
+      {
+        "name": "python-dotenv",
+        "version": "1.2.2"
+      },
+      {
+        "name": "python-multipart",
+        "version": "0.0.32"
+      },
+      {
+        "name": "rich",
+        "version": "15.0.0"
+      },
+      {
+        "name": "setuptools",
+        "version": "83.0.0"
+      },
+      {
+        "name": "shellingham",
+        "version": "1.5.4"
+      },
+      {
+        "name": "six",
+        "version": "1.17.0"
+      },
+      {
+        "name": "starlette",
+        "version": "1.3.1"
+      },
+      {
+        "name": "structlog",
+        "version": "26.1.0"
+      },
+      {
+        "name": "typer",
+        "version": "0.27.0"
+      },
+      {
+        "name": "typing-inspection",
+        "version": "0.4.2"
+      },
+      {
+        "name": "typing_extensions",
+        "version": "4.16.0"
+      },
+      {
+        "name": "tzdata",
+        "version": "2026.3"
+      },
+      {
+        "name": "uvicorn",
+        "version": "0.52.0"
+      },
+      {
+        "name": "uvloop",
+        "version": "0.22.1"
+      },
+      {
+        "name": "watchfiles",
+        "version": "1.2.0"
+      },
+      {
+        "name": "websockets",
+        "version": "17.0"
+      },
+      {
+        "name": "xlsxwriter",
+        "version": "3.2.9"
+      },
+      {
+        "name": "yarl",
+        "version": "1.24.5"
+      },
+      {
+        "name": "z4j",
+        "version": "1.8.2"
+      },
+      {
+        "name": "z4j-core",
+        "version": "1.8.0"
+      },
+      {
+        "name": "z4j-scheduler",
+        "version": "1.8.0"
+      }
+    ],
+    "application_content": {
+      "roots": [
+        "z4j",
+        "z4j_brain"
+      ],
+      "format": "z4j-old-runtime-app-tree-v1",
+      "framing": "For each root in order, sort root.rglob('*') by path relative to that root; include regular files only; exclude __pycache__ components, .pyc/.pyo suffixes, and .DS_Store; hash canonical ASCII JSON {format,files:[{path,size,sha256}]}",
+      "canonical_bytes": 59821,
+      "entries": 409,
+      "sha256": "2b66900392a8dc72086c2bfee5f923b32241012cf5520bf06775cf8c03dd725a"
+    },
+    "record_owned_scripts": [
+      {
+        "path": "/usr/local/bin/alembic",
+        "distribution": "alembic",
+        "mode": "0755",
+        "size": 170,
+        "sha256": "45fe52050ed4c0971b793c7fc76d199d41c00920885fd7aabce452526c50a631"
+      },
+      {
+        "path": "/usr/local/bin/cffi-gen-src",
+        "distribution": "cffi",
+        "mode": "0755",
+        "size": 172,
+        "sha256": "3c54953e11e7f4792168a5d6d40c313e4a6a3b0d7ff66542d5e972e995b119b6"
+      },
+      {
+        "path": "/usr/local/bin/dotenv",
+        "distribution": "python-dotenv",
+        "mode": "0755",
+        "size": 169,
+        "sha256": "30369628ca0caf99f78a1ae6bcd8fe5509507df5cc54f8ce06713c8c8007e92e"
+      },
+      {
+        "path": "/usr/local/bin/email_validator",
+        "distribution": "email-validator",
+        "mode": "0755",
+        "size": 180,
+        "sha256": "58f5887607f4e42272c7930fbfa72a7b9268929d1f2998df9a6279546f53c933"
+      },
+      {
+        "path": "/usr/local/bin/fastapi",
+        "distribution": "fastapi",
+        "mode": "0755",
+        "size": 167,
+        "sha256": "1942591cbaa60bd91436285c86ce2e8137c13b051a83b4f7659e874a59a504e5"
+      },
+      {
+        "path": "/usr/local/bin/httpx",
+        "distribution": "httpx",
+        "mode": "0755",
+        "size": 161,
+        "sha256": "ab0a6e5bc6fb880ed17e30a50ca69ba05c7359fc0450f286e005f887a5c78c0c"
+      },
+      {
+        "path": "/usr/local/bin/idna",
+        "distribution": "idna",
+        "mode": "0755",
+        "size": 164,
+        "sha256": "5fc5762575a300e9d96f85fe309cc51d6c71cdba9aa15e7330ac522fe819792d"
+      },
+      {
+        "path": "/usr/local/bin/mako-render",
+        "distribution": "Mako",
+        "mode": "0755",
+        "size": 170,
+        "sha256": "0886d3449e01b7bce53097386d4eb19a79702296767e06f87cdb1ad1c1a84994"
+      },
+      {
+        "path": "/usr/local/bin/markdown-it",
+        "distribution": "markdown-it-py",
+        "mode": "0755",
+        "size": 177,
+        "sha256": "aa49e0f0fbb24bc9a255d37a76bded1a86835786edc5e3e13f518d54a876ddda"
+      },
+      {
+        "path": "/usr/local/bin/pip3",
+        "distribution": "pip",
+        "mode": "0755",
+        "size": 178,
+        "sha256": "8db38de18d109f2f2c2ade3b63fb92d4f373bff1da95484792c2f7c49bd20477"
+      },
+      {
+        "path": "/usr/local/bin/pip3.14",
+        "distribution": "pip",
+        "mode": "0755",
+        "size": 178,
+        "sha256": "8db38de18d109f2f2c2ade3b63fb92d4f373bff1da95484792c2f7c49bd20477"
+      },
+      {
+        "path": "/usr/local/bin/pygmentize",
+        "distribution": "Pygments",
+        "mode": "0755",
+        "size": 172,
+        "sha256": "c3796628e99905f4243cd9a2e520b982df1fd03af36740536180c20d8752b970"
+      },
+      {
+        "path": "/usr/local/bin/python-grpc-tools-protoc",
+        "distribution": "grpcio-tools",
+        "mode": "0755",
+        "size": 185,
+        "sha256": "3e7f6f8167c9cc0e4157478f40e456c55e5e9337eac5ac83f36202becfc44a8c"
+      },
+      {
+        "path": "/usr/local/bin/typer",
+        "distribution": "typer",
+        "mode": "0755",
+        "size": 165,
+        "sha256": "77e1627e2396831f86f0ccfefd062bd70e22d81e9c649ea44bd1238beccc2615"
+      },
+      {
+        "path": "/usr/local/bin/uvicorn",
+        "distribution": "uvicorn",
+        "mode": "0755",
+        "size": 168,
+        "sha256": "1de955155ea5d80059672c99d03fbaa7e14262bfcb2e98464f9798ea46ddfa97"
+      },
+      {
+        "path": "/usr/local/bin/vba_extract.py",
+        "distribution": "xlsxwriter",
+        "mode": "0755",
+        "size": 2328,
+        "sha256": "d4422c9d4629b4b2f67471f374292ff225ddabc2a4fc1d0cf077605c30ce01b4"
+      },
+      {
+        "path": "/usr/local/bin/watchfiles",
+        "distribution": "watchfiles",
+        "mode": "0755",
+        "size": 168,
+        "sha256": "cf2945ef215be6bb519262c5fdbfb5e17bb11d00ac1dc03f9d012ae79f8e947d"
+      },
+      {
+        "path": "/usr/local/bin/websockets",
+        "distribution": "websockets",
+        "mode": "0755",
+        "size": 170,
+        "sha256": "d91e78dbf75fc72b9b7ee2d3024d68c535b440728972e44043fb9fee43afadb7"
+      },
+      {
+        "path": "/usr/local/bin/z4j",
+        "distribution": "z4j",
+        "mode": "0755",
+        "size": 169,
+        "sha256": "1a954c3d6e44dd541919c6faa52a45f0058ed01ff7c10681c6bf6c54ae05e5ce"
+      },
+      {
+        "path": "/usr/local/bin/z4j-scheduler",
+        "distribution": "z4j-scheduler",
+        "mode": "0755",
+        "size": 173,
+        "sha256": "dbd464a3344c063abb7a8d9e4f8fca7e1f734b4461a2b9d5b7f38c6ef96e1169"
+      }
+    ],
+    "record_owned_header": {
+      "path": "/usr/local/include/python3.14/greenlet/greenlet.h",
+      "distribution": "greenlet",
+      "mode": "0644",
+      "size": 4755,
+      "sha256": "b33e69611490a9e7603add80320c4b65d4e33bea9caff24cbe0884251f48009f"
+    },
+    "explicitly_excluded_non_authority": [
+      "/usr/local/bin/__pycache__/vba_extract.cpython-314.pyc"
+    ],
+    "copied_from_released_image_prefix_allowlist": [
+      "/usr/local/lib/python3.14/site-packages/",
+      "/usr/local/bin/",
+      "/usr/local/include/python3.14/greenlet/greenlet.h",
+      "/usr/bin/tini-static"
+    ]
+  },
+  "cadence": {
+    "payload_format": "z4j-cadence-runtime-v1",
+    "semantics_version": 1,
+    "dependencies": {
+      "croniter": "6.2.2",
+      "astral": "3.2",
+      "tzdata": "2026.3",
+      "python-dateutil": "2.9.0.post0",
+      "six": "1.17.0"
+    },
+    "tzdata_tree_sha256": "864e13548b97e0e7be6bd2d4dd5e8b4a04cea0b570066ef5dfa40a424300cb0c",
+    "python": {
+      "implementation": "CPython",
+      "version": [
+        3,
+        14,
+        7
+      ]
+    },
+    "behavior_vector_sha256": "8e2ec76becf6ca6263805221e930c98962713ba0419c2a7e320e1dc928014a15",
+    "expected_runtime_fingerprint": "5e63a2ae8ec66ec9b86f64828b7ac2499c9254531d2ceb33e32ac3a80c344ef4",
+    "source_image_python_3_14_6_fingerprint": "7d4e2328ee3298801d5fa2151ebf771b0b5ed186dded7ba7b7211bceabb043a1",
+    "acceptance_rule": "compute actual payload and fingerprint in the compatibility image; never alias the source-image fingerprint"
+  },
+  "expected_labels": {
+    "org.opencontainers.image.version": "1.8.2",
+    "org.opencontainers.image.revision": "891d66f77cd87b93311eaf2ed8189e1780430e2c",
+    "org.opencontainers.image.base.digest": "sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4",
+    "io.z4j.rollback.target": "1.9.0",
+    "io.z4j.rollback.compatibility.python": "3.14.7",
+    "io.z4j.rollback.source.image": "docker.io/z4jdev/z4j@sha256:ed2dac96f24b4ea42fcc89e76f459035365229d62f9d8efe916741cfd9373c03"
+  },
+  "runtime_contract": {
+    "user": "z4j",
+    "uid": 10001,
+    "gid": 10001,
+    "workdir": "/data",
+    "entrypoint": [
+      "/usr/bin/tini-static",
+      "--",
+      "z4j"
+    ],
+    "cmd": [
+      "serve"
+    ],
+    "health_url": "http://127.0.0.1:17700/api/v1/health"
+  },
+  "publication_gate": {
+    "platforms": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "trivy": {
+      "version": "0.74.0",
+      "severity": [
+        "HIGH",
+        "CRITICAL"
+      ],
+      "ignore_unfixed": false,
+      "exit_code": 1
+    },
+    "syft_version": "1.50.0",
+    "cosign_version": "3.1.3",
+    "immutable_tag_authority": {
+      "provider": "docker-hub",
+      "api": "https://hub.docker.com/v2/namespaces/z4jdev/repositories/z4j",
+      "repository": "z4jdev/z4j",
+      "target_tag": "1.8.2-py3.14.7-rollback-1.9.0",
+      "enabled": true,
+      "rules": [
+        "^1\\.8\\.2-py3\\.14\\.7-rollback-1\\.9\\.0$"
+      ],
+      "required_behavior": "matched-tag-cannot-be-overwritten-or-deleted",
+      "authority_format": "z4j-docker-hub-immutable-tag-authority-v1",
+      "authentication_format": "z4j-docker-hub-immutable-tag-authority-authentication-v1",
+      "require_authenticated_readback": true,
+      "require_prewrite_exact_reread": true,
+      "require_target_absent": true
+    },
+    "receipt_authentication": {
+      "method": "sigstore-keyless-cosign-sign-blob",
+      "identity": "https://github.com/z4jdev/z4j/.github/workflows/release-rollback-compat.yml@refs/heads/main",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "qualification_format": "z4j-rollback-compat-qualification-authentication-v1",
+      "finalization_format": "z4j-rollback-compat-finalization-authentication-v1",
+      "promotion_format": "z4j-rollback-compat-promotion-authentication-v1",
+      "requires_pre_promotion_upload": true
+    },
+    "recovery": {
+      "workflow": ".github/workflows/recover-rollback-compat-promotion.yml",
+      "environment": "rollback-compat-publisher",
+      "identity": "https://github.com/z4jdev/z4j/.github/workflows/recover-rollback-compat-promotion.yml@refs/heads/main",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "evidence_format": "z4j-rollback-compat-recovery-evidence-v1",
+      "authentication_format": "z4j-rollback-compat-recovery-authentication-v1",
+      "release_index_format": "z4j-rollback-compat-release-evidence-index-v1",
+      "release_index_authentication_format": "z4j-rollback-compat-release-evidence-index-authentication-v1",
+      "transition": "recovered-existing-exact-under-signed-immutable-authority",
+      "allowed_recovery_of_conclusions": [
+        "failure",
+        "cancelled"
+      ],
+      "requires_qualification_conclusion": "success",
+      "requires_existing_exact_tag": true,
+      "requires_signed_prewrite_finalization": true,
+      "requires_fresh_exact_immutable_authority": true,
+      "existing_promotion_behavior": "publish-missing-release-index-only",
+      "rejects_existing_recovery_or_release_index": true,
+      "forbids_target_image_or_tag_mutation": true,
+      "actions_artifacts_are_optional_mirrors": true,
+      "requires_durable_oci_predecessors": true,
+      "promotion_terminal_completion_transition": "authenticated-promotion-terminal-to-release-index-only",
+      "recovery_terminal_completion_transition": "authenticated-finalization-to-recovery-terminal-and-release-index"
+    },
+    "durable_evidence": {
+      "registry": "https://registry-1.docker.io",
+      "repository": "z4jdev/z4j",
+      "record_format": "z4j-rollback-compat-durable-evidence-record-v1",
+      "config_format": "z4j-rollback-compat-durable-evidence-config-v1",
+      "release_index_format": "z4j-rollback-compat-release-evidence-index-v1",
+      "completion_format": "z4j-rollback-compat-release-index-completion-v1",
+      "portable_graph_format": "z4j-rollback-compat-portable-evidence-graph-verification-v1",
+      "original_materialization_format": "z4j-rollback-compat-original-evidence-materialization-v1",
+      "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+      "subject_media_type": "application/vnd.oci.image.index.v1+json",
+      "config_media_type": "application/vnd.z4j.rollback-compat.durable-evidence-config.v1+json",
+      "bundle_layer_media_type": "application/vnd.z4j.rollback-compat.sigstore-bundle.v1+json",
+      "authentication_layer_media_type": "application/vnd.z4j.rollback-compat.receipt-authentication.v1+json",
+      "payload_layer_media_type": "application/vnd.z4j.rollback-compat.evidence-payload.v1",
+      "publication": {
+        "api": "oci-distribution-1.1-referrers",
+        "manifest_reference": "digest-only",
+        "require_absent_or_byte_exact_idempotence": true,
+        "reject_different_or_duplicate_artifact_type": true,
+        "require_raw_referrers_readback": true,
+        "require_raw_manifest_readback": true,
+        "require_raw_blob_readback": true,
+        "actions_artifacts_are_convenience_only": true,
+        "github_release_asset_published": false
+      },
+      "stages": {
+        "qualification": {
+          "artifact_type": "application/vnd.z4j.rollback-compat.qualification-evidence.v1",
+          "receipt_media_type": "application/vnd.z4j.rollback-compat.qualification-receipt.v1+json",
+          "authentication_format": "z4j-rollback-compat-qualification-authentication-v1",
+          "identities": ["https://github.com/z4jdev/z4j/.github/workflows/release-rollback-compat.yml@refs/heads/main"],
+          "predecessors": []
+        },
+        "finalization": {
+          "artifact_type": "application/vnd.z4j.rollback-compat.finalization-evidence.v1",
+          "receipt_media_type": "application/vnd.z4j.rollback-compat.finalization-receipt.v1+json",
+          "authentication_format": "z4j-rollback-compat-finalization-authentication-v1",
+          "identities": ["https://github.com/z4jdev/z4j/.github/workflows/release-rollback-compat.yml@refs/heads/main"],
+          "predecessors": ["qualification"]
+        },
+        "promotion": {
+          "artifact_type": "application/vnd.z4j.rollback-compat.promotion-evidence.v1",
+          "receipt_media_type": "application/vnd.z4j.rollback-compat.promotion-evidence.v1+json",
+          "authentication_format": "z4j-rollback-compat-promotion-authentication-v1",
+          "identities": ["https://github.com/z4jdev/z4j/.github/workflows/release-rollback-compat.yml@refs/heads/main"],
+          "predecessors": ["finalization"]
+        },
+        "recovery": {
+          "artifact_type": "application/vnd.z4j.rollback-compat.recovery-evidence.v1",
+          "receipt_media_type": "application/vnd.z4j.rollback-compat.recovery-evidence.v1+json",
+          "authentication_format": "z4j-rollback-compat-recovery-authentication-v1",
+          "identities": ["https://github.com/z4jdev/z4j/.github/workflows/recover-rollback-compat-promotion.yml@refs/heads/main"],
+          "predecessors": ["finalization"]
+        },
+        "release-index": {
+          "artifact_type": "application/vnd.z4j.rollback-compat.release-evidence-index.v1",
+          "receipt_media_type": "application/vnd.z4j.rollback-compat.release-evidence-index.v1+json",
+          "authentication_format": "z4j-rollback-compat-release-evidence-index-authentication-v1",
+          "identities": [
+            "https://github.com/z4jdev/z4j/.github/workflows/release-rollback-compat.yml@refs/heads/main",
+            "https://github.com/z4jdev/z4j/.github/workflows/recover-rollback-compat-promotion.yml@refs/heads/main"
+          ],
+          "predecessors": ["promotion", "recovery"]
+        }
+      }
+    },
+    "require_native_verifier": true,
+    "require_sbom": true,
+    "require_keyless_signature": true,
+    "require_provenance": true,
+    "promote_only_after_verification": true
+  }
+}

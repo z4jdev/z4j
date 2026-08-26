@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import type { ColumnDef } from "@tanstack/react-table";
 import { Terminal } from "lucide-react";
 import { FilterToolbar } from "@/components/domain/filter-toolbar";
 import { RefreshButton } from "@/components/domain/refresh-button";
@@ -8,7 +7,7 @@ import { PageHeader } from "@/components/domain/page-header";
 import { PageShell } from "@/components/domain/page-shell";
 import { CommandStatusBadge } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type DataTableColumnDef } from "@/components/ui/data-table";
 import {
   Select,
   SelectContent,
@@ -114,10 +113,7 @@ function CommandsPage() {
         icon={Terminal}
         description="trail of all operator-initiated actions"
         actions={
-          <RefreshButton
-              onRefresh={() => refetch()}
-              pending={isFetching}
-            />
+          <RefreshButton onRefresh={() => refetch()} pending={isFetching} />
         }
       />
 
@@ -163,7 +159,7 @@ function CommandsPage() {
 // Column definitions
 // ---------------------------------------------------------------------------
 
-function useCommandColumns(): ColumnDef<CommandPublic, unknown>[] {
+function useCommandColumns(): DataTableColumnDef<CommandPublic>[] {
   return useMemo(
     () => [
       {

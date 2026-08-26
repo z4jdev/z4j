@@ -25,13 +25,14 @@ import asyncio
 import contextlib
 import os
 import secrets
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Generator, Iterator
+from pathlib import Path
 
 import pytest
 
 # Two paths into this suite:
 #  1. testcontainers available + Docker reachable → spin a fresh
-#     ``postgres:18-trixie`` per session.
+#     ``postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941`` per session.
 #  2. ``Z4J_TEST_POSTGRES_URL`` set → reuse an existing Postgres
 #     (the dev-container loop sets this to the shared
 #     ``z4j-dev-postgres`` service). Every test still gets its own
@@ -41,17 +42,98 @@ import pytest
 # If neither path works we skip rather than fail so unit-only
 # contributors are not blocked.
 _SHARED_PG_URL = os.environ.get("Z4J_TEST_POSTGRES_URL")
+_REQUIRE_INTEGRATION = os.environ.get("Z4J_REQUIRE_INTEGRATION") == "1"
+_INTEGRATION_ROOT = Path(__file__).resolve().parent
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the marker even when this package becomes pytest's root."""
+    config.addinivalue_line(
+        "markers",
+        "integration: tests requiring real services (DB, broker)",
+    )
+
+
+def _is_backend_integration_item(item: pytest.Item) -> bool:
+    """Return whether *item* belongs to this directory's service suite."""
+    try:
+        item.path.resolve().relative_to(_INTEGRATION_ROOT)
+    except ValueError:
+        return False
+    return True
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Mark every test below this directory as an integration test.
+
+    The directory is the source of truth. New test modules cannot silently
+    fall out of ``-m integration`` because an author forgot a module marker.
+    ``tryfirst`` makes this run before pytest applies the marker expression.
+    """
+    for item in items:
+        if _is_backend_integration_item(item):
+            item.add_marker(pytest.mark.integration)
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """A required run must select tests from every module in this suite."""
+    if not _REQUIRE_INTEGRATION:
+        return
+    expected_modules = {path.resolve() for path in _INTEGRATION_ROOT.glob("test_*.py")}
+    collected_modules = {
+        item.path.resolve() for item in session.items if _is_backend_integration_item(item)
+    }
+    missing_modules = sorted(path.name for path in expected_modules - collected_modules)
+    if missing_modules:
+        pytest.exit(
+            "required backend integration suite selected no tests from: "
+            + ", ".join(missing_modules),
+            returncode=4,
+        )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item,
+    call: pytest.CallInfo[object],
+) -> Generator[None, object, None]:
+    """Turn every skip into failure for the explicit required-service run."""
+    del call
+    outcome = yield
+    report = outcome.get_result()  # type: ignore[attr-defined]
+    if not _REQUIRE_INTEGRATION or not report.skipped:
+        return
+    original_reason = str(report.longrepr)
+    report.outcome = "failed"
+    report.longrepr = (
+        str(item.path),
+        item.location[1] + 1,
+        f"required backend integration test skipped during {report.when}: {original_reason}",
+    )
+
 
 if _SHARED_PG_URL is None:
-    testcontainers = pytest.importorskip(
-        "testcontainers.postgres",
-        reason=(
-            "testcontainers not installed and Z4J_TEST_POSTGRES_URL "
-            "not set; run `pip install z4j-brain[test-integration]` "
-            "or point Z4J_TEST_POSTGRES_URL at a running Postgres."
-        ),
+    reason = (
+        "testcontainers not installed and Z4J_TEST_POSTGRES_URL "
+        "not set; run `uv sync --all-extras` or point "
+        "Z4J_TEST_POSTGRES_URL at a running Postgres."
     )
-    PostgresContainer = testcontainers.PostgresContainer  # type: ignore[attr-defined]
+    if _REQUIRE_INTEGRATION:
+        try:
+            from testcontainers.postgres import PostgresContainer
+        except ModuleNotFoundError as exc:
+            if exc.name not in {"testcontainers", "testcontainers.postgres"}:
+                raise
+            raise pytest.UsageError(
+                f"required backend integration suite unavailable: {reason}"
+            ) from exc
+    else:
+        testcontainers = pytest.importorskip(
+            "testcontainers.postgres",
+            reason=reason,
+        )
+        PostgresContainer = testcontainers.PostgresContainer  # type: ignore[attr-defined]
 else:
     PostgresContainer = None  # type: ignore[assignment]
 
@@ -72,7 +154,7 @@ from z4j_brain.settings import Settings  # noqa: E402  must follow importorskip 
 
 @pytest.fixture(scope="session")
 def _postgres_container() -> Iterator[object | None]:
-    """Start one ``postgres:18-trixie`` container for the whole test run.
+    """Start one ``postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941`` container for the whole test run.
 
     When :envvar:`Z4J_TEST_POSTGRES_URL` is set this fixture is a
     no-op - the suite reuses that Postgres instead. Otherwise we
@@ -83,13 +165,15 @@ def _postgres_container() -> Iterator[object | None]:
         return
     try:
         container = PostgresContainer(
-            image="postgres:18-trixie",
+            image="postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941",
             username="z4j",
             password="z4j",
             dbname="z4j",
         )
         container.start()
     except Exception as exc:
+        if _REQUIRE_INTEGRATION:
+            pytest.fail(f"required docker / postgres integration service unavailable: {exc}")
         pytest.skip(f"docker / postgres container unavailable: {exc}")
     try:
         yield container

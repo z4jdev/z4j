@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable, Sequence
 from logging.config import fileConfig
+from typing import Any
 
 from alembic import context
+from alembic.util import CommandError
 from sqlalchemy import event, pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -30,7 +33,9 @@ from z4j_brain.configuration import (
 from z4j_brain.migrations import MIGRATION_SETTINGS_ATTRIBUTE
 from z4j_brain.persistence import Base
 from z4j_brain.persistence import models as _models  # noqa: F401
+from z4j_brain.postgres_tls import asyncpg_engine_url_and_connect_args
 from z4j_brain.schema_transition import SCHEMA_TRANSITION_ADVISORY_LOCK_KEY
+from z4j_brain.settings import Settings
 
 # Force-import the ``models`` submodule so every model class
 # registers with ``Base.metadata`` before alembic reads it.
@@ -56,7 +61,7 @@ if _supplied_snapshot is not None and not isinstance(
 _migration_snapshot: ConfigurationSnapshot | None = _supplied_snapshot
 
 
-def _migration_settings():
+def _migration_settings() -> Settings:
     """Bind one captured Settings object for every migration body."""
 
     global _migration_snapshot  # noqa: PLW0603  one invocation snapshot
@@ -75,6 +80,105 @@ def _resolve_database_url() -> str:
     return _migration_settings().database_url
 
 
+#: Module-level attribute a migration sets to declare that it will not be
+#: undone, carrying the operator-facing reason as its value. Read off the
+#: loaded module rather than matched against a list of revision ids kept here,
+#: so a migration written later inherits the pre-flight below without anyone
+#: remembering to come back and register it.
+DOWNGRADE_REFUSED_ATTRIBUTE = "DOWNGRADE_REFUSED"
+
+#: Module-level callable a migration sets when its downgrade permission depends
+#: on live database state. The callable receives the online SQLAlchemy
+#: connection and raises :class:`CommandError` when the downgrade would discard
+#: state that the operator has not made safe. Like ``DOWNGRADE_REFUSED``, this
+#: is revision metadata rather than a registry maintained in ``env.py`` so a
+#: later guarded migration automatically participates in the whole-plan check.
+DOWNGRADE_PREFLIGHT_ATTRIBUTE = "DOWNGRADE_PREFLIGHT"
+
+
+def _assert_downgrade_plan_is_permitted(
+    steps: Sequence[object],
+    connection: Connection | None,
+) -> None:
+    """Refuse a downgrade run as a whole when any planned step refuses.
+
+    ``transaction_per_migration`` means Alembic commits after every step, so a
+    destructive step stacked above a refusing one finishes and commits before
+    the refusal is ever reached. The operator is told the rollback failed while
+    the columns it dropped are already gone, and the natural next move (upgrade
+    back to head) re-adds them empty: the data is discarded with no error and
+    no audit row. Only a decision taken over the complete plan can be honest
+    about that, and taking it here covers every migration rather than the one
+    that happened to expose the hole.
+    """
+
+    downgrade_revisions: list[Any] = []
+    for step in steps:
+        if getattr(step, "is_upgrade", True):
+            continue
+        revision = getattr(step, "revision", None)
+        if revision is None:
+            raise CommandError("downgrade plan step lacks revision metadata")
+        downgrade_revisions.append(revision)
+        reason = getattr(getattr(revision, "module", None), DOWNGRADE_REFUSED_ATTRIBUTE, None)
+        if reason:
+            raise CommandError(
+                f"{reason}; refused before running any step of this downgrade, "
+                f"so nothing stacked above {revision.revision} was dropped",
+            )
+    preflights: list[tuple[Any, Callable[[Connection], None]]] = []
+    for revision in downgrade_revisions:
+        callback = getattr(
+            getattr(revision, "module", None),
+            DOWNGRADE_PREFLIGHT_ATTRIBUTE,
+            None,
+        )
+        if callback is None:
+            continue
+        if not callable(callback):
+            raise CommandError(
+                f"revision {revision.revision} declares "
+                f"{DOWNGRADE_PREFLIGHT_ATTRIBUTE}, but it is not callable",
+            )
+        preflights.append((revision, callback))
+
+    if preflights and connection is None:
+        revisions = ", ".join(str(revision.revision) for revision, _ in preflights)
+        raise CommandError(
+            "offline downgrade SQL cannot evaluate live database-state "
+            f"preflight(s) for revision(s) {revisions}; run the downgrade "
+            "online so it can prove the guarded state is safe before emitting "
+            "or executing destructive DDL",
+        )
+
+    if connection is not None:
+        for _, callback in preflights:
+            callback(connection)
+
+
+def _install_downgrade_preflight(connection: Connection | None) -> None:
+    """Have Alembic hand its resolved plan to the pre-flight first.
+
+    ``MigrationContext.run_migrations`` asks the command for the step list once
+    and then executes it. Wrapping that one call is the only seam that sees the
+    whole plan and still runs ahead of its first step. Resolving the plan a
+    second time from here instead would double the side effects of the other
+    commands that route through this same hook, such as ``alembic current``.
+    """
+
+    migration_context = context.get_context()
+    plan = migration_context._migrations_fn
+    if plan is None:  # pragma: no cover - commands that run env with no plan
+        return
+
+    def guarded_plan(heads: Any, runtime_context: Any) -> list[Any]:
+        steps = list(plan(heads, runtime_context))
+        _assert_downgrade_plan_is_permitted(steps, connection)
+        return steps
+
+    migration_context._migrations_fn = guarded_plan
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode (URL string only, no engine).
 
@@ -91,6 +195,12 @@ def run_migrations_offline() -> None:
         compare_server_default=True,
     )
     with context.begin_transaction():
+        # Conditional downgrade guards need live rows and therefore cannot be
+        # represented truthfully in an offline SQL artifact. Installing the
+        # plan hook with no connection makes such a downgrade fail closed
+        # before any destructive SQL is emitted; offline upgrades and
+        # unguarded downgrade ranges continue to render normally.
+        _install_downgrade_preflight(None)
         context.run_migrations()
 
 
@@ -135,7 +245,9 @@ def do_run_migrations(
         # make Alembic own the transaction, and use EXCLUSIVE for every
         # per-migration unit.  Preparation can therefore commit separately
         # while every activation DDL/DML/version-row change is all-or-nothing.
-        connection.connection.dbapi_connection.isolation_level = None
+        dbapi_connection = connection.connection.dbapi_connection
+        assert dbapi_connection is not None
+        dbapi_connection.isolation_level = None
         event.listen(connection.engine, "begin", _begin_exclusive)
     try:
         context.configure(
@@ -147,6 +259,7 @@ def do_run_migrations(
             transactional_ddl=True if sqlite else None,
         )
         with context.begin_transaction():
+            _install_downgrade_preflight(connection)
             context.run_migrations()
     finally:
         if sqlite:
@@ -199,18 +312,22 @@ async def run_async_migrations() -> None:
             )
             export_snapshot_environment(_migration_snapshot)
         database_url = _resolve_database_url()
+        engine_url, tls_connect_args = asyncpg_engine_url_and_connect_args(
+            database_url,
+        )
         from z4j_brain.management_restore import (
             assert_database_restore_not_pending,
             install_database_restore_fence_engine_hook,
         )
 
         assert_database_restore_not_pending(database_url)
-        config_section["sqlalchemy.url"] = database_url
+        config_section["sqlalchemy.url"] = engine_url
         connectable = async_engine_from_config(
             config_section,
             prefix="sqlalchemy.",
             poolclass=pool.NullPool,
             future=True,
+            connect_args=tls_connect_args,
         )
         install_database_restore_fence_engine_hook(
             connectable,

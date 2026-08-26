@@ -12,7 +12,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import type { ColumnDef } from "@tanstack/react-table";
 import {
   Ban,
   ChevronDown,
@@ -33,7 +32,7 @@ import {
 } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
 import { QueryError } from "@/components/domain/query-error";
-import { DataTable } from "@/components/ui/data-table";
+import { DataTable, type DataTableColumnDef } from "@/components/ui/data-table";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -109,6 +108,7 @@ const TASK_STATES: TaskState[] = [
 ];
 
 const PRIORITIES: TaskPriority[] = ["critical", "high", "normal", "low"];
+const taskRowId = (row: TaskPublic) => row.id;
 
 function TasksPage() {
   const { slug } = Route.useParams();
@@ -142,6 +142,16 @@ function TasksPage() {
     cursor,
     limit: pageSize,
   };
+  const taskSelectionScopeKey = JSON.stringify({
+    slug,
+    state: stateFilter,
+    priority: PRIORITIES.filter((priority) =>
+      priorityFilter.includes(priority),
+    ),
+    search: searchQuery,
+    cursor,
+    pageSize,
+  });
 
   const { data, isLoading, isError, isFetching, refetch } = useTasks(
     slug,
@@ -167,7 +177,7 @@ function TasksPage() {
   // this is the UI mirror that hides buttons the user can't click.
   const canRetry = useCan(slug, "retry_task");
   const canCancel = useCan(slug, "cancel_task");
-  const canBulk = useCan(slug, "bulk_action");
+  const canDeleteTasks = useCan(slug, "delete_tasks");
 
   const handleBulkDelete = useCallback(
     async (
@@ -175,7 +185,12 @@ function TasksPage() {
       allPages: boolean,
       clearSelection: () => void,
     ) => {
-      const count = allPages ? "all matching" : selectedRows.length;
+      if (!canDeleteTasks) return;
+      if (!allPages && selectedRows.length === 0) {
+        window.alert("Select at least one task before deleting task records.");
+        return;
+      }
+      const count = allPages ? "up to 10,000 matching" : selectedRows.length;
       if (
         !window.confirm(`Delete ${count} task records? This cannot be undone.`)
       )
@@ -184,9 +199,21 @@ function TasksPage() {
       setBulkLoading(true);
       try {
         if (allPages) {
+          const filterBody = {
+            ...(stateFilter !== "all" ? { filter_state: stateFilter } : {}),
+            ...(priorityFilter.length > 0
+              ? { filter_priority: priorityFilter }
+              : {}),
+            ...(searchQuery ? { filter_search: searchQuery } : {}),
+          };
+          if (Object.keys(filterBody).length === 0) {
+            window.alert(
+              "Choose at least one task filter before deleting all matching tasks.",
+            );
+            return;
+          }
           await api.post(`/projects/${slug}/tasks/bulk-delete`, {
-            filter_state: stateFilter === "all" ? undefined : stateFilter,
-            filter_name: searchQuery || undefined,
+            ...filterBody,
           });
         } else {
           await api.post(`/projects/${slug}/tasks/bulk-delete`, {
@@ -202,7 +229,14 @@ function TasksPage() {
         setBulkLoading(false);
       }
     },
-    [slug, stateFilter, searchQuery, queryClient],
+    [
+      canDeleteTasks,
+      slug,
+      stateFilter,
+      priorityFilter,
+      searchQuery,
+      queryClient,
+    ],
   );
 
   const handleBulkRetry = useCallback(
@@ -555,6 +589,8 @@ function TasksPage() {
           columns={columns}
           data={data.items}
           enableSelection
+          getRowId={taskRowId}
+          selectionScopeKey={taskSelectionScopeKey}
           enableSorting
           pageSize={pageSize}
           onPageSizeChange={(size) => {
@@ -596,7 +632,7 @@ function TasksPage() {
                   </Button>
                 )}
                 <div className="ml-auto flex items-center gap-2">
-                  {(canRetry || canBulk) && (
+                  {canRetry && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -632,7 +668,7 @@ function TasksPage() {
                       Revoke
                     </Button>
                   )}
-                  {canBulk && (
+                  {canDeleteTasks && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -675,7 +711,7 @@ function TasksPage() {
 // Column definitions
 // ---------------------------------------------------------------------------
 
-function useTaskColumns(slug: string): ColumnDef<TaskPublic, unknown>[] {
+function useTaskColumns(slug: string): DataTableColumnDef<TaskPublic>[] {
   return useMemo(
     () => [
       {

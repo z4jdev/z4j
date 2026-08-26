@@ -43,12 +43,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  useActivityInfinite,
-  type ActivityItem,
-} from "@/hooks/use-activity";
+import { useActivityInfinite, type ActivityItem } from "@/hooks/use-activity";
 import { useMe } from "@/hooks/use-auth";
 import { useProjects } from "@/hooks/use-projects";
+import { projectlessActivityScope } from "@/lib/activity-scope";
 
 export const Route = createFileRoute("/_authenticated/activity")({
   component: ActivityPage,
@@ -115,9 +113,7 @@ function ActivityPage() {
                 <SelectValue placeholder="All projects" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={ALL_PROJECTS_VALUE}>
-                  All projects
-                </SelectItem>
+                <SelectItem value={ALL_PROJECTS_VALUE}>All projects</SelectItem>
                 {(projects.data ?? []).map((p) => (
                   <SelectItem key={p.slug} value={p.slug}>
                     {p.name}
@@ -163,7 +159,9 @@ function ActivityPage() {
           <ActivitySkeleton />
         ) : items.length === 0 ? (
           <EmptyActivity
-            hasFilters={Boolean(projectSlug !== ALL_PROJECTS_VALUE || actionPrefix.trim())}
+            hasFilters={Boolean(
+              projectSlug !== ALL_PROJECTS_VALUE || actionPrefix.trim(),
+            )}
             onClear={() => {
               setProjectSlug(ALL_PROJECTS_VALUE);
               setActionPrefix("");
@@ -252,28 +250,21 @@ function ActivityRow({
                 </Badge>
               </Link>
             )}
-            {!item.project_slug && (() => {
-              // v1.6 Round 6 UX fix: user-scoped rows (MFA enroll,
-              // password change, etc.) have project_id NULL but
-              // user_id == caller. Rendering them as "brain-wide"
-              // would lie about the scope; tag as "personal" so
-              // operators don't worry their MFA secret leaked.
-              // True brain-wide rows (system bootstrap, no user_id)
-              // keep the original badge.
-              const isPersonal = (
-                currentUserId !== null
-                && item.user_id !== null
-                && item.user_id === currentUserId
-              );
-              return (
-                <Badge
-                  variant="secondary"
-                  className="shrink-0"
-                >
-                  {isPersonal ? "personal" : "brain-wide"}
-                </Badge>
-              );
-            })()}
+            {!item.project_slug &&
+              (() => {
+                // v1.6 Round 6 UX fix: user-scoped rows (MFA enroll,
+                // password change, etc.) have project_id NULL but
+                // user_id == caller. Rendering them as "brain-wide"
+                // would lie about the scope; tag as "personal" so
+                // operators don't worry their MFA secret leaked.
+                // True brain-wide rows (system bootstrap, no user_id)
+                // keep the original badge.
+                return (
+                  <Badge variant="secondary" className="shrink-0">
+                    {projectlessActivityScope(item.user_id, currentUserId)}
+                  </Badge>
+                );
+              })()}
             <span className="text-xs text-muted-foreground">
               {item.target_type}
               {item.target_id ? ` / ${item.target_id}` : ""}
@@ -292,9 +283,7 @@ function ActivityRow({
         </div>
         <div className="shrink-0 text-right text-xs text-muted-foreground">
           <DateCell value={item.occurred_at} />
-          {item.source_ip && (
-            <p className="font-mono">{item.source_ip}</p>
-          )}
+          {item.source_ip && <p className="font-mono">{item.source_ip}</p>}
         </div>
       </CardContent>
     </Card>
@@ -336,8 +325,8 @@ function EmptyActivity({
           <>
             <p className="text-sm">No activity yet.</p>
             <p className="text-xs">
-              The feed polls every 5 seconds. Activity will appear as
-              rows are written to the audit log.
+              The feed polls every 5 seconds. Activity will appear as rows are
+              written to the audit log.
             </p>
           </>
         )}
@@ -350,8 +339,10 @@ function isRateLimited(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const err = error as { status?: number; message?: string };
   if (err.status === 429) return true;
-  return typeof err.message === "string"
-    && err.message.toLowerCase().includes("rate limit");
+  return (
+    typeof err.message === "string" &&
+    err.message.toLowerCase().includes("rate limit")
+  );
 }
 
 function pickStatusIcon(result: string, outcome: string | null) {

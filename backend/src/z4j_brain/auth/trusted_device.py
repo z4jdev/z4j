@@ -8,8 +8,8 @@ use :func:`hash_cookie_id` to look up the row.
 Cookie attributes mirror the session cookie's hardening:
 
 - ``HttpOnly`` -- not readable from JS.
-- ``Secure`` -- never sent over plaintext (relaxed in dev when
-  ``Z4J_ALLOW_HTTP_PUBLIC_URL=true``).
+- ``Secure`` -- never sent over plaintext outside the exact ``dev``
+  environment. ``Z4J_ALLOW_HTTP_PUBLIC_URL`` does not relax cookies.
 - ``SameSite=Strict`` -- not sent on cross-site requests. Stricter
   than the session cookie (which uses Lax) because the trust cookie
   is exclusively for the login flow on this origin.
@@ -41,12 +41,27 @@ COOKIE_NAME_DEV: str = "z4j_mfa_trust"
 COOKIE_RANDOM_BYTES: int = 32
 
 
+def is_dev_environment(environment: str) -> bool:
+    """Whether this environment relaxes cookie hardening. Exactly ``dev``.
+
+    One definition for both the name and the flags below, because they have to
+    agree: a ``__Host-`` prefixed cookie is only valid when Secure is set, so
+    two predicates that can disagree is a way to emit a cookie browsers reject
+    or, worse, a plaintext one in a deployment that believes it is hardened.
+
+    ``dev`` is also what :mod:`sessions`, :mod:`csrf` and the startup invariants
+    compare against, so a near miss like ``development`` means production
+    everywhere rather than production in most places and not here.
+    """
+    return environment == "dev"
+
+
 def cookie_name(*, environment: str) -> str:
     """Pick the cookie name for the current environment.
 
     Same logic as :mod:`z4j_brain.auth.csrf` for parity.
     """
-    if environment in ("dev", "development", "test"):
+    if is_dev_environment(environment):
         return COOKIE_NAME_DEV
     return COOKIE_NAME_PROD
 
@@ -73,10 +88,19 @@ def cookie_kwargs(
     """``Response.set_cookie`` keyword arguments for the trust cookie.
 
     Production (``__Host-`` prefix) requires Secure + Path=/ + no
-    Domain. We enforce those regardless of environment so the dev
-    cookie shape matches prod.
+    Domain. Dev keeps Path=/ and no Domain but deliberately drops
+    Secure so localhost HTTP works.
+
+    ``dev`` and nothing else, matching :mod:`sessions` and :mod:`csrf` and the
+    startup invariants, all of which compare against that exact string. This
+    predicate used to also relax for ``development`` and ``test``, which
+    inverted the safe direction: every other check treats ``development`` as
+    production, so an operator who set it got production strictness everywhere,
+    believed they were in production, and shipped the one cookie that lets a
+    browser skip an MFA challenge without ``Secure``. A near miss on the
+    environment name must never be the thing that drops a security flag.
     """
-    is_prod = environment not in ("dev", "development", "test")
+    is_prod = not is_dev_environment(environment)
     return {
         "max_age": max_age_seconds,
         "httponly": True,
@@ -159,6 +183,7 @@ __all__ = [
     "cookie_name",
     "derive_label_from_user_agent",
     "hash_cookie_id",
+    "is_dev_environment",
     "mint_cookie_id",
     "set_trust_cookie",
 ]

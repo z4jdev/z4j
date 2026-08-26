@@ -2,9 +2,13 @@
 
 Two backends, one operator surface:
 
-- **SQLite**: uses SQLite's online ``VACUUM INTO`` to produce a consistent
-  snapshot file without stopping the brain. Restore is a sanity-checked
-  file replacement (with the live DB stopped).
+- **SQLite**: uses ``VACUUM INTO`` from a separate connection to produce a
+  consistent snapshot file. The helper does not quiesce the brain and is
+  not lock-free: it participates in SQLite's normal transaction locking,
+  so concurrent traffic may delay the backup, be delayed itself, or make
+  the operation fail. Use a maintenance window when predictable completion
+  matters. Restore is a sanity-checked file replacement with the live DB
+  stopped.
 - **PostgreSQL**: shells out to ``pg_dump`` / ``pg_restore``, since
   reimplementing those tools is folly. The brain does not need to be
   stopped for a dump.
@@ -20,9 +24,20 @@ this module without going through argparse.
 
 from __future__ import annotations
 
+import contextlib
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlparse
+
+from z4j_core.redaction import redact_url_password
+
+_T = TypeVar("_T")
+
+#: A snapshot carries users, API keys, sessions, task history and the audit
+#: chain in the clear, so it is exactly as sensitive as the live database and
+#: must never be legible to anyone but the operator who took it.
+_BACKUP_FILE_MODE = 0o600
 
 
 def detect_backend(database_url: str) -> str:
@@ -31,9 +46,13 @@ def detect_backend(database_url: str) -> str:
         return "sqlite"
     if database_url.startswith(("postgresql", "postgres")):
         return "postgres"
+    # Redacted even though an unsupported scheme is unlikely to be a real DSN:
+    # this message reaches an operator's terminal and their ticket, and a
+    # mistyped URL is still a URL with the password in it.
     raise ValueError(
         f"backup: unsupported database URL scheme - "
-        f"only sqlite and postgresql are supported (got {database_url!r})",
+        f"only sqlite and postgresql are supported "
+        f"(got {redact_url_password(database_url)!r})",
     )
 
 
@@ -60,10 +79,18 @@ def _sqlite_path_from_url(database_url: str) -> Path:
 def backup_sqlite(database_url: str, output: Path) -> None:
     """Snapshot a SQLite DB to ``output`` using ``VACUUM INTO``.
 
-    VACUUM INTO produces a consistent point-in-time copy without
-    locking the source DB - the brain can keep serving requests
-    throughout. The output is a fully self-contained SQLite file
-    (no WAL, no journal). Restore is a plain file copy.
+    ``VACUUM INTO`` produces a consistent point-in-time copy, but it is
+    not a lock-free online-backup protocol. This helper opens a separate
+    SQLite connection without coordinating or quiescing the brain; normal
+    SQLite read/write locks still apply, so concurrent requests and the
+    backup can contend or fail on a busy database. The output is a fully
+    self-contained SQLite file (no WAL, no journal). Restore is a plain
+    file copy performed while the live database is stopped.
+
+    On POSIX the snapshot is created mode 0600 before data is written. On
+    Windows the file inherits the destination directory's DACL, so callers
+    must choose a directory restricted to the backup identity and intended
+    administrators.
     """
     src = _sqlite_path_from_url(database_url)
     if not src.exists():
@@ -72,26 +99,53 @@ def backup_sqlite(database_url: str, output: Path) -> None:
         )
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists():
+    # Reserve the path ourselves instead of letting VACUUM INTO create it.
+    # Left to SQLite the snapshot is born with the process umask, which is
+    # 0644 on an ordinary host, and a chmod afterwards would still publish
+    # the database contents for the whole length of the vacuum. O_EXCL also
+    # makes the refusal below atomic rather than a check some other writer
+    # can win a race against.
+    try:
+        reserved = os.open(
+            output,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            _BACKUP_FILE_MODE,
+        )
+    except FileExistsError as exists:
         raise FileExistsError(
             f"backup: refusing to overwrite existing file at {output}. "
             f"Move/delete it first, or pick a different --output path.",
-        )
+        ) from exists
+    os.close(reserved)
     # Use stdlib sqlite3 - no async needed, we just want the
     # synchronous VACUUM INTO. The async aiosqlite layer is for
     # request handling, not maintenance ops.
     import sqlite3
 
-    conn = sqlite3.connect(src)
     try:
-        # str(output) needed because SQLite's parameter binding
-        # does not handle Path; embed the literal path safely
-        # via single-quote escaping.
-        safe_path = str(output).replace("'", "''")
-        conn.execute(f"VACUUM INTO '{safe_path}'")
-        conn.commit()
-    finally:
-        conn.close()
+        conn = sqlite3.connect(src)
+        try:
+            # str(output) needed because SQLite's parameter binding
+            # does not handle Path; embed the literal path safely
+            # via single-quote escaping.
+            safe_path = str(output).replace("'", "''")
+            conn.execute(f"VACUUM INTO '{safe_path}'")
+            conn.commit()
+        finally:
+            conn.close()
+        # Backstop for a SQLite build that unlinks the reservation and
+        # recreates the target rather than writing into the inode we made:
+        # whatever the provenance of the file that lands here, it leaves
+        # private.
+        output.chmod(_BACKUP_FILE_MODE)
+    except BaseException:
+        # A vacuum that failed leaves either our empty reservation or a
+        # half-written database. Both block the operator's retry with the
+        # refusal above, and the second one sits on disk looking like a
+        # usable backup.
+        with contextlib.suppress(OSError):
+            output.unlink()
+        raise
 
 
 def restore_sqlite(
@@ -122,14 +176,21 @@ def restore_sqlite(
 # ---------------------------------------------------------------------------
 
 
+# The pinned-loop runner lives beside the psycopg client in
+# management_restore_postgres, because every entry point there needs it and a
+# copy here would drift from the one that matters.
+
+
 def backup_postgres(database_url: str, output: Path) -> None:
     """Snapshot PostgreSQL through the trusted pinned client runner."""
 
-    from z4j_brain.management_restore_postgres import (
-        backup_postgres_database,
-    )
+    from z4j_brain.management_restore_postgres import _run_backup, _run_pinned_client
 
-    backup_postgres_database(database_url, output)
+    # The ceremony's own synchronous wrapper reaches straight for
+    # ``asyncio.run``, so the loop it runs on is not the caller's to pick.
+    # Drive the coroutine from here instead, which keeps the selector loop
+    # Windows needs scoped to this single operation.
+    _run_pinned_client(_run_backup(database_url, output))
 
 
 def restore_postgres(

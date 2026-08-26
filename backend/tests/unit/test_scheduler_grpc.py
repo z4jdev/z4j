@@ -10,6 +10,12 @@ Three layers:
    call each RPC's pure-Python entry point. We don't spin up an
    actual gRPC server here; that path is exercised by the scheduler
    package's integration suite (which has both sides).
+
+Layer 3 runs against a MIGRATED database rather than a create_all() one.
+Every Boundary-D guard lives in a migration, so a create_all() schema
+refuses nothing: it would take hand-built ``schedules`` rows that an
+operator's database rejects outright, which is how a handler can pass its
+whole test file and raise on first use.
 """
 
 from __future__ import annotations
@@ -33,11 +39,14 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.enums import ScheduleKind
 from z4j_brain.persistence.models import Project, Schedule
+from z4j_brain.persistence.repositories.schedule_control import (
+    ScheduleControlRepository,
+)
 from z4j_brain.scheduler_grpc.auth import (
     SchedulerAllowlistInterceptor,
     mint_scheduler_cert,
@@ -51,6 +60,8 @@ from z4j_brain.scheduler_grpc.handlers import (
 from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
 from z4j_brain.scheduler_grpc.server import SchedulerGrpcServer
 from z4j_brain.settings import Settings
+
+from tests.unit._schedule_seeding import project_external_schedule
 
 # =====================================================================
 # Helpers
@@ -384,11 +395,14 @@ class TestEnforceCnAuthContextShape:
 
 
 @pytest.fixture
-def settings(tmp_path: Path) -> Settings:
+def settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_db_url,
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated and refuses an audit
+        # row that carries no chain authentication.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
         log_json=False,
         environment="dev",
     )
@@ -419,12 +433,15 @@ class TestServerLifecycleEnabledMissingTls:
     @pytest.mark.asyncio
     async def test_enabled_without_tls_material_raises(
         self,
-        tmp_path: Path,
+        migrated_db_url: str,
     ) -> None:
         # Operator set ENABLED=true but didn't supply cert paths.
         # We expect a clear RuntimeError pointing at the env var.
+        # Built fresh rather than copied from the fixture: the point is that
+        # a real Settings accepts this configuration and start() is what
+        # refuses it.
         bad = Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
+            database_url=migrated_db_url,
             secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
             session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
             log_json=False,
@@ -485,51 +502,49 @@ class TestListSchedulesHandler:
     ) -> None:
         engine = create_async_engine(settings.database_url, future=True)
         try:
-            # Build the brain so its lifespan creates the schema -
-            # we use ``Base.metadata.create_all`` via a one-shot.
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-
             db = DatabaseManager(engine)
             project_id = uuid.uuid4()
 
             async with db.session() as session:
-                project = Project(
-                    id=project_id,
-                    slug="test-project",
-                    name="test",
+                session.add(
+                    Project(
+                        id=project_id,
+                        slug="test-project",
+                        name="test",
+                    ),
                 )
-                session.add(project)
-                # One row that belongs to z4j-scheduler.
-                ours = Schedule(
+                await session.flush()
+                # One row that belongs to z4j-scheduler, planned through the
+                # control repository because Boundary D refuses a direct
+                # INSERT into schedules.
+                await ScheduleControlRepository(session).create_current(
                     project_id=project_id,
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="ours",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
+                    data={
+                        "engine": "celery",
+                        "scheduler": "z4j-scheduler",
+                        "name": "ours",
+                        "task_name": "t.t",
+                        "kind": ScheduleKind.CRON.value,
+                        "expression": "0 * * * *",
+                        "timezone": "UTC",
+                        "args": [],
+                        "kwargs": {},
+                        "is_enabled": True,
+                    },
+                    planning_at=datetime.now(UTC),
                 )
-                # Another row owned by celery-beat - must be filtered out.
-                theirs = Schedule(
-                    project_id=project_id,
-                    engine="celery",
-                    scheduler="celery-beat",
-                    name="theirs",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                )
-                session.add_all([ours, theirs])
                 await session.commit()
+
+            # Another row owned by celery-beat, which must be filtered out.
+            # There is no direct route to one: an externally owned schedule
+            # exists only as the projection of an adapter's snapshot, and the
+            # guards enforce that. Seeding it the real way is what makes this
+            # a test of the owner filter against a row an operator can hold.
+            await project_external_schedule(
+                db,
+                project_id=project_id,
+                name="theirs",
+            )
 
             servicer = SchedulerServiceImpl(
                 settings=settings,
@@ -537,6 +552,14 @@ class TestListSchedulesHandler:
                 command_dispatcher=None,  # type: ignore[arg-type]
                 audit_service=None,  # type: ignore[arg-type]
             )
+            # Both rows are really there, so "one result" means filtered and
+            # not "the second row was never seeded".
+            async with db.session() as session:
+                owners = sorted(
+                    (await session.execute(select(Schedule.scheduler))).scalars().all(),
+                )
+            assert owners == ["celery-beat", "z4j-scheduler"]
+
             request = pb.ListSchedulesRequest(project_id=str(project_id))
             results = []
             async for sched in servicer.ListSchedules(request, _NoopContext()):

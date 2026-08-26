@@ -2,7 +2,7 @@
 #
 # Use this compose file when you need:
 #   - more than one concurrent admin (SQLite is single-writer)
-#   - more than ~5k events / minute sustained throughput
+#   - throughput or retention that exceeds your measured SQLite capacity
 #   - audit-grade Postgres (range-partitioned events, LISTEN/NOTIFY,
 #     tsvector full-text search)
 #   - horizontal brain replicas behind a load balancer
@@ -36,11 +36,11 @@
 #
 #   2. Build + start:
 #
-#         docker compose up -d --build
+#         docker compose -f docker-compose.postgres.yml up -d --build
 #
 #   3. Tail the brain logs to find the first-boot setup token:
 #
-#         docker compose logs -f z4j
+#         docker compose -f docker-compose.postgres.yml logs -f z4j
 #
 #   4. Open the printed URL, create the admin user, and paste the
 #      bearer token from the dashboard "Agents" page into your
@@ -58,7 +58,7 @@ services:
   # PostgreSQL 18 - brain database
   # ====================================================================
   z4j-postgres:
-    image: postgres:18-trixie
+    image: postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
     container_name: z4j-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-z4j}
@@ -99,9 +99,8 @@ services:
       retries: 10
       start_period: 30s
     restart: unless-stopped
-    # Resource limits - sized for a typical mid-VPS self-host
-    # (4 GB RAM / 2 vCPU). Bump in your .env via override if you
-    # have a beefier host or expect heavy ingestion. Without these
+    # Operative resource limits for the packaged example. Validate them
+    # against your workload and override them when needed. Without these
     # limits a runaway query or batch ingest can OOM the host and
     # cascade-kill the brain alongside Postgres.
     deploy:
@@ -126,7 +125,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        Z4J_VERSION: ${Z4J_VERSION:-1.8.0}
+        Z4J_VERSION: ${Z4J_VERSION:-1.9.0}
     image: ${Z4J_BRAIN_IMAGE:-z4jdev/z4j:latest}
     container_name: z4j
     depends_on:
@@ -134,11 +133,10 @@ services:
         condition: service_healthy
     environment:
       # ----- required -----
-      # NOTE: asyncpg does NOT accept the libpq-style ?sslmode=...
-      # query param. SQLAlchemy's asyncpg dialect uses connect_args
-      # for ssl config. For brain↔postgres traffic over the private
-      # docker bridge we don't need TLS, so we leave it off entirely
-      # and gate it via Z4J_REQUIRE_DB_SSL=false below.
+      # z4j translates libpq-style sslmode/sslrootcert/sslcert/sslkey
+      # URL parameters into asyncpg's explicit SSL configuration before
+      # SQLAlchemy connects. For brain-to-postgres traffic over this private
+      # docker bridge we leave TLS off and use Z4J_REQUIRE_DB_SSL=false below.
       # Pass credentials as data, not by interpolating them into a URL.
       # z4j builds the SQLAlchemy URL with delimiter-safe quoting at its
       # single configuration-capture boundary.
@@ -162,11 +160,15 @@ services:
       # bridge with no outside access. If you point
       # z4j at a remote / managed database (RDS, Neon, Supabase,
       # Cloud SQL, ...) you MUST use an override file that supplies:
-      #   1. Z4J_DATABASE_URL with ?sslmode=require (or stricter)
-      #      (an explicit URL takes precedence over the fields above)
+      #   1. Z4J_DATABASE_URL with verified TLS, for example:
+      #      postgresql+asyncpg://user:pass@db.example/z4j?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.pem
+      #      (mount the CA file at that container path; an explicit URL
+      #      takes precedence over the structured fields above)
       #   2. Z4J_REQUIRE_DB_SSL=true
       #      (or just delete the line below - true is the default).
-      # The brain refuses to start in production with sslmode=disable
+      # sslmode=require encrypts but does not verify the server identity
+      # unless sslrootcert is also supplied. Prefer verify-full for a remote
+      # database. The brain refuses to start in production with sslmode=disable
       # unless this flag is explicitly set to false (R3 release-
       # blocker - quiet credentials-on-the-wire was the failure
       # mode otherwise). Set ``Z4J_REQUIRE_DB_SSL=false`` only when
@@ -214,9 +216,8 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
-    # Resource limits - sized for a small/mid-VPS. The brain is a
-    # FastAPI process; 1 GB is generous for this workload but
-    # leaves headroom for in-memory event batching. Without a
+    # Operative resource limits for the packaged example. Validate them
+    # against your workload and override them when needed. Without a
     # limit a misbehaving consumer or accidentally-massive payload
     # can OOM the host and take Postgres with it.
     deploy:

@@ -36,6 +36,10 @@ from uuid import UUID
 import asyncpg
 import structlog
 
+from z4j_brain.postgres_tls import (
+    PostgresTLSConfigurationError,
+    asyncpg_dsn_and_connect_args,
+)
 from z4j_brain.websocket.dashboard_hub._protocol import DASHBOARD_TOPICS
 from z4j_brain.websocket.dashboard_hub.local import LocalDashboardHub
 
@@ -220,6 +224,18 @@ class PostgresNotifyDashboardHub:
                 backoff_index = 0
             except asyncio.CancelledError:
                 return
+            except PostgresTLSConfigurationError as exc:
+                # Configuration errors cannot heal through reconnecting.
+                # Settings normally rejects them at startup; this boundary
+                # also protects custom or changed DSN providers from a tight
+                # background failure loop.
+                logger.exception(
+                    "z4j dashboard_hub listener: invalid PostgreSQL TLS "
+                    "configuration; listener stopped",
+                    error=str(exc),
+                    worker_id=self._worker_id,
+                )
+                return
             except Exception as exc:
                 logger.warning(
                     "z4j dashboard_hub listener: error, will reconnect",
@@ -239,7 +255,7 @@ class PostgresNotifyDashboardHub:
                     pass
 
     async def _listen_session(self) -> None:
-        dsn = self._asyncpg_dsn()
+        dsn, tls_connect_args = self._asyncpg_connection_options()
         conn: asyncpg.Connection | None = None
         try:
             conn = await asyncpg.connect(
@@ -251,6 +267,7 @@ class PostgresNotifyDashboardHub:
                     "tcp_keepalives_count": "3",
                     "application_name": (f"z4j-brain-dashboard-hub-{self._worker_id}"),
                 },
+                **tls_connect_args,
             )
             await conn.add_listener(_DASHBOARD_CHANNEL, self._on_notify)
             await conn.add_listener(_HEARTBEAT_CHANNEL, self._on_heartbeat)
@@ -374,9 +391,10 @@ class PostgresNotifyDashboardHub:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _asyncpg_dsn(self) -> str:
-        url = self._dsn_provider()
-        return url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    def _asyncpg_connection_options(self) -> tuple[str, dict[str, object]]:
+        """Return a sanitized DSN and the shared explicit TLS arguments."""
+
+        return asyncpg_dsn_and_connect_args(self._dsn_provider())
 
     # ------------------------------------------------------------------
     # Test helpers

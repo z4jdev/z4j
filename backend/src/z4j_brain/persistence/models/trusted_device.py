@@ -12,7 +12,8 @@ the MFA second step is skipped.
 The server-side row is the authoritative truth; the cookie is just an
 opaque pointer. This buys us revoke-from-anywhere: the user can list
 their trusted devices and revoke any one of them from any session,
-and the brain enforces the revocation immediately.
+and the brain refuses that cookie on its next login lookup. Revocation
+does not invalidate a session that has already authenticated.
 
 Lifecycle (see ``docs/MFA-DESIGN.md``):
 

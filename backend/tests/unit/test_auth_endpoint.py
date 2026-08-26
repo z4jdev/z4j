@@ -8,16 +8,18 @@ login - we use the smaller test cost from the conftest fixture.
 from __future__ import annotations
 
 import secrets
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import cookie_name
 from z4j_brain.main import create_app
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
-from z4j_brain.persistence.models import User
+from z4j_brain.persistence.models import Session, User
 from z4j_brain.settings import Settings
 
 
@@ -585,3 +587,103 @@ class TestLogout:
         )
         logout = await client.post("/api/v1/auth/logout")
         assert logout.status_code == 403
+
+
+@pytest.mark.asyncio
+class TestSessionRevocation:
+    async def test_revoke_others_is_not_limited_by_session_listing(
+        self,
+        client,
+        settings: Settings,
+        seeded_user,
+        brain_app,
+    ) -> None:
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "alice@example.com",
+                "password": "correct horse battery staple 9",
+            },
+        )
+        assert login.status_code == 200
+
+        expires_at = datetime.now(UTC) + timedelta(days=1)
+        async with brain_app.state.db.session() as db_session:
+            current = (
+                await db_session.execute(
+                    select(Session).where(Session.user_id == seeded_user.id),
+                )
+            ).scalar_one()
+            other_user = User(
+                email="bob@example.com",
+                password_hash=seeded_user.password_hash,
+                display_name="Bob",
+                is_admin=False,
+                is_active=True,
+            )
+            db_session.add(other_user)
+            await db_session.flush()
+            db_session.add_all(
+                [
+                    Session(
+                        user_id=seeded_user.id,
+                        csrf_token=f"extra-{index}",
+                        expires_at=expires_at,
+                        ip_at_issue="127.0.0.1",
+                        user_agent_at_issue="old-browser",
+                    )
+                    for index in range(101)
+                ]
+                + [
+                    Session(
+                        user_id=other_user.id,
+                        csrf_token="other-user-session",
+                        expires_at=expires_at,
+                        ip_at_issue="127.0.0.2",
+                        user_agent_at_issue="other-browser",
+                    ),
+                ],
+            )
+            await db_session.commit()
+            current_id = current.id
+            other_user_id = other_user.id
+
+        from z4j_brain.auth.csrf import csrf_cookie_name
+
+        csrf_value = client.cookies.get(
+            csrf_cookie_name(environment=settings.environment),
+        )
+        assert csrf_value is not None
+        response = await client.post(
+            "/api/v1/auth/sessions/revoke-others",
+            headers={"X-CSRF-Token": csrf_value},
+        )
+        assert response.status_code == 200, response.text
+
+        async with brain_app.state.db.session() as db_session:
+            own_rows = list(
+                (
+                    await db_session.execute(
+                        select(Session).where(Session.user_id == seeded_user.id),
+                    )
+                ).scalars(),
+            )
+            other_rows = list(
+                (
+                    await db_session.execute(
+                        select(Session).where(Session.user_id == other_user_id),
+                    )
+                ).scalars(),
+            )
+
+        assert len(own_rows) == 102
+        live_own = [row for row in own_rows if row.revoked_at is None]
+        assert [row.id for row in live_own] == [current_id]
+        assert all(
+            row.revocation_reason == "user_revoke_others"
+            for row in own_rows
+            if row.id != current_id
+        )
+        # Negative control: the unbounded UPDATE is still scoped by user.
+        assert len(other_rows) == 1
+        assert other_rows[0].revoked_at is None

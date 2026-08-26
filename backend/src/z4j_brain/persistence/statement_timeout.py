@@ -15,6 +15,16 @@ We set them via a ``connect`` event on the engine, NOT via
 overhead-heavy and (b) the connect-time setting persists across
 the connection's lifetime which matches what we actually want.
 
+``idle_in_transaction_session_timeout`` applies to every connection
+this engine hands out, including one that is not doing work itself
+but holding something on behalf of work happening elsewhere. Anything
+that has to outlive a single unit of work therefore must not sit
+inside a transaction while it waits, or PostgreSQL will terminate it
+mid-wait and the holder will never hear about it. The leader lock in
+``domain/workers/_leader_lock`` is the case that matters: it holds a
+session-scoped advisory lock on a connection with no open
+transaction, precisely so this budget cannot apply to it.
+
 SQLite has none of these knobs - the function is a no-op there.
 """
 

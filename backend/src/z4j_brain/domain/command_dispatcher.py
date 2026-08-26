@@ -18,14 +18,31 @@ Public surface:
 
 Atomicity rules:
 
-- The ``commands`` row INSERT and the NOTIFY publish happen in the
-  same transaction. NOTIFY only fires on COMMIT, so if the INSERT
-  rolls back the NOTIFY never fires.
+- The ``commands`` row INSERT and its issuance audit commit together.
+  Registry delivery happens only after that commit.  A PostgreSQL
+  ``NOTIFY`` is therefore a best-effort wake-up in a separate
+  transaction, not part of the command write.  The durable
+  ``status='pending'`` row is the recovery queue: a healthy
+  PostgreSQL registry polls it every
+  ``registry_reconcile_interval_seconds`` (validated to 1..600
+  seconds), and reconnect/long-poll drains read it too.  A crash or
+  failed wake-up can delay delivery until the next successful drain,
+  but cannot erase the command.
 - The ``mark_dispatched`` UPDATE has a ``WHERE status='pending'``
   guard so two workers racing to dispatch the same command cannot
   double-mark.
 - ``CommandTimeoutWorker`` is the safety net: any command stuck in
   ``pending`` past ``timeout_at`` flips to ``timeout``.
+- :meth:`CommandDispatcher.issue` COMMITS the caller's session, so it
+  is the point at which a command becomes work an agent will run,
+  and the end of the caller's write unit. A caller that decided the
+  command was permitted by reading state (a hold, an enabled flag, a
+  quota) must hold that read and this call inside ONE transaction,
+  with whatever lock makes the read authoritative: a decision taken
+  in an earlier transaction can be contradicted by a commit that
+  lands in between, and this commit then makes the contradicted
+  command durable anyway. Nothing here can check that for the caller,
+  because only the caller knows what it decided on.
 """
 
 from __future__ import annotations
@@ -212,13 +229,38 @@ class CommandDispatcher:
 
         The command + audit rows are committed before delivery so
         the ``deliver_local`` callback (which opens its own session)
-        can read the command row.
+        can read the command row.  Registry delivery and its optional
+        PostgreSQL ``NOTIFY`` are post-commit wake-ups.  If that step
+        crashes, the durable PENDING row remains eligible for registry
+        reconciliation, reconnect drain, and long polling.  The commit
+        ends the caller's write unit and releases every lock it was
+        holding, so any invariant the caller checked has to have been
+        checked in this same transaction, and nothing the caller does
+        afterwards is still protected by it. See the module docstring's
+        atomicity rules.
 
         M1: when ``pre_completed_result`` is supplied the command is COMPLETED
         in place with that result and NOT delivered to any agent (a brain-side
         synthetic success, e.g. the no-owned-match bulk-retry no-op). Still
         inserted + audited + committed so it is a durable, queryable record.
         """
+        from z4j_brain.persistence.repositories import AgentRepository
+
+        # This is the final authority edge shared by every generic issue()
+        # caller. Selecting an online agent earlier is only a routing hint:
+        # revocation may commit after that selection, and a failed best-effort
+        # registry kick may leave the old socket available for delivery. Lock
+        # the durable live row in the SAME transaction as command insert +
+        # commit so either the command wins first or revoke wins and no new
+        # work is made executable. Specialized cadence/external writers enforce
+        # the same invariant inside CommandRepository and their planning edge.
+        agent = await AgentRepository(commands.session).get_live(agent_id, lock=True)
+        if agent is None or agent.project_id != project_id:
+            raise AgentOfflineError(
+                "agent is revoked or unavailable",
+                details={"agent_id": str(agent_id)},
+            )
+
         timeout_at = datetime.now(UTC) + timedelta(
             seconds=self._settings.command_timeout_seconds,
         )
@@ -274,10 +316,12 @@ class CommandDispatcher:
             await commands.session.refresh(command)
             return command
 
-        # Commit the command + audit rows so that the deliver
-        # callback (which opens its own session) can read the row.
-        # Without this, the command is only flush()ed and invisible
-        # to other transactions.
+        # Commit the command + audit rows so that the deliver callback (which
+        # opens its own session) can read the row.  This deliberately publishes
+        # durable recovery authority BEFORE the best-effort registry wake-up:
+        # PostgreSQL NOTIFY is not an outbox and uses another transaction.
+        # Without this commit, the command is only flush()ed and invisible to
+        # delivery and reconciliation readers.
         await commands.session.commit()
 
         # 4: an idempotent re-issue (same key) that returned an
@@ -375,7 +419,8 @@ class CommandDispatcher:
             )
         except Exception:
             logger.exception(
-                "z4j command_dispatcher: registry deliver crashed",
+                "z4j command_dispatcher: registry wake-up failed; "
+                "durable pending-command reconciliation will retry",
                 command_id=str(command.id),
                 agent_id=str(agent_id),
             )
@@ -501,7 +546,7 @@ class CommandDispatcher:
             agent_id=agent_id,
         )
 
-    async def handle_result(  # noqa: PLR0912 - protocol-specific terminal routing
+    async def handle_result(  # noqa: PLR0911, PLR0912 - protocol routing
         self,
         *,
         commands: CommandRepository,
@@ -517,15 +562,31 @@ class CommandDispatcher:
         session_generation: str | None = None,
         delivery_claim_token: str | None = None,
     ) -> None:
-        """Mark a command completed or failed based on the agent's reply.
+        """Apply one authenticated terminal result from an agent.
 
-        Audits the outcome regardless. ``status`` from the agent
-        is one of ``"success"`` / ``"failed"`` / ``"timeout"`` -
-        we map to the brain enum.
+        A first accepted transition is audited exactly once.  Replays, late
+        results, authority mismatches, non-pending commands, and unknown command
+        ids append no audit rows: the existing command state and any original
+        terminal audit are the durable evidence for known commands, while
+        attacker-controlled rejected frames must not amplify the append-only
+        audit chain.  Terminal replays increment only the fixed-cardinality
+        late-result metric.
+
+        ``status`` is one of ``"success"`` / ``"failed"``. ``TIMEOUT`` is
+        deliberately distinct from ``FAILED``, but it is brain-owned state:
+        :class:`CommandTimeoutWorker` applies it only when no result arrived by
+        the durable deadline. An agent cannot report it directly.
         """
         from z4j_brain.domain.schedule_fire_authority import (
             SCHEDULE_FIRE_PROTOCOL_MARKER,
         )
+
+        if status not in ("success", "failed"):
+            # The wire schema rejects this before dispatch.  Keep the domain
+            # boundary fail-closed for direct/internal callers too, without
+            # copying attacker-controlled status strings into an audit or
+            # metric label.
+            return
 
         candidate = await commands.get_for_dispatch(command_id)
         if candidate is not None and candidate.action == "schedule.external.control":
@@ -535,7 +596,7 @@ class CommandDispatcher:
                 ScheduleExternalRepository,
             )
 
-            transition = await ScheduleExternalRepository(
+            external_transition = await ScheduleExternalRepository(
                 commands.session,
             ).apply_control_result(
                 command_id=command_id,
@@ -550,17 +611,17 @@ class CommandDispatcher:
                 delivery_claim_token=delivery_claim_token,
                 occurred_at=datetime.now(UTC),
             )
-            if transition.disposition in {
+            if external_transition.disposition in {
                 "result_recorded",
                 "ambiguous",
             }:
-                operation = transition.operation
-                command = transition.command
+                operation = external_transition.operation
+                command = external_transition.command
                 await self._audit.record(
                     audit_log,
                     action=(
                         "schedule.external_control.result"
-                        if transition.disposition == "result_recorded"
+                        if external_transition.disposition == "result_recorded"
                         else "schedule.external_control.ambiguous"
                     ),
                     target_type="schedule",
@@ -568,7 +629,11 @@ class CommandDispatcher:
                         str(operation.schedule_id) if operation is not None else candidate.target_id
                     ),
                     result=status,
-                    outcome=("allow" if transition.disposition == "result_recorded" else "failure"),
+                    outcome=(
+                        "allow"
+                        if external_transition.disposition == "result_recorded"
+                        else "failure"
+                    ),
                     project_id=project_id,
                     metadata={
                         "command_id": str(command_id),
@@ -593,7 +658,7 @@ class CommandDispatcher:
                 ScheduleControlRepository,
             )
 
-            transition = await ScheduleControlRepository(
+            cadence_transition = await ScheduleControlRepository(
                 commands.session,
             ).apply_current_agent_result(
                 command_id=command_id,
@@ -608,8 +673,8 @@ class CommandDispatcher:
                 delivery_claim_token=delivery_claim_token,
                 occurred_at=datetime.now(UTC),
             )
-            command = transition.command
-            if transition.command_transitioned and command is not None:
+            command = cadence_transition.command
+            if cadence_transition.command_transitioned and command is not None:
                 succeeded = status == "success"
                 await self._audit.record(
                     audit_log,
@@ -623,9 +688,20 @@ class CommandDispatcher:
                         "command_id": str(command_id),
                         "agent_id": str(command.agent_id),
                         "error": error,
-                        "cadence_hold_created": transition.hold_created,
+                        "cadence_hold_created": cadence_transition.hold_created,
                     },
                 )
+            return
+
+        if candidate is None:
+            # There is no trusted project/target context for an audit row.
+            return
+        if (project_id is not None and candidate.project_id != project_id) or (
+            agent_id is not None and candidate.agent_id != agent_id
+        ):
+            # An authenticated agent can still guess another command id.  The
+            # guarded UPDATE below would reject it too, but rejecting before a
+            # write attempt makes the no-audit/no-amplification policy explicit.
             return
 
         if status == "success":
@@ -637,6 +713,7 @@ class CommandDispatcher:
             )
             outcome = "allow"
             audit_action = "command.completed"
+            audit_result = "success"
         else:
             transitioned = await commands.mark_failed(
                 command_id,
@@ -653,30 +730,30 @@ class CommandDispatcher:
             # don't flag routine task crashes as access denials.
             outcome = "failure"
             audit_action = "command.failed"
-
+            audit_result = "failed"
         if not transitioned:
-            # Race or replay: the command was already terminal,
-            # almost always because the timeout sweeper transitioned
-            # it to TIMEOUT before the agent's late result arrived
-            # (operator-visible "X seems to have timed out but
-            # actually finished" signal). We log + bump a metric
-            # so operators can see how often this happens and
-            # tune ``command_timeout_seconds`` if needed.
-            logger.info(
-                "z4j command_dispatcher: result for non-pending command, ignoring",
-                command_id=str(command_id),
-                status=status,
-            )
-            try:
-                from z4j_brain.api.metrics import (
-                    z4j_command_late_results_total,
-                )
+            # Race or replay. Refresh so a concurrent winner is classified from
+            # durable state.  Do not append an audit row or emit one log record
+            # per rejected frame: a compromised agent could otherwise amplify
+            # append-only/operator storage.  Only a bounded-label metric tracks
+            # results that arrived after a terminal transition.
+            await commands.session.refresh(candidate)
+            if candidate.status in {
+                CommandStatus.COMPLETED,
+                CommandStatus.FAILED,
+                CommandStatus.TIMEOUT,
+                CommandStatus.CANCELLED,
+            }:
+                try:
+                    from z4j_brain.api.metrics import (
+                        z4j_command_late_results_total,
+                    )
 
-                z4j_command_late_results_total.labels(status=status).inc()
-            except Exception:
-                from z4j_brain.api.metrics import record_swallowed
+                    z4j_command_late_results_total.labels(status=status).inc()
+                except Exception:
+                    from z4j_brain.api.metrics import record_swallowed
 
-                record_swallowed("command_dispatcher", "late_result_metric")
+                    record_swallowed("command_dispatcher", "late_result_metric")
             return
 
         # Look up the command for the audit row context.
@@ -689,7 +766,7 @@ class CommandDispatcher:
             action=audit_action,
             target_type=command.target_type,
             target_id=command.target_id,
-            result=("success" if status == "success" else "failed"),
+            result=audit_result,
             outcome=outcome,
             project_id=command.project_id,
             metadata={
@@ -754,7 +831,7 @@ class CommandDispatcher:
         from z4j_brain.persistence.repositories import TaskRepository
 
         engine_state = result_payload.get("engine_state")
-        if engine_state in (None, "unknown"):
+        if not isinstance(engine_state, str) or engine_state == "unknown":
             return
 
         # Anchored to command, NOT result_payload - see audit H3.
@@ -849,11 +926,25 @@ class CommandDispatcher:
     ) -> None:
         """Run ``task.orphaned`` automation rules for one corrected task.
 
-        Reuses the caller's session AFTER the reconciliation commit (the
-        session is clean at this point); ``run_matching`` owns its own
-        per-rule transaction boundary + the per-project kill-switch check,
-        exactly as on the task-event path.
+        Reuses the caller's session AFTER the reconciliation commit.
+
+        "Clean at this point" is true of the ORM and false of Boundary F. The
+        commit ended the audited write unit, so on SQLite the first rule to
+        fire raised when it wrote its ``automation.rule.fired`` audit row, and
+        the caller swallows that exception: the correction was audited, the
+        rule never fired, and no notification went out. Re-arm the unit before
+        reading, exactly as the write paths do.
+
+        ``run_matching`` owns its own per-rule transaction boundary and the
+        per-project kill-switch check, exactly as on the task-event path.
         """
+        from sqlalchemy import text as _text
+
+        if commands.session.get_bind().dialect.name == "sqlite":
+            if commands.session.in_transaction():
+                await commands.session.rollback()
+            await commands.session.execute(_text("BEGIN IMMEDIATE"))
+            commands.session.sync_session.info["z4j_sqlite_immediate"] = True
         from z4j_brain.domain.automation import (
             AutomationActionRunner,
             AutomationExecutor,

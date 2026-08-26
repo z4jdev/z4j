@@ -10,9 +10,11 @@ data (Celery / RQ workers known via broker heartbeat events):
                        pid 12500), tracked via the WebSocket
                        handshake protocol.
 
-The dashboard's /workers page in 1.2.1+ joins both: every
-agent_worker is shown, with optional engine-side details from
-the engine workers table when there's a hostname/pid match.
+The current dashboard's ``/workers`` page reads the engine-native
+``/workers`` resource only; it does not join these rows. API clients
+that need the z4j process inventory must request ``/agent-workers``
+explicitly. Long-poll sessions do not perform the WebSocket ``hello``
+registration and therefore do not create rows in this resource.
 
 Filters:
 
@@ -58,9 +60,10 @@ class AgentWorkerPublic(BaseModel):
     """One row in the agent-workers list view.
 
     Fields mirror the ``agent_workers`` table directly with one
-    addition: ``id`` is the row's UUID PK so URLs / row keys
-    stay stable across the (agent_id, worker_id) reassignments
-    that happen when workers cycle.
+    addition: ``id`` is the row's UUID PK. It stays stable while
+    the same ``(agent_id, worker_id)`` natural key is refreshed.
+    Reassigning or regenerating ``worker_id`` creates a new row with
+    a new UUID; the previous row remains as historical state.
     """
 
     id: uuid.UUID

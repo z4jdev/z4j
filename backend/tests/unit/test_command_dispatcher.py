@@ -1,4 +1,23 @@
-"""Tests for the brain-side ``CommandDispatcher``."""
+"""Tests for the brain-side ``CommandDispatcher``.
+
+Two schemas, on purpose.
+
+``session`` is a MIGRATED database, so the guards an operator's database
+carries are present. Every Boundary-D and Boundary-F guard lives inside a
+migration, so a create_all() schema refuses nothing and cannot observe what
+production does.
+
+``unguarded_session`` is a create_all() database, kept for the handful of
+tests that insert a ``schedule.fire`` command through the GENERIC
+``CommandRepository.insert``. An activated database refuses that row
+outright (``schedule command protocol marker required``): the only writer of
+a fire command that production can reach is
+``CommandRepository.insert_current_schedule_fire``, which fills the whole
+Boundary-D receipt tuple. Those tests pin the generic repository's
+action-classification, lease and CAS mechanics using the fire action as
+their subject, so re-seeding them through the cadence writer would change
+what they prove. They stay where they are.
+"""
 
 from __future__ import annotations
 
@@ -7,40 +26,48 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.domain.command_dispatcher import CommandDispatcher
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.enums import AgentState, CommandStatus
-from z4j_brain.persistence.models import Agent, Project
+from z4j_brain.persistence.models import Agent, AuditLog, Command, Project
 from z4j_brain.persistence.repositories import (
     AuditLogRepository,
     CommandRepository,
 )
+from z4j_brain.persistence.repositories import commands as commands_module
 from z4j_brain.settings import Settings
 from z4j_brain.websocket.registry._protocol import DeliveryResult
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_db_url,
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated, so it refuses an audit
+        # row that carries no chain authentication. Production always has this
+        # configured; a test that omits it is not testing production.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
         environment="dev",
         log_json=False,
     )
 
 
 @pytest.fixture
-async def session():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as s:
+async def session(settings: Settings):
+    # ``write=True`` is what every production caller of the dispatcher opens
+    # (the frame router, the API request dependency, the replay worker). On
+    # SQLite that is the BEGIN IMMEDIATE the audit chain requires before its
+    # first read, so a session without it cannot write an audit row at all.
+    engine = create_async_engine(settings.database_url)
+    async with DatabaseManager(engine).session(write=True) as s:
         yield s
     await engine.dispose()
 
@@ -49,7 +76,10 @@ async def session():
 async def project(session: AsyncSession) -> Project:
     p = Project(slug="default", name="Default")
     session.add(p)
-    await session.commit()
+    # Flush, not commit: a commit ends the write unit that ``session`` opened,
+    # and the audited operation under test would then start an ordinary
+    # transaction that Boundary F refuses to sign.
+    await session.flush()
     return p
 
 
@@ -67,7 +97,69 @@ async def agent(session: AsyncSession, project: Project) -> Agent:
         state=AgentState.ONLINE,
     )
     session.add(a)
-    await session.commit()
+    await session.flush()
+    return a
+
+
+@pytest.fixture
+def unguarded_settings() -> Settings:
+    """Settings without a chain key, matching ``unguarded_session``.
+
+    A create_all() database has no activated audit chain to sign against, so
+    the tests pinned to that schema must not ask for the v2 signer.
+    """
+    return Settings(
+        database_url="sqlite+aiosqlite:///:memory:",
+        secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        environment="dev",
+        log_json=False,
+    )
+
+
+@pytest.fixture
+async def unguarded_session():
+    """A create_all() database, for the ``schedule.fire`` tests only.
+
+    See the module docstring: an activated database refuses a fire command
+    that did not come from the cadence writer, and these tests are about the
+    generic repository rather than the cadence envelope.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        yield s
+    await engine.dispose()
+
+
+@pytest.fixture
+async def unguarded_project(unguarded_session: AsyncSession) -> Project:
+    p = Project(slug="default", name="Default")
+    unguarded_session.add(p)
+    await unguarded_session.commit()
+    return p
+
+
+@pytest.fixture
+async def unguarded_agent(
+    unguarded_session: AsyncSession,
+    unguarded_project: Project,
+) -> Agent:
+    a = Agent(
+        project_id=unguarded_project.id,
+        name="web-01",
+        token_hash=secrets.token_hex(32),
+        protocol_version="1",
+        framework_adapter="django",
+        engine_adapters=["celery"],
+        scheduler_adapters=[],
+        capabilities={},
+        state=AgentState.ONLINE,
+    )
+    unguarded_session.add(a)
+    await unguarded_session.commit()
     return a
 
 
@@ -97,6 +189,28 @@ class FakeRegistry:
     ) -> DeliveryResult:
         self.calls.append((command_id, agent_id))
         return self._result
+
+
+class FailingWakeupRegistry(FakeRegistry):
+    """Registry whose post-commit delivery wake-up always fails."""
+
+    async def deliver(
+        self,
+        *,
+        command_id: uuid.UUID,
+        agent_id: uuid.UUID,
+        required_retry_engine: str | None = None,
+    ) -> DeliveryResult:
+        self.calls.append((command_id, agent_id))
+        raise OSError("forced registry wake-up failure")
+
+
+async def _command_audits(
+    session: AsyncSession,
+    command_id: uuid.UUID,
+) -> list[AuditLog]:
+    rows = list((await session.execute(select(AuditLog))).scalars())
+    return [row for row in rows if row.audit_metadata.get("command_id") == str(command_id)]
 
 
 @pytest.mark.asyncio
@@ -134,6 +248,108 @@ class TestIssue:
         assert command.action == "retry_task"
         assert command.status == CommandStatus.PENDING
         assert registry.calls == [(command.id, agent.id)]
+
+    async def test_failed_post_commit_wakeup_leaves_durable_recoverable_row(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+        settings: Settings,
+    ) -> None:
+        """NOTIFY/delivery is a wake-up; PENDING + audit are the outbox."""
+        registry = FailingWakeupRegistry()
+        dispatcher = CommandDispatcher(
+            settings=settings,
+            registry=registry,
+            audit=AuditService(settings),
+        )
+
+        command = await dispatcher.issue(
+            commands=CommandRepository(session),
+            audit_log=AuditLogRepository(session),
+            project_id=project.id,
+            agent_id=agent.id,
+            action="retry_task",
+            target_type="task",
+            target_id="celery:recoverable",
+            payload={"engine": "celery", "task_id": "recoverable"},
+            issued_by=None,
+            ip="127.0.0.1",
+            user_agent=None,
+        )
+
+        # Observe through an independent connection: the registry exception was
+        # swallowed only AFTER the command + issuance audit committed.
+        observer = create_async_engine(settings.database_url)
+        try:
+            observer_factory = sessionmaker(
+                observer,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )
+            async with observer_factory() as observer_session:
+                durable = (
+                    await observer_session.execute(
+                        select(Command).where(Command.id == command.id),
+                    )
+                ).scalar_one()
+                issued = list(
+                    (
+                        await observer_session.execute(
+                            select(AuditLog).where(
+                                AuditLog.action == "command.issue.retry_task",
+                            ),
+                        )
+                    ).scalars()
+                )
+        finally:
+            await observer.dispose()
+
+        assert durable.status == CommandStatus.PENDING
+        assert any(row.audit_metadata.get("command_id") == str(command.id) for row in issued)
+        assert registry.calls == [(command.id, agent.id)]
+        # This is the exact read used by registry delivery/reconciliation.
+        assert (await CommandRepository(session).get_for_dispatch(command.id)).id == command.id
+
+    async def test_revoked_agent_is_rejected_before_insert_or_delivery(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+        settings: Settings,
+    ) -> None:
+        """Every caller shares one final durable authority edge."""
+        from z4j_brain.errors import AgentOfflineError
+
+        agent.revoked_at = datetime.now(UTC)
+        await session.flush()
+        registry = FakeRegistry(delivered_locally=True, agent_was_known=True)
+        dispatcher = CommandDispatcher(
+            settings=settings,
+            registry=registry,
+            audit=AuditService(settings),
+        )
+
+        with pytest.raises(AgentOfflineError, match="revoked or unavailable"):
+            await dispatcher.issue(
+                commands=CommandRepository(session),
+                audit_log=AuditLogRepository(session),
+                project_id=project.id,
+                agent_id=agent.id,
+                action="retry_task",
+                target_type="task",
+                target_id="celery:task-001",
+                payload={"engine": "celery", "task_id": "task-001"},
+                issued_by=None,
+                ip="127.0.0.1",
+                user_agent="authority-edge-test",
+            )
+
+        assert registry.calls == []
+        rows = (
+            await session.execute(select(Command).where(Command.agent_id == agent.id))
+        ).scalars()
+        assert list(rows) == []
 
     async def test_issue_to_unknown_agent_raises(
         self,
@@ -261,10 +477,10 @@ class TestIssue:
 
     async def test_idempotent_reissue_of_completed_command_no_offline_raise_h8(
         self,
-        session: AsyncSession,
-        project: Project,
-        agent: Agent,
-        settings: Settings,
+        unguarded_session: AsyncSession,
+        unguarded_project: Project,
+        unguarded_agent: Agent,
+        unguarded_settings: Settings,
     ) -> None:
         # Re-issuing a command whose idempotency_key already maps to an
         # already-progressed (COMPLETED) row must return it as success WITHOUT
@@ -277,12 +493,14 @@ class TestIssue:
             delivered_locally=False, notified_cluster=False, agent_was_known=False
         )
         dispatcher = CommandDispatcher(
-            settings=settings, registry=registry, audit=AuditService(settings)
+            settings=unguarded_settings,
+            registry=registry,
+            audit=AuditService(unguarded_settings),
         )
-        commands = CommandRepository(session)
+        commands = CommandRepository(unguarded_session)
         first, _ = await commands.insert(
-            project_id=project.id,
-            agent_id=agent.id,
+            project_id=unguarded_project.id,
+            agent_id=unguarded_agent.id,
             issued_by=None,
             action="schedule.fire",
             target_type="schedule",
@@ -293,16 +511,16 @@ class TestIssue:
             source_ip=None,
         )
         await commands.mark_completed(first.id, result_payload={"ok": True})
-        await session.commit()
+        await unguarded_session.commit()
 
         # Re-issue with the SAME idempotency key (catch-up replay of a dispatched
         # slot). Must not raise, must not deliver.
         try:
             returned = await dispatcher.issue(
                 commands=commands,
-                audit_log=AuditLogRepository(session),
-                project_id=project.id,
-                agent_id=agent.id,
+                audit_log=AuditLogRepository(unguarded_session),
+                project_id=unguarded_project.id,
+                agent_id=unguarded_agent.id,
                 action="schedule.fire",
                 target_type="schedule",
                 target_id="sched-1",
@@ -445,6 +663,10 @@ class TestHandleResult:
         await session.refresh(cmd)
         assert cmd.status == CommandStatus.COMPLETED
         assert cmd.result == {"new_task_id": "task-002"}
+        audits = await _command_audits(session, cmd.id)
+        assert [(row.action, row.result, row.outcome) for row in audits] == [
+            ("command.completed", "success", "allow"),
+        ]
 
     async def test_failed_marks_failed(
         self,
@@ -485,6 +707,59 @@ class TestHandleResult:
         await session.refresh(cmd)
         assert cmd.status == CommandStatus.FAILED
         assert cmd.error == "task does not exist"
+        audits = await _command_audits(session, cmd.id)
+        assert [(row.action, row.result, row.outcome) for row in audits] == [
+            ("command.failed", "failed", "failure"),
+        ]
+
+    @pytest.mark.parametrize(
+        "action",
+        ["retry_task", "schedule.external.control"],
+    )
+    async def test_agent_timeout_status_cannot_mutate_state_or_audit(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+        settings: Settings,
+        action: str,
+    ) -> None:
+        dispatcher = CommandDispatcher(
+            settings=settings,
+            registry=FakeRegistry(notified_cluster=True),
+            audit=AuditService(settings),
+        )
+        commands = CommandRepository(session)
+        cmd, _ = await commands.insert(
+            project_id=project.id,
+            agent_id=agent.id,
+            issued_by=None,
+            action=action,
+            target_type="task",
+            target_id="celery:task-timeout",
+            payload={},
+            idempotency_key=None,
+            timeout_at=datetime.now(UTC) + timedelta(seconds=60),
+            source_ip=None,
+        )
+
+        await dispatcher.handle_result(
+            commands=commands,
+            audit_log=AuditLogRepository(session),
+            command_id=cmd.id,
+            status="timeout",
+            result_payload={"adapter_timeout": True},
+            error="adapter deadline elapsed",
+            project_id=project.id,
+            agent_id=agent.id,
+        )
+        await session.commit()
+        await session.refresh(cmd)
+
+        assert cmd.status == CommandStatus.PENDING
+        assert cmd.result is None
+        assert cmd.error is None
+        assert await _command_audits(session, cmd.id) == []
 
     async def test_result_from_wrong_agent_is_ignored(
         self,
@@ -540,6 +815,7 @@ class TestHandleResult:
         await session.refresh(cmd)
         assert cmd.status == CommandStatus.PENDING
         assert cmd.result is None
+        assert await _command_audits(session, cmd.id) == []
 
     async def test_duplicate_result_is_noop(
         self,
@@ -588,6 +864,128 @@ class TestHandleResult:
         # Still completed, no crash from the duplicate.
         await session.refresh(cmd)
         assert cmd.status == CommandStatus.COMPLETED
+        audits = await _command_audits(session, cmd.id)
+        assert [row.action for row in audits] == ["command.completed"]
+
+    @pytest.mark.parametrize(
+        "terminal_status",
+        [CommandStatus.TIMEOUT, CommandStatus.CANCELLED],
+    )
+    async def test_late_or_nonpending_result_adds_no_audit_row(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+        settings: Settings,
+        terminal_status: CommandStatus,
+    ) -> None:
+        dispatcher = CommandDispatcher(
+            settings=settings,
+            registry=FakeRegistry(notified_cluster=True),
+            audit=AuditService(settings),
+        )
+        commands = CommandRepository(session)
+        cmd, _ = await commands.insert(
+            project_id=project.id,
+            agent_id=agent.id,
+            issued_by=None,
+            action="retry_task",
+            target_type="task",
+            target_id="celery:already-terminal",
+            payload={},
+            idempotency_key=None,
+            timeout_at=datetime.now(UTC) + timedelta(seconds=60),
+            source_ip=None,
+        )
+        cmd.status = terminal_status
+        cmd.completed_at = datetime.now(UTC)
+        await session.flush()
+
+        await dispatcher.handle_result(
+            commands=commands,
+            audit_log=AuditLogRepository(session),
+            command_id=cmd.id,
+            status="success",
+            result_payload={"late": True},
+            error=None,
+            project_id=project.id,
+            agent_id=agent.id,
+        )
+        await session.commit()
+        await session.refresh(cmd)
+
+        assert cmd.status == terminal_status
+        assert await _command_audits(session, cmd.id) == []
+
+    async def test_unknown_command_result_adds_no_audit_row(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+        settings: Settings,
+    ) -> None:
+        dispatcher = CommandDispatcher(
+            settings=settings,
+            registry=FakeRegistry(notified_cluster=True),
+            audit=AuditService(settings),
+        )
+        unknown_id = uuid.uuid4()
+
+        await dispatcher.handle_result(
+            commands=CommandRepository(session),
+            audit_log=AuditLogRepository(session),
+            command_id=unknown_id,
+            status="failed",
+            result_payload=None,
+            error="forged",
+            project_id=project.id,
+            agent_id=agent.id,
+        )
+        await session.commit()
+
+        assert await _command_audits(session, unknown_id) == []
+
+    async def test_unknown_result_status_is_ignored_without_audit(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+        settings: Settings,
+    ) -> None:
+        dispatcher = CommandDispatcher(
+            settings=settings,
+            registry=FakeRegistry(notified_cluster=True),
+            audit=AuditService(settings),
+        )
+        commands = CommandRepository(session)
+        cmd, _ = await commands.insert(
+            project_id=project.id,
+            agent_id=agent.id,
+            issued_by=None,
+            action="retry_task",
+            target_type="task",
+            target_id="celery:invalid-status",
+            payload={},
+            idempotency_key=None,
+            timeout_at=datetime.now(UTC) + timedelta(seconds=60),
+            source_ip=None,
+        )
+
+        await dispatcher.handle_result(
+            commands=commands,
+            audit_log=AuditLogRepository(session),
+            command_id=cmd.id,
+            status="unexpected",
+            result_payload=None,
+            error="untrusted",
+            project_id=project.id,
+            agent_id=agent.id,
+        )
+        await session.commit()
+        await session.refresh(cmd)
+
+        assert cmd.status == CommandStatus.PENDING
+        assert await _command_audits(session, cmd.id) == []
 
 
 @pytest.mark.asyncio
@@ -650,7 +1048,24 @@ class TestInsertIdentityGuardRH1:
 
 @pytest.mark.asyncio
 class TestInitialDispatchTimeout:
-    """A late first delivery gets a full response/redispatch window."""
+    """A late first delivery gets a full response/redispatch window.
+
+    Pinned to the create_all() schema: it seeds a fire command through the
+    generic repository, which an activated database refuses. See the module
+    docstring.
+    """
+
+    @pytest.fixture
+    def session(self, unguarded_session: AsyncSession) -> AsyncSession:
+        return unguarded_session
+
+    @pytest.fixture
+    def project(self, unguarded_project: Project) -> Project:
+        return unguarded_project
+
+    @pytest.fixture
+    def agent(self, unguarded_agent: Agent) -> Agent:
+        return unguarded_agent
 
     async def test_initial_dispatch_refreshes_timeout_from_claim_generation(
         self, session: AsyncSession, project: Project, agent: Agent
@@ -754,10 +1169,15 @@ class TestFireVsOperatorIdentityR7:
     operator commands 409 when a key is reused with different parameters."""
 
     async def test_fire_refire_different_agent_dedups(
-        self, session: AsyncSession, project: Project, agent: Agent
+        self,
+        unguarded_session: AsyncSession,
+        unguarded_project: Project,
+        unguarded_agent: Agent,
     ) -> None:
+        # Create_all() only: an activated database refuses a fire command that
+        # did not come from the cadence writer. See the module docstring.
         agent_b = Agent(
-            project_id=project.id,
+            project_id=unguarded_project.id,
             name="web-02",
             token_hash=secrets.token_hex(32),
             protocol_version="1",
@@ -767,13 +1187,13 @@ class TestFireVsOperatorIdentityR7:
             capabilities={},
             state=AgentState.ONLINE,
         )
-        session.add(agent_b)
-        await session.commit()
-        commands = CommandRepository(session)
+        unguarded_session.add(agent_b)
+        await unguarded_session.commit()
+        commands = CommandRepository(unguarded_session)
         key = "schedule:s1:fire:f1"
         first, c1 = await commands.insert(
-            project_id=project.id,
-            agent_id=agent.id,
+            project_id=unguarded_project.id,
+            agent_id=unguarded_agent.id,
             issued_by=None,
             action="schedule.fire",
             target_type="schedule",
@@ -783,10 +1203,10 @@ class TestFireVsOperatorIdentityR7:
             timeout_at=datetime.now(UTC) + timedelta(seconds=60),
             source_ip=None,
         )
-        await session.commit()
+        await unguarded_session.commit()
         # Re-fire the SAME fire_id but routed to agent B, different fired_at.
         second, c2 = await commands.insert(
-            project_id=project.id,
+            project_id=unguarded_project.id,
             agent_id=agent_b.id,
             issued_by=None,
             action="schedule.fire",
@@ -847,11 +1267,65 @@ class TestFireVsOperatorIdentityR7:
         _row, created = await commands.insert(payload={"x": 1, "fired_at": "t9"}, **base)
         assert created is False  # only fired_at differs -> still dedups
 
+    async def test_retry_identity_uses_countdown_not_derived_deadline(
+        self, session: AsyncSession, project: Project, agent: Agent
+    ) -> None:
+        from z4j_core.errors import ConflictError
+
+        commands = CommandRepository(session)
+        base = {
+            "project_id": project.id,
+            "agent_id": agent.id,
+            "issued_by": None,
+            "action": "retry_task",
+            "target_type": "task",
+            "target_id": "celery:t1",
+            "idempotency_key": "K3",
+            "timeout_at": datetime.now(UTC) + timedelta(seconds=60),
+            "source_ip": None,
+            "enforce_payload_identity": True,
+        }
+        await commands.insert(payload={"eta_seconds": 60, "eta": 1_700_000_060.0}, **base)
+        await session.commit()
+
+        _row, created = await commands.insert(
+            payload={"eta_seconds": 60, "eta": 1_700_000_061.0},
+            **base,
+        )
+        assert created is False
+
+        with pytest.raises(ConflictError):
+            await commands.insert(
+                payload={"eta_seconds": 120, "eta": 1_700_000_120.0},
+                **base,
+            )
+
 
 @pytest.mark.asyncio
 class TestReissueStatusFreshnessR7:
     """4: a re-issue of an existing command is a status+freshness
-    decision -- terminal returns idempotently, stale/timeout re-drives."""
+    decision -- terminal returns idempotently, stale/timeout re-drives.
+
+    Pinned to the create_all() schema: every case seeds a fire command through
+    the generic repository, which an activated database refuses. See the
+    module docstring.
+    """
+
+    @pytest.fixture
+    def session(self, unguarded_session: AsyncSession) -> AsyncSession:
+        return unguarded_session
+
+    @pytest.fixture
+    def project(self, unguarded_project: Project) -> Project:
+        return unguarded_project
+
+    @pytest.fixture
+    def agent(self, unguarded_agent: Agent) -> Agent:
+        return unguarded_agent
+
+    @pytest.fixture
+    def settings(self, unguarded_settings: Settings) -> Settings:
+        return unguarded_settings
 
     async def _seed(self, commands, project, agent):
         cmd, _ = await commands.insert(
@@ -947,7 +1421,24 @@ class TestClaimRedispatchLeaseR8:
     """The DISPATCHED-recovery redispatch is a real LEASE, not a
     concurrent-snapshot tiebreak. At most one re-send per ``min_interval``, and a
     SEQUENTIAL second poll (re-reading the just-bumped dispatched_at) must NOT
-    re-win -- the bug that re-sent on every poll."""
+    re-win -- the bug that re-sent on every poll.
+
+    Pinned to the create_all() schema: the lease subject is a fire command
+    seeded through the generic repository, which an activated database
+    refuses. See the module docstring.
+    """
+
+    @pytest.fixture
+    def session(self, unguarded_session: AsyncSession) -> AsyncSession:
+        return unguarded_session
+
+    @pytest.fixture
+    def project(self, unguarded_project: Project) -> Project:
+        return unguarded_project
+
+    @pytest.fixture
+    def agent(self, unguarded_agent: Agent) -> Agent:
+        return unguarded_agent
 
     async def _fire_cmd(self, commands: CommandRepository, project: Project, agent: Agent):
         cmd, _ = await commands.insert(
@@ -981,10 +1472,25 @@ class TestClaimRedispatchLeaseR8:
         )
         await session.commit()
         # First poll: last send was 100s ago (> 10s lease) -> wins, bumps to now.
-        assert await commands.claim_redispatch(cmd.id, min_interval_seconds=10.0) is True
+        assert (
+            await commands.claim_redispatch(
+                cmd.id,
+                min_interval_seconds=10.0,
+                expected_dispatched_at=cmd.dispatched_at,
+            )
+            is True
+        )
         await session.commit()
+        await session.refresh(cmd)
         # Second SEQUENTIAL poll: dispatched_at is now fresh (< 10s lease) -> loses.
-        assert await commands.claim_redispatch(cmd.id, min_interval_seconds=10.0) is False
+        assert (
+            await commands.claim_redispatch(
+                cmd.id,
+                min_interval_seconds=10.0,
+                expected_dispatched_at=cmd.dispatched_at,
+            )
+            is False
+        )
 
     async def test_fresh_dispatch_not_resent(
         self, session: AsyncSession, project: Project, agent: Agent
@@ -995,13 +1501,116 @@ class TestClaimRedispatchLeaseR8:
         cmd = await self._fire_cmd(commands, project, agent)
         await commands.mark_dispatched(cmd.id, timeout_seconds=60)
         await session.commit()
-        assert await commands.claim_redispatch(cmd.id, min_interval_seconds=60.0) is False
+        await session.refresh(cmd)
+        assert (
+            await commands.claim_redispatch(
+                cmd.id,
+                min_interval_seconds=60.0,
+                expected_dispatched_at=cmd.dispatched_at,
+            )
+            is False
+        )
+
+    async def test_process_clock_skew_cannot_mint_or_win_lease(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        commands = CommandRepository(session)
+        cmd = await self._fire_cmd(commands, project, agent)
+
+        class SkewedDateTime(datetime):
+            @classmethod
+            def now(cls, tz: object = None) -> SkewedDateTime:
+                del tz
+                return cls(2099, 1, 1, tzinfo=UTC)
+
+        monkeypatch.setattr(commands_module, "datetime", SkewedDateTime)
+        generation = await commands.mark_dispatched(cmd.id, timeout_seconds=60)
+        assert generation is not None
+        await session.commit()
+        await session.refresh(cmd)
+
+        # The generation comes from SQLite's clock, not the process's 2099 clock;
+        # and that fake future cannot make a fresh lease immediately eligible.
+        assert generation.year < 2099
+        assert (
+            await commands.claim_redispatch(
+                cmd.id,
+                min_interval_seconds=60.0,
+                expected_dispatched_at=cmd.dispatched_at,
+            )
+            is False
+        )
+
+    async def test_stale_generation_cannot_overwrite_newer_lease(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+    ) -> None:
+        from sqlalchemy import update as _update
+
+        commands = CommandRepository(session)
+        cmd = await self._fire_cmd(commands, project, agent)
+        assert await commands.mark_dispatched(cmd.id, timeout_seconds=60) is not None
+        stale_generation = datetime.now(UTC) - timedelta(seconds=100)
+        await session.execute(
+            _update(Command).where(Command.id == cmd.id).values(dispatched_at=stale_generation)
+        )
+        await session.commit()
+
+        assert (
+            await commands.claim_redispatch(
+                cmd.id,
+                min_interval_seconds=10.0,
+                expected_dispatched_at=stale_generation,
+            )
+            is True
+        )
+        await session.commit()
+        await session.refresh(cmd)
+        winning_generation = cmd.dispatched_at
+        assert winning_generation is not None
+        assert winning_generation != stale_generation
+
+        # A delayed replica holding the old generation cannot re-win even with a
+        # zero lease. Its compare-and-swap predicate no longer names the row.
+        assert (
+            await commands.claim_redispatch(
+                cmd.id,
+                min_interval_seconds=0.0,
+                expected_dispatched_at=stale_generation,
+            )
+            is False
+        )
+        await session.refresh(cmd)
+        assert cmd.dispatched_at == winning_generation
 
 
 @pytest.mark.asyncio
 class TestRevertDispatchR8:
     """(ABA CAS), (rearm clears terminal fields), (ownership
-    transfer) on revert_dispatch."""
+    transfer) on revert_dispatch.
+
+    Pinned to the create_all() schema: every case seeds a fire command through
+    the generic repository, which an activated database refuses. See the
+    module docstring.
+    """
+
+    @pytest.fixture
+    def session(self, unguarded_session: AsyncSession) -> AsyncSession:
+        return unguarded_session
+
+    @pytest.fixture
+    def project(self, unguarded_project: Project) -> Project:
+        return unguarded_project
+
+    @pytest.fixture
+    def agent(self, unguarded_agent: Agent) -> Agent:
+        return unguarded_agent
 
     async def _dispatched_cmd(self, commands, project, agent, *, action="schedule.fire"):
         cmd, _ = await commands.insert(

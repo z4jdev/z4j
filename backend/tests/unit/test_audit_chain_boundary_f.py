@@ -32,6 +32,8 @@ from z4j_brain.persistence.repositories import AuditLogRepository
 from z4j_brain.settings import Settings
 from z4j_brain.startup import verify_production_authority_at_startup
 
+from tests.migration_head import code_head
+
 MASTER = "master-secret-that-is-not-the-audit-key-000000"
 SESSION = "session-secret-that-is-not-the-audit-key-0000"
 AUDIT = "audit-only-secret-that-is-independent-000000000"
@@ -88,10 +90,13 @@ async def _mark_release_migration_head(engine) -> None:
         await connection.execute(
             text("CREATE TABLE alembic_version (version_num VARCHAR(80) NOT NULL)"),
         )
+        # Seed the head this build expects. Startup refuses a database whose
+        # head is not the activated one, so a literal revision id here makes
+        # these tests fail on the next migration for a reason that has
+        # nothing to do with what they verify (the audit-state MAC).
         await connection.execute(
-            text(
-                "INSERT INTO alembic_version (version_num) VALUES ('v1_8_schedule_cursor_repair')"
-            ),
+            text("INSERT INTO alembic_version (version_num) VALUES (:head)"),
+            {"head": code_head()},
         )
 
 
@@ -1051,6 +1056,113 @@ async def test_stable_v2_verifier_authenticates_state_counts_head_and_anchor(
 
 
 @pytest.mark.asyncio
+async def test_a_flood_of_mismatches_is_capped_and_the_remainder_counted(
+    engine,
+) -> None:
+    """A report is evidence, not a firehose.
+
+    Every caller renders the whole mismatch tuple into a single log record,
+    and startup runs this verification for every operator whether they asked
+    for it or not. An unbounded list makes a large finding the outage, which
+    is precisely what the machinery around it works to avoid. The count of
+    what was dropped is what keeps a capped report honest about its own
+    incompleteness.
+    """
+    settings = _settings()
+    service = AuditService(settings)
+    await _activate(engine, service)
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    forged = 60
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        state = (await session.execute(select(AuditChainState))).scalar_one()
+        base = datetime.now(UTC)
+        for index in range(forged):
+            # Two findings apiece: the link does not follow, and the signature
+            # does not hold. Enough rows to overrun the cap without needing a
+            # realistically-sized log.
+            session.add(
+                AuditLog(
+                    action="forged.row",
+                    target_type="test",
+                    result="success",
+                    audit_metadata={},
+                    occurred_at=base + timedelta(seconds=index),
+                    legacy_frozen=False,
+                    hmac_version=2,
+                    hmac_key_id=canonical_audit_key_id(AUDIT.encode()),
+                    row_hmac=f"{index:064x}",
+                    prev_row_hmac=f"{index + 1000:064x}",
+                    chain_generation=state.generation,
+                ),
+            )
+        await session.commit()
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        report = await verify_active_audit_generation(session, settings, page_size=20)
+
+    assert not report.clean
+    # 100 findings plus one line naming the overflow. That last line is the
+    # point: eight callers render this tuple and report its length, and only
+    # the worker reads mismatches_truncated, so without it an operator running
+    # `z4j audit verify` on a badly corrupted chain would be told there were
+    # exactly a hundred findings.
+    assert len(report.mismatches) == 101
+    assert report.mismatches_truncated > 0
+    assert "further finding" in report.mismatches[-1]
+    assert str(report.mismatches_truncated) in report.mismatches[-1]
+    assert 100 + report.mismatches_truncated > 2 * forged
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_anchor_is_still_provable_from_an_earlier_page(
+    engine,
+) -> None:
+    """An operator's last known head goes stale as soon as anything is audited.
+
+    Proving it is still an ancestor is what turns "I saw this head once" into
+    "and the chain still contains it", so the answer cannot depend on which
+    page the row happens to fall in. Driven at ``page_size=1`` against an
+    anchor two pages back for exactly that reason: the anchor is settled while
+    its own page is in scope, and a check that only looked at the last page
+    would call a perfectly good anchor UNPROVABLE.
+    """
+    settings = _settings()
+    service = AuditService(settings)
+    await _activate(engine, service)
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    anchors = []
+    for index in range(3):
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            anchors.append(
+                await service.record(
+                    AuditLogRepository(session),
+                    action="ancestor.step",
+                    target_type="test",
+                    target_id=str(index),
+                ),
+            )
+            await session.commit()
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        report = await verify_active_audit_generation(
+            session,
+            settings,
+            page_size=1,
+            known_head={
+                "row_hmac": anchors[0].row_hmac,
+                "hmac_version": 2,
+                "hmac_key_id": anchors[0].hmac_key_id,
+                "id": str(anchors[0].id),
+            },
+        )
+
+    assert report.clean, report.mismatches
+    assert report.known_head_result == "VERIFIED_ANCESTOR"
+
+
+@pytest.mark.asyncio
 async def test_v2_verifier_reports_deleted_prefix_and_unprovable_anchor(
     engine,
 ) -> None:
@@ -1138,3 +1250,155 @@ async def test_sqlite_mid_session_commit_requires_a_fresh_immediate_write_unit(
                 target_type="test",
             )
         await session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Rows the verifier does not select
+#
+# These run against a MIGRATED database rather than the create_all() engine
+# above. What a forged row can look like is decided by the activation CHECK
+# constraint and the SQLite insert trigger, and both live in a migration: on a
+# create_all() schema the planted rows below would prove nothing, because that
+# schema accepts anything at all.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def migrated_settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
+    return Settings(
+        database_url=migrated_db_url,
+        secret=MASTER,  # type: ignore[arg-type]
+        session_secret=SESSION,  # type: ignore[arg-type]
+        # Activation binds the state to the key that signed it, so a session
+        # opened against a copy of the template must present the same key.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
+        environment="dev",
+    )
+
+
+@pytest.fixture
+async def migrated_engine(migrated_settings: Settings):
+    value = create_async_engine(migrated_settings.database_url)
+    yield value
+    await value.dispose()
+
+
+async def _authenticated_state(engine) -> AuditChainState:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        return (await session.execute(select(AuditChainState))).scalar_one()
+
+
+async def _plant_row(engine, **columns) -> None:
+    """Insert one audit row around AuditService, with the guards live.
+
+    Arming a transition is what a caller inside the process already has: the
+    trigger asks only that some insert transition is armed, and the CHECK
+    constraint asks only that the marker columns agree with each other.
+    Neither asks whether the generation is one the chain knows about.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from z4j_brain.persistence.audit_guard import register_sqlite_audit_guard
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        connection = await session.connection()
+        await connection.run_sync(
+            lambda sync_connection: register_sqlite_audit_guard(
+                sync_connection.connection.dbapi_connection,
+            ),
+        )
+        await session.execute(text("SELECT z4j_audit_guard('arm', 'append-v1')"))
+        session.add(
+            AuditLog(
+                action="planted.row",
+                target_type="test",
+                result="success",
+                audit_metadata={},
+                legacy_frozen=False,
+                hmac_version=2,
+                **columns,
+            ),
+        )
+        await session.commit()
+
+
+async def _verify_migrated(engine, settings: Settings):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        return await verify_active_audit_generation(session, settings, page_size=50)
+
+
+@pytest.mark.asyncio
+async def test_an_untouched_migrated_chain_verifies_clean(
+    migrated_engine,
+    migrated_settings,
+) -> None:
+    """The control the two tampering cases below are read against."""
+    report = await _verify_migrated(migrated_engine, migrated_settings)
+
+    assert report.clean, report.mismatches
+    assert report.unattributed_rows == 0
+
+
+@pytest.mark.asyncio
+async def test_a_row_in_no_known_generation_is_reported_not_ignored(
+    migrated_engine,
+    migrated_settings,
+) -> None:
+    """A forged row the walk never selects used to verify clean.
+
+    Both counts are scoped, one to the active generation and one to the
+    frozen flag, and so is the walk. A row carrying some third generation is
+    counted by nothing and has its HMAC compared to nothing, so the whole
+    verification passes while it sits in the table -- and ``reset_generation``
+    refuses the very same database, which means the two authorities disagreed
+    about what they were both looking at.
+    """
+    state = await _authenticated_state(migrated_engine)
+    await _plant_row(
+        migrated_engine,
+        chain_generation=uuid.uuid4(),
+        prev_row_hmac=None,
+        row_hmac="f" * 64,
+        hmac_key_id=state.state_key_id,
+        occurred_at=datetime.now(UTC),
+    )
+
+    report = await _verify_migrated(migrated_engine, migrated_settings)
+
+    assert not report.clean
+    assert report.unattributed_rows == 1
+    assert any("outside the authenticated generations" in m for m in report.mismatches)
+
+
+@pytest.mark.asyncio
+async def test_a_forged_row_in_the_active_generation_is_reported_once(
+    migrated_engine,
+    migrated_settings,
+) -> None:
+    """An HMAC failure is an HMAC failure, and not also an intruder.
+
+    The unattributed count has to come from the row counts rather than from
+    the tally of rows that verified. That tally only advances on a row that
+    passed, so subtracting it would report every genuine HMAC failure a
+    second time as a row from somewhere else, and send an operator looking
+    for a forger who is not there.
+    """
+    state = await _authenticated_state(migrated_engine)
+    await _plant_row(
+        migrated_engine,
+        chain_generation=state.generation,
+        prev_row_hmac=state.head_row_hmac,
+        row_hmac="a" * 64,
+        hmac_key_id=state.state_key_id,
+        occurred_at=datetime.now(UTC),
+    )
+
+    report = await _verify_migrated(migrated_engine, migrated_settings)
+
+    assert not report.clean
+    assert len([m for m in report.mismatches if "HMAC mismatch" in m]) == 1
+    assert report.unattributed_rows == 0
+    assert not any("outside the authenticated generations" in m for m in report.mismatches)

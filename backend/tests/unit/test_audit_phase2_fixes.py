@@ -15,6 +15,10 @@ Three fixes landed before declaring Phase 2 done:
   TriggerScheduleClient on ``app.state``.
 
 These tests pin the fix so a future regression fails loudly.
+
+The database-backed test here runs against a MIGRATED schema. Boundary D
+refuses a direct INSERT into ``schedules``, so the replay batch is seeded
+the way the product seeds it, through ``ScheduleControlRepository``.
 """
 
 from __future__ import annotations
@@ -24,19 +28,20 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
 from z4j_brain.persistence import models  # noqa: F401
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.enums import ScheduleKind
 from z4j_brain.persistence.models import (
     PendingFire,
     Project,
-    Schedule,
 )
 from z4j_brain.persistence.repositories import (
     ScheduleRepository,
 )
+from z4j_brain.persistence.repositories.schedule_control import (
+    ScheduleControlRepository,
+)
+from z4j_brain.scheduler_grpc.auth import _normalise_cn
 
 # =====================================================================
 # HIGH-1: removeprefix vs lstrip
@@ -58,45 +63,21 @@ class TestInterceptorRemovePrefix:
     is covered by ``packages/z4j-scheduler/tests/unit/test_audit_phase2_fixes.py``.
     """
 
-    def test_cn_starting_with_S_not_mangled(self) -> None:  # noqa: N802  capital S is the mangled-letter symptom under test
-        # The literal symptom: S gets stripped, "Scheduler-1"
-        # becomes "cheduler-1", allow-list match fails.
-        assert "Scheduler-1".removeprefix("DNS:") == "Scheduler-1"
-        # Whereas the broken behaviour:
-        assert "Scheduler-1".lstrip("DNS:") == "cheduler-1"
-
-    def test_dns_prefix_correctly_stripped(self) -> None:
-        # When the prefix is actually present, removeprefix removes it.
-        assert "DNS:scheduler-1".removeprefix("DNS:") == "scheduler-1"
-
-    def test_no_prefix_leaves_string_alone(self) -> None:
-        # Plain CN with no DNS prefix should be unchanged.
-        assert "scheduler-1".removeprefix("DNS:") == "scheduler-1"
-        assert "Nightly-Scheduler".removeprefix("DNS:") == "Nightly-Scheduler"
-        assert "DDD-cluster".removeprefix("DNS:") == "DDD-cluster"
-
-    def test_interceptor_normalisation_uses_removeprefix(self) -> None:
-        # Inline the same expression the interceptor uses to ensure
-        # both sides stay consistent. If a future refactor switches
-        # back to lstrip this assertion catches it.
-        # Pull the source of the interceptor module and confirm
-        # ``lstrip("DNS:")`` no longer appears.
-        # Round-9 audit fix -Sched-MED (Apr 2026): the helper now
-        # iterates a tuple of prefixes (DNS:, IP:, URI:, email:)
-        # using ``removeprefix`` rather than a single literal call;
-        # we still assert the substring ``removeprefix`` is present
-        # and that ``lstrip`` is absent.
-        import inspect
-
-        from z4j_brain.scheduler_grpc import auth as brain_auth
-
-        source = inspect.getsource(brain_auth)
-        assert 'lstrip("DNS:")' not in source
-        assert "lstrip('DNS:')" not in source
-        assert "removeprefix" in source
-        # And every general-name prefix is in the strip set.
-        for prefix in ("DNS:", "IP:", "URI:", "email:"):
-            assert prefix in source, f"_normalise_cn must strip {prefix} (-Sched-MED)"
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Scheduler-1", "Scheduler-1"),
+            ("Nightly-Scheduler", "Nightly-Scheduler"),
+            ("DDD-cluster", "DDD-cluster"),
+            ("DNS:scheduler-1", "scheduler-1"),
+            ("IP:127.0.0.1", "127.0.0.1"),
+            ("URI:spiffe://scheduler/one", "spiffe://scheduler/one"),
+            ("email:scheduler@example.test", "scheduler@example.test"),
+            ("  DNS:scheduler-1  ", "DNS:scheduler-1"),
+        ],
+    )
+    def test_production_cn_normaliser(self, raw: str, expected: str) -> None:
+        assert _normalise_cn(raw) == expected
 
 
 # =====================================================================
@@ -124,14 +105,11 @@ class _CountingSession:
 
 
 @pytest.fixture
-async def db():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+async def db(migrated_db_url: str):
+    # A migrated database, not a create_all() one: the Boundary-D guards
+    # that refuse a hand-written schedules row live in a migration, and a
+    # DatabaseManager is what installs the guard UDFs those triggers call.
+    engine = create_async_engine(migrated_db_url)
     yield DatabaseManager(engine)
     await engine.dispose()
 
@@ -153,48 +131,52 @@ class TestApplyCatchUpBatchedLookup:
         )
 
         project_id = uuid.uuid4()
-        schedule_ids = [uuid.uuid4() for _ in range(5)]
+        schedule_ids = []
         async with db.session() as s:
             s.add(Project(id=project_id, slug="proj", name="Proj"))
-            for sid in schedule_ids:
-                s.add(
-                    Schedule(
-                        id=sid,
-                        project_id=project_id,
-                        engine="celery",
-                        scheduler="z4j-scheduler",
-                        name=f"sched-{sid.hex[:8]}",
-                        task_name="t.t",
-                        kind=ScheduleKind.CRON,
-                        expression="0 * * * *",
-                        timezone="UTC",
-                        args=[],
-                        kwargs={},
-                        is_enabled=True,
-                        catch_up="fire_all_missed",
-                    ),
+            await s.flush()
+            control = ScheduleControlRepository(s)
+            for index in range(5):
+                # Through the control repository, because Boundary D refuses
+                # a direct INSERT into schedules.
+                row = await control.create_current(
+                    project_id=project_id,
+                    data={
+                        "engine": "celery",
+                        "scheduler": "z4j-scheduler",
+                        "name": f"sched-{index}",
+                        "task_name": "t.t",
+                        "kind": ScheduleKind.CRON.value,
+                        "expression": "0 * * * *",
+                        "timezone": "UTC",
+                        "is_enabled": True,
+                        "catch_up": "fire_all_missed",
+                    },
+                    planning_at=datetime.now(UTC),
                 )
+                schedule_ids.append(row.id)
             await s.commit()
 
-        # Build a synthetic batch of fires across all 5 schedules.
-        async with db.session() as s:
-            now = datetime.now(UTC)
-            fires = []
-            for sid in schedule_ids:
-                pf = PendingFire(
-                    id=uuid.uuid4(),
-                    fire_id=uuid.uuid4(),
-                    schedule_id=sid,
-                    project_id=project_id,
-                    engine="celery",
-                    payload={},
-                    scheduled_for=now,
-                    enqueued_at=now,
-                    expires_at=now + timedelta(days=1),
-                )
-                s.add(pf)
-                fires.append(pf)
-            await s.commit()
+        # A synthetic batch of fires across all 5 schedules. These are
+        # inputs to the filter, not buffered rows: _apply_catch_up reads
+        # ``schedule_id`` and ``fire_id`` off them and queries the DB only
+        # for the schedules, so persisting them would add a guarded write
+        # that proves nothing about the batching under test.
+        now = datetime.now(UTC)
+        fires = [
+            PendingFire(
+                id=uuid.uuid4(),
+                fire_id=uuid.uuid4(),
+                schedule_id=sid,
+                project_id=project_id,
+                engine="celery",
+                payload={},
+                scheduled_for=now,
+                enqueued_at=now,
+                expires_at=now + timedelta(days=1),
+            )
+            for sid in schedule_ids
+        ]
 
         async with db.session() as s:
             counting = _CountingSession(s)
@@ -213,17 +195,24 @@ class TestApplyCatchUpBatchedLookup:
 
 
 # =====================================================================
-# MED-1: trigger route uses Depends(get_settings)
+# MED-1: the schedule routes never reach into another object's privates
 # =====================================================================
 
 
-class TestTriggerRouteUsesProperDependency:
-    """The trigger route must NOT reach into ``dispatcher._settings``.
+class TestScheduleRoutesUseProperDependencies:
+    """The schedule routes must NOT reach into ``dispatcher._settings``.
 
-    The previous implementation read the brain's Settings via
-    ``getattr(dispatcher, "_settings", None)`` - a fragile private-
-    API access that breaks the moment CommandDispatcher's __slots__
-    or layout changes. The fix injects Settings via Depends.
+    An earlier implementation read the brain's Settings via
+    ``getattr(dispatcher, "_settings", None)``, a private-API access that
+    breaks the moment CommandDispatcher's layout changes. Configuration
+    arrives through the dependency system or not at all.
+
+    The original form of this class also pinned the gRPC trigger-client
+    singleton, which no longer exists: an operator trigger is now dispatched
+    by the brain itself in every configuration, because the brain is the fire
+    authority and the only side that can see a hold. The surviving invariant
+    is the one that was always the point, and the client's absence is now
+    asserted rather than its presence.
     """
 
     def test_dispatcher_underscore_settings_not_referenced(self) -> None:
@@ -232,16 +221,21 @@ class TestTriggerRouteUsesProperDependency:
         from z4j_brain.api import schedules as routes
 
         source = inspect.getsource(routes)
-        # Negative - the broken pattern is gone.
         assert 'getattr(dispatcher, "_settings"' not in source
         assert "dispatcher._settings" not in source
-        # Positive - Settings comes via Depends.
-        assert "Depends(get_settings)" in source
 
-    def test_singleton_helper_exists(self) -> None:
-        # The helper that builds + caches the TriggerScheduleClient
-        # on app.state. Pinning its existence so it isn't deleted
-        # by accident in a future refactor.
+    def test_a_trigger_opens_no_network_client(self) -> None:
+        """A click resolves inside the brain, on the request's own session.
+
+        A route that opened a gRPC channel would be back to sending an
+        operator's fire out to a component that cannot see the hold that
+        should stop it, and cannot accept the fire either.
+        """
+        import inspect
+
         from z4j_brain.api import schedules as routes
 
-        assert hasattr(routes, "_get_or_build_trigger_client")
+        source = inspect.getsource(routes)
+        assert not hasattr(routes, "_get_or_build_trigger_client")
+        assert "TriggerScheduleClient" not in source
+        assert "scheduler_trigger_url" not in source

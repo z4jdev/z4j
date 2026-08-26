@@ -43,6 +43,8 @@ async def _seed_project_channel(
     session: AsyncSession,
     *,
     role: ProjectRole,
+    channel_type: str = "pagerduty",
+    config: dict[str, str] | None = None,
 ) -> tuple[Project, User, NotificationChannel]:
     project = Project(slug=f"source-{role.value}", name="Source")
     user = User(
@@ -63,8 +65,8 @@ async def _seed_project_channel(
     channel = NotificationChannel(
         project_id=project.id,
         name="Primary PagerDuty",
-        type="pagerduty",
-        config={"integration_key": "SecretKey123"},
+        type=channel_type,
+        config=config if config is not None else {"integration_key": "SecretKey123"},
         is_active=True,
     )
     session.add(channel)
@@ -126,3 +128,62 @@ class TestProjectChannelImport:
         assert copied is not None
         assert copied.user_id == user.id
         assert copied.config["integration_key"] == "SecretKey123"
+
+    @pytest.mark.parametrize(
+        ("channel_type", "secret_key", "secret_value"),
+        [
+            (
+                "webhook",
+                "url",
+                "https://hooks.example.test/delivery/bearer-secret",
+            ),
+            (
+                "slack",
+                "webhook_url",
+                "https://hooks.slack.com/services/T000/B000/bearer-secret",
+            ),
+        ],
+    )
+    async def test_import_never_returns_secret_bearing_url(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+        channel_type: str,
+        secret_key: str,
+        secret_value: str,
+    ) -> None:
+        async def _accept_test_config(
+            candidate_type: str,
+            candidate_config: dict[str, str],
+        ) -> None:
+            assert candidate_type == channel_type
+            assert candidate_config[secret_key] == secret_value
+
+        monkeypatch.setattr(
+            "z4j_brain.api.user_notifications._validate_channel_config",
+            _accept_test_config,
+        )
+        project, user, channel = await _seed_project_channel(
+            session,
+            role=ProjectRole.ADMIN,
+            channel_type=channel_type,
+            config={secret_key: secret_value},
+        )
+
+        response = await import_user_channel_from_project(
+            UserChannelImportFromProjectRequest(
+                project_slug=project.slug,
+                channel_id=channel.id,
+            ),
+            user,
+            MembershipRepository(session),
+            ProjectRepository(session),
+            session,
+        )
+
+        assert response.config[secret_key] == "••••••••"
+        assert secret_value not in response.model_dump_json()
+
+        copied = await session.scalar(select(UserChannel))
+        assert copied is not None
+        assert copied.config[secret_key] == secret_value

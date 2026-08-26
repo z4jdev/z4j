@@ -740,12 +740,13 @@ class NotificationDeliveryRepository(BaseRepository[NotificationDelivery]):
     ) -> list[NotificationDelivery]:
         """Newest deliveries TO a specific user, capped at ``limit``.
 
-        Joins ``notification_deliveries.subscription_id`` to
-        ``user_subscriptions.user_id`` so a user sees every
-        notification that fired into one of their personal
-        subscriptions across all projects. Added v1.0.18 to
-        complement the project-scoped audit log with a personal
-        delivery history view.
+        Filters on the immutable ``recipient_user_id`` snapshot written when
+        a subscription-driven delivery is staged. Ownership cannot be derived
+        from the live subscription row: deleting a subscription sets
+        ``subscription_id`` NULL, while its delivery history must remain
+        visible to the historical recipient. Added v1.0.18 to complement the
+        project-scoped audit log; the durable owner snapshot was added in
+        v1.9.0.
 
         - ``project_id``: optional filter when the dashboard wants
           to scope the view to one project.
@@ -764,28 +765,16 @@ class NotificationDeliveryRepository(BaseRepository[NotificationDelivery]):
             raise ValueError("limit must be between 1 and 501")
         from sqlalchemy import or_
 
-        from z4j_brain.persistence.models import UserSubscription
-
-        # Subquery: subscription IDs that belong to this user. We
-        # cache the LEFT-JOIN-friendly id list so a delivery row
-        # whose subscription was deleted (subscription_id NULL)
-        # still surfaces if it carries a user_subscription_id we
-        # remember owning. For the v1.0.18 minimum, we just match
-        # by user-owned subscription_id at query time.
-        owned_subs = (
-            select(UserSubscription.id).where(UserSubscription.user_id == user_id).scalar_subquery()
-        )
-
-        # v1.1.0: a row "belongs to" the user if EITHER it fired
-        # into one of their subscriptions OR they personally
-        # triggered it (channel-test fires, which have
-        # subscription_id=NULL but triggered_by_user_id=user.id).
+        # A row "belongs to" the user if EITHER it was delivered to one of
+        # their subscriptions (snapshotted at write time) OR they personally
+        # triggered it (channel-test fires, which have subscription_id=NULL
+        # but triggered_by_user_id=user.id).
         # Without the OR, test fires never appear in the personal
         # Global Notification Log even though the user fired them
         # themselves. See migration 2026_04_27_0009.
         where_conds: list[Any] = [
             or_(
-                NotificationDelivery.subscription_id.in_(owned_subs),
+                NotificationDelivery.recipient_user_id == user_id,
                 NotificationDelivery.triggered_by_user_id == user_id,
             ),
         ]

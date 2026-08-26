@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from z4j_brain.auth.csrf import CSRF_HEADER_NAME
@@ -28,6 +28,7 @@ from z4j_brain.persistence.models import (
     ApiKey,
     AuditLog,
     AutomationRule,
+    AutomationRuleAdmission,
     Membership,
     Project,
     Session,
@@ -306,6 +307,10 @@ class TestCrud:
             assert p.status_code == 200, p.text
             assert p.json()["is_enabled"] is False
             assert p.json()["dry_run"] is False
+            async with brain_app.state.db.session() as session:
+                persisted = await session.get(AutomationRule, uuid.UUID(rid))
+                assert persisted is not None
+                assert persisted.config_revision == 2
 
             d = await ac.delete(f"{_BASE}/{rid}", headers=_hdr(ctx))
             assert d.status_code == 204
@@ -325,6 +330,13 @@ class TestCrud:
                 cb_execution_count=999,
             )
             s.add(rule)
+            await s.flush()
+            s.add(
+                AutomationRuleAdmission(
+                    rule_id=rule.id,
+                    admitted_at=datetime.now(UTC),
+                ),
+            )
             await s.commit()
             rid = str(rule.id)
         async with _client(brain_app, settings, ctx) as ac:
@@ -332,6 +344,15 @@ class TestCrud:
             assert r.status_code == 200, r.text
             assert r.json()["cb_tripped"] is False
             assert r.json()["cb_execution_count"] == 0
+        async with db.session() as s:
+            assert (
+                await s.scalar(
+                    select(func.count(AutomationRuleAdmission.id)).where(
+                        AutomationRuleAdmission.rule_id == uuid.UUID(rid),
+                    ),
+                )
+                == 0
+            )
 
 
 @pytest.mark.asyncio
@@ -516,6 +537,10 @@ class TestKillSwitch:
                 json={"automation_enabled": True},
             )
             assert on.json()["automation_enabled"] is True
+        async with brain_app.state.db.session() as session:
+            project = await session.get(Project, ctx["project_id"])
+            assert project is not None
+            assert project.automation_revision == 3
 
     async def test_operator_cannot_toggle(self, brain_app, settings) -> None:
         ctx = await _seed_actor(

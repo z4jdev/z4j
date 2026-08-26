@@ -17,6 +17,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.util import CommandError
 from sqlalchemy import create_engine, func, inspect, null, select, text
+from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Session
@@ -113,6 +114,8 @@ from z4j_core.schedule_external import (
     external_snapshot_frame_body,
     external_snapshot_frame_digest,
 )
+
+from tests.migration_head import code_head
 
 _SQLITE_AUDIT_STATE_UPDATE_TRIGGER_SQL = """
 CREATE TRIGGER audit_chain_state_boundary_f_no_update
@@ -214,6 +217,26 @@ def boundary_d_install(
 
 def _project(project_id: uuid.UUID, slug: str) -> Project:
     return Project(id=project_id, slug=slug, name=slug.title())
+
+
+def _insert_historical_project(
+    session: Session,
+    *,
+    project_id: uuid.UUID,
+    slug: str,
+) -> None:
+    """Insert through a pre-0014 project schema, not today's ORM mapper."""
+
+    session.execute(
+        text(
+            "INSERT INTO projects(id, slug, name) VALUES (:project_id, :slug, :name)",
+        ),
+        {
+            "project_id": project_id.hex,
+            "slug": slug,
+            "name": slug.title(),
+        },
+    )
 
 
 def _schedule(
@@ -411,8 +434,11 @@ async def test_legacy_subsecond_cursor_executes_after_boundary_d_upgrade(
     engine = create_engine(sync_url)
     try:
         with Session(engine) as session:
-            session.add(_project(project_id, "legacy-subsecond"))
-            session.flush()
+            _insert_historical_project(
+                session,
+                project_id=project_id,
+                slug="legacy-subsecond",
+            )
             _insert_pre_boundary_d_schedule(
                 session,
                 project_id=project_id,
@@ -438,11 +464,12 @@ async def test_legacy_subsecond_cursor_executes_after_boundary_d_upgrade(
     finally:
         engine.dispose()
 
-    await asyncio.to_thread(
-        command.upgrade,
-        config,
-        "v1_8_schedule_control_activate",
-    )
+    # Upgrade to head, not to the revision that happened to be head when
+    # this test was written. Everything below exercises RUNTIME behaviour
+    # through the ORM and the fire authority, and in production those
+    # always run against head, so parking the schema earlier tests a
+    # combination that never occurs and breaks on the next migration.
+    await asyncio.to_thread(command.upgrade, config, "head")
     database = DatabaseManager(create_async_engine(async_url))
     try:
         async with database.session(write=True) as session:
@@ -511,8 +538,11 @@ async def test_existing_activated_subsecond_cursor_is_repaired_at_head(
     engine = create_engine(sync_url)
     try:
         with Session(engine) as session:
-            session.add(_project(project_id, "activated-subsecond"))
-            session.flush()
+            _insert_historical_project(
+                session,
+                project_id=project_id,
+                slug="activated-subsecond",
+            )
             _insert_pre_boundary_d_schedule(
                 session,
                 project_id=project_id,
@@ -690,8 +720,11 @@ async def test_existing_invalid_quarantine_cursor_is_parked_at_head(
     engine = create_engine(sync_url)
     try:
         with Session(engine) as session:
-            session.add(_project(project_id, "invalid-quarantine-repair"))
-            session.flush()
+            _insert_historical_project(
+                session,
+                project_id=project_id,
+                slug="invalid-quarantine-repair",
+            )
             _insert_pre_boundary_d_schedule(
                 session,
                 project_id=project_id,
@@ -736,16 +769,32 @@ async def test_existing_invalid_quarantine_cursor_is_parked_at_head(
 
     engine = create_engine(sync_url)
     try:
-        with Session(engine) as session:
-            quarantined = session.get(Schedule, schedule_id)
+        with engine.connect() as connection:
+            # Read explicit columns, not session.get(Schedule, ...). The
+            # database is deliberately parked at an intermediate revision
+            # here, and the ORM model belongs to the CURRENT release, so a
+            # whole-entity load asks for columns a later migration has not
+            # created yet.
+            quarantined = (
+                connection.execute(
+                    sa_text(
+                        "SELECT is_enabled, quarantine_code, quarantine_control_token, "
+                        "control_token, last_run_at, next_run_at "
+                        "FROM schedules WHERE id = :schedule_id",
+                    ),
+                    {"schedule_id": schedule_id.hex},
+                )
+                .mappings()
+                .one_or_none()
+            )
             assert quarantined is not None
-            assert not quarantined.is_enabled
-            assert quarantined.quarantine_code == "migration_definition_invalid"
-            assert quarantined.quarantine_control_token == quarantined.control_token
-            assert quarantined.last_run_at is not None
-            assert quarantined.next_run_at is not None
-            assert quarantined.last_run_at.microsecond == 357644
-            assert quarantined.next_run_at.microsecond == 357644
+            assert not quarantined["is_enabled"]
+            assert quarantined["quarantine_code"] == "migration_definition_invalid"
+            assert quarantined["quarantine_control_token"] == quarantined["control_token"]
+            assert quarantined["last_run_at"] is not None
+            assert quarantined["next_run_at"] is not None
+            assert "357644" in str(quarantined["last_run_at"])
+            assert "357644" in str(quarantined["next_run_at"])
     finally:
         engine.dispose()
 
@@ -791,8 +840,11 @@ def test_sqlite_restore_rebases_above_target_authority_and_signs_marker(
     engine = create_engine(sync_url)
     try:
         with Session(engine) as session:
-            session.add(_project(project_id, "restore-rebase"))
-            session.flush()
+            _insert_historical_project(
+                session,
+                project_id=project_id,
+                slug="restore-rebase",
+            )
             _insert_pre_boundary_d_schedule(
                 session,
                 project_id=project_id,
@@ -1762,8 +1814,11 @@ def test_activation_backfills_distinct_generations_and_legacy_evidence(
     engine = create_engine(sync_url)
     try:
         with Session(engine) as session:
-            session.add(_project(project_id, "legacy"))
-            session.flush()
+            _insert_historical_project(
+                session,
+                project_id=project_id,
+                slug="legacy",
+            )
             _insert_pre_boundary_d_schedule(
                 session,
                 project_id=project_id,
@@ -1893,8 +1948,11 @@ async def test_external_activation_is_strictly_sequenced_and_replay_safe(
     sync_engine = create_engine(sync_url)
     try:
         with Session(sync_engine) as session:
-            session.add(_project(project_id, "external-stream"))
-            session.flush()
+            _insert_historical_project(
+                session,
+                project_id=project_id,
+                slug="external-stream",
+            )
             _insert_pre_boundary_d_schedule(
                 session,
                 project_id=project_id,
@@ -2771,8 +2829,11 @@ async def test_activated_legacy_scheduler_ack_is_history_only(
     engine = create_engine(sync_url)
     try:
         with Session(engine) as session:
-            session.add(_project(project_id, "legacy-ack"))
-            session.flush()
+            _insert_historical_project(
+                session,
+                project_id=project_id,
+                slug="legacy-ack",
+            )
             _insert_pre_boundary_d_schedule(
                 session,
                 project_id=project_id,
@@ -2889,7 +2950,7 @@ def test_activation_failure_rolls_back_d_and_resumes_from_f(
                 connection.execute(
                     text("SELECT version_num FROM alembic_version"),
                 ).scalar_one()
-                == "v1_8_schedule_cursor_repair"
+                == code_head()
             )
     finally:
         engine.dispose()
@@ -2989,8 +3050,11 @@ async def test_sqlite_retention_deletes_current_and_preserves_legacy(
     engine = create_engine(sync_url)
     try:
         with Session(engine) as session:
-            session.add(_project(project_id, "retention"))
-            session.flush()
+            _insert_historical_project(
+                session,
+                project_id=project_id,
+                slug="retention",
+            )
             _insert_pre_boundary_d_schedule(
                 session,
                 project_id=project_id,
@@ -3243,6 +3307,7 @@ async def test_event_ingestor_retries_a_gap_after_raw_event_dedup(
     try:
         async with database.session(write=True) as session:
             session.add(_project(project_id, "ingestor-external"))
+            await session.flush()
             session.add(
                 Agent(
                     id=agent_id,
@@ -3411,6 +3476,7 @@ async def test_framed_activation_reconciles_only_after_exact_terminal_replay(
     try:
         async with database.session(write=True) as session:
             session.add(_project(project_id, "framed-external"))
+            await session.flush()
             session.add(
                 Agent(
                     id=agent_id,
@@ -3643,6 +3709,7 @@ async def test_external_activation_claim_is_bound_to_exact_websocket_generation(
     try:
         async with database.session(write=True) as session:
             session.add(_project(project_id, "exact-activation"))
+            await session.flush()
             session.add(
                 Agent(
                     id=agent_id,
@@ -3752,6 +3819,7 @@ async def test_activated_brain_rejects_unsequenced_schedule_event_before_insert(
     try:
         async with database.session(write=True) as session:
             session.add(_project(project_id, "legacy-schedule-event"))
+            await session.flush()
             session.add(
                 Agent(
                     id=agent_id,
@@ -3833,6 +3901,7 @@ async def test_gateway_issues_activation_only_to_the_exact_stable_session(
     try:
         async with database.session(write=True) as session:
             session.add(_project(project_id, "gateway-activation"))
+            await session.flush()
             session.add(
                 Agent(
                     id=agent_id,
@@ -3971,6 +4040,7 @@ async def test_gateway_reactivates_restore_hold_with_fresh_epoch(
     try:
         async with database.session(write=True) as session:
             session.add(_project(project_id, "gateway-restore-reactivation"))
+            await session.flush()
             session.add_all(
                 [
                     Agent(
@@ -4247,6 +4317,225 @@ async def test_gateway_reactivates_restore_hold_with_fresh_epoch(
         await async_engine.dispose()
 
 
+async def test_gateway_activation_skips_revoked_agent_before_stream_or_command(
+    boundary_d_install: tuple[Config, str, str],
+) -> None:
+    """Registration is a hint; the durable tombstone wins at insertion."""
+    config, _, async_url = boundary_d_install
+    await asyncio.to_thread(command.upgrade, config, "head")
+    project_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    handle = SimpleNamespace(
+        agent_id=agent_id,
+        worker_id="scheduler-revoked",
+        registry_owner_id=uuid.uuid4(),
+        generation=uuid.uuid4(),
+    )
+    async_engine = create_async_engine(async_url)
+    database = DatabaseManager(async_engine)
+    try:
+        async with database.session(write=True) as session:
+            session.add(_project(project_id, "gateway-revoked"))
+            await session.flush()
+            session.add(
+                Agent(
+                    id=agent_id,
+                    project_id=project_id,
+                    name="revoked-cron",
+                    token_hash=f"revoked:{agent_id}",
+                    protocol_version="2",
+                    framework_adapter="bare",
+                    engine_adapters=["arq"],
+                    scheduler_adapters=["arqcron"],
+                    capabilities={},
+                    state=AgentState.OFFLINE,
+                    revoked_at=datetime.now(UTC),
+                ),
+            )
+            await session.commit()
+
+        class _Audit:
+            async def record(self, _repo, **_kwargs):
+                pytest.fail("revoked activation must not write its allow audit")
+
+        class _Registry:
+            async def deliver_exact(self, **_kwargs):
+                pytest.fail("revoked activation must not reach physical delivery")
+
+        delivered = await _issue_external_schedule_activations(
+            db=database,
+            settings=SimpleNamespace(command_timeout_seconds=60),
+            dispatcher=SimpleNamespace(audit=_Audit()),
+            registry=_Registry(),
+            session_handle=handle,
+            project_id=project_id,
+            agent_id=agent_id,
+            schedulers=["arqcron"],
+            capabilities={
+                "arqcron": [
+                    EXTERNAL_SCHEDULE_STABLE_SNAPSHOT_CAPABILITY,
+                ],
+            },
+            runtime_features=[EXTERNAL_SCHEDULE_RUNTIME_FEATURE],
+        )
+        assert delivered == 0
+
+        async with database.session() as session:
+            assert await session.scalar(select(func.count(ScheduleExternalStream.id))) == 0
+            assert (
+                await session.scalar(
+                    select(func.count(Command.id)).where(
+                        Command.action == "schedule.external.activate",
+                    ),
+                )
+                == 0
+            )
+    finally:
+        await async_engine.dispose()
+
+
+async def test_external_control_planning_rejects_revoked_stream_executor(
+    boundary_d_install: tuple[Config, str, str],
+) -> None:
+    """An ACTIVE stream cannot mint fresh work for its retired agent."""
+    config, _, async_url = boundary_d_install
+    await asyncio.to_thread(command.upgrade, config, "head")
+    database = DatabaseManager(create_async_engine(async_url))
+    project_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    registry_owner_id = uuid.uuid4()
+    session_generation = str(uuid.uuid4())
+    adapter_instance_id = str(uuid.uuid4())
+    stream_id: uuid.UUID | None = None
+    try:
+        occurred_at = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+        owner = "arqcron"
+        source_scope = '{"kind":"scheduler-owner","owner":"arqcron","version":1}'
+        projected = {
+            "source_key": "revoked-control-source",
+            "engine": "arq",
+            "scheduler": owner,
+            "name": "revoked-control-schedule",
+            "task_name": "jobs.revoked_control",
+            "kind": "interval",
+            "expression": "60",
+            "timezone": "UTC",
+            "queue": None,
+            "priority": "normal",
+            "args": [],
+            "kwargs": {},
+            "is_enabled": True,
+            "last_run_at": None,
+            "next_run_at": None,
+            "total_runs": 0,
+            "external_id": None,
+            "catch_up": "skip",
+            "source": "agent",
+            "source_hash": None,
+        }
+        async with database.session(write=True) as session:
+            session.add(_project(project_id, "revoked-control"))
+            await session.flush()
+            agent = Agent(
+                id=agent_id,
+                project_id=project_id,
+                name="revoked-control-agent",
+                token_hash=uuid.uuid4().hex,
+                protocol_version="2",
+                framework_adapter="bare",
+                engine_adapters=["arq"],
+                scheduler_adapters=[owner],
+                capabilities={},
+                state=AgentState.ONLINE,
+            )
+            session.add(agent)
+            await session.flush()
+            external = ScheduleExternalRepository(session)
+            stream = await external.ensure_activation_epoch(
+                project_id=project_id,
+                owner=owner,
+                source_scope=source_scope,
+                occurred_at=occurred_at,
+                adapter_instance_id=adapter_instance_id,
+                executor_agent_id=agent_id,
+                executor_registry_owner_id=registry_owner_id,
+                executor_session_generation=session_generation,
+            )
+            stream_id = stream.id
+            body = external_projection_body(
+                stream_id=str(stream.id),
+                epoch_uuid=str(stream.current_epoch_uuid),
+                epoch_number=stream.current_epoch_number,
+                sequence=1,
+                kind="snapshot",
+                owner=owner,
+                source_scope=source_scope,
+                adapter_instance_id=adapter_instance_id,
+                schedules=[projected],
+                deleted_source_keys=[],
+                complete=True,
+                stable_source=True,
+            )
+            applied = await external.apply_projection(
+                project_id=project_id,
+                stream_id=stream.id,
+                epoch_uuid=stream.current_epoch_uuid,
+                epoch_number=stream.current_epoch_number,
+                sequence=1,
+                kind="snapshot",
+                owner=owner,
+                source_scope=source_scope,
+                adapter_instance_id=adapter_instance_id,
+                schedules=[projected],
+                deleted_source_keys=[],
+                complete=True,
+                stable_source=True,
+                payload_digest=external_projection_digest(body),
+                operation_id=None,
+                occurred_at=occurred_at,
+            )
+            assert applied.disposition == "applied"
+            schedule = (
+                await session.execute(
+                    select(Schedule).where(Schedule.external_stream_id == stream.id),
+                )
+            ).scalar_one()
+            await AgentRepository(session).revoke(agent, at=occurred_at + timedelta(seconds=1))
+            plan = await external.plan_control_operation(
+                project_id=project_id,
+                stream_id=stream.id,
+                schedule_id=schedule.id,
+                enabled=False,
+                issued_by=None,
+                source_ip=None,
+                timeout_at=occurred_at + timedelta(minutes=5),
+            )
+            assert plan.disposition == "stream_not_executable"
+            assert plan.operation is None
+            assert plan.command is None
+            await session.commit()
+
+        async with database.session() as session:
+            assert stream_id is not None
+            assert await session.scalar(select(func.count(ScheduleExternalStream.id))) == 1
+            assert (
+                await session.scalar(
+                    select(func.count(ScheduleExternalControlOperation.id)),
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    select(func.count(Command.id)).where(
+                        Command.action == "schedule.external.control",
+                    ),
+                )
+                == 0
+            )
+    finally:
+        await database.dispose()
+
+
 @pytest.mark.parametrize("first_claimed", [False, True])
 async def test_gateway_replaces_only_a_never_claimed_activation(
     boundary_d_install: tuple[Config, str, str],
@@ -4273,6 +4562,7 @@ async def test_gateway_replaces_only_a_never_claimed_activation(
     try:
         async with database.session(write=True) as session:
             session.add(_project(project_id, "gateway-activation-reconnect"))
+            await session.flush()
             session.add(
                 Agent(
                     id=agent_id,
@@ -5905,6 +6195,64 @@ async def test_external_control_timeout_is_specialized_and_fail_closed(
         await async_engine.dispose()
 
 
+async def test_external_control_agent_timeout_status_is_rejected_without_mutation(
+    boundary_d_install: tuple[Config, str, str],
+) -> None:
+    config, _, async_url = boundary_d_install
+    await asyncio.to_thread(command.upgrade, config, "head")
+    async_engine = create_async_engine(async_url)
+    database = DatabaseManager(async_engine)
+    base = datetime(2026, 7, 25, 19, 30, tzinfo=UTC)
+    try:
+        seeded = await _seed_claimed_external_control(
+            database,
+            slug="control-agent-timeout",
+            occurred_at=base,
+        )
+        async with database.session(write=True) as session:
+            receipt = await ScheduleExternalRepository(
+                session,
+            ).apply_control_result(
+                command_id=seeded.command_id,
+                project_id=seeded.project_id,
+                agent_id=seeded.agent_id,
+                status="timeout",
+                result_payload={"adapter_timeout": True},
+                error="adapter deadline elapsed",
+                transport_kind="websocket",
+                registry_owner_id=seeded.registry_owner_id,
+                session_generation=seeded.session_generation,
+                delivery_claim_token=str(seeded.claim_token),
+                occurred_at=base + timedelta(minutes=1, seconds=1),
+            )
+            assert receipt.disposition == "invalid_status"
+            await session.commit()
+
+        async with database.session() as session:
+            schedule = await session.get(Schedule, seeded.schedule_id)
+            stream = await session.get(
+                ScheduleExternalStream,
+                seeded.stream_id,
+            )
+            operation = await session.get(
+                ScheduleExternalControlOperation,
+                seeded.operation_id,
+            )
+            command_row = await session.get(Command, seeded.command_id)
+            assert schedule is not None
+            assert stream is not None
+            assert operation is not None
+            assert command_row is not None
+            assert schedule.is_enabled is True
+            assert stream.phase == "ACTIVE"
+            assert operation.status == "CLAIMED"
+            assert command_row.status == CommandStatus.DISPATCHED
+            assert command_row.result is None
+            assert command_row.error is None
+    finally:
+        await async_engine.dispose()
+
+
 async def test_external_control_failure_result_ambiguates_without_truth_change(
     boundary_d_install: tuple[Config, str, str],
 ) -> None:
@@ -6214,6 +6562,7 @@ async def test_external_control_changes_truth_only_on_allowed_observed_projectio
     try:
         async with database.session(write=True) as session:
             session.add(_project(project_id, "external-control"))
+            await session.flush()
             session.add(
                 Agent(
                     id=agent_id,

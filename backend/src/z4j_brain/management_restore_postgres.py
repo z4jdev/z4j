@@ -21,9 +21,10 @@ import stat
 import subprocess
 import threading
 import uuid
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -46,12 +47,18 @@ from z4j_brain.management_reset import (
     release_schema_contract_manifest,
 )
 from z4j_brain.management_restore import (
+    _PREVIOUS_RELEASE_HEAD,
+    _SQLITE_SOURCE_SCHEMA_DIGESTS,
     DatabaseRestoreRefused,
+    _absent_directories,
     _attestation_envelope,
+    _ensure_durable_directory,
     _file_digest,
     _fsync_directory,
+    _fsync_new_directory_names,
     _read_phase,
     _replace_phase,
+    _restore_migration_config,
     _stage_source,
     authenticated_database_snapshot,
     finalize_restored_database,
@@ -82,6 +89,12 @@ _TOC_LINE = re.compile(r"^\d+;\s+\d+\s+\d+\s+(.+)$")
 _COPY_HEADER = re.compile(
     r"^COPY public\.([a-z0-9_]+) \(([^)]+)\) FROM stdin;$",
 )
+#: Name the recovery dump is written under while it is still being produced.
+#: Nothing reads it, which is the point: see ``_run_restore``. Deliberately
+#: SHORTER than the finished name -- the operation directory already spends a
+#: 64-character target key and a UUID, and a longer one put pg_dump's output
+#: path past the 260-character limit Windows still applies to it.
+_RECOVERY_PARTIAL_NAME = "recovery.part"
 _MAX_COPY_EXTRACT_BYTES = 32 * 1024 * 1024
 _MAX_SCHEMA_EXTRACT_BYTES = 16 * 1024 * 1024
 _RELEASE_EXTENSIONS = frozenset({"citext", "pg_trgm", "pgcrypto"})
@@ -168,6 +181,15 @@ _LEGACY_FUNCTION_DEFINITIONS_DIGEST = (
 # inspected by matching-major client/server pairs.  A converted or cross-major
 # archive is not valid derivation evidence for this fail-closed map.
 _RELEASE_SCHEMA_DEFINITIONS_DIGESTS = {
+    16: "320359d69d4cea4683da5e37d575d9989ce78b7d9563b3ab63b364d832eb6546",
+    17: "320359d69d4cea4683da5e37d575d9989ce78b7d9563b3ab63b364d832eb6546",
+    18: "9a77a23a38b979712a5b1650732ff020e5d7ed05c115ca426362f6df4a5d08d0",
+}
+# The previous release head, derived the same way: a database migrated to that
+# head on a live server of each major, archived by the matching-major pinned
+# client.  Cross-checked against the immutable published release image, which
+# is an oracle no current source tree can talk itself into agreeing with.
+_PREVIOUS_SCHEMA_DEFINITIONS_DIGESTS = {
     16: "dbeb00b3791e608e895ce8da3edf04f17580b0d1aae978c5d8135c74bdf2bef8",
     17: "dbeb00b3791e608e895ce8da3edf04f17580b0d1aae978c5d8135c74bdf2bef8",
     18: "cccd4a1651106141697c0b8d247d35dd679bc65e7360bb913a956d6ca556ca56",
@@ -179,6 +201,92 @@ _LEGACY_SCHEMA_DEFINITIONS_DIGESTS = {
     17: "570e8353d0bc9bec897fa9bda2dbee1b5ad1a71329e984095d5bef6bb4e02d91",
     18: "052ea06f4769c42eb75bdd38b81606ce94c8ddfe3001809cbef61c7751c3e6cb",
 }
+#: The exact head every hardcoded map above was measured at, spelled out.
+#:
+#: ``RELEASE_MIGRATION_HEAD`` and ``_PREVIOUS_RELEASE_HEAD`` are imported names
+#: that move on the next release, while each digest above was captured by hand
+#: from one real database at one exact head.  Binding a moving name to fixed
+#: evidence without pinning the head means the next head bump silently
+#: re-points measured evidence at an unmeasured head: every restore of the
+#: displaced head is then refused for a schema mismatch whose cause is
+#: invisible, and the Boundary-D set below adopts a head nobody confirmed
+#: shipped D activated.  The literals here turn that into an import failure, so
+#: the commit that bumps the head is the commit that has to re-derive.
+_MEASURED_RELEASE_HEAD = "v1_9_audit_action_pattern"
+_MEASURED_PREVIOUS_RELEASE_HEAD = "v1_8_schedule_cursor_repair"
+_SCHEMA_DEFINITIONS_DIGESTS_BY_HEAD = {
+    RELEASE_MIGRATION_HEAD: _RELEASE_SCHEMA_DEFINITIONS_DIGESTS,
+    _PREVIOUS_RELEASE_HEAD: _PREVIOUS_SCHEMA_DEFINITIONS_DIGESTS,
+    _LEGACY_SOURCE_HEAD: _LEGACY_SCHEMA_DEFINITIONS_DIGESTS,
+}
+#: Heads whose archives carry an activated Boundary D, so their schedule
+#: authority is read out of the archive rather than assumed.  The previous
+#: release head belongs here: it shipped Boundary D already activated, and
+#: treating it like the pre-D legacy head would hardcode revision 0, epoch 0
+#: and an empty external-authority manifest over real rows, which silently
+#: drops the stopped-executor ceremony for an operator who has executors.
+_BOUNDARY_D_SOURCE_HEADS = frozenset(
+    {
+        RELEASE_MIGRATION_HEAD,
+        _PREVIOUS_RELEASE_HEAD,
+    },
+)
+#: Every head this release can accept as a restore source.  The previous
+#: release head shares the current executable-function contract: the delta
+#: between them is additive table columns and one CHECK, so no function body
+#: or signature moved.  Its static schema text does differ, which is why only
+#: the schema-definitions map above gains a per-major entry.
+_SUPPORTED_SOURCE_HEADS = frozenset(_SCHEMA_DEFINITIONS_DIGESTS_BY_HEAD)
+
+
+def _assert_source_head_evidence_is_current() -> None:
+    """Refuse to import while a head moved out from under its evidence.
+
+    Every claim this module makes about a source head is hand-derived and
+    head-specific, so a head that moves without its evidence being re-derived
+    is not a smaller version of a working restore: it is a restore that
+    refuses every real archive for an unrelated-looking reason.  Failing at
+    import turns that into a test-suite failure on the commit that causes it.
+
+    The allowlist comparison is the other half.  The two backends restore the
+    same logical database, so an operator told by one backend that their
+    backup is restorable must not be told otherwise by the other; letting the
+    allowlists drift apart is how that promise gets broken silently.
+    """
+
+    for imported, measured, role in (
+        (RELEASE_MIGRATION_HEAD, _MEASURED_RELEASE_HEAD, "release"),
+        (
+            _PREVIOUS_RELEASE_HEAD,
+            _MEASURED_PREVIOUS_RELEASE_HEAD,
+            "previous release",
+        ),
+    ):
+        if imported != measured:
+            raise RuntimeError(
+                f"PostgreSQL restore {role} head moved to {imported!r} while its "
+                f"per-major schema-definition digests and its Boundary-D "
+                f"activation were measured at {measured!r}: re-derive both from a "
+                f"real server of every supported major, then pin the new head.",
+            )
+    unconfirmed = sorted(
+        _BOUNDARY_D_SOURCE_HEADS - {_MEASURED_RELEASE_HEAD, _MEASURED_PREVIOUS_RELEASE_HEAD},
+    )
+    if unconfirmed:
+        raise RuntimeError(
+            "PostgreSQL restore reads Boundary-D authority out of archives at "
+            f"heads with no confirmed activated release behind them: {', '.join(unconfirmed)}",
+        )
+    if frozenset(_SQLITE_SOURCE_SCHEMA_DIGESTS) != _SUPPORTED_SOURCE_HEADS:
+        raise RuntimeError(
+            "PostgreSQL and SQLite restore source allowlists disagree: "
+            f"postgres={sorted(_SUPPORTED_SOURCE_HEADS)}, "
+            f"sqlite={sorted(_SQLITE_SOURCE_SCHEMA_DIGESTS)}",
+        )
+
+
+_assert_source_head_evidence_is_current()
+
 _RUNTIME_PARTITION = re.compile(
     r"^(?:events|schedule_fires)(?:_default|_\d{4}_\d{2}_\d{2})$",
 )
@@ -390,7 +498,31 @@ def _resolve_tool(name: str) -> _Tool:
     path = Path(candidate)
     _assert_trusted_path(path)
     observed = path.stat()
-    digest = _sha256_file(path)
+    try:
+        digest = _sha256_file(path)
+    except DatabaseRestoreRefused as refusal:
+        # ``_sha256_file`` reaches ``_file_digest``, whose Windows arm is the
+        # owner-private reader written for restore ARTEFACTS. A PostgreSQL
+        # client installed the ordinary way is a shared system binary: not
+        # owned by the invoking user and readable by others, so it fails that
+        # rule and the operator is told their "restore artifact" cannot be
+        # read, about a tool they did not choose the location of.
+        #
+        # The rule is not relaxed here. What changes is that the refusal says
+        # which file it means, why a system binary trips it, and the one thing
+        # that resolves it, because the alternative is an operator reading
+        # "artifact" and looking at their backup.
+        if os.name != "nt":
+            raise
+        message = (
+            f"restore: {name} at {path} could not be verified. z4j reads the "
+            f"PostgreSQL client binaries under the same owner-private rule it "
+            f"uses for restore artefacts, and a client installed the usual way "
+            f"on Windows does not meet it ({refusal}). Copy the PostgreSQL "
+            f"client binaries into a directory you own privately and put that "
+            f"directory first on PATH."
+        )
+        raise DatabaseRestoreRefused(message) from refusal
     probe = subprocess.run(  # noqa: S603  path identity was validated above
         [str(path), "--version"],
         env=_minimal_process_environment(),
@@ -676,6 +808,13 @@ def _passfile_value(value: str) -> str:
 
 
 def _write_passfile(path: Path, target: _Target) -> None:
+    """Write the short-lived libpq password file.
+
+    The bytes are flushed but the directory entry deliberately is not. Every
+    caller removes this file in a ``finally``, so a crash that loses the name
+    loses a copy of the database password, which is the outcome to prefer.
+    """
+
     if target.password is None:
         return
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -872,9 +1011,15 @@ def _inspect_schema_definitions(
     canonical = "\n\n".join(blocks) + "\n"
     digest = hashlib.sha256(canonical.encode()).hexdigest()
     if digest != expected_digest:
+        # Report both sides. The reset path already does, and without it an
+        # operator (or a maintainer adding a migration) is told only that a
+        # fail-closed contract refused them, with no way to see what was
+        # actually observed. The digest is a hash of public schema text, not
+        # a secret.
         raise DatabaseRestoreRefused(
             "restore archive static schema definitions do not match "
-            "the recognized migration-head contract",
+            f"the recognized migration-head contract "
+            f"(observed={digest}, expected={expected_digest})",
         )
     return digest
 
@@ -994,10 +1139,9 @@ def _inspect_toc(  # noqa: PLR0912, PLR0915
         raise DatabaseRestoreRefused(
             "restore archive type manifest differs from release head",
         )
+    boundary_d_head = source_head in _BOUNDARY_D_SOURCE_HEADS
     expected_functions = (
-        _RELEASE_FUNCTION_SIGNATURES
-        if source_head == RELEASE_MIGRATION_HEAD
-        else _LEGACY_FUNCTION_SIGNATURES
+        _RELEASE_FUNCTION_SIGNATURES if boundary_d_head else _LEGACY_FUNCTION_SIGNATURES
     )
     if functions != expected_functions:
         raise DatabaseRestoreRefused(
@@ -1008,15 +1152,15 @@ def _inspect_toc(  # noqa: PLR0912, PLR0915
         archive,
         expected_digest=(
             _RELEASE_FUNCTION_DEFINITIONS_DIGEST
-            if source_head == RELEASE_MIGRATION_HEAD
+            if boundary_d_head
             else _LEGACY_FUNCTION_DEFINITIONS_DIGEST
         ),
     )
-    schema_definition_digests = (
-        _RELEASE_SCHEMA_DEFINITIONS_DIGESTS
-        if source_head == RELEASE_MIGRATION_HEAD
-        else _LEGACY_SCHEMA_DEFINITIONS_DIGESTS
-    )
+    schema_definition_digests = _SCHEMA_DEFINITIONS_DIGESTS_BY_HEAD.get(source_head)
+    if schema_definition_digests is None:
+        raise DatabaseRestoreRefused(
+            f"restore archive migration head has no schema contract: {source_head}",
+        )
     expected_schema_definitions_digest = schema_definition_digests.get(
         pg_restore.major,
     )
@@ -1031,7 +1175,7 @@ def _inspect_toc(  # noqa: PLR0912, PLR0915
         expected_digest=expected_schema_definitions_digest,
     )
     required = ("TABLE DATA public alembic_version",)
-    if source_head == RELEASE_MIGRATION_HEAD:
+    if boundary_d_head:
         required += (
             "TABLE public audit_chain_state",
             "TABLE public schedule_revision_state",
@@ -1039,7 +1183,7 @@ def _inspect_toc(  # noqa: PLR0912, PLR0915
         )
     if any(not any(fragment in entry for entry in entries) for fragment in required):
         raise DatabaseRestoreRefused(
-            "restore archive lacks required current-head objects",
+            f"restore archive lacks objects required at head {source_head}",
         )
     canonical = (
         "\n".join(sorted(entries)) + "\nSCHEMA DEFINITIONS SHA256 " + schema_definitions_digest
@@ -1091,11 +1235,67 @@ def _copy_unescape(value: str) -> str | None:
     return "".join(output)
 
 
+#: The canonical row order of every archive table that feeds the manifest.
+#:
+#: These mirror the ``ORDER BY`` the SQLite backend reads the same tables with,
+#: so the two backends describe the same logical database in the same order.
+_ARCHIVE_TABLE_ORDER_COLUMNS: dict[str, tuple[str, ...]] = {
+    "alembic_version": ("version_num",),
+    "schedule_revision_state": ("singleton_id",),
+    "schedule_external_epoch_allocator": ("singleton_id",),
+    "schedule_external_streams": ("id",),
+    "schedule_external_stream_epochs": ("epoch_number", "epoch_uuid"),
+    "schedule_external_control_operations": ("id",),
+}
+#: Columns whose COPY text is a number, so ``10`` sorts after ``9``.
+_ARCHIVE_NUMERIC_ORDER_COLUMNS = frozenset({"epoch_number"})
+
+
+def _order_component(column: str, value: str | None) -> tuple[int, int, str]:
+    """Rank one column value so absent, numeric and text never compare."""
+
+    if value is None:
+        return (0, 0, "")
+    if column in _ARCHIVE_NUMERIC_ORDER_COLUMNS:
+        try:
+            return (1, int(value), "")
+        except ValueError:
+            return (2, 0, value)
+    return (2, 0, value)
+
+
+def _archive_row_order_key(
+    table_name: str,
+    row: dict[str, str | None],
+) -> tuple[tuple[int, int, str], ...]:
+    """Return one total, value-derived order key for an extracted row."""
+
+    key = tuple(
+        _order_component(column, row.get(column))
+        for column in _ARCHIVE_TABLE_ORDER_COLUMNS.get(table_name, ())
+    )
+    # The declared columns are unique in a well-formed source, but a malformed
+    # one must still order totally rather than fall back to physical order, so
+    # the whole canonical row is the last component.
+    return (*key, (2, 0, canonical_json(row).decode()))
+
+
 def _extract_table(
     pg_restore: _Tool,
     archive: Path,
     table_name: str,
 ) -> list[dict[str, str | None]]:
+    """Read one archive table in a fixed, value-derived row order.
+
+    pg_restore replays a table in physical order, so a VACUUM FULL or any row
+    rewrite between two dumps of the same logical database reorders it.  The
+    manifest built from these rows is what the stopped-executor attestation
+    challenge is derived from, and a resumed operation re-derives that
+    challenge, so an unordered read would let the same source produce a
+    different challenge on the second run and strand the operator mid ceremony
+    with no way to finish it.
+    """
+
     result = _run_identity_bound(
         pg_restore,
         [
@@ -1151,6 +1351,7 @@ def _extract_table(
         raise DatabaseRestoreRefused(
             f"restore archive COPY stream is unterminated for {table_name}",
         )
+    rows.sort(key=lambda row: _archive_row_order_key(table_name, row))
     return rows
 
 
@@ -1166,20 +1367,48 @@ def _single_int(
     return int(str(rows[0][column]))
 
 
+def _assert_activated_boundary_singleton(
+    rows: list[dict[str, str | None]],
+    table_name: str,
+) -> None:
+    """Refuse a source claiming an activated head without activated state.
+
+    This has to run here, at preflight, and not on the restored database.  The
+    only other place the unactivated state is noticed is the authenticated
+    snapshot taken after ``pg_restore --clean --if-exists`` has already
+    overwritten the live target, which turns a source that should never have
+    been accepted into a destroyed database plus a retained fence.  The SQLite
+    backend refuses the same archive with nothing touched, and the two
+    backends have to agree about the same logical database.
+
+    ``guard_version`` arrives from the archive as COPY text, so the activated
+    value is the text PostgreSQL prints for the integer 1.
+    """
+
+    if len(rows) != 1 or rows[0].get("guard_version") != "1":
+        raise DatabaseRestoreRefused(
+            f"restore archive {table_name} is not Boundary-D activated",
+        )
+
+
 def _archive_source_head(
     pg_restore: _Tool,
     archive: Path,
 ) -> str:
     versions = _extract_table(pg_restore, archive, "alembic_version")
-    if (
-        len(versions) != 1
-        or set(versions[0]) != {"version_num"}
-        or versions[0]["version_num"] not in {RELEASE_MIGRATION_HEAD, _LEGACY_SOURCE_HEAD}
-    ):
+    if len(versions) != 1 or set(versions[0]) != {"version_num"}:
         raise DatabaseRestoreRefused(
-            "restore archive has an unsupported or malformed migration head",
+            "restore archive has a malformed migration head",
         )
-    return str(versions[0]["version_num"])
+    head = str(versions[0]["version_num"])
+    if head not in _SUPPORTED_SOURCE_HEADS:
+        raise DatabaseRestoreRefused(
+            f"this release cannot restore a backup taken at migration head "
+            f"{head!r}. Supported heads are "
+            f"{', '.join(sorted(_SUPPORTED_SOURCE_HEADS))}. Install the z4j "
+            f"release matching that head, restore there, then upgrade.",
+        )
+    return head
 
 
 def _archive_source_authority(
@@ -1190,12 +1419,19 @@ def _archive_source_authority(
     archive_digest: str,
     toc_digest: str,
 ) -> dict[str, Any]:
+    if source_head not in _SUPPORTED_SOURCE_HEADS:
+        raise DatabaseRestoreRefused(
+            f"restore archive migration head has no source authority: {source_head}",
+        )
     revisions = _extract_table(
         pg_restore,
         archive,
         "schedule_revision_state",
     )
-    if source_head == _LEGACY_SOURCE_HEAD:
+    if source_head not in _BOUNDARY_D_SOURCE_HEADS:
+        # Only the pre-Boundary-D legacy head takes the stub. Every other
+        # supported head shipped D activated, so its revision, epoch and
+        # external-executor authority are read out of the archive below.
         legacy_revision = (
             0
             if not revisions
@@ -1236,6 +1472,11 @@ def _archive_source_authority(
     allocators = _extract_table(
         pg_restore,
         archive,
+        "schedule_external_epoch_allocator",
+    )
+    _assert_activated_boundary_singleton(revisions, "schedule_revision_state")
+    _assert_activated_boundary_singleton(
+        allocators,
         "schedule_external_epoch_allocator",
     )
     streams = _extract_table(
@@ -1527,6 +1768,248 @@ async def _recover_committed_finalization(
         )
 
 
+async def _assert_coordinator_still_owns_the_ceremony(
+    connection: _PinnedConnection,
+) -> None:
+    """Refuse unless the running coordinator still holds the schema lock.
+
+    Committing part way through a ceremony is only safe while the lock
+    outlives a transaction, which the session-scoped form does and the
+    transaction-scoped form does not. A second session is the only one that
+    can tell the two apart: it succeeds in taking the lock precisely when the
+    coordinator has stopped holding it.
+    """
+
+    taken = await connection.fetchrow(
+        "SELECT pg_try_advisory_lock($1) AS taken",
+        SCHEMA_TRANSITION_ADVISORY_LOCK_KEY,
+    )
+    if taken is None or not bool(taken["taken"]):
+        return
+    # Session-scoped, so closing this connection is what releases it; do it
+    # explicitly anyway rather than leaving the lifetime to the pool.
+    with contextlib.suppress(Exception):
+        await connection.execute(
+            "SELECT pg_advisory_unlock($1)",
+            SCHEMA_TRANSITION_ADVISORY_LOCK_KEY,
+        )
+    raise DatabaseRestoreRefused(
+        "PostgreSQL restore coordinator no longer holds the schema transition lock",
+    )
+
+
+async def _assert_finalization_is_durable(
+    target: _Target,
+    *,
+    finalization: Mapping[str, Any],
+    operation_id: uuid.UUID,
+    source_digest: str,
+) -> None:
+    """Prove the finalization outlived its commit, from a second connection.
+
+    A connection can see its own uncommitted work, so the coordinator is the
+    one place in the system that cannot answer whether the rebases and the
+    signed marker are durable. Put the question to a connection that has no
+    such privilege, and require it to describe the same finalization the
+    caller is about to publish: anything less and the startup fence would come
+    down on the strength of writes a crash can still take back.
+
+    Deliberately a plain read rather than the authenticated recovery used on
+    resume. The audit generation was already authenticated by finalization
+    itself, and the reader that would repeat that here has to take the
+    schema-transition lock this coordinator is still holding, which is a wait
+    that never ends. What no earlier check could establish, and what this one
+    does, is that the writes are visible outside the transaction that made
+    them.
+    """
+
+    revision_rebase = finalization["revision_rebase"]
+    epoch_rebase = finalization["epoch_rebase"]
+    connection = await _connect(target)
+    try:
+        await _assert_coordinator_still_owns_the_ceremony(connection)
+        row = await connection.fetchrow(
+            """
+            SELECT
+              marker.action AS action,
+              marker.target_id AS target_id,
+              marker.metadata::text AS metadata,
+              revision.current_revision AS current_revision,
+              revision.change_log_pruned_through AS pruned_through,
+              allocator.current_epoch_number AS current_epoch
+            FROM audit_log AS marker
+            CROSS JOIN schedule_revision_state AS revision
+            CROSS JOIN schedule_external_epoch_allocator AS allocator
+            WHERE marker.id = $1::uuid
+            """,
+            str(finalization["marker_id"]),
+        )
+    finally:
+        await connection.close()
+    if row is None:
+        raise DatabaseRestoreRefused(
+            "PostgreSQL restore finalization did not survive its own commit",
+        )
+    try:
+        metadata = json.loads(str(row["metadata"]))
+    except json.JSONDecodeError as exc:
+        raise DatabaseRestoreRefused(
+            "PostgreSQL committed restore marker metadata is malformed",
+        ) from exc
+    if (
+        str(row["action"]) != "audit.database_restored"
+        or str(row["target_id"]) != str(operation_id)
+        or metadata.get("operation_id") != str(operation_id)
+        or metadata.get("source_stage_digest") != source_digest
+        or metadata.get("migration_head") != RELEASE_MIGRATION_HEAD
+        or metadata.get("schema_contract_digest") != finalization["schema_contract_digest"]
+        or metadata.get("known_head_result") != finalization["known_head_result"]
+        or metadata.get("revision_rebase") != revision_rebase
+        or metadata.get("epoch_rebase") != epoch_rebase
+    ):
+        raise DatabaseRestoreRefused(
+            "PostgreSQL committed restore marker differs from the one being published",
+        )
+    # The marker is one row of the finalization transaction. These are the
+    # rows the restore exists to move, so a committed marker beside stale
+    # boundaries would mean a torn write, not a finished restore.
+    if (
+        int(row["current_revision"]) != int(revision_rebase["final_revision"])
+        or int(row["pruned_through"]) != int(revision_rebase["barrier_revision"])
+        or int(row["current_epoch"]) != int(epoch_rebase["barrier_epoch"])
+    ):
+        raise DatabaseRestoreRefused(
+            "PostgreSQL committed restore boundaries do not match the signed marker",
+        )
+
+
+async def _assert_restored_activation_is_durable(target: _Target) -> None:
+    """Prove the restore-bound activation reached the release head, durably."""
+
+    connection = await _connect(target)
+    try:
+        await _assert_coordinator_still_owns_the_ceremony(connection)
+        row = await connection.fetchrow(
+            "SELECT version_num FROM alembic_version",
+        )
+    finally:
+        await connection.close()
+    if row is None or str(row["version_num"]) != RELEASE_MIGRATION_HEAD:
+        raise DatabaseRestoreRefused(
+            "PostgreSQL restore-bound audit activation did not survive its own commit",
+        )
+
+
+async def _assert_rollback_marker_is_durable(
+    target: _Target,
+    *,
+    marker_id: str,
+    operation_id: uuid.UUID,
+    binding: Mapping[str, Any],
+    recovered_revision: int,
+    recovered_epoch: int,
+) -> None:
+    """Prove the rollback marker outlived its commit, from a second connection.
+
+    Same reason as the restore side, and the same shape: the connection that
+    wrote the marker is the one connection whose answer means nothing, and the
+    fence comes down next.
+    """
+
+    connection = await _connect(target)
+    try:
+        await _assert_coordinator_still_owns_the_ceremony(connection)
+        row = await connection.fetchrow(
+            """
+            SELECT
+              marker.metadata::text AS metadata,
+              revision.current_revision AS current_revision,
+              allocator.current_epoch_number AS current_epoch
+            FROM audit_log AS marker
+            CROSS JOIN schedule_revision_state AS revision
+            CROSS JOIN schedule_external_epoch_allocator AS allocator
+            WHERE marker.id = $1::uuid
+              AND marker.action = 'audit.database_restore_rolled_back'
+              AND marker.target_id = $2
+            """,
+            marker_id,
+            str(operation_id),
+        )
+    finally:
+        await connection.close()
+    if row is None:
+        raise DatabaseRestoreRefused(
+            "PostgreSQL rollback marker did not survive its own commit",
+        )
+    try:
+        metadata = json.loads(str(row["metadata"]))
+    except json.JSONDecodeError as exc:
+        raise DatabaseRestoreRefused(
+            "PostgreSQL committed rollback marker metadata is malformed",
+        ) from exc
+    if any(metadata.get(field) != value for field, value in binding.items()):
+        raise DatabaseRestoreRefused(
+            "PostgreSQL committed rollback marker binding is invalid",
+        )
+    if (
+        int(row["current_revision"]) != recovered_revision
+        or int(row["current_epoch"]) != recovered_epoch
+    ):
+        raise DatabaseRestoreRefused(
+            "PostgreSQL committed rollback boundaries do not match the recovered target",
+        )
+
+
+async def _committed_finalization_marker_id(
+    connection: AsyncConnection,
+    *,
+    operation_id: uuid.UUID,
+) -> str | None:
+    """Name the restore marker this operation already committed, if any.
+
+    The marker commits inside ``finalize_restored_database`` and the fence
+    only learns of it afterwards, so between those two the row itself is the
+    only record that the restore succeeded. It therefore has to be found by
+    the operation it names rather than by an id the fence never got to store.
+    Nothing here trusts the row: ``_recover_committed_finalization`` is what
+    authenticates it before any field of it is believed.
+    """
+
+    await connection.rollback()
+    if not (
+        await connection.execute(
+            text("SELECT to_regclass('public.audit_log') IS NOT NULL"),
+        )
+    ).scalar_one():
+        await connection.rollback()
+        return None
+    marker_ids = (
+        (
+            await connection.execute(
+                text(
+                    """
+                    SELECT CAST(id AS text) AS marker_id
+                    FROM audit_log
+                    WHERE action = 'audit.database_restored'
+                      AND target_id = :operation_id
+                    """,
+                ),
+                {"operation_id": str(operation_id)},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    await connection.rollback()
+    if not marker_ids:
+        return None
+    if len(marker_ids) != 1:
+        raise DatabaseRestoreRefused(
+            "PostgreSQL committed restore marker is duplicated",
+        )
+    return str(marker_ids[0])
+
+
 def _validate_committed_finalization_marker(
     row: Any,
     *,
@@ -1751,17 +2234,11 @@ async def _upgrade_restored_database(
     """Run release migrations on the already-locked physical coordinator."""
 
     from alembic import command
-    from alembic.config import Config
 
     await connection.rollback()
-    backend_root = Path(__file__).resolve().parents[2]  # noqa: ASYNC240
 
     def upgrade(sync_connection: Any) -> None:
-        config = Config(str(backend_root / "alembic.ini"))
-        config.set_main_option(
-            "script_location",
-            str(backend_root / "src" / "z4j_brain" / "migrations"),
-        )
+        config = _restore_migration_config()
         config.attributes["z4j_restore_connection"] = sync_connection
         if activation_manifest is not None:
             config.attributes["z4j_audit_activation_manifest"] = activation_manifest
@@ -1776,23 +2253,19 @@ def _target_phase_root(
     *,
     create: bool,
 ) -> Path:
-    home = ensure_secret_store_directory(z4j_home())
+    home = _ensure_durable_directory(z4j_home())
     root = home / ".z4j-restore"
-    if not root.exists():
-        if not create:
-            raise DatabaseRestoreRefused(
-                "PostgreSQL restore state directory does not exist",
-            )
-        root.mkdir(mode=0o700)
-    ensure_secret_store_directory(root)
+    if not create and not root.exists():
+        raise DatabaseRestoreRefused(
+            "PostgreSQL restore state directory does not exist",
+        )
+    _ensure_durable_directory(root)
     postgres_root = root / "postgres"
-    if not postgres_root.exists():
-        if not create:
-            raise DatabaseRestoreRefused(
-                "PostgreSQL restore state directory does not exist",
-            )
-        postgres_root.mkdir(mode=0o700)
-    ensure_secret_store_directory(postgres_root)
+    if not create and not postgres_root.exists():
+        raise DatabaseRestoreRefused(
+            "PostgreSQL restore state directory does not exist",
+        )
+    _ensure_durable_directory(postgres_root)
     target_key = hashlib.sha256(
         canonical_json(
             {
@@ -1804,13 +2277,11 @@ def _target_phase_root(
         ),
     ).hexdigest()
     target_root = postgres_root / target_key
-    if not target_root.exists():
-        if not create:
-            raise DatabaseRestoreRefused(
-                "PostgreSQL restore target has no recorded operations",
-            )
-        target_root.mkdir(mode=0o700)
-    ensure_secret_store_directory(target_root)
+    if not create and not target_root.exists():
+        raise DatabaseRestoreRefused(
+            "PostgreSQL restore target has no recorded operations",
+        )
+    _ensure_durable_directory(target_root)
     return target_root
 
 
@@ -1822,14 +2293,25 @@ def _phase_directory(
 ) -> Path:
     target_root = _target_phase_root(target, create=create)
     operation_dir = target_root / str(operation_id)
-    if not operation_dir.exists():
-        if not create:
-            raise DatabaseRestoreRefused(
-                "PostgreSQL rollback lacks its exact restore phase",
-            )
-        operation_dir.mkdir(mode=0o700)
-    ensure_secret_store_directory(operation_dir)
+    if not create and not operation_dir.exists():
+        raise DatabaseRestoreRefused(
+            "PostgreSQL rollback lacks its exact restore phase",
+        )
+    _ensure_durable_directory(operation_dir)
     return operation_dir
+
+
+def _fsync_file(path: Path) -> None:
+    """Persist one archive's bytes before anything publishes its name."""
+
+    # Windows refuses to flush a handle opened read-only, and POSIX is happy
+    # either way, so the mode is chosen per platform rather than per caller.
+    flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _cleanup_operation_artifacts(operation_dir: Path) -> None:
@@ -1837,53 +2319,153 @@ def _cleanup_operation_artifacts(operation_dir: Path) -> None:
         "pgpass",
         "source-staged.dump",
         "target-recovery.dump",
+        _RECOVERY_PARTIAL_NAME,
     ):
         with contextlib.suppress(FileNotFoundError):
             (operation_dir / name).unlink()
+    _fsync_directory(operation_dir)
 
 
-def _copy_backup_to_destination(source: Path, destination: Path) -> None:
+def _read_back_archive(path: Path) -> tuple[int, str]:
+    """Measure a delivered archive by reopening and rereading its bytes.
+
+    Deliberately not ``_file_digest``: that helper demands an owner-private
+    file, which the operator's chosen ``--output`` directory has no reason
+    to be.  This only needs the bytes, so it asks for nothing more.
+    """
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    flags |= getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        observed = os.fstat(fd)
+        if not stat.S_ISREG(observed.st_mode):
+            raise DatabaseRestoreRefused(
+                "PostgreSQL backup copy is not a regular file",
+            )
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+    finally:
+        os.close(fd)
+    return size, digest.hexdigest()
+
+
+def _stream_archive_bytes(source_fd: int, destination_fd: int) -> tuple[int, str]:
+    """Copy one descriptor into another, measuring what actually crossed."""
+
+    digest = hashlib.sha256()
+    copied = 0
+    while True:
+        chunk = os.read(source_fd, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+        copied += len(chunk)
+        offset = 0
+        while offset < len(chunk):
+            offset += os.write(destination_fd, chunk[offset:])
+    os.fsync(destination_fd)
+    return copied, digest.hexdigest()
+
+
+def _copy_backup_to_destination(
+    source: Path,
+    destination: Path,
+    *,
+    expected_size: int,
+    expected_digest: str,
+) -> None:
+    """Copy the staged archive out and prove the copy is byte-identical.
+
+    ``expected_size``/``expected_digest`` come from an independent read of
+    the stage, so the checks below compare the delivered archive against a
+    separate measurement rather than against the copy's own bookkeeping.
+    """
+
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    # Windows ``os.open`` defaults to text mode if neither O_TEXT nor
+    # O_BINARY is specified: a read then stops dead at the first 0x1A
+    # byte and a write expands ``\n`` to ``\r\n``.  A compressed pg_dump
+    # archive is full of both, so without this the operator is handed a
+    # silently truncated backup.  POSIX defines O_BINARY as 0 (or absent)
+    # so this is a no-op there.
+    flags |= getattr(os, "O_BINARY", 0)
     source_flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         source_flags |= os.O_NOFOLLOW
+    source_flags |= getattr(os, "O_BINARY", 0)
     source_fd = os.open(source, source_flags)
-    destination_fd: int | None = None
     try:
         destination_fd = os.open(destination, flags, 0o600)
-        before = os.fstat(source_fd)
-        if not stat.S_ISREG(before.st_mode):
-            raise DatabaseRestoreRefused(  # noqa: TRY301
-                "PostgreSQL backup stage is not a regular file",
-            )
-        while True:
-            chunk = os.read(source_fd, 1024 * 1024)
-            if not chunk:
-                break
-            offset = 0
-            while offset < len(chunk):
-                offset += os.write(destination_fd, chunk[offset:])
-        os.fsync(destination_fd)
-        after = os.fstat(source_fd)
-        if (before.st_dev, before.st_ino, before.st_size) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-        ):
-            raise DatabaseRestoreRefused(  # noqa: TRY301
-                "PostgreSQL backup stage changed while it was copied",
-            )
+    except BaseException:
+        os.close(source_fd)
+        raise
+    # Past this point the destination is ours (O_EXCL created it), so every
+    # failure below has to take it back out again.
+    try:
+        try:
+            before = os.fstat(source_fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise DatabaseRestoreRefused(
+                    "PostgreSQL backup stage is not a regular file",
+                )
+            copied = _stream_archive_bytes(source_fd, destination_fd)
+            after = os.fstat(source_fd)
+            if (before.st_dev, before.st_ino, before.st_size) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+            ):
+                raise DatabaseRestoreRefused(
+                    "PostgreSQL backup stage changed while it was copied",
+                )
+            # A truncating read is the failure that matters here, and it
+            # is invisible to the identity check above because that
+            # compares the stage to itself.  Weigh what actually crossed
+            # the descriptor instead.
+            if copied != (expected_size, expected_digest):
+                raise DatabaseRestoreRefused(
+                    "PostgreSQL backup stage did not read back as it was written",
+                )
+        finally:
+            # Windows will not unlink a file that still has an open
+            # handle, so both descriptors close before the cleanup below
+            # tries to remove a backup nobody should keep.
+            os.close(destination_fd)
+            os.close(source_fd)
     except BaseException:
         with contextlib.suppress(OSError):
             destination.unlink()
         raise
-    finally:
-        if destination_fd is not None:
-            os.close(destination_fd)
-        os.close(source_fd)
     _fsync_directory(destination.parent)
+    # Prove the delivered file by reading it back rather than by trusting
+    # the descriptor that just wrote it.  An archive that cannot be
+    # reproduced byte-for-byte has to fail here, while the database is
+    # still healthy, instead of at the restore that was counting on it.
+    try:
+        written = _read_back_archive(destination)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            destination.unlink()
+        _fsync_directory(destination.parent)
+        raise
+    if written != (expected_size, expected_digest):
+        with contextlib.suppress(OSError):
+            destination.unlink()
+        _fsync_directory(destination.parent)
+        raise DatabaseRestoreRefused(
+            "PostgreSQL backup copy does not match the staged archive",
+        )
 
 
 async def _run_backup(
@@ -1899,7 +2481,14 @@ async def _run_backup(
         )
 
     destination = output.expanduser().resolve()  # noqa: ASYNC240
+    # An archive is only as durable as the entries that reach it, and a backup
+    # written into directories created for the occasion is exactly the file
+    # whose survival is the point of taking it. The privacy-enforcing helper
+    # is deliberately not used here: this is the operator's chosen output
+    # location, not restore state, and it is not this command's to lock down.
+    absent_output_directories = _absent_directories(destination.parent)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    _fsync_new_directory_names(absent_output_directories)
     if destination.exists():
         raise FileExistsError(
             f"backup: refusing to overwrite existing file at {destination}",
@@ -1946,12 +2535,17 @@ async def _run_backup(
                 f"PostgreSQL backup failed: {str(result.stderr).strip()}",
             )
         stage.chmod(0o600)
-        _file_digest(stage)
+        stage_size, stage_digest = _file_digest(stage)
         if await _target_identity(target) != target_identity:
             raise DatabaseRestoreRefused(
                 "PostgreSQL physical target changed during backup",
             )
-        _copy_backup_to_destination(stage, destination)
+        _copy_backup_to_destination(
+            stage,
+            destination,
+            expected_size=stage_size,
+            expected_digest=stage_digest,
+        )
     finally:
         for path in (passfile, stage):
             with contextlib.suppress(FileNotFoundError):
@@ -1961,13 +2555,47 @@ async def _run_backup(
             _fsync_directory(root)
 
 
+#: Return type of one pinned-client ceremony.
+_PinnedT = TypeVar("_PinnedT")
+
+
+def _pinned_client_loop_factory() -> Callable[[], asyncio.AbstractEventLoop] | None:
+    """Pick an event loop the pinned psycopg client will accept.
+
+    psycopg refuses Windows' ProactorEventLoop, and a console entry point gets
+    exactly that from a bare ``asyncio.run``. That is why a Windows operator
+    could neither back up nor restore PostgreSQL, while anyone whose entry point
+    happened to supply a selector loop (uvicorn does) saw nothing wrong.
+
+    Installing a process-wide selector policy would buy the CLI its fix by
+    dragging every application that embeds z4j onto a loop with no subprocess
+    support, so the loop is chosen per operation instead. ``None`` off Windows
+    leaves stock ``asyncio.run`` behaviour untouched on the platforms that never
+    had the problem.
+
+    It lives beside the psycopg client rather than in one caller, because every
+    entry point in this module has the same constraint and the next one added
+    should inherit it rather than rediscover it.
+    """
+    if os.name == "nt":
+        return asyncio.SelectorEventLoop
+    return None
+
+
+def _run_pinned_client(coroutine: Coroutine[Any, Any, _PinnedT]) -> _PinnedT:
+    """Drive one pinned-client ceremony on a loop of our own choosing."""
+
+    with asyncio.Runner(loop_factory=_pinned_client_loop_factory()) as runner:
+        return runner.run(coroutine)
+
+
 def backup_postgres_database(
     database_url: str,
     output: Path,
 ) -> None:
     """Create a custom archive through the trusted pinned client runner."""
 
-    asyncio.run(_run_backup(database_url, output))
+    _run_pinned_client(_run_backup(database_url, output))
 
 
 async def _run_restore(  # noqa: PLR0912, PLR0915
@@ -2150,7 +2778,9 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
                     raise DatabaseRestoreRefused(
                         "PostgreSQL restore requires the exact "
                         "stopped-executor challenge "
-                        f"{challenge}; resume with --operation {operation_id}",
+                        f"{challenge}; resume with `z4j restore --force "
+                        f"--operation {operation_id} "
+                        f"--attest-stopped-executors {challenge}`",
                     )
                 phase = {
                     **phase,
@@ -2291,6 +2921,18 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
                         "the restore coordinator lock",
                     )
                 if not recovery.exists():
+                    # pg_dump leaves its partial output behind when it fails,
+                    # and the recovery pathname is the whole record of whether
+                    # a dump happened: resume skips the dump when the name is
+                    # there, and rollback demands a complete archive under it.
+                    # Some bytes on their way to becoming one satisfied the
+                    # first and failed the second, so a failed dump fenced the
+                    # brain with no way forward and no way back. The archive
+                    # therefore grows under a name nothing consults and only
+                    # takes the real one once it is whole and on the platter.
+                    partial = operation_dir / _RECOVERY_PARTIAL_NAME
+                    with contextlib.suppress(FileNotFoundError):
+                        partial.unlink()
                     dump_result = await asyncio.to_thread(
                         _run_identity_bound,
                         pg_dump,
@@ -2301,7 +2943,7 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
                             "--no-owner",
                             "--no-acl",
                             "--file",
-                            str(recovery),
+                            str(partial),
                             "--dbname",
                             target.database,
                         ],
@@ -2309,11 +2951,17 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
                         text_output=True,
                     )
                     if dump_result.returncode != 0:
+                        with contextlib.suppress(FileNotFoundError):
+                            partial.unlink()
+                        _fsync_directory(operation_dir)
                         raise DatabaseRestoreRefused(
                             "PostgreSQL target recovery dump failed: "
                             f"{str(dump_result.stderr).strip()}",
                         )
-                    recovery.chmod(0o600)
+                    partial.chmod(0o600)
+                    _fsync_file(partial)
+                    partial.replace(recovery)
+                    _fsync_directory(operation_dir)
                 recovery_size, recovery_digest = _file_digest(recovery)
                 recovery_toc, recovery_toc_digest = await asyncio.to_thread(
                     _inspect_toc,
@@ -2356,19 +3004,43 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
                         "PostgreSQL target recovery archive changed during resume",
                     )
 
-            if observed_fence["state"] == "MARKER_COMMITTED":
+            # The marker commits before the fence records that it did, so an
+            # interrupted run can leave a finished restore whose fence still
+            # calls the target merely cleared. Ask the database which of the
+            # two is right before re-deriving anything: reading the fence
+            # alone, the resume ran the destructive half again, which throws
+            # away signed audit history that was already committed and, on a
+            # database whose partitions are already back, is refused outright
+            # by pg_restore --clean.
+            committed_marker_id = (
+                str(observed_fence["marker_id"])
+                if observed_fence["state"] == "MARKER_COMMITTED"
+                else await _committed_finalization_marker_id(
+                    coordinator,
+                    operation_id=operation_id,
+                )
+            )
+            if committed_marker_id is not None:
                 finalization = phase.get("finalization") or await _recover_committed_finalization(
                     target,
-                    marker_id=str(observed_fence["marker_id"]),
+                    marker_id=committed_marker_id,
                     operation_id=operation_id,
                     source_digest=source_digest,
                     settings=settings,
                     connection=coordinator,
                 )
+                marker_fence = {
+                    **observed_fence,
+                    "state": "MARKER_COMMITTED",
+                    "marker_id": committed_marker_id,
+                }
+                if observed_fence != marker_fence:
+                    await _set_fence(target, marker_fence)
+                observed_fence = marker_fence
                 phase = {
                     **phase,
                     "state": "MARKER_COMMITTED",
-                    "fence": observed_fence,
+                    "fence": marker_fence,
                     "finalization": finalization,
                 }
                 _replace_phase(phase_path, phase)
@@ -2405,7 +3077,10 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
                             "PostgreSQL physical target changed after pg_restore",
                         )
                     await _verify_fence(target, observed_fence)
-                if phase["source_authority"]["source_head"] == _LEGACY_SOURCE_HEAD:
+                restored_source_head = str(
+                    phase["source_authority"]["source_head"],
+                )
+                if restored_source_head == _LEGACY_SOURCE_HEAD:
                     try:
                         await _upgrade_restored_database(coordinator)
                     except Exception as exc:
@@ -2465,8 +3140,19 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
                         raise DatabaseRestoreRefused(
                             "legacy restore is awaiting manifest-bound audit "
                             "activation; run `z4j audit activate-chain-state "
-                            f"--restore-operation {operation_id} ...`",
+                            f"--restore-operation {operation_id} "
+                            "--manifest PATH`, then the same command again "
+                            "with --apply added",
                         ) from exc
+                elif restored_source_head != RELEASE_MIGRATION_HEAD:
+                    # A previous-release archive lands at its own head, so it
+                    # is migrated up inside the same held coordinator lock,
+                    # before anything reads the release schema contract or
+                    # signs the marker. There is no authenticated-audit
+                    # continuation to fall into here: the audit chain was
+                    # already activated when this archive was taken, so a
+                    # migration failure is just a failure and keeps the fence.
+                    await _upgrade_restored_database(coordinator)
                 restored_schema_manifest = await _schema_manifest_on_connection(coordinator)
                 phase = {
                     **phase,
@@ -2513,7 +3199,12 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
                             "expected_sha256": phase["source_provenance"].get("expected_sha256"),
                             "verified_digest": source_digest,
                         },
-                        "source_migration_head": phase["source_authority"]["source_head"],
+                        # The head the archive was TAKEN at, captured at
+                        # preflight and never rewritten by the upgrade above.
+                        # The marker's own ``migration_head`` says where the
+                        # data now lives; this says where it came from, and an
+                        # operator reading the audit trail needs both.
+                        "source_migration_head": restored_source_head,
                         "source_toc_digest": phase["toc_digest"],
                         "target_recovery_toc_digest": phase["target_recovery_toc_digest"],
                         "target_recovery_migration_head": (
@@ -2529,6 +3220,25 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
                         ),
                         "physical_target": target_identity,
                     },
+                )
+                # Finalization writes through a session BOUND to this
+                # connection, and a session that joins a transaction it did
+                # not open does not end one either: its commit flushes and
+                # returns without a COMMIT reaching the server. The
+                # coordinator can be holding such a transaction here, because
+                # an upgrade with no steps left to apply still reads the
+                # version table and leaves that read's transaction open. So
+                # end it here, and then prove from a connection that cannot
+                # see uncommitted work that the marker survived. Everything
+                # below publishes or removes the startup fence, and a fence
+                # removed before the work it fenced is durable leaves a
+                # database that starts, was replaced, and was never rebased.
+                await coordinator.commit()
+                await _assert_finalization_is_durable(
+                    target,
+                    finalization=finalization,
+                    operation_id=operation_id,
+                    source_digest=source_digest,
                 )
                 marker_fence = {
                     **observed_fence,
@@ -2598,6 +3308,87 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
             passfile.unlink()
 
 
+async def _retire_untouched_operation(
+    target: _Target,
+    *,
+    operation_id: uuid.UUID,
+    phase: dict[str, Any],
+    phase_path: Path,
+    operation_dir: Path,
+    fence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Retire an operation that never reached the target, fence included.
+
+    Clearing the fence is deliberately not conditional on the live database
+    still matching its preflight snapshot. Nothing on this path writes to the
+    target, so the clear is safe whatever the database now holds, and a
+    rollback that can refuse is not an exit: refusing would leave the operator
+    in the state this path exists to end. No signed marker is written for the
+    same reason the SQLite ceremony writes none for its pre-staging states:
+    there is nothing about the target to attest to.
+    """
+
+    if fence is not None:
+        engine = _pinned_coordinator_engine(target)
+        coordinator: AsyncConnection | None = None
+        lock_owned = False
+        try:
+            coordinator = await engine.connect()
+            await coordinator.execute(
+                text("SELECT pg_advisory_lock(:lock_id)"),
+                {"lock_id": SCHEMA_TRANSITION_ADVISORY_LOCK_KEY},
+            )
+            await coordinator.commit()
+            lock_owned = True
+            # Re-read under the lock. A fence that moved between the read
+            # above and here belongs to a coordinator that is still running,
+            # and its work is not this command's to discard.
+            await _verify_fence(target, fence)
+            await _clear_fence(target)
+            unlocked = (
+                await coordinator.execute(
+                    text("SELECT pg_advisory_unlock(:lock_id)"),
+                    {"lock_id": SCHEMA_TRANSITION_ADVISORY_LOCK_KEY},
+                )
+            ).scalar_one()
+            await coordinator.commit()
+            if unlocked is not True:
+                raise DatabaseRestoreRefused(
+                    "PostgreSQL rollback coordinator did not unlock once",
+                )
+            lock_owned = False
+        finally:
+            if coordinator is not None:
+                if lock_owned:
+                    with contextlib.suppress(Exception):
+                        await coordinator.rollback()
+                    with contextlib.suppress(Exception):
+                        await coordinator.execute(
+                            text("SELECT pg_advisory_unlock(:lock_id)"),
+                            {
+                                "lock_id": (SCHEMA_TRANSITION_ADVISORY_LOCK_KEY),
+                            },
+                        )
+                        await coordinator.commit()
+                with contextlib.suppress(Exception):
+                    await coordinator.close()
+            await engine.dispose()
+    result = {
+        "backend": "postgres",
+        "operation_id": str(operation_id),
+        "rolled_back": True,
+        "marker_id": None,
+        "source_digest": phase.get("source_digest"),
+        "target_recovery_digest": None,
+    }
+    _replace_phase(
+        phase_path,
+        {**phase, "state": "ROLLED_BACK", "result": result},
+    )
+    _cleanup_operation_artifacts(operation_dir)
+    return result
+
+
 async def _run_rollback(  # noqa: PLR0912, PLR0915
     database_url: str,
     *,
@@ -2646,6 +3437,39 @@ async def _run_rollback(  # noqa: PLR0912, PLR0915
         raise DatabaseRestoreRefused(
             "PostgreSQL rollback client identity changed",
         )
+    observed_fence = await _read_fence(target)
+    if observed_fence is not None and (
+        observed_fence.get("operation_id") != str(operation_id)
+        or observed_fence.get("target_identity_digest") != release_manifest_digest(target_identity)
+        # Against the phase's recorded digest, because the staged archive that
+        # the full path below re-measures may not exist yet. That re-measured
+        # comparison still runs; this one only makes the early exit hold the
+        # same binding.
+        or observed_fence.get("source_digest") != phase.get("source_digest")
+    ):
+        raise DatabaseRestoreRefused(
+            "PostgreSQL rollback catalog fence does not match its phase",
+        )
+    # Dropping the managed tables and advancing the fence out of FENCED commit
+    # in one transaction, so a fence that is absent or still FENCED proves the
+    # target was never touched. An operation in that state has to retire
+    # WITHOUT a recovery archive, because the crash window it covers is
+    # precisely the one where no complete archive was ever produced: requiring
+    # one first is what left a failed recovery dump holding a fence that
+    # neither exit could clear.
+    if (observed_fence is None or observed_fence.get("state") == "FENCED") and phase.get(
+        "target_recovery_digest"
+    ) is None:
+        return await _retire_untouched_operation(
+            target,
+            operation_id=operation_id,
+            phase=phase,
+            phase_path=phase_path,
+            operation_dir=operation_dir,
+            fence=observed_fence,
+        )
+    # Past this point the phase recorded a staged recovery archive, or the
+    # fence itself proves the restore got far enough to have staged one.
     source_size, source_digest = _file_digest(staged_source)
     recovery_size, recovery_digest = _file_digest(recovery)
     if (
@@ -2667,7 +3491,6 @@ async def _run_rollback(  # noqa: PLR0912, PLR0915
         raise DatabaseRestoreRefused(
             "PostgreSQL rollback recovery TOC changed",
         )
-    observed_fence = await _read_fence(target)
     if observed_fence is None and phase.get("state") == "TARGET_RECOVERED":
         marker_id = str(phase.get("rollback_marker_id", ""))
         verification_connection = await _connect(target)
@@ -3005,6 +3828,14 @@ async def _run_rollback(  # noqa: PLR0912, PLR0915
                 },
             )
             await session.commit()
+        # The marker was written through a session bound to this connection,
+        # which does not commit a transaction it did not open. Nothing below
+        # may run on a marker a crash can still take back: the fence comes
+        # down two statements from here, and a rollback whose fence is gone
+        # and whose marker never landed is one no supported command can
+        # finish. So end the transaction here rather than at the far side of
+        # the fence removal.
+        await coordinator.commit()
         async with AsyncSession(
             bind=coordinator,
             expire_on_commit=False,
@@ -3018,6 +3849,20 @@ async def _run_rollback(  # noqa: PLR0912, PLR0915
                 raise DatabaseRestoreRefused(
                     f"PostgreSQL rollback marker verification failed: {list(report.mismatches)}",
                 )
+        await _assert_rollback_marker_is_durable(
+            target,
+            marker_id=str(marker.id),
+            operation_id=operation_id,
+            binding={
+                "operation_id": str(operation_id),
+                "rejected_source_stage_digest": source_digest,
+                "target_recovery_digest": recovery_digest,
+                "target_manifest_digest": (phase["target_snapshot"]["manifest_digest"]),
+                "physical_target": target_identity,
+            },
+            recovered_revision=int(recovered["revision"]),
+            recovered_epoch=int(recovered["epoch"]),
+        )
 
         recovered_fence = {
             **observed_fence,
@@ -3260,6 +4105,13 @@ async def _apply_restore_activation_manifest(
             activation_manifest=manifest,
             activation_attestation=attestation,
         )
+        # The migration runner owns its own transactions, but this function
+        # ends by rolling this connection back, so anything still open here
+        # would be discarded after the fence had already announced it. Close
+        # the transaction and prove the activation from a connection that
+        # cannot see uncommitted work, before the fence says it happened.
+        await connection.commit()
+        await _assert_restored_activation_is_durable(target)
         snapshot = await authenticated_database_snapshot(
             database_url,
             settings,
@@ -3310,7 +4162,7 @@ def build_restore_activation_manifest(
     target = _parse_target(database_url)
     target_root = _target_phase_root(target, create=False)
     with audit_bootstrap_coordinator(target_root):
-        return asyncio.run(
+        return _run_pinned_client(
             _build_restore_activation_manifest(
                 database_url,
                 operation_id=operation_id,
@@ -3335,7 +4187,7 @@ def apply_restore_activation_manifest(
     target = _parse_target(database_url)
     target_root = _target_phase_root(target, create=False)
     with audit_bootstrap_coordinator(target_root):
-        return asyncio.run(
+        return _run_pinned_client(
             _apply_restore_activation_manifest(
                 database_url,
                 operation_id=operation_id,
@@ -3359,7 +4211,7 @@ def restore_postgres_database(
     operation_id = uuid.UUID(operation) if operation is not None else uuid.uuid4()
     target_root = _target_phase_root(target, create=True)
     with audit_bootstrap_coordinator(target_root):
-        return asyncio.run(
+        return _run_pinned_client(
             _run_restore(
                 database_url,
                 source,
@@ -3369,6 +4221,37 @@ def restore_postgres_database(
                 known_head=known_head,
             ),
         )
+
+
+def staged_restore_source(
+    database_url: str,
+    *,
+    operation: str | uuid.UUID,
+) -> Path:
+    """Return the source path one already-staged PostgreSQL operation carries.
+
+    A resume reads its source from the durable phase and never reopens the
+    operator's archive, which is why the refusals advertise ``--operation`` on
+    its own. Handing that recorded path back lets the command an operator is
+    told to run be the command they can run.
+    """
+
+    operation_id = operation if isinstance(operation, uuid.UUID) else uuid.UUID(str(operation))
+    target = _parse_target(database_url)
+    operation_dir = _phase_directory(target, operation_id, create=False)
+    phase_path = operation_dir / "phase.json"
+    try:
+        phase = _read_phase(phase_path)
+    except FileNotFoundError as exc:
+        raise DatabaseRestoreRefused(
+            f"there is no staged restore operation {operation_id}; supply the "
+            f"backup PATH to start one",
+        ) from exc
+    if phase.get("backend") != "postgres" or phase.get("operation_id") != str(operation_id):
+        raise DatabaseRestoreRefused(
+            "PostgreSQL restore phase identity mismatch",
+        )
+    return Path(str(phase["source_provenance"]["supplied_path"]))
 
 
 def rollback_postgres_database(
@@ -3386,7 +4269,7 @@ def rollback_postgres_database(
         )
     ensure_secret_store_directory(operation_dir)
     with audit_bootstrap_coordinator(target_root):
-        return asyncio.run(
+        return _run_pinned_client(
             _run_rollback(
                 database_url,
                 operation=str(operation_id),
@@ -3400,4 +4283,5 @@ __all__ = [
     "build_restore_activation_manifest",
     "restore_postgres_database",
     "rollback_postgres_database",
+    "staged_restore_source",
 ]

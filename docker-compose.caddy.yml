@@ -76,7 +76,7 @@ services:
   # Caddy - auto-HTTPS reverse proxy
   # ====================================================================
   z4j-caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     container_name: z4j-caddy
     restart: unless-stopped
     depends_on:

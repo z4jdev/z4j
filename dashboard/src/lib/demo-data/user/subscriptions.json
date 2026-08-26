@@ -57,7 +57,7 @@
     "project_id": "00000000-0000-4000-9000-000000000002",
     "trigger": "task.retried",
     "filters": {
-      "min_retry_count": 2
+      "task_name_pattern": "webhooks.*"
     },
     "in_app": true,
     "project_channel_ids": [],

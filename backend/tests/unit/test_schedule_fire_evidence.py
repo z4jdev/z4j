@@ -1,3 +1,12 @@
+"""Generation-scoped current-protocol fire evidence.
+
+These run against a MIGRATED database rather than a create_all() one. The
+evidence tables are exactly where the Boundary-D triggers live: an
+activated ``commands``, ``schedule_fires`` or ``pending_fires`` INSERT is
+refused unless its receipt tuple is complete. A create_all() schema accepts
+any shape, so it cannot tell a complete evidence row from a partial one.
+"""
+
 from __future__ import annotations
 
 import secrets
@@ -9,10 +18,8 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.pool import StaticPool
 from z4j_brain.domain.schedule_fire_authority import derive_execution_fire_id
 from z4j_brain.persistence import models  # noqa: F401
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import AgentState, CommandStatus, ScheduleKind
 from z4j_brain.persistence.models import (
     Agent,
@@ -27,6 +34,12 @@ from z4j_brain.persistence.repositories import (
     PendingFiresRepository,
     ScheduleFireRepository,
 )
+from z4j_brain.persistence.repositories.schedule_control import (
+    ScheduleControlRepository,
+)
+from z4j_brain.persistence.schedule_guard import (
+    install_schedule_guard_engine_hooks,
+)
 from z4j_brain.websocket.gateway import deliver_command_frame
 from z4j_core.errors import ConflictError
 from z4j_core.transport.frames import CommandFrame, parse_frame
@@ -34,30 +47,17 @@ from z4j_core.transport.framing import FrameSigner
 
 
 @pytest.fixture
-async def evidence() -> AsyncIterator[tuple[AsyncSession, Project, Schedule, Agent]]:
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+async def evidence(
+    migrated_db_url: str,
+) -> AsyncIterator[tuple[AsyncSession, Project, Schedule, Agent]]:
+    engine = create_async_engine(migrated_db_url)
+    # Production installs these when ``DatabaseManager`` wraps the engine.
+    # The SQLite guard UDFs are per-connection, and a connection without them
+    # fails closed inside the trigger, so a raw-session test has to install
+    # them itself or it is testing a permanently fenced database.
+    install_schedule_guard_engine_hooks(engine)
     async with AsyncSession(engine, expire_on_commit=False) as session:
         project = Project(id=uuid.uuid4(), slug="evidence", name="Evidence")
-        schedule = Schedule(
-            id=uuid.uuid4(),
-            project_id=project.id,
-            engine="celery",
-            scheduler="z4j-scheduler",
-            name="cleanup",
-            task_name="jobs.cleanup",
-            kind=ScheduleKind.INTERVAL,
-            expression="5m",
-            timezone="UTC",
-            args=[],
-            kwargs={},
-            is_enabled=True,
-        )
         agent = Agent(
             id=uuid.uuid4(),
             project_id=project.id,
@@ -70,7 +70,26 @@ async def evidence() -> AsyncIterator[tuple[AsyncSession, Project, Schedule, Age
             capabilities={},
             state=AgentState.ONLINE,
         )
-        session.add_all([project, schedule, agent])
+        session.add_all([project, agent])
+        await session.flush()
+        # Through the control repository, because Boundary D refuses a direct
+        # INSERT into schedules.
+        schedule = await ScheduleControlRepository(session).create_current(
+            project_id=project.id,
+            data={
+                "engine": "celery",
+                "scheduler": "z4j-scheduler",
+                "name": "cleanup",
+                "task_name": "jobs.cleanup",
+                "kind": ScheduleKind.INTERVAL.value,
+                "expression": "5m",
+                "timezone": "UTC",
+                "args": [],
+                "kwargs": {},
+                "is_enabled": True,
+            },
+            planning_at=datetime(2026, 1, 1, 12, tzinfo=UTC),
+        )
         await session.commit()
         yield session, project, schedule, agent
         await session.rollback()

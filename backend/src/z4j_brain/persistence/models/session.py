@@ -6,13 +6,13 @@ password change, admin kill, account deactivation. Pure stateless
 JWT-style cookies cannot offer any of that without a separate
 denylist that grows forever.
 
-The cookie value is a signed envelope (``itsdangerous`` HMAC over
-``{sid, csrf}``) - the session id alone is not the bearer; the
-signature must verify too. The DB row is the source of truth for
+The cookie value is a signed envelope (``itsdangerous`` HMAC over the
+session id) - the id alone is not the bearer; the signature must verify
+too. The separate CSRF cookie/header is checked on mutations. The DB row is the source of truth for
 ``revoked_at``, ``last_seen_at``, and the absolute ``expires_at``.
 
-Cost: one indexed SELECT + one indexed UPDATE per authenticated
-request. Both hit the primary key. The trade is well worth the
+Cost: one indexed SELECT per authenticated request plus a throttled,
+isolated primary-key UPDATE for activity. The trade is well worth the
 ability to revoke sessions on demand - see ``docs/SECURITY.md``.
 """
 
@@ -50,19 +50,19 @@ class Session(Base):
         issued_at: When the session was created (login or setup
             completion).
         expires_at: Hard cap. Sessions past this are rejected even
-            if active. Set to ``issued_at +
-            settings.session_absolute_lifetime_seconds``.
-        last_seen_at: Sliding-idle anchor. Updated on every request
-            that successfully resolves a session. A session whose
+            if active. Normal and remembered sessions use their
+            respective configured lifetimes.
+        last_seen_at: Sliding-idle anchor. Durably updated at a
+            throttled cadence after successful session resolution. A session whose
             ``last_seen_at`` is older than
             ``settings.session_idle_timeout_seconds`` is rejected.
         revoked_at: Set when the session is explicitly killed.
             ``NULL`` for live sessions.
-        revocation_reason: ``logout`` | ``password_changed`` |
-            ``admin_revoke`` | ``deactivated`` | ``role_changed``.
+        revocation_reason: Operator/debug label such as ``logout``,
+            ``password_changed``, ``user_agent_changed`` or
+            ``deactivated``.
         ip_at_issue: Real client IP at the time the session was
-            issued. Used for forensics and (optionally) for
-            session pinning.
+            issued. Used for forensics.
         user_agent_at_issue: Truncated to 256 chars. Used for
             forensics and (optionally) for the user-agent
             pinning policy.

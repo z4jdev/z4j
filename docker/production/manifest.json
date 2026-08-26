@@ -1,0 +1,610 @@
+{
+  "schema_version": 1,
+  "kind": "z4j-production-container-contract",
+  "release": "1.9.0",
+  "state": "unfinalized",
+  "source_tag_authority_policy": {
+    "required": true,
+    "schema": "z4j.source-tag-authority.v1",
+    "location": "detached-production-finalization"
+  },
+  "system_authority_policy": {
+    "contract": {
+      "path": "docker/production/system-authority-policy.json",
+      "sha256": "0d70332f66ccc7f4583fbff263609a6572d34489cbbb60ad70eb949c3500f3dd",
+      "size": 10854
+    },
+    "location": "detached-pre-freeze-finalization",
+    "required": true,
+    "schema": "z4j.production-system-authority.v2"
+  },
+  "system_authority": {
+    "artifact": {
+      "digest": null,
+      "size": null,
+      "tag": null
+    },
+    "bundle": {
+      "sha256": null,
+      "size": null
+    },
+    "receipt": {
+      "sha256": null,
+      "size": null
+    },
+    "repository": "docker.io/z4jdev/z4j-production-system"
+  },
+  "dashboard_authority_policy": {
+    "contract": {
+      "path": "docker/production/dashboard-authority-policy.json",
+      "sha256": "5aba03a9b1d8ffa0f8cb7aa0565a4ddbfdafba27413fc673a89278aab062e4ff",
+      "size": 8929
+    },
+    "location": "detached-pre-freeze-finalization",
+    "required": true,
+    "schema": "z4j.production-dashboard-authority.v1"
+  },
+  "dashboard_authority": {
+    "artifact": {
+      "digest": null,
+      "size": null,
+      "tag": null
+    },
+    "bundle": {
+      "sha256": null,
+      "size": null
+    },
+    "receipt": {
+      "sha256": null,
+      "size": null
+    },
+    "repository": "docker.io/z4jdev/z4j-production-dashboard"
+  },
+  "finalization": {
+    "not_before_utc": "2026-08-23T04:14:39.107Z",
+    "allowed_post_freeze_paths": [
+      "docker/production/locks/build-linux-amd64.txt",
+      "docker/production/locks/build-linux-arm64.txt",
+      "docker/production/locks/system-linux-amd64.json",
+      "docker/production/locks/system-linux-arm64.json",
+      "docker/production/locks/runtime-linux-amd64.txt",
+      "docker/production/locks/runtime-linux-arm64.txt",
+      "docker/production/locks/UNFINALIZED",
+      "docker/production/manifest.json"
+    ],
+    "receipt_policy": {
+      "kind": "z4j-production-container-finalization-v1",
+      "required": true,
+      "binds": [
+        "release_git_commit",
+        "release_git_tree",
+        "manifest_sha256",
+        "production_source_projection_sha256",
+        "source_tag_authority",
+        "system_authority_policy",
+        "system_authority",
+        "dashboard_authority_policy",
+        "dashboard_authority",
+        "wheelhouse_index_digest",
+        "candidate_image_index_digest",
+        "platform_manifest_and_config_digests",
+        "runtime_and_build_lock_sha256",
+        "wheelhouse_inventory_and_tree_sha256",
+        "registry_provenance_and_resolver_receipt_sha256",
+        "debian_snapshot_release_key_package_inventory_and_advisory_sha256",
+        "system_real_base_installability_receipt_sha256",
+        "system_bundle_index_manifest_config_and_tree_sha256",
+        "dashboard_source_pnpm_lock_store_build_sbom_advisory_and_bundle_tree_sha256",
+        "dashboard_bundle_index_manifest_and_config_sha256",
+        "cadence_probe_sha256",
+        "sbom_sha256",
+        "candidate_scanner_verdict_and_report_sha256",
+        "advisory_receipt_sha256"
+      ]
+    }
+  },
+  "source_authority": {
+    "base_commit": "986a33eb60d3554bb1269126f9768a201349b54f",
+    "integrated_prelock_tree": "bb5fc5dc7b539536e0e5d12ebdedcf54a62f0025",
+    "integrated_prelock_patch_sha256": "423ce1165f34a192e1f3519d5f0bb4499b8c8f8fc9539fb40404bc518c013a38",
+    "integrated_prelock_patch_size": 1716110,
+    "production_source_freeze": {
+      "commit": null,
+      "tree": null
+    },
+    "projection": {
+      "algorithm": "z4j-production-source-tree-v1",
+      "record_framing": "canonical-json:{format,files:[{path,mode,size,sha256}]} sorted by UTF-8 logical path; mode is 0755 iff path is listed in executables, otherwise 0644",
+      "executables": [],
+      "inclusions": {
+        "z4j": [
+          "LICENSE",
+          "README.md",
+          "backend/src/z4j_brain",
+          "pyproject.toml",
+          "src/z4j"
+        ],
+        "z4j-core": [
+          "LICENSE",
+          "README.md",
+          "pyproject.toml",
+          "src/z4j_core"
+        ],
+        "z4j-scheduler": [
+          "CHANGELOG.md",
+          "LICENSE",
+          "README.md",
+          "proto",
+          "pyproject.toml",
+          "src/z4j_scheduler"
+        ]
+      },
+      "exclusions": [
+        ".DS_Store",
+        "__pycache__",
+        "*.pyc",
+        "*.pyo"
+      ],
+      "sha256": null,
+      "entries": null,
+      "bytes": null
+    }
+  },
+  "python": {
+    "implementation": "CPython",
+    "version": "3.14.7",
+    "image": "docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4",
+    "index": {
+      "digest": "sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4",
+      "size": 10365
+    },
+    "source_tar_sha256": "3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81",
+    "docker_library_revision": "228f71e70a42ba9f9a092321b971031603bb88ff",
+    "platforms": {
+      "linux/amd64": {
+        "manifest_digest": "sha256:d6e0850f13fda0e2305d4c3c1c2f7930fe1042d34ddd958e49bba6ef685d0bb2",
+        "manifest_size": 1745,
+        "config_digest": "sha256:a41c1f663be90eb31af9864d1e1ccdaa91b6af11776b7ade1c05915e76da7aea",
+        "config_size": 4934
+      },
+      "linux/arm64": {
+        "manifest_digest": "sha256:c65a4a1140b75416bbc7f28807f82a3746bd6567645d5848123b6a6587f86962",
+        "manifest_size": 1747,
+        "config_digest": "sha256:462b4d0ce92fd7559a84feb2d3ab4eca3b741c5a1a375e28cce7fd8900659688",
+        "config_size": 4949
+      }
+    }
+  },
+  "resolver": {
+    "name": "uv",
+    "version": "0.12.5",
+    "binary_relative_path": "bin/uv",
+    "required_sync_flags": [
+      "--require-hashes",
+      "--no-index",
+      "--find-links",
+      "--offline",
+      "--no-cache",
+      "--no-config"
+    ]
+  },
+  "signature_verifier": {
+    "name": "cosign",
+    "version": "3.1.3",
+    "runtime_path": "/usr/local/bin/cosign",
+    "release_response": {
+      "path": "evidence/cosign-release.json",
+      "sha256": "5ca8c4ac124c8d596c71fa417861c60c6a1e551a35aa433c4af3342796c81c4c",
+      "size": 157813
+    },
+    "platforms": {
+      "linux/amd64": {
+        "filename": "cosign-linux-amd64",
+        "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64",
+        "sha256": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
+        "size": 141178250,
+        "version_output_sha256": "04983c4e5afb1a85ec8b13c80db5412c3fdc8d9e32cae6ac973baedbee13ad66",
+        "version_output_size": 230
+      },
+      "linux/arm64": {
+        "filename": "cosign-linux-arm64",
+        "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-arm64",
+        "sha256": "c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a",
+        "size": 132747403,
+        "version_output_sha256": "da37535f8a15bc08be67bf64561ac700f5a24c85e2bbf062f00162d21752e660",
+        "version_output_size": 230
+      }
+    }
+  },
+  "install": {
+    "python_requires": "==3.14.7",
+    "source_date_epoch": null,
+    "roots": [
+      {
+        "distribution": "z4j-core",
+        "version": "1.9.0",
+        "extras": []
+      },
+      {
+        "distribution": "z4j",
+        "version": "1.9.0",
+        "extras": [
+          "postgres",
+          "scheduler-grpc"
+        ]
+      },
+      {
+        "distribution": "z4j-scheduler",
+        "version": "1.9.0",
+        "extras": []
+      }
+    ],
+    "local_wheel_install": "offline-no-deps",
+    "build_isolation": "offline-hash-locked",
+    "cadence_dependencies": {
+      "astral": "3.2",
+      "croniter": "6.2.2",
+      "python-dateutil": "2.9.0.post0",
+      "six": "1.17.0",
+      "tzdata": "2026.3"
+    }
+  },
+  "wheelhouse": {
+    "image": null,
+    "index": {
+      "digest": null,
+      "size": null
+    },
+    "payload_root": "/opt/z4j-production",
+    "inventory_format": "z4j-production-wheelhouse-inventory-v1",
+    "tree_format": "z4j-production-wheelhouse-tree-v1",
+    "platforms": {
+      "linux/amd64": {
+        "manifest_digest": null,
+        "manifest_size": null,
+        "config_digest": null,
+        "config_size": null,
+        "runtime_lock": {
+          "path": "locks/runtime-linux-amd64.txt",
+          "sha256": null,
+          "size": null
+        },
+        "build_lock": {
+          "path": "locks/build-linux-amd64.txt",
+          "sha256": null,
+          "size": null
+        },
+        "inventory": {
+          "path": "inventory.json",
+          "sha256": null,
+          "size": null,
+          "entries": null
+        },
+        "tree_sha256": null,
+        "tree_bytes": null,
+        "uv": {
+          "sha256": null,
+          "size": null,
+          "version_output": null,
+          "probe_sha256": null
+        },
+        "local_wheels": [],
+        "cadence_probe": {
+          "sha256": null,
+          "fingerprint": null,
+          "behavior_vector_sha256": null,
+          "tzdata_tree_sha256": null
+        },
+        "sbom": {
+          "sha256": null,
+          "size": null
+        },
+        "provenance_receipt": {
+          "sha256": null,
+          "size": null
+        },
+        "resolver_receipt": {
+          "sha256": null,
+          "size": null
+        },
+        "advisory_receipt": {
+          "sha256": null,
+          "size": null,
+          "verdict": null
+        }
+      },
+      "linux/arm64": {
+        "manifest_digest": null,
+        "manifest_size": null,
+        "config_digest": null,
+        "config_size": null,
+        "runtime_lock": {
+          "path": "locks/runtime-linux-arm64.txt",
+          "sha256": null,
+          "size": null
+        },
+        "build_lock": {
+          "path": "locks/build-linux-arm64.txt",
+          "sha256": null,
+          "size": null
+        },
+        "inventory": {
+          "path": "inventory.json",
+          "sha256": null,
+          "size": null,
+          "entries": null
+        },
+        "tree_sha256": null,
+        "tree_bytes": null,
+        "uv": {
+          "sha256": null,
+          "size": null,
+          "version_output": null,
+          "probe_sha256": null
+        },
+        "local_wheels": [],
+        "cadence_probe": {
+          "sha256": null,
+          "fingerprint": null,
+          "behavior_vector_sha256": null,
+          "tzdata_tree_sha256": null
+        },
+        "sbom": {
+          "sha256": null,
+          "size": null
+        },
+        "provenance_receipt": {
+          "sha256": null,
+          "size": null
+        },
+        "resolver_receipt": {
+          "sha256": null,
+          "size": null
+        },
+        "advisory_receipt": {
+          "sha256": null,
+          "size": null,
+          "verdict": null
+        }
+      }
+    }
+  },
+  "system_packages": {
+    "state": "unfinalized",
+    "format": "z4j-production-system-bundle-v2",
+    "image": null,
+    "index": {
+      "digest": null,
+      "size": null
+    },
+    "payload_root": "/opt/z4j-production-system",
+    "requested": [
+      "ca-certificates",
+      "libpq5",
+      "tini"
+    ],
+    "snapshot": {
+      "selection_utc": null,
+      "sources": [
+        {
+          "name": "debian",
+          "archive": "https://snapshot.debian.org/archive/debian/",
+          "suite": "trixie",
+          "release_suite": "stable",
+          "components": ["main"],
+          "timestamp_utc": null,
+          "inrelease_sha256": null,
+          "inrelease_size": null,
+          "release_sha256": null,
+          "release_size": null,
+          "archive_keyring_sha256": null,
+          "archive_keyring_size": null,
+          "archive_key_fingerprints": [
+            "04B54C3CDCA79751B16BC6B5225629DF75B188BD",
+            "41587F7DB8C774BCCF131416762F67A0B2C39DE4"
+          ]
+        },
+        {
+          "name": "debian-security",
+          "archive": "https://snapshot.debian.org/archive/debian-security/",
+          "suite": "trixie-security",
+          "release_suite": "stable-security",
+          "components": ["main"],
+          "timestamp_utc": null,
+          "inrelease_sha256": null,
+          "inrelease_size": null,
+          "release_sha256": null,
+          "release_size": null,
+          "archive_keyring_sha256": null,
+          "archive_keyring_size": null,
+          "archive_key_fingerprints": [
+            "5E04A1E3223A19A20706E20F9904613D4CCE68C6"
+          ]
+        },
+        {
+          "name": "debian-updates",
+          "archive": "https://snapshot.debian.org/archive/debian/",
+          "suite": "trixie-updates",
+          "release_suite": "stable-updates",
+          "components": ["main"],
+          "timestamp_utc": null,
+          "inrelease_sha256": null,
+          "inrelease_size": null,
+          "release_sha256": null,
+          "release_size": null,
+          "archive_keyring_sha256": null,
+          "archive_keyring_size": null,
+          "archive_key_fingerprints": [
+            "04B54C3CDCA79751B16BC6B5225629DF75B188BD",
+            "41587F7DB8C774BCCF131416762F67A0B2C39DE4"
+          ]
+        }
+      ]
+    },
+    "platforms": {
+      "linux/amd64": {
+        "manifest_digest": null,
+        "manifest_size": null,
+        "config_digest": null,
+        "config_size": null,
+        "package_lock": {
+          "path": "locks/system-linux-amd64.json",
+          "sha256": null,
+          "size": null,
+          "entries": null
+        },
+        "inventory_sha256": null,
+        "inventory_size": null,
+        "inventory_entries": null,
+        "tree_sha256": null,
+        "tree_bytes": null,
+        "resolution_receipt_sha256": null,
+        "resolution_receipt_size": null,
+        "installability_receipt_sha256": null,
+        "installability_receipt_size": null,
+        "advisory_receipt_sha256": null,
+        "advisory_receipt_size": null,
+        "advisory_verdict": null
+      },
+      "linux/arm64": {
+        "manifest_digest": null,
+        "manifest_size": null,
+        "config_digest": null,
+        "config_size": null,
+        "package_lock": {
+          "path": "locks/system-linux-arm64.json",
+          "sha256": null,
+          "size": null,
+          "entries": null
+        },
+        "inventory_sha256": null,
+        "inventory_size": null,
+        "inventory_entries": null,
+        "tree_sha256": null,
+        "tree_bytes": null,
+        "resolution_receipt_sha256": null,
+        "resolution_receipt_size": null,
+        "installability_receipt_sha256": null,
+        "installability_receipt_size": null,
+        "advisory_receipt_sha256": null,
+        "advisory_receipt_size": null,
+        "advisory_verdict": null
+      }
+    }
+  },
+  "dashboard": {
+    "state": "unfinalized",
+    "format": "z4j-production-dashboard-bundle-v1",
+    "image": null,
+    "index": {
+      "digest": null,
+      "size": null
+    },
+    "payload_root": "/opt/z4j-production-dashboard",
+    "source_projection": {
+      "algorithm": "z4j-dashboard-source-tree-v1",
+      "record_framing": "canonical-json:{format,files:[{path,mode,size,sha256}]} sorted by UTF-8 logical path; mode is 0755 iff path is listed in executables, otherwise 0644",
+      "executables": [],
+      "inclusions": [
+        ".npmrc",
+        "components.json",
+        "index.html",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "public",
+        "scripts",
+        "src",
+        "tsconfig.json",
+        "vite.config.ts"
+      ],
+      "exclusions": [
+        ".DS_Store",
+        "__pycache__",
+        "*.map",
+        "*.pyc",
+        "*.pyo"
+      ],
+      "sha256": null,
+      "entries": null,
+      "bytes": null
+    },
+    "node": {
+      "version": "24.19.0",
+      "image": "docker.io/library/node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03",
+      "index_digest": "sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03",
+      "index_size": null,
+      "platforms": {
+        "linux/amd64": {
+          "manifest_digest": null,
+          "manifest_size": null,
+          "config_digest": null,
+          "config_size": null
+        },
+        "linux/arm64": {
+          "manifest_digest": null,
+          "manifest_size": null,
+          "config_digest": null,
+          "config_size": null
+        }
+      }
+    },
+    "pnpm": {
+      "version": "11.22.0",
+      "archive_sha256": null,
+      "archive_size": null,
+      "binary_sha256": null,
+      "binary_size": null,
+      "release_receipt_sha256": null,
+      "release_receipt_size": null
+    },
+    "platforms": {
+      "linux/amd64": {
+        "manifest_digest": null,
+        "manifest_size": null,
+        "config_digest": null,
+        "config_size": null,
+        "inventory_sha256": null,
+        "inventory_size": null,
+        "inventory_entries": null,
+        "tree_sha256": null,
+        "tree_bytes": null,
+        "pnpm_lock_sha256": null,
+        "store_inventory_sha256": null,
+        "store_inventory_size": null,
+        "build_receipt_sha256": null,
+        "build_receipt_size": null,
+        "sbom_sha256": null,
+        "sbom_size": null,
+        "advisory_receipt_sha256": null,
+        "advisory_receipt_size": null,
+        "advisory_verdict": null,
+        "bundle_tree_sha256": null,
+        "bundle_tree_bytes": null
+      },
+      "linux/arm64": {
+        "manifest_digest": null,
+        "manifest_size": null,
+        "config_digest": null,
+        "config_size": null,
+        "inventory_sha256": null,
+        "inventory_size": null,
+        "inventory_entries": null,
+        "tree_sha256": null,
+        "tree_bytes": null,
+        "pnpm_lock_sha256": null,
+        "store_inventory_sha256": null,
+        "store_inventory_size": null,
+        "build_receipt_sha256": null,
+        "build_receipt_size": null,
+        "sbom_sha256": null,
+        "sbom_size": null,
+        "advisory_receipt_sha256": null,
+        "advisory_receipt_size": null,
+        "advisory_verdict": null,
+        "bundle_tree_sha256": null,
+        "bundle_tree_bytes": null
+      }
+    }
+  }
+}

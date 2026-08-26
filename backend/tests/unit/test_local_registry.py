@@ -51,6 +51,10 @@ class TestRegister:
             ws=ws,
         )
         assert registry.is_online(agent_id)
+        # Physical delivery revalidates this immutable registry coordinate
+        # before it sends; a test double that sets it by hand would hide a
+        # production registration regression.
+        assert ws._z4j_agent_id == agent_id  # type: ignore[attr-defined]
 
     async def test_second_connection_kicks_first(
         self,

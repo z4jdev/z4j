@@ -8,6 +8,22 @@ Three layers:
    three ``catch_up`` policies, agent-offline -> noop, sweep.
 3. End-to-end via the FireSchedule gRPC handler is covered by the
    scheduler-side e2e test in ``packages/z4j-scheduler/tests/integration``.
+
+Deliberately NOT on the migrated schema, unlike the rest of the schedule
+suite. Everything here is the PRE-ACTIVATION buffer protocol: rows with a
+NULL ``protocol_marker``, written by ``PendingFiresRepository.buffer`` and
+drained by the replay worker's generic branch. A migrated database refuses
+to create such a row by any route -- ``z4j_pending_fire_insert_guard_v1``
+has no ``guard_version`` condition, so it rejects every insert that is not
+a complete receipt-bound occurrence ("pending fire protocol marker
+required"). These rows can only exist on an operator's database by having
+survived the 1.8 activation, which is exactly why the generic drain paths
+still need coverage, and exactly why that coverage cannot be seeded on the
+schema an operator now runs.
+
+The current receipt-bound buffer -- ``buffer_current`` plus the replay,
+expiry and stale-receipt transitions the activated brain actually takes --
+is covered against a migrated database in ``test_scheduler_grpc_current``.
 """
 
 from __future__ import annotations

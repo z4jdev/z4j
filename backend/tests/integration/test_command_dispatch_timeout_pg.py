@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from z4j_brain.persistence.enums import AgentState
 from z4j_brain.persistence.models import Agent, Project
 from z4j_brain.persistence.repositories import CommandRepository
+from z4j_brain.persistence.repositories import commands as commands_module
 
 pytestmark = pytest.mark.asyncio
 
@@ -123,3 +125,162 @@ async def test_initial_dispatch_refreshes_timeout_on_postgres(
             {"command_id": command.id},
         )
     assert status_after_deadline == "timeout"
+
+
+async def test_postgres_redispatch_lease_has_one_database_clock_winner(
+    migrated_engine: AsyncEngine,
+) -> None:
+    """Two replicas holding one generation cannot both advance its lease."""
+    sessions = async_sessionmaker(
+        migrated_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    async with sessions() as session:
+        project = Project(
+            id=uuid.uuid4(),
+            slug=f"redispatch-cas-{uuid.uuid4().hex[:8]}",
+            name="Redispatch CAS",
+        )
+        session.add(project)
+        await session.flush()
+        agent = Agent(
+            id=uuid.uuid4(),
+            project_id=project.id,
+            name="redispatch-cas-agent",
+            token_hash=secrets.token_hex(32),
+            protocol_version="2",
+            framework_adapter="bare",
+            engine_adapters=["celery"],
+            scheduler_adapters=[],
+            capabilities={},
+            state=AgentState.ONLINE,
+        )
+        session.add(agent)
+        await session.flush()
+        commands = CommandRepository(session)
+        command, _ = await commands.insert(
+            project_id=project.id,
+            agent_id=agent.id,
+            issued_by=None,
+            action="cancel_task",
+            target_type="task",
+            target_id="task-cas",
+            payload={},
+            idempotency_key=None,
+            timeout_at=datetime.now(UTC) + timedelta(minutes=10),
+            source_ip=None,
+        )
+        assert await commands.mark_dispatched(command.id, timeout_seconds=600) is not None
+        stale_generation = await session.scalar(
+            text(
+                "UPDATE commands "
+                "SET dispatched_at = clock_timestamp() - interval '120 seconds' "
+                "WHERE id = :command_id RETURNING dispatched_at"
+            ),
+            {"command_id": command.id},
+        )
+        assert isinstance(stale_generation, datetime)
+        command_id = command.id
+        await session.commit()
+
+    ready = asyncio.Event()
+    starters = 0
+    starters_lock = asyncio.Lock()
+
+    async def claim_from_replica() -> bool:
+        nonlocal starters
+        async with sessions() as session:
+            async with starters_lock:
+                starters += 1
+                if starters == 2:
+                    ready.set()
+            await ready.wait()
+            claimed = await CommandRepository(session).claim_redispatch(
+                command_id,
+                min_interval_seconds=10.0,
+                expected_dispatched_at=stale_generation,
+            )
+            await session.commit()
+            return claimed
+
+    winners = await asyncio.gather(claim_from_replica(), claim_from_replica())
+    assert winners.count(True) == 1
+    assert winners.count(False) == 1
+
+    async with migrated_engine.connect() as connection:
+        durable_generation = await connection.scalar(
+            text("SELECT dispatched_at FROM commands WHERE id = :command_id"),
+            {"command_id": command_id},
+        )
+    assert isinstance(durable_generation, datetime)
+    assert _as_utc(durable_generation) > _as_utc(stale_generation)
+
+
+async def test_postgres_process_clock_skew_cannot_control_dispatch_lease(
+    migrated_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions = async_sessionmaker(
+        migrated_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    async with sessions() as session:
+        project = Project(
+            id=uuid.uuid4(),
+            slug=f"redispatch-clock-{uuid.uuid4().hex[:8]}",
+            name="Redispatch clock",
+        )
+        session.add(project)
+        await session.flush()
+        agent = Agent(
+            id=uuid.uuid4(),
+            project_id=project.id,
+            name="redispatch-clock-agent",
+            token_hash=secrets.token_hex(32),
+            protocol_version="2",
+            framework_adapter="bare",
+            engine_adapters=["celery"],
+            scheduler_adapters=[],
+            capabilities={},
+            state=AgentState.ONLINE,
+        )
+        session.add(agent)
+        await session.flush()
+        commands = CommandRepository(session)
+        command, _ = await commands.insert(
+            project_id=project.id,
+            agent_id=agent.id,
+            issued_by=None,
+            action="cancel_task",
+            target_type="task",
+            target_id="task-clock",
+            payload={},
+            idempotency_key=None,
+            timeout_at=datetime.now(UTC) + timedelta(minutes=10),
+            source_ip=None,
+        )
+        before = await session.scalar(text("SELECT clock_timestamp()"))
+
+        class SkewedDateTime(datetime):
+            @classmethod
+            def now(cls, tz: object = None) -> SkewedDateTime:
+                del tz
+                return cls(2099, 1, 1, tzinfo=UTC)
+
+        monkeypatch.setattr(commands_module, "datetime", SkewedDateTime)
+        generation = await commands.mark_dispatched(command.id, timeout_seconds=600)
+        after = await session.scalar(text("SELECT clock_timestamp()"))
+        assert isinstance(before, datetime)
+        assert isinstance(after, datetime)
+        assert generation is not None
+        assert _as_utc(before) <= generation <= _as_utc(after)
+        assert (
+            await commands.claim_redispatch(
+                command.id,
+                min_interval_seconds=60.0,
+                expected_dispatched_at=generation,
+            )
+            is False
+        )

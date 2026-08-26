@@ -16,8 +16,9 @@ gates that make destructive automation safe to hand an operator:
   ``require_fresh_mfa``).
 - **Every mutation is audited** through the one HMAC-chained audit log.
 
-The per-project kill switch (disable ALL automation for a project) lands
-in a follow-up (needs a project-level flag + migration)."""
+The project-level ``/automation/settings`` endpoint exposes a kill switch
+that disables all rule execution for the project independently of each
+rule's own ``is_enabled`` state."""
 
 from __future__ import annotations
 
@@ -468,7 +469,15 @@ async def update_rule(
         min_role=ProjectRole.VIEWER,
     )
     repo = AutomationRuleRepository(db_session)
-    rule = await _load_rule(repo, rule_id=rule_id, project_id=project.id)
+    # Lock the authoritative configuration before deriving the old/new RBAC
+    # union. The same lock is retained through the DB-side revision increment,
+    # so a concurrent edit cannot change the action class after authorization.
+    rule = await repo.get_for_update(rule_id, project_id=project.id)
+    if rule is None:
+        raise NotFoundError(
+            "automation rule not found",
+            details={"rule_id": str(rule_id)},
+        )
 
     data = body.model_dump(exclude_unset=True)
     eff_trigger = data.get("trigger", rule.trigger)
@@ -503,10 +512,8 @@ async def update_rule(
                 details={"name": data["name"]},
             )
 
-    for field, value in data.items():
-        setattr(rule, field, value)
     try:
-        await db_session.flush()
+        await repo.update_configuration(rule, data)
     except IntegrityError as exc:
         # Lost the unique-(project, name) rename race: 409, not 500.
         await db_session.rollback()
@@ -567,7 +574,16 @@ async def delete_rule(
         min_role=ProjectRole.VIEWER,
     )
     repo = AutomationRuleRepository(db_session)
-    rule = await _load_rule(repo, rule_id=rule_id, project_id=project.id)
+    # Lock the exact configuration whose action class controls authorization.
+    # Without this, an OPERATOR could read a notify-only rule while an ADMIN
+    # concurrently turns it destructive, then delete the committed
+    # destructive rule using the stale lower privilege decision.
+    rule = await repo.get_for_update(rule_id, project_id=project.id)
+    if rule is None:
+        raise NotFoundError(
+            "automation rule not found",
+            details={"rule_id": str(rule_id)},
+        )
 
     # Deleting a destructive rule needs ADMIN; removal reduces blast
     # radius, so no MFA step-up here.
@@ -630,7 +646,15 @@ async def reset_circuit(
         min_role=ProjectRole.VIEWER,
     )
     repo = AutomationRuleRepository(db_session)
-    rule = await _load_rule(repo, rule_id=rule_id, project_id=project.id)
+    # Lock before inspecting the action set: reset re-arms the rule, so a
+    # concurrent edit must not turn a notify-only rule destructive after the
+    # authorization decision but before its breaker history is cleared.
+    rule = await repo.get_for_update(rule_id, project_id=project.id)
+    if rule is None:
+        raise NotFoundError(
+            "automation rule not found",
+            details={"rule_id": str(rule_id)},
+        )
 
     await _authorize_write(
         policy,
@@ -642,10 +666,7 @@ async def reset_circuit(
         destructive=actions_are_destructive(rule.actions),
     )
 
-    rule.cb_tripped = False
-    rule.cb_execution_count = 0
-    rule.cb_window_start = None
-    await db_session.flush()
+    await repo.reset_circuit(rule)
 
     await audit.record(
         audit_log,
@@ -730,8 +751,13 @@ async def set_automation_settings(
     if body.automation_enabled and resolved is not None:
         enforce_fresh_mfa(user=user, session_row=resolved[0], settings=settings)
 
-    project.automation_enabled = body.automation_enabled
-    await db_session.flush()
+    # The SQL statement owns both the boolean transition and its monotonic
+    # authority epoch. In particular, off/on racing requests cannot return the
+    # epoch to an earlier value and resurrect a pre-toggle dispatch token.
+    await AutomationRuleRepository(db_session).set_project_automation_enabled(
+        project,
+        enabled=body.automation_enabled,
+    )
     await audit.record(
         audit_log,
         action="automation.kill_switch.updated",

@@ -20,11 +20,11 @@
     {
       "id": "a2000000-0000-4000-b000-000000000002",
       "project_id": "00000000-0000-4000-9000-000000000002",
-      "name": "Auto-retry ingest timeouts",
+      "name": "Auto-retry webhook delivery failures",
       "is_enabled": true,
       "dry_run": true,
       "trigger": "task.failed",
-      "conditions": { "queue": "ingest" },
+      "conditions": { "queue": "webhooks" },
       "actions": [{ "type": "retry" }],
       "max_executions_per_window": 100,
       "window_seconds": 900,

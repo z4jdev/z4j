@@ -103,6 +103,11 @@ async def _seed_user_in_project(
                     is_admin=False,
                     is_active=True,
                 ),
+            ],
+        )
+        await s.flush()
+        s.add_all(
+            [
                 Session(
                     id=session_id,
                     user_id=user_id,

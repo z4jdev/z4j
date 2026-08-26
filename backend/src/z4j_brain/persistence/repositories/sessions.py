@@ -5,9 +5,10 @@ all work without waiting for an absolute expiry. The auth service
 holds a SessionRepository and treats the database row as the
 source of truth.
 
-Hot path: every authenticated request runs ``get`` (PK SELECT) +
-``touch`` (PK UPDATE). Both are O(1) by primary key - no scan, no
-N+1.
+Hot path: every authenticated request runs ``get`` (PK SELECT). The
+transport samples ``touch`` (PK UPDATE) at a bounded cadence so the durable
+idle clock advances without turning every dashboard request into a write.
+Both operations use the primary key; there is no row scan or N+1 query.
 """
 
 from __future__ import annotations
@@ -55,15 +56,29 @@ class SessionRepository(BaseRepository[Session]):
         await self.session.flush()
         return row
 
-    async def touch(self, session_id: UUID) -> None:
+    async def touch(self, session_id: UUID) -> bool:
         """Bump ``last_seen_at`` to now.
 
-        Single indexed UPDATE - O(1) by PK. Called once per
-        authenticated request after the session has been validated.
+        Single indexed UPDATE by PK. Called by a transport after the session
+        has been validated and its activity-sampling window permits a write.
+        The live-row predicates close the validation-to-touch race: a
+        concurrent revoke or expiry can never be made to look active again.
+
+        Returns whether a still-live row was updated. Callers use the result
+        to cache a throttle slot only after a real activity write succeeds.
         """
-        await self.session.execute(
-            update(Session).where(Session.id == session_id).values(last_seen_at=datetime.now(UTC)),
+        now = datetime.now(UTC)
+        result = await self.session.execute(
+            update(Session)
+            .where(
+                Session.id == session_id,
+                Session.revoked_at.is_(None),
+                Session.expires_at > now,
+            )
+            .values(last_seen_at=now)
+            .execution_options(synchronize_session=False),
         )
+        return bool(result.rowcount)
 
     async def revoke(
         self,
@@ -112,17 +127,44 @@ class SessionRepository(BaseRepository[Session]):
         )
         return int(result.rowcount or 0)
 
-    async def list_active_for_user(self, user_id: UUID) -> list[Session]:
-        """Return every live session for one user.
+    async def revoke_all_except(
+        self,
+        user_id: UUID,
+        *,
+        except_session_id: UUID,
+        reason: str,
+    ) -> int:
+        """Revoke every live session for a user except one session.
 
-        Used by the dashboard "active sessions" view (B5). Bounded
-        by the user's session count, which is bounded by browser
-        + device count - never large enough to justify pagination
-        in v1.
+        This is deliberately one server-side UPDATE. The dashboard session
+        listing is capped for display, so using that list as the revocation
+        work queue would leave older sessions active.
         """
         result = await self.session.execute(
+            update(Session)
+            .where(
+                Session.user_id == user_id,
+                Session.id != except_session_id,
+                Session.revoked_at.is_(None),
+            )
+            .values(revoked_at=datetime.now(UTC), revocation_reason=reason),
+        )
+        return int(result.rowcount or 0)
+
+    async def list_active_for_user(self, user_id: UUID) -> list[Session]:
+        """Return up to 100 non-revoked, non-expired sessions for one user.
+
+        Used by the dashboard "active sessions" view (B5). The explicit cap
+        bounds a user who repeatedly signs in without revoking old sessions.
+        """
+        now = datetime.now(UTC)
+        result = await self.session.execute(
             select(Session)
-            .where(Session.user_id == user_id, Session.revoked_at.is_(None))
+            .where(
+                Session.user_id == user_id,
+                Session.revoked_at.is_(None),
+                Session.expires_at > now,
+            )
             .order_by(Session.issued_at.desc())
             .limit(100),
         )

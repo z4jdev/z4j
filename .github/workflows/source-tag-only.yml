@@ -1,0 +1,1092 @@
+name: source-tag-only
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_commit:
+        description: "Exact finalized standalone 1.9.0 commit (40 lowercase hex)"
+        required: true
+        type: string
+      approved_tree:
+        description: "Exact finalized standalone 1.9.0 tree (40 lowercase hex)"
+        required: true
+        type: string
+      source_main_authority_input:
+        description: "Exact bounded S0/settings transport (never logged)"
+        required: true
+        type: string
+      immutable_tag_ruleset_id:
+        description: "Reviewed active immutable-v-tags ruleset id"
+        required: true
+        type: string
+      dry_run:
+        description: "Validate every authority but do not create a Git ref"
+        required: true
+        default: true
+        type: boolean
+      recovery_run_id:
+        description: "Required only to recover evidence after an authorized failed tag run"
+        required: false
+        type: string
+      recovery_artifact_digest:
+        description: "Optional exact retained sha256 A to materialize after a prior durable crash"
+        required: false
+        type: string
+      confirmation:
+        description: "CREATE IMMUTABLE v1.9.0 or RECOVER EXACT IMMUTABLE v1.9.0 EVIDENCE"
+        required: false
+        type: string
+
+concurrency:
+  group: source-tag-only-v1.9.0
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  actions: write
+
+jobs:
+  finalized-authority-boundary:
+    name: Refuse before any source-tag file, credential, network, or tool
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 1
+    steps:
+      - name: Unconditional finalized-authority refusal
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          printf '%s\n' \
+            '::error::sealed release runtime and finalized material authorities are UNFINALIZED; refusing before checkout, protected environments, credentials, files, network, or release tools'
+          exit 97
+
+  source-tag-only:
+    name: Validate and create only immutable v1.9.0
+    runs-on: ubuntu-24.04
+    needs: finalized-authority-boundary
+    environment: production-release
+    timeout-minutes: 20
+    env:
+      MANIFEST: docker/production/manifest.json
+      EVIDENCE: ${{ runner.temp }}/source-tag-evidence
+      PORTABLE: ${{ runner.temp }}/source-tag-evidence/authority
+      HUB_API_REPOSITORY: https://hub.docker.com/v2/namespaces/z4jdev/repositories/z4j-production-wheelhouse
+      TAG_REF: refs/tags/v1.9.0
+      GIT_NO_REPLACE_OBJECTS: "1"
+    steps:
+      - name: Refuse any non-main or non-z4jdev ceremony
+        env:
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          APPROVED_TREE: ${{ inputs.approved_tree }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ inputs.recovery_artifact_digest }}
+          SOURCE_MAIN_AUTHORITY_INPUT: ${{ inputs.source_main_authority_input }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REPOSITORY}" != "z4jdev/z4j" ]; then
+            echo "::error::source authority must be z4jdev/z4j"
+            exit 1
+          fi
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] \
+            || [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::source-tag-only must be manually dispatched from main"
+            exit 1
+          fi
+          if ! printf '%s' "${APPROVED_COMMIT}" | grep -Eq '^[0-9a-f]{40}$' \
+            || ! printf '%s' "${APPROVED_TREE}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::approved commit/tree must be exact lowercase Git SHA-1 values"
+            exit 1
+          fi
+          if [ "${GITHUB_SHA}" != "${APPROVED_COMMIT}" ]; then
+            echo "::error::workflow source ${GITHUB_SHA} differs from approved commit"
+            exit 1
+          fi
+          if [ -n "${RECOVERY_RUN_ID}" ] \
+            && ! printf '%s' "${RECOVERY_RUN_ID}" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "::error::recovery run id must be a positive integer"
+            exit 1
+          fi
+          if [ -n "${RECOVERY_ARTIFACT_DIGEST}" ] \
+            && ! printf '%s' "${RECOVERY_ARTIFACT_DIGEST}" \
+              | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::recovery artifact digest must be an exact sha256 digest"
+            exit 1
+          fi
+          if [ -n "${RECOVERY_ARTIFACT_DIGEST}" ] && [ -z "${RECOVERY_RUN_ID}" ]; then
+            echo "::error::durable materialization requires an authenticated recovery run"
+            exit 1
+          fi
+          if [ -z "${SOURCE_MAIN_AUTHORITY_INPUT}" ] \
+            || [ "${#SOURCE_MAIN_AUTHORITY_INPUT}" -gt 60000 ] \
+            || ! printf '%s' "${SOURCE_MAIN_AUTHORITY_INPUT}" \
+              | grep -Eq '^[A-Za-z0-9_-]+$'; then
+            echo "::error::source-main authority transport framing differs"
+            exit 1
+          fi
+          if [ "${DRY_RUN}" != "true" ] \
+            && [ "${CONFIRMATION}" != "CREATE IMMUTABLE v1.9.0" ] \
+            && [ "${CONFIRMATION}" != "RECOVER EXACT IMMUTABLE v1.9.0 EVIDENCE" ]; then
+            echo "::error::live ceremony requires an exact create or recovery confirmation"
+            exit 1
+          fi
+
+      - name: Checkout exact approved finalized source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.approved_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Capture exact HEAD-bound helper in private runner storage
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -m 0700 "${EVIDENCE}"
+          helper_oid=$(git -c core.hooksPath=/dev/null rev-parse \
+            "${GITHUB_SHA}:.github/source_tag_authority.py")
+          entry=$(git -c core.hooksPath=/dev/null ls-tree \
+            "${GITHUB_SHA}" -- .github/source_tag_authority.py)
+          expected=$(printf '100644 blob %s\t.github/source_tag_authority.py' "${helper_oid}")
+          test "${entry}" = "${expected}"
+          private_helper="${EVIDENCE}/head-bound-source-tag-authority.py"
+          test ! -e "${private_helper}"
+          set -C
+          git -c core.hooksPath=/dev/null cat-file blob "${helper_oid}" \
+            > "${private_helper}"
+          set +C
+          chmod 0400 "${private_helper}"
+          python -I -B - .github/source_tag_authority.py "${private_helper}" <<'PY'
+          import os
+          import stat
+          import sys
+
+          def exact_regular(path: str) -> bytes:
+              descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+              try:
+                  before = os.fstat(descriptor)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                      raise SystemExit(f"{path} is not one no-follow regular file")
+                  raw = os.read(descriptor, before.st_size + 1)
+                  after = os.fstat(descriptor)
+                  if len(raw) != before.st_size or (before.st_dev, before.st_ino, before.st_size) != (
+                      after.st_dev,
+                      after.st_ino,
+                      after.st_size,
+                  ):
+                      raise SystemExit(f"{path} changed during exact read")
+                  return raw
+              finally:
+                  os.close(descriptor)
+
+          if exact_regular(sys.argv[1]) != exact_regular(sys.argv[2]):
+              raise SystemExit("worktree helper differs from exact HEAD blob")
+          PY
+          chmod 0500 "${private_helper}"
+          printf 'HELPER=%s\n' "${private_helper}" >> "${GITHUB_ENV}"
+          private_curl="${EVIDENCE}/sterile-curl"
+          test ! -e "${private_curl}"
+          set -C
+          cat > "${private_curl}" <<'SH'
+          #!/bin/bash
+          set -euo pipefail
+          while IFS= read -r name; do
+            case "${name,,}" in
+              http_proxy|https_proxy|all_proxy|no_proxy|ssl_cert_file|ssl_cert_dir|requests_ca_bundle|curl_ca_bundle)
+                unset "${name}"
+                ;;
+            esac
+          done < <(compgen -e)
+          exec /usr/bin/curl -q --noproxy '*' --proto '=https' \
+            --proto-redir '=https' --tlsv1.2 --max-redirs 0 \
+            --connect-timeout 30 --max-time 60 "$@"
+          SH
+          set +C
+          chmod 0500 "${private_curl}"
+          printf 'CURL=%s\n' "${private_curl}" >> "${GITHUB_ENV}"
+
+      - name: Decode and validate exact S0 settings authority without logging it
+        env:
+          SOURCE_MAIN_AUTHORITY_INPUT: ${{ inputs.source_main_authority_input }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -m 0700 "${EVIDENCE}"
+          python -I -B - "${EVIDENCE}/source-main-authority-input.txt" <<'PY'
+          import os
+          import sys
+
+          payload = os.environ["SOURCE_MAIN_AUTHORITY_INPUT"]
+          if (
+              not payload
+              or len(payload) > 60000
+              or not payload.isascii()
+              or any(
+                  not (character.isalnum() or character in "_-")
+                  for character in payload
+              )
+          ):
+              raise SystemExit("source-main authority transport framing differs")
+          descriptor = os.open(
+              sys.argv[1],
+              os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+              0o600,
+          )
+          try:
+              os.write(descriptor, payload.encode("ascii") + b"\n")
+          finally:
+              os.close(descriptor)
+          PY
+          python -I -B "${HELPER}" decode-source-main-transport \
+            --input "${EVIDENCE}/source-main-authority-input.txt" \
+            --output-root "${EVIDENCE}/source-main" \
+            > "${EVIDENCE}/source-main-transport-verification.json"
+          rm -f "${EVIDENCE}/source-main-authority-input.txt"
+
+      - name: Validate bounded local source and S0 authority
+        env:
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          APPROVED_TREE: ${{ inputs.approved_tree }}
+        run: |
+          set -euo pipefail
+          python -I -B "${HELPER}" validate-pre-e0-static \
+            --repo . \
+            --source-main-plan \
+              "${EVIDENCE}/source-main/source-main-transition-plan.json" \
+            --source-main-readback \
+              "${EVIDENCE}/source-main/source-main-transition-readback.json" \
+            --release-settings-authority \
+              "${EVIDENCE}/source-main/release-settings-authority.json" \
+            --approved-commit "${APPROVED_COMMIT}" \
+            --approved-tree "${APPROVED_TREE}" \
+            --output "${EVIDENCE}/pre-e0-static-verification.json"
+
+      - name: Capture protected repository authorities
+        env:
+          RULESET_ID: ${{ inputs.immutable_tag_ruleset_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "${EVIDENCE}"
+          github_get() {
+            output="$1"
+            url="$2"
+            status=$("${CURL}" --config - --fail-with-body --silent --show-error \
+              --output "${output}.raw" --write-out '%{http_code}' "${url}" <<EOF
+          header = "Authorization: Bearer ${GITHUB_TOKEN}"
+          header = "Accept: application/vnd.github+json"
+          header = "X-GitHub-Api-Version: 2026-03-10"
+          EOF
+            )
+            if [ "${status}" != "200" ]; then
+              echo "::error::authority GET ${url} returned HTTP ${status}"
+              exit 1
+            fi
+            python -B - "${output}.raw" "${output}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          source = Path(sys.argv[1])
+          target = Path(sys.argv[2])
+          value = json.loads(source.read_bytes())
+          raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+          descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          try:
+              os.write(descriptor, raw)
+          finally:
+              os.close(descriptor)
+          PY
+            rm -f "${output}.raw"
+          }
+          if ! printf '%s' "${RULESET_ID}" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "::error::immutable tag ruleset id must be a positive integer"
+            exit 1
+          fi
+          github_get "${EVIDENCE}/repository.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          github_get "${EVIDENCE}/main-ref.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/heads/main"
+          github_get "${EVIDENCE}/ruleset.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/rulesets/${RULESET_ID}?includes_parents=true"
+          main_ruleset_id=$(python -I -B - \
+            "${EVIDENCE}/source-main/release-settings-authority.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          value = json.loads(Path(sys.argv[1]).read_bytes())
+          identifier = value["policy"]["main_ruleset"]["id"]
+          if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0:
+              raise SystemExit("embedded main ruleset id differs")
+          print(identifier)
+          PY
+          )
+          github_get "${EVIDENCE}/main-ruleset.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/rulesets/${main_ruleset_id}?includes_parents=true"
+          github_get "${EVIDENCE}/main-branch-protection.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main/protection"
+          github_get "${EVIDENCE}/environment.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/environments/production-release"
+          github_get "${EVIDENCE}/source-workflow.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/source-tag-only.yml"
+          github_get "${EVIDENCE}/release-workflow.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/270520651"
+          github_get "${EVIDENCE}/workflow-inventory-recheck.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows?per_page=100"
+          runs_url=$(python -I -B - \
+            "${EVIDENCE}/source-main/source-main-transition-readback.json" <<'PY'
+          import json
+          import sys
+          import urllib.parse
+          from pathlib import Path
+
+          readback = json.loads(Path(sys.argv[1]).read_bytes())
+          query = readback["post_push_runs"]["query"]
+          parameters = {
+              "branch": query["branch"],
+              "event": query["event"],
+              "created": f"{query['created_after']}..{query['created_before']}",
+              "per_page": "100",
+          }
+          print(
+              "https://api.github.com/repos/z4jdev/z4j/actions/runs?"
+              + urllib.parse.urlencode(parameters)
+          )
+          PY
+          )
+          github_get "${EVIDENCE}/source-main-runs-recheck.json" "${runs_url}"
+          python -I -B "${HELPER}" verify-source-workflow \
+            --response "${EVIDENCE}/source-workflow.json" > /dev/null
+          python -I -B "${HELPER}" verify-release-workflow \
+            --response "${EVIDENCE}/release-workflow.json" > /dev/null
+
+      - name: Stop at unresolved signed E0 and A0 trust boundary
+        run: |
+          set -euo pipefail
+          helper_oid=$(git -c core.hooksPath=/dev/null rev-parse \
+            "${GITHUB_SHA}:.github/source_tag_authority.py")
+          test ! -L "${HELPER}"
+          test "$(git -c core.hooksPath=/dev/null hash-object "${HELPER}")" = "${helper_oid}"
+          python -I -B "${HELPER}" require-a0-authority
+
+      - name: Capture authenticated immutable wheelhouse retention
+        env:
+          Z4J_DOCKERHUB_PUBLISHER_PAT: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT }}
+          Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          auth_request="${EVIDENCE}/hub-auth-request.json"
+          token_response="${EVIDENCE}/hub-token.json"
+          token_config="${EVIDENCE}/hub-token.curl"
+          repository_raw="${EVIDENCE}/wheelhouse-repository.raw"
+          trap 'rm -f "${auth_request}" "${token_response}" "${token_config}" "${repository_raw}"' EXIT
+          python -B - "${auth_request}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          value = {
+              "identifier": os.environ["GITHUB_REPOSITORY_OWNER"],
+              "secret": os.environ["Z4J_DOCKERHUB_PUBLISHER_PAT"],
+          }
+          Path(sys.argv[1]).write_bytes(
+              (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+          )
+          PY
+          status=$("${CURL}" --silent --show-error --fail-with-body \
+            --request POST --header 'Content-Type: application/json' \
+            --data-binary "@${auth_request}" --output "${token_response}" \
+            --write-out '%{http_code}' 'https://hub.docker.com/v2/auth/token')
+          test "${status}" = 200
+          python -B - "${token_response}" "${token_config}" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          value = json.loads(Path(sys.argv[1]).read_bytes())
+          token = value.get("access_token") if isinstance(value, dict) else None
+          if not isinstance(token, str) or re.fullmatch(r"[A-Za-z0-9._~-]+", token) is None:
+              raise SystemExit("Docker Hub access token response differs")
+          Path(sys.argv[2]).write_text(
+              f'header = "Authorization: Bearer {token}"\n', encoding="ascii"
+          )
+          PY
+          status=$("${CURL}" --config "${token_config}" --silent --show-error \
+            --fail-with-body --request GET --output "${repository_raw}" \
+            --write-out '%{http_code}' "${HUB_API_REPOSITORY}")
+          test "${status}" = 200
+          python -B - "${repository_raw}" "${EVIDENCE}/wheelhouse-repository.json" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          value = json.loads(Path(sys.argv[1]).read_bytes())
+          raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+          output = Path(sys.argv[2])
+          descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          try:
+              os.write(descriptor, raw)
+          finally:
+              os.close(descriptor)
+          PY
+          rm -f "${auth_request}" "${token_response}" "${token_config}" "${repository_raw}"
+          trap - EXIT
+
+      - name: Build exact source-tag plan
+        env:
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          APPROVED_TREE: ${{ inputs.approved_tree }}
+          RULESET_ID: ${{ inputs.immutable_tag_ruleset_id }}
+        run: |
+          set -euo pipefail
+          test ! -e docker/production/locks/UNFINALIZED
+          python -I -B "${HELPER}" plan \
+            --repo . \
+            --manifest "${MANIFEST}" \
+            --repository-response "${EVIDENCE}/repository.json" \
+            --main-ref-response "${EVIDENCE}/main-ref.json" \
+            --ruleset-response "${EVIDENCE}/ruleset.json" \
+            --main-ruleset-response "${EVIDENCE}/main-ruleset.json" \
+            --main-branch-protection-response \
+              "${EVIDENCE}/main-branch-protection.json" \
+            --environment-response "${EVIDENCE}/environment.json" \
+            --wheelhouse-repository-response "${EVIDENCE}/wheelhouse-repository.json" \
+            --source-workflow-response "${EVIDENCE}/source-workflow.json" \
+            --release-workflow-response "${EVIDENCE}/release-workflow.json" \
+            --source-main-plan "${EVIDENCE}/source-main/source-main-transition-plan.json" \
+            --source-main-readback "${EVIDENCE}/source-main/source-main-transition-readback.json" \
+            --release-settings-authority "${EVIDENCE}/source-main/release-settings-authority.json" \
+            --source-main-runs-response "${EVIDENCE}/source-main-runs-recheck.json" \
+            --workflow-inventory-response "${EVIDENCE}/workflow-inventory-recheck.json" \
+            --approved-commit "${APPROVED_COMMIT}" \
+            --approved-tree "${APPROVED_TREE}" \
+            --ruleset-id "${RULESET_ID}" \
+            --actor "${GITHUB_ACTOR}" \
+            --output "${EVIDENCE}/source-tag-plan.json" \
+            --tag-object-output "${EVIDENCE}/source-tag-object.txt"
+
+      - name: Fetch and verify sealed Cosign 3.1.3
+        env:
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          APPROVED_TREE: ${{ inputs.approved_tree }}
+        run: |
+          set -euo pipefail
+          COSIGN_URL=$(python -I -B - "${EVIDENCE}/source-tag-plan.json" <<'PY'
+          import json
+          import platform
+          import sys
+          from pathlib import Path
+
+          machine = platform.machine().lower()
+          platform_name = "linux/amd64" if machine in {"amd64", "x86_64"} else "linux/arm64"
+          plan = json.loads(Path(sys.argv[1]).read_bytes())
+          print(plan["signature_verifier"]["platforms"][platform_name]["url"])
+          PY
+          )
+          curl --proto '=https' --tlsv1.2 --location --fail --silent --show-error \
+            --output "${EVIDENCE}/cosign" "${COSIGN_URL}"
+          chmod 0500 "${EVIDENCE}/cosign"
+          "${EVIDENCE}/cosign" version --json > "${EVIDENCE}/cosign-version.json"
+          python -I -B "${HELPER}" verify-cosign \
+            --manifest "${MANIFEST}" \
+            --approved-commit "${APPROVED_COMMIT}" \
+            --approved-tree "${APPROVED_TREE}" \
+            --binary "${EVIDENCE}/cosign" \
+            --version-output "${EVIDENCE}/cosign-version.json" \
+            > "${EVIDENCE}/cosign-verification.json"
+
+      - name: Prove retained subject and native OCI referrers before tag mutation
+        env:
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          APPROVED_TREE: ${{ inputs.approved_tree }}
+          Z4J_DOCKERHUB_PUBLISHER_PAT: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT }}
+          Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          python -I -B "${HELPER}" probe-registry \
+            --manifest "${MANIFEST}" \
+            --approved-commit "${APPROVED_COMMIT}" \
+            --approved-tree "${APPROVED_TREE}" \
+            --repository-response "${EVIDENCE}/wheelhouse-repository.json" \
+            > "${EVIDENCE}/registry-capability.json"
+
+      - name: Materialize deterministic annotated tag object locally
+        run: |
+          set -euo pipefail
+          EXPECTED=$(python -I -B - "${EVIDENCE}/source-tag-plan.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          print(json.loads(Path(sys.argv[1]).read_bytes())["tag"]["object"])
+          PY
+          )
+          ACTUAL=$(git -c core.hooksPath=/dev/null hash-object -t tag -w --stdin \
+            < "${EVIDENCE}/source-tag-object.txt")
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "::error::materialized tag object ${ACTUAL} differs from plan ${EXPECTED}"
+            exit 1
+          fi
+          printf 'tag_object=%s\n' "${ACTUAL}" >> "${GITHUB_ENV}"
+
+      - name: Classify current remote source tag
+        id: classify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          capture_ref() {
+            status=$("${CURL}" --config - --silent --show-error \
+              --output "${EVIDENCE}/tag-ref.raw" --write-out '%{http_code}' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/tags/v1.9.0" <<EOF
+          header = "Authorization: Bearer ${GITHUB_TOKEN}"
+          header = "Accept: application/vnd.github+json"
+          header = "X-GitHub-Api-Version: 2026-03-10"
+          EOF
+            )
+            printf '%s' "${status}"
+          }
+          status=$(capture_ref)
+          case "${status}" in
+            404)
+              printf 'state=absent\n' >> "${GITHUB_OUTPUT}"
+              ;;
+            200)
+              python -B - "${EVIDENCE}/tag-ref.raw" "${EVIDENCE}/tag-ref.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          raw = json.dumps(json.loads(Path(sys.argv[1]).read_bytes()), sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+          fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          try: os.write(fd, raw)
+          finally: os.close(fd)
+          PY
+              object_sha=$(python -I -B - "${EVIDENCE}/tag-ref.json" <<'PY'
+          import json, sys
+          from pathlib import Path
+          print(json.loads(Path(sys.argv[1]).read_bytes())["object"]["sha"])
+          PY
+              )
+              tag_status=$("${CURL}" --config - --fail-with-body --silent --show-error \
+                --output "${EVIDENCE}/tag-object.raw" --write-out '%{http_code}' \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" <<EOF
+          header = "Authorization: Bearer ${GITHUB_TOKEN}"
+          header = "Accept: application/vnd.github+json"
+          header = "X-GitHub-Api-Version: 2022-11-28"
+          EOF
+              )
+              test "${tag_status}" = "200"
+              python -B - "${EVIDENCE}/tag-object.raw" "${EVIDENCE}/tag-object.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          raw = json.dumps(json.loads(Path(sys.argv[1]).read_bytes()), sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+          fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          try: os.write(fd, raw)
+          finally: os.close(fd)
+          PY
+              python -I -B "${HELPER}" verify-remote \
+                --plan "${EVIDENCE}/source-tag-plan.json" \
+                --ref-response "${EVIDENCE}/tag-ref.json" \
+                --tag-response "${EVIDENCE}/tag-object.json"
+              printf 'state=recovery-required-exact\n' >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "::error::source tag classification returned HTTP ${status}"
+              exit 1
+              ;;
+          esac
+
+      - name: Require truthful create or recovery mode
+        if: ${{ !inputs.dry_run }}
+        env:
+          STATE: ${{ steps.classify.outputs.state }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+        run: |
+          set -euo pipefail
+          case "${STATE}" in
+            absent)
+              test "${CONFIRMATION}" = "CREATE IMMUTABLE v1.9.0"
+              test -z "${RECOVERY_RUN_ID}"
+              ;;
+            recovery-required-exact)
+              test "${CONFIRMATION}" = "RECOVER EXACT IMMUTABLE v1.9.0 EVIDENCE"
+              printf '%s' "${RECOVERY_RUN_ID}" | grep -Eq '^[1-9][0-9]*$'
+              ;;
+            *)
+              echo "::error::unexpected source-tag classification"
+              exit 1
+              ;;
+          esac
+
+      - name: Authenticate prior failed protected run for recovery
+        if: ${{ !inputs.dry_run && steps.classify.outputs.state == 'recovery-required-exact' }}
+        env:
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          github_get_canonical() {
+            output="$1"
+            url="$2"
+            status=$("${CURL}" --config - --fail-with-body --silent --show-error \
+              --output "${output}.raw" --write-out '%{http_code}' "${url}" <<EOF
+          header = "Authorization: Bearer ${GITHUB_TOKEN}"
+          header = "Accept: application/vnd.github+json"
+          header = "X-GitHub-Api-Version: 2026-03-10"
+          EOF
+            )
+            test "${status}" = 200
+            python -B - "${output}.raw" "${output}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          value = json.loads(Path(sys.argv[1]).read_bytes())
+          raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+          descriptor = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          try:
+              os.write(descriptor, raw)
+          finally:
+              os.close(descriptor)
+          PY
+            rm -f "${output}.raw"
+          }
+          github_get_canonical "${EVIDENCE}/prior-run.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${RECOVERY_RUN_ID}"
+          github_get_canonical "${EVIDENCE}/prior-jobs.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${RECOVERY_RUN_ID}/jobs?filter=latest&per_page=100"
+          github_get_canonical "${EVIDENCE}/prior-approvals.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${RECOVERY_RUN_ID}/approvals"
+          python -I -B "${HELPER}" recovery-authority \
+            --run-response "${EVIDENCE}/prior-run.json" \
+            --jobs-response "${EVIDENCE}/prior-jobs.json" \
+            --approvals-response "${EVIDENCE}/prior-approvals.json" \
+            --prior-run-id "${RECOVERY_RUN_ID}" \
+            --approved-commit "${APPROVED_COMMIT}" \
+            --source-workflow-id \
+              "$(python -I -B -c 'import json;print(json.load(open("'"'${EVIDENCE}/source-workflow.json'"'"))["id"])')" \
+            --source-workflow-node-id \
+              "$(python -I -B -c 'import json;print(json.load(open("'"'${EVIDENCE}/source-workflow.json'"'"))["node_id"])')" \
+            --output "${EVIDENCE}/recovery-authority.json"
+
+      - name: Dry-run stops before the sole mutation
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-tag-only-dry-run-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/source-tag-evidence/source-tag-plan.json
+            ${{ runner.temp }}/source-tag-evidence/registry-capability.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Create the absent immutable tag only
+        if: ${{ !inputs.dry_run && steps.classify.outputs.state == 'absent' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          AUTHORIZATION=$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)
+          export GIT_CONFIG_COUNT=3
+          export GIT_CONFIG_KEY_0=core.hooksPath
+          export GIT_CONFIG_VALUE_0=/dev/null
+          export GIT_CONFIG_KEY_1=push.followTags
+          export GIT_CONFIG_VALUE_1=false
+          export GIT_CONFIG_KEY_2=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_2="AUTHORIZATION: basic ${AUTHORIZATION}"
+          git push --porcelain --no-follow-tags origin "${tag_object}:${TAG_REF}" \
+            > "${EVIDENCE}/tag-push.txt" 2>&1
+          unset AUTHORIZATION GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 \
+            GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2
+          printf 'transition=created-under-signed-immutable-authority\n' >> "${GITHUB_ENV}"
+
+      - name: Recover evidence for exact existing immutable tag without mutation
+        if: ${{ !inputs.dry_run && steps.classify.outputs.state == 'recovery-required-exact' }}
+        run: |
+          printf '%s\n' 'transition=recovered-existing-exact-under-signed-immutable-authority' \
+            >> "${GITHUB_ENV}"
+
+      - name: Re-read exact tag after the ceremony
+        if: ${{ !inputs.dry_run }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -f "${EVIDENCE}/tag-ref.raw" "${EVIDENCE}/tag-ref.json" \
+            "${EVIDENCE}/tag-object.raw" "${EVIDENCE}/tag-object.json"
+          status=$("${CURL}" --config - --fail-with-body --silent --show-error \
+            --output "${EVIDENCE}/tag-ref.raw" --write-out '%{http_code}' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/tags/v1.9.0" <<EOF
+          header = "Authorization: Bearer ${GITHUB_TOKEN}"
+          header = "Accept: application/vnd.github+json"
+          header = "X-GitHub-Api-Version: 2026-03-10"
+          EOF
+          )
+          test "${status}" = "200"
+          python -B - "${EVIDENCE}/tag-ref.raw" "${EVIDENCE}/tag-ref.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          raw = json.dumps(json.loads(Path(sys.argv[1]).read_bytes()), sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+          fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          try: os.write(fd, raw)
+          finally: os.close(fd)
+          PY
+          object_sha=$(python -I -B - "${EVIDENCE}/tag-ref.json" <<'PY'
+          import json, sys
+          from pathlib import Path
+          print(json.loads(Path(sys.argv[1]).read_bytes())["object"]["sha"])
+          PY
+          )
+          status=$("${CURL}" --config - --fail-with-body --silent --show-error \
+            --output "${EVIDENCE}/tag-object.raw" --write-out '%{http_code}' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" <<EOF
+          header = "Authorization: Bearer ${GITHUB_TOKEN}"
+          header = "Accept: application/vnd.github+json"
+          header = "X-GitHub-Api-Version: 2022-11-28"
+          EOF
+          )
+          test "${status}" = "200"
+          python -B - "${EVIDENCE}/tag-object.raw" "${EVIDENCE}/tag-object.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          raw = json.dumps(json.loads(Path(sys.argv[1]).read_bytes()), sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+          fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          try: os.write(fd, raw)
+          finally: os.close(fd)
+          PY
+          python -I -B "${HELPER}" verify-remote \
+            --plan "${EVIDENCE}/source-tag-plan.json" \
+            --ref-response "${EVIDENCE}/tag-ref.json" \
+            --tag-response "${EVIDENCE}/tag-object.json"
+          git -c core.hooksPath=/dev/null update-ref "${TAG_REF}" "${tag_object}"
+          test "$(git rev-parse "${TAG_REF}^{commit}")" = "${GITHUB_SHA}"
+
+      - name: Reauthenticate immutable wheelhouse retention before evidence publication
+        if: ${{ !inputs.dry_run }}
+        env:
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          APPROVED_TREE: ${{ inputs.approved_tree }}
+          RULESET_ID: ${{ inputs.immutable_tag_ruleset_id }}
+          Z4J_DOCKERHUB_PUBLISHER_PAT: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT }}
+          Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          auth_request="${EVIDENCE}/hub-prepublish-auth.json"
+          token_response="${EVIDENCE}/hub-prepublish-token.json"
+          token_config="${EVIDENCE}/hub-prepublish.curl"
+          repository_raw="${EVIDENCE}/wheelhouse-repository-prepublish.raw"
+          trap 'rm -f "${auth_request}" "${token_response}" "${token_config}" "${repository_raw}"' EXIT
+          python -B - "${auth_request}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          value = {
+              "identifier": os.environ["GITHUB_REPOSITORY_OWNER"],
+              "secret": os.environ["Z4J_DOCKERHUB_PUBLISHER_PAT"],
+          }
+          Path(sys.argv[1]).write_bytes(
+              (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+          )
+          PY
+          status=$("${CURL}" --silent --show-error --fail-with-body --request POST \
+            --header 'Content-Type: application/json' --data-binary "@${auth_request}" \
+            --output "${token_response}" --write-out '%{http_code}' \
+            'https://hub.docker.com/v2/auth/token')
+          test "${status}" = 200
+          python -B - "${token_response}" "${token_config}" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          value = json.loads(Path(sys.argv[1]).read_bytes())
+          token = value.get("access_token") if isinstance(value, dict) else None
+          if not isinstance(token, str) or re.fullmatch(r"[A-Za-z0-9._~-]+", token) is None:
+              raise SystemExit("Docker Hub access token response differs")
+          Path(sys.argv[2]).write_text(f'header = "Authorization: Bearer {token}"\n', encoding="ascii")
+          PY
+          status=$("${CURL}" --config "${token_config}" --silent --show-error \
+            --fail-with-body --request GET --output "${repository_raw}" \
+            --write-out '%{http_code}' "${HUB_API_REPOSITORY}")
+          test "${status}" = 200
+          python -B - "${repository_raw}" "${EVIDENCE}/wheelhouse-repository-prepublish.json" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          raw = (
+              json.dumps(json.loads(Path(sys.argv[1]).read_bytes()), sort_keys=True, separators=(",", ":"))
+              + "\n"
+          ).encode("ascii")
+          descriptor = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          try:
+              os.write(descriptor, raw)
+          finally:
+              os.close(descriptor)
+          PY
+          rm -f "${auth_request}" "${token_response}" "${token_config}" "${repository_raw}"
+          trap - EXIT
+          python -I -B "${HELPER}" plan \
+            --repo . --manifest "${MANIFEST}" \
+            --repository-response "${EVIDENCE}/repository.json" \
+            --main-ref-response "${EVIDENCE}/main-ref.json" \
+            --ruleset-response "${EVIDENCE}/ruleset.json" \
+            --environment-response "${EVIDENCE}/environment.json" \
+            --wheelhouse-repository-response "${EVIDENCE}/wheelhouse-repository-prepublish.json" \
+            --main-ruleset-response "${EVIDENCE}/main-ruleset.json" \
+            --main-branch-protection-response \
+              "${EVIDENCE}/main-branch-protection.json" \
+            --source-workflow-response "${EVIDENCE}/source-workflow.json" \
+            --release-workflow-response "${EVIDENCE}/release-workflow.json" \
+            --source-main-plan "${EVIDENCE}/source-main/source-main-transition-plan.json" \
+            --source-main-readback "${EVIDENCE}/source-main/source-main-transition-readback.json" \
+            --release-settings-authority "${EVIDENCE}/source-main/release-settings-authority.json" \
+            --source-main-runs-response "${EVIDENCE}/source-main-runs-recheck.json" \
+            --workflow-inventory-response "${EVIDENCE}/workflow-inventory-recheck.json" \
+            --approved-commit "${APPROVED_COMMIT}" --approved-tree "${APPROVED_TREE}" \
+            --ruleset-id "${RULESET_ID}" --actor "${GITHUB_ACTOR}" \
+            --output "${EVIDENCE}/source-tag-final-plan.json" \
+            --tag-object-output "${EVIDENCE}/source-tag-final-object.txt"
+          cmp "${EVIDENCE}/source-tag-object.txt" "${EVIDENCE}/source-tag-final-object.txt"
+
+      - name: Emit exact three-file portable source-tag authority
+        if: ${{ !inputs.dry_run }}
+        env:
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          APPROVED_TREE: ${{ inputs.approved_tree }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ inputs.recovery_artifact_digest }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+        run: |
+          set -euo pipefail
+          helper_oid=$(git -c core.hooksPath=/dev/null rev-parse \
+            "${GITHUB_SHA}:.github/source_tag_authority.py")
+          test ! -L "${HELPER}"
+          test "$(git -c core.hooksPath=/dev/null hash-object "${HELPER}")" = "${helper_oid}"
+          if [ -n "${RECOVERY_ARTIFACT_DIGEST}" ]; then
+            prior_attempt=$(python -I -B -c \
+              'import json;print(json.load(open("'"'${EVIDENCE}/recovery-authority.json'"'"))["prior_run"]["run_attempt"])')
+            python -I -B "${HELPER}" materialize-durable \
+              --manifest "${MANIFEST}" \
+              --approved-commit "${APPROVED_COMMIT}" \
+              --approved-tree "${APPROVED_TREE}" \
+              --artifact-digest "${RECOVERY_ARTIFACT_DIGEST}" \
+              --authority-run-id "${RECOVERY_RUN_ID}" \
+              --authority-run-attempt "${prior_attempt}" \
+              --output-root "${PORTABLE}" \
+              > "${EVIDENCE}/materialization.json"
+          else
+            mkdir -m 0700 "${PORTABLE}"
+          recovery_args=()
+          if [ "${transition}" = \
+            "recovered-existing-exact-under-signed-immutable-authority" ]; then
+            recovery_args=(--recovery-authority "${EVIDENCE}/recovery-authority.json")
+          fi
+          push_args=()
+          if [ "${transition}" = "created-under-signed-immutable-authority" ]; then
+            push_args=(--push-response "${EVIDENCE}/tag-push.txt")
+          fi
+          python -I -B "${HELPER}" receipt \
+            --plan "${EVIDENCE}/source-tag-final-plan.json" \
+            --transition "${transition}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --actor "${GITHUB_ACTOR}" \
+            --workflow-sha "${GITHUB_SHA}" \
+            --ref-response "${EVIDENCE}/tag-ref.json" \
+            --tag-response "${EVIDENCE}/tag-object.json" \
+            "${recovery_args[@]}" \
+            "${push_args[@]}" \
+            --output "${PORTABLE}/source-tag-creation-receipt.json"
+          emitted_bundle="${EVIDENCE}/source-tag-creation-receipt.sigstore.emitted.json"
+          "${EVIDENCE}/cosign" sign-blob --yes --new-bundle-format=true \
+            --use-signing-config=true \
+            --bundle "${emitted_bundle}" \
+            "${PORTABLE}/source-tag-creation-receipt.json"
+          python -I -B "${HELPER}" canonicalize-bundle \
+            --input "${emitted_bundle}" \
+            --receipt "${PORTABLE}/source-tag-creation-receipt.json" \
+            --output "${PORTABLE}/source-tag-creation-receipt.sigstore.json" \
+            > "${EVIDENCE}/source-tag-bundle-canonicalization.json"
+          rm -f "${emitted_bundle}"
+          "${EVIDENCE}/cosign" verify-blob \
+            --bundle "${PORTABLE}/source-tag-creation-receipt.sigstore.json" \
+            --certificate-identity \
+              "https://github.com/z4jdev/z4j/.github/workflows/source-tag-only.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-github-workflow-name source-tag-only \
+            --certificate-github-workflow-repository z4jdev/z4j \
+            --certificate-github-workflow-ref refs/heads/main \
+            --certificate-github-workflow-sha "${GITHUB_SHA}" \
+            --certificate-github-workflow-trigger workflow_dispatch \
+            "${PORTABLE}/source-tag-creation-receipt.json" > /dev/null
+          python -I -B "${HELPER}" build-index \
+            --receipt "${PORTABLE}/source-tag-creation-receipt.json" \
+            --bundle "${PORTABLE}/source-tag-creation-receipt.sigstore.json" \
+            --manifest "${MANIFEST}" \
+            --output "${PORTABLE}/source-tag-evidence-index.json"
+          fi
+          test "$(find "${PORTABLE}" -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find "${PORTABLE}" -mindepth 1 -maxdepth 1 | wc -l)" -eq 3
+
+      - name: Configure private registry credentials without argv exposure
+        if: ${{ !inputs.dry_run }}
+        env:
+          Z4J_DOCKERHUB_PUBLISHER_PAT: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT }}
+          Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -m 0700 "${EVIDENCE}/docker-config"
+          python -B - "${EVIDENCE}/docker-config/config.json" <<'PY'
+          import base64
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          credential = base64.b64encode(
+              f"{os.environ['GITHUB_REPOSITORY_OWNER']}:"
+              f"{os.environ['Z4J_DOCKERHUB_PUBLISHER_PAT']}".encode()
+          ).decode("ascii")
+          value = {"auths": {"https://index.docker.io/v1/": {"auth": credential}}}
+          Path(sys.argv[1]).write_bytes(
+              (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+          )
+          PY
+          printf 'DOCKER_CONFIG=%s\n' "${EVIDENCE}/docker-config" >> "${GITHUB_ENV}"
+
+      - name: Publish or reuse and raw-refetch durable OCI source authority
+        if: ${{ !inputs.dry_run }}
+        env:
+          Z4J_DOCKERHUB_PUBLISHER_PAT: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT }}
+          Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64: ${{ secrets.Z4J_DOCKERHUB_PUBLISHER_PAT_HMAC_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          python -I -B "${HELPER}" publish-durable \
+            --root "${PORTABLE}" \
+            --repo . \
+            --manifest "${MANIFEST}" \
+            --cosign "${EVIDENCE}/cosign" \
+            --version-output "${EVIDENCE}/cosign-version.json" \
+            --output-dir "${EVIDENCE}/durable-readback" \
+            > "${EVIDENCE}/durable-verification.json"
+
+      - name: Dispatch authenticated release-docker after durable authority readback
+        if: ${{ !inputs.dry_run }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -I -B "${HELPER}" dispatch-request \
+            --durable-verification "${EVIDENCE}/durable-verification.json" \
+            --receipt "${PORTABLE}/source-tag-creation-receipt.json" \
+            --initiating-run-id "${GITHUB_RUN_ID}" \
+            --initiating-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --actor "${GITHUB_ACTOR}" \
+            --output "${EVIDENCE}/release-dispatch-request.json"
+          status=$("${CURL}" --config - --fail-with-body --silent --show-error \
+            --request GET --output "${EVIDENCE}/release-workflow-pre-dispatch.raw" \
+            --write-out '%{http_code}' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/270520651" <<EOF
+          header = "Authorization: Bearer ${GITHUB_TOKEN}"
+          header = "Accept: application/vnd.github+json"
+          header = "X-GitHub-Api-Version: 2026-03-10"
+          EOF
+          )
+          test "${status}" = "200"
+          python -B - "${EVIDENCE}/release-workflow-pre-dispatch.raw" \
+            "${EVIDENCE}/release-workflow-pre-dispatch.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          raw = json.dumps(json.loads(Path(sys.argv[1]).read_bytes()), sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+          fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          try: os.write(fd, raw)
+          finally: os.close(fd)
+          PY
+          python -I -B "${HELPER}" verify-release-workflow \
+            --response "${EVIDENCE}/release-workflow-pre-dispatch.json" > /dev/null
+          status=$("${CURL}" --config - --fail-with-body --silent --show-error \
+            --request POST --header 'Content-Type: application/json' \
+            --data-binary "@${EVIDENCE}/release-dispatch-request.json" \
+            --output "${EVIDENCE}/release-dispatch-response.json" \
+            --write-out '%{http_code}' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/270520651/dispatches" <<EOF
+          header = "Authorization: Bearer ${GITHUB_TOKEN}"
+          header = "Accept: application/vnd.github+json"
+          header = "X-GitHub-Api-Version: 2026-03-10"
+          EOF
+          )
+          if [ "${status}" != "200" ]; then
+            echo "::error::release-docker dispatch must return HTTP 200 details, got ${status}"
+            exit 1
+          fi
+          run_url=$(python -I -B - "${EVIDENCE}/release-dispatch-response.json" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          value = json.loads(Path(sys.argv[1]).read_bytes())
+          if set(value) != {"workflow_run_id", "run_url", "html_url"}:
+              raise SystemExit("release dispatch response keys differ")
+          url = value["run_url"]
+          if not isinstance(url, str) or re.fullmatch(
+              r"https://api\.github\.com/repos/z4jdev/z4j/actions/runs/[1-9][0-9]*", url
+          ) is None:
+              raise SystemExit("release dispatch run URL differs")
+          print(url)
+          PY
+          )
+          status=$("${CURL}" --config - --fail-with-body --silent --show-error \
+            --request GET --output "${EVIDENCE}/release-dispatch-run.json" \
+            --write-out '%{http_code}' "${run_url}" <<EOF
+          header = "Authorization: Bearer ${GITHUB_TOKEN}"
+          header = "Accept: application/vnd.github+json"
+          header = "X-GitHub-Api-Version: 2026-03-10"
+          EOF
+          )
+          test "${status}" = "200"
+          python -I -B "${HELPER}" verify-dispatch \
+            --request "${EVIDENCE}/release-dispatch-request.json" \
+            --response "${EVIDENCE}/release-dispatch-response.json" \
+            --run-response "${EVIDENCE}/release-dispatch-run.json" \
+            --durable-verification "${EVIDENCE}/durable-verification.json" \
+            --receipt "${PORTABLE}/source-tag-creation-receipt.json" \
+            --initiating-run-id "${GITHUB_RUN_ID}" \
+            --initiating-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --actor "${GITHUB_ACTOR}" \
+            > "${EVIDENCE}/release-dispatch-verification.json"
+
+      - name: Retain exact three portable files as convenience only
+        if: ${{ !inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-tag-authority-portable-v1.9.0-${{ github.run_id }}
+          path: ${{ runner.temp }}/source-tag-evidence/authority
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Retain raw OCI readback as convenience only
+        if: ${{ !inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-tag-authority-readback-v1.9.0-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/source-tag-evidence/durable-readback
+            ${{ runner.temp }}/source-tag-evidence/durable-verification.json
+            ${{ runner.temp }}/source-tag-evidence/release-dispatch-request.json
+            ${{ runner.temp }}/source-tag-evidence/release-dispatch-response.json
+            ${{ runner.temp }}/source-tag-evidence/release-dispatch-run.json
+            ${{ runner.temp }}/source-tag-evidence/release-dispatch-verification.json
+          if-no-files-found: error
+          retention-days: 90

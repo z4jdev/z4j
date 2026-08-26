@@ -38,7 +38,7 @@ from z4j_brain.persistence.models import (
 )
 from z4j_brain.persistence.repositories import AgentStatusHistoryRepository
 from z4j_brain.settings import Settings
-from z4j_brain.websocket.frame_router import FrameRouter
+from z4j_brain.websocket.frame_router import FrameOutcome, FrameRouter
 from z4j_core.transport.frames import AgentStatusFrame, AgentStatusPayload
 
 # ---------------------------------------------------------------------------
@@ -360,6 +360,41 @@ class TestFrameRouterIntegration:
             assert row.payload["buffer_depth"] == 42
             assert row.payload["agent_version"] == "1.5.0"
             assert row.payload["engines"] == ["celery"]
+
+    async def test_revoked_agent_status_is_rejected_without_history_row(
+        self,
+        db_manager: DatabaseManager,
+        project_and_agent: tuple[uuid.UUID, uuid.UUID],
+    ) -> None:
+        """A committed revoke blocks status writes on an established session."""
+        project_id, agent_id = project_and_agent
+        async with db_manager.session(write=True) as session:
+            agent = await session.get(Agent, agent_id)
+            assert agent is not None
+            agent.revoked_at = datetime.now(UTC)
+            await session.commit()
+
+        router = FrameRouter(
+            db=db_manager,
+            ingestor=None,
+            dispatcher=None,
+            project_id=project_id,
+            agent_id=agent_id,
+            dashboard_hub=None,
+            worker_id=None,
+        )
+        frame = AgentStatusFrame(
+            id=str(uuid.uuid4()),
+            ts=datetime.now(UTC),
+            payload=AgentStatusPayload(buffer_depth=99),
+        )
+
+        outcome = await router.dispatch(frame)
+
+        assert outcome is FrameOutcome.REVOKED
+        async with db_manager.session() as session:
+            rows = (await session.execute(select(AgentStatusHistory))).scalars().all()
+        assert rows == []
 
     async def test_agent_status_persist_failure_does_not_raise(
         self,

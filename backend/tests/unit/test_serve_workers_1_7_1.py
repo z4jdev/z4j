@@ -8,7 +8,12 @@ contend on SQLite writes, and race the first-boot bootstrap. So SQLite
 
 from __future__ import annotations
 
-from z4j_brain.cli import resolve_serve_workers
+import pytest
+from z4j_brain.cli import (
+    enforce_cli_admin_password_topology,
+    resolve_serve_workers,
+    resolve_serve_workers_for_settings,
+)
 
 
 def test_local_registry_forces_single_worker() -> None:
@@ -84,18 +89,24 @@ class TestLocalRegistryDetectionH2:
             "registry_backend to 'local' so _run_serve forces one worker."
         )
 
-    def test_run_serve_derives_local_registry_from_settings_not_env(self) -> None:
-        import inspect
+    def test_resolved_settings_drive_worker_topology(self) -> None:
+        from z4j_brain.settings import Settings
 
-        from z4j_brain import cli
-
-        src = inspect.getsource(cli._run_serve)
-        assert "settings.registry_backend" in src, (
-            "H2 regression: _run_serve must derive local_registry from "
-            "settings.registry_backend (which Settings coerces for any "
-            "sqlite URL), not from os.environ['Z4J_REGISTRY_BACKEND'] "
-            "(set only on the auto-SQLite path)."
+        settings = Settings(
+            database_url="sqlite+aiosqlite:////srv/data/z4j.db",
+            secret="x" * 48,
+            session_secret="y" * 48,
+            environment="dev",
         )
+
+        workers, note = resolve_serve_workers_for_settings(
+            4,
+            settings=settings,
+            cpu_count=8,
+        )
+
+        assert workers == 1
+        assert note is not None and "SQLite" in note
 
 
 class TestAdminPasswordTopologyGuardCXM18:
@@ -104,21 +115,28 @@ class TestAdminPasswordTopologyGuardCXM18:
     4 on Postgres; uvicorn spawns fresh interpreters that never receive
     the in-process password)."""
 
-    def test_guard_checks_resolved_workers_and_reload(self) -> None:
-        import inspect
+    @pytest.mark.parametrize(
+        ("workers", "reload"),
+        [(2, False), (4, False), (1, True)],
+    )
+    def test_password_is_rejected_for_spawned_topologies(
+        self,
+        workers: int,
+        reload: bool,
+    ) -> None:
+        with pytest.raises(SystemExit, match="single non-reload"):
+            enforce_cli_admin_password_topology(
+                "correct horse battery staple",
+                workers=workers,
+                reload=reload,
+            )
 
-        from z4j_brain import cli
+    def test_password_is_allowed_for_one_in_process_worker(self) -> None:
+        enforce_cli_admin_password_topology(
+            "correct horse battery staple",
+            workers=1,
+            reload=False,
+        )
 
-        src = inspect.getsource(cli._run_serve)
-        # The guard must appear AFTER workers_resolved exists and gate on
-        # it (plus --reload), not on a pre-resolution `workers_requested`.
-        assert "workers_resolved > 1 or args.reload" in src, (
-            "CX-M18 regression: --admin-password must be rejected when the "
-            "RESOLVED topology spawns worker interpreters (workers_resolved "
-            "> 1 or --reload), where the in-process password holder is empty."
-        )
-        assert "workers_requested" not in src, (
-            "CX-M18 regression: the old pre-resolution `workers_requested "
-            "or 1` guard must be gone -- it treated an unset --workers as 1 "
-            "and let Postgres silently resolve it to 4."
-        )
+    def test_absent_password_needs_no_topology_guard(self) -> None:
+        enforce_cli_admin_password_topology(None, workers=4, reload=True)

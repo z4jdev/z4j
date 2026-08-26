@@ -56,6 +56,27 @@ logger = structlog.get_logger("z4j.brain.dashboard_gateway")
 router = APIRouter(tags=["dashboard"])
 
 
+class _NonTextFirstFrameError(Exception):
+    """The first client frame used the binary WebSocket carrier."""
+
+
+async def _receive_first_text(websocket: WebSocket) -> str:
+    """Receive the first frame while distinguishing binary from internals.
+
+    Pinned Starlette's ``receive_text()`` indexes ``message["text"]`` and
+    therefore raises a bare ``KeyError("text")`` for a binary frame. Catching
+    ``KeyError`` around that call would also risk hiding an unrelated internal
+    error. Inspecting the ASGI carrier explicitly lets the route translate only
+    an actual binary frame to its promised 4400 close path.
+    """
+    message = await websocket.receive()
+    if message["type"] == "websocket.disconnect":
+        raise WebSocketDisconnect(message["code"], message.get("reason"))
+    if message.get("bytes") is not None:
+        raise _NonTextFirstFrameError
+    return message["text"]
+
+
 @router.websocket("/ws/dashboard")
 async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912  websocket lifecycle handler
     """The dashboard push endpoint. See module docstring."""
@@ -90,8 +111,8 @@ async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912 
     # 2) First frame: subscribe
     # ------------------------------------------------------------------
     try:
-        first = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
-    except (TimeoutError, WebSocketDisconnect):
+        first = await asyncio.wait_for(_receive_first_text(websocket), timeout=10.0)
+    except (TimeoutError, WebSocketDisconnect, _NonTextFirstFrameError):
         await _safe_close(websocket, code=4400)
         return
 
@@ -256,6 +277,18 @@ async def _resolve_user(
             sessions=sessions,
             session_id=sid,
         )
+        if resolved is not None and settings.session_pin_user_agent:
+            current_user_agent = websocket.headers.get("user-agent")
+            current_user_agent = current_user_agent[:256] if current_user_agent else None
+            if resolved[0].user_agent_at_issue != current_user_agent:
+                await sessions.revoke(resolved[0].id, reason="user_agent_changed")
+                resolved = None
+        if resolved is not None:
+            await sessions.touch(resolved[0].id)
+        # This session exists only for WebSocket authentication, so the commit
+        # cannot carry handler business writes. It makes the successful touch
+        # (and any revocation found by resolve_session) durable.
+        await session.commit()
     return resolved if resolved else None
 
 

@@ -21,6 +21,9 @@ import tailwindcss from "@tailwindcss/vite";
 import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 import path from "node:path";
 
+const releaseBuild =
+  process.env.Z4J_RELEASE_DASHBOARD_BUILD === "production-v1";
+
 const vitestConfig = {
   // Vitest config. ``jsdom`` provides the DOM shim - we picked it
   // over the slightly-faster ``happy-dom`` because jsdom is the
@@ -37,11 +40,7 @@ const vitestConfig = {
     provider: "v8",
     reporter: ["text", "html"],
     include: ["src/**/*.{ts,tsx}"],
-    exclude: [
-      "src/**/*.d.ts",
-      "src/routeTree.gen.ts",
-      "src/main.tsx",
-    ],
+    exclude: ["src/**/*.d.ts", "src/routeTree.gen.ts", "src/main.tsx"],
   },
 };
 
@@ -54,6 +53,10 @@ const vitestConfig = {
 // recommended path for any mode-dependent decision; see
 // https://vite.dev/config/#conditional-config.
 export default defineConfig(({ mode }) => ({
+  // Release builds are hermetic: Vite must not load ignored .env files.
+  // `make dash-bundle` also rejects ambient VITE_* values and records the
+  // matching production-v1 contract in the bundled output.
+  envDir: releaseBuild ? false : undefined,
   // Vitest reads ``test`` at runtime; vite's typing doesn't know
   // about it, so we tunnel it through a cast.
   ...({ test: vitestConfig } as object),
@@ -80,8 +83,7 @@ export default defineConfig(({ mode }) => ({
     host: "0.0.0.0",
     port: 5173,
     proxy: (() => {
-      const brainHttp =
-        process.env.VITE_BRAIN_URL || "http://127.0.0.1:7700";
+      const brainHttp = process.env.VITE_BRAIN_URL || "http://127.0.0.1:7700";
       const brainWs = brainHttp.replace(/^http/, "ws");
       return {
         "/api/v1": { target: brainHttp, changeOrigin: true },
@@ -112,9 +114,13 @@ export default defineConfig(({ mode }) => ({
         // pin the big vendors into their own chunks so the hash
         // of one does not invalidate the others on a content bump.
         manualChunks: (id: string): string | undefined => {
-          if (id.includes("node_modules/react/") ||
-              id.includes("node_modules/react-dom/")) return "react";
-          if (id.includes("node_modules/@tanstack/react-router")) return "router";
+          if (
+            id.includes("node_modules/react/") ||
+            id.includes("node_modules/react-dom/")
+          )
+            return "react";
+          if (id.includes("node_modules/@tanstack/react-router"))
+            return "router";
           if (id.includes("node_modules/@tanstack/react-query")) return "query";
           if (id.includes("node_modules/@tanstack/react-table")) return "table";
           return undefined;

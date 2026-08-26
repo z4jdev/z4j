@@ -12,6 +12,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import asyncpg
 import pytest
@@ -62,6 +63,9 @@ from z4j_brain.persistence.repositories import (
     AuditLogRepository,
 )
 from z4j_brain.persistence.repositories import (
+    schedule_control as schedule_control_repository_module,
+)
+from z4j_brain.persistence.repositories import (
     schedule_external as schedule_external_repository_module,
 )
 from z4j_brain.persistence.repositories.commands import CommandRepository
@@ -70,6 +74,7 @@ from z4j_brain.persistence.repositories.pending_fires import (
 )
 from z4j_brain.persistence.repositories.schedule_control import (
     ScheduleControlRepository,
+    ScheduleControlStateUnavailableError,
 )
 from z4j_brain.persistence.repositories.schedule_external import (
     ScheduleExternalRepository,
@@ -3899,6 +3904,21 @@ async def test_exhausted_one_shot_command_keeps_nullable_successor(
                 name="One Shot",
             ),
         )
+        await session.flush()
+        session.add(
+            Agent(
+                id=agent_id,
+                project_id=project_id,
+                name="one-shot-agent",
+                token_hash=uuid.uuid4().hex,
+                protocol_version="2",
+                framework_adapter="bare",
+                engine_adapters=["celery"],
+                scheduler_adapters=[],
+                capabilities={},
+                state=AgentState.ONLINE,
+            ),
+        )
         await session.commit()
     async with database.session(write=True) as session:
         schedule = await ScheduleControlRepository(session).create_current(
@@ -3959,3 +3979,210 @@ async def test_exhausted_one_shot_command_keeps_nullable_successor(
         assert created is True
         assert command.schedule_next_run_at is None
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_pre_upgrade_row_still_fires_after_a_cadence_closure_change(
+    migrated_engine: AsyncEngine,
+) -> None:
+    """A row stamped by a previous release must still fire.
+
+    ``cadence_runtime_fingerprint`` hashes the packaged tzdata tree, every
+    pinned cadence dependency, and the running Python version. It is persisted
+    per schedule row, and NOTHING re-stamps it: ``create_current`` and the
+    external-schedule writers are its only writers, and Boundary D's trigger
+    refuses a raw UPDATE. So after any change to that closure -- including a
+    Python patch upgrade -- every pre-existing row carries a value the Brain no
+    longer computes.
+
+    That is only survivable because the acceptance test looks at the value the
+    SCHEDULER SUBMITS, not the one on the row. The scheduler now submits what
+    it computes itself (see test_fire_wire_current.py); it used to echo the
+    row's stamp, which made this comparison the Brain checking itself, and made
+    a closure change refuse every fire and every cursor advance for every
+    existing schedule -- a total scheduling stall on upgrade.
+
+    Both directions are asserted so this cannot pass vacuously:
+      - a stale ROW plus a current SUBMISSION is applied, and
+      - a stale SUBMISSION is refused, which is the genuinely dangerous case,
+        a scheduler that was not upgraded alongside its Brain, and doubles as
+        proof the check is live rather than absent.
+    """
+
+    database = DatabaseManager(migrated_engine)
+    project_id = uuid.uuid4()
+    planning_at = datetime(2026, 7, 25, 12, 3, 7, tzinfo=UTC)
+    stale_fingerprint = "0" * 64
+    current_fingerprint = cadence_runtime_fingerprint()
+    assert stale_fingerprint != current_fingerprint
+
+    async with database.session(write=True) as session:
+        session.add(
+            Project(id=project_id, slug=f"u-{project_id.hex[:12]}", name="UpgradeCadence"),
+        )
+        await session.commit()
+
+    # Create it the way an operator actually acquires a stale row: the Brain
+    # computes the OLD fingerprint while creating it, through the guarded path
+    # with every trigger live. A raw UPDATE is refused by Boundary D, so this
+    # is an upgrade rather than an imitation of one.
+    with mock.patch.object(
+        schedule_control_repository_module,
+        "cadence_runtime_fingerprint",
+        return_value=stale_fingerprint,
+    ):
+        async with database.session(write=True) as session:
+            schedule = await ScheduleControlRepository(session).create_current(
+                project_id=project_id,
+                data=_definition(),
+                planning_at=planning_at,
+            )
+            await session.commit()
+            schedule_id = schedule.id
+
+    async with database.session(write=True) as session:
+        snapshot = await ScheduleControlRepository(session).stable_snapshot(
+            project_id=project_id,
+        )
+        row = snapshot.rows[0]
+        assert row.cadence_runtime_fingerprint == stale_fingerprint, (
+            "the pre-upgrade state was not established, so the rest of this "
+            "test would prove nothing"
+        )
+        slot = row.next_run_at
+        token = row.control_token
+        digest = row.definition_digest
+        expected_revision = row.schedule_revision
+        assert slot is not None
+        assert token is not None
+        assert digest is not None
+        assert expected_revision is not None
+        fire_id = derive_scheduler_fire_id(schedule_id, slot)
+        successor = slot + timedelta(minutes=5)
+
+        # NEGATIVE CONTROL: an un-upgraded scheduler is refused.
+        stale_caller = await ScheduleControlRepository(session).accept_current_fire_progress(
+            project_id=project_id,
+            schedule_id=schedule_id,
+            fire_id=fire_id,
+            scheduled_for=slot,
+            observed_control_token=token,
+            definition_digest=digest,
+            expected_revision=expected_revision,
+            expected_last_run_at=None,
+            expected_next_run_at=slot,
+            prepared_next_run_at=successor,
+            cadence_semantics_version=CADENCE_SEMANTICS_VERSION,
+            cadence_fingerprint=stale_fingerprint,
+            occurred_at=slot + timedelta(seconds=1),
+        )
+        assert stale_caller.disposition == "cadence_semantics_mismatch", (
+            "a scheduler on the previous cadence closure must be refused; "
+            f"got {stale_caller.disposition!r}"
+        )
+
+    async with database.session(write=True) as session:
+        # POSITIVE: an upgraded scheduler submits what it computes, and the
+        # stale value still sitting on the row does not block it.
+        applied = await ScheduleControlRepository(session).accept_current_fire_progress(
+            project_id=project_id,
+            schedule_id=schedule_id,
+            fire_id=fire_id,
+            scheduled_for=slot,
+            observed_control_token=token,
+            definition_digest=digest,
+            expected_revision=expected_revision,
+            expected_last_run_at=None,
+            expected_next_run_at=slot,
+            prepared_next_run_at=successor,
+            cadence_semantics_version=CADENCE_SEMANTICS_VERSION,
+            cadence_fingerprint=current_fingerprint,
+            occurred_at=slot + timedelta(seconds=1),
+        )
+        assert applied.disposition == "applied", (
+            "a schedule created before a cadence closure change was stranded by "
+            f"it; got {applied.disposition!r}"
+        )
+        assert applied.execution_fire_id is not None
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_legacy_fire_path_does_not_reject_a_stale_stamped_row(
+    migrated_engine: AsyncEngine,
+) -> None:
+    """The legacy path must test completeness, not equality-with-now.
+
+    ``accept_legacy_fire_progress`` gated on
+    ``row.cadence_runtime_fingerprint != cadence_runtime_fingerprint()`` while
+    raising ``ScheduleControlStateUnavailableError("reserved schedule lacks
+    complete D identity")``. The message says completeness; the test was
+    equality against whatever the Brain computes right now, on a column nothing
+    re-stamps. So every row created before any cadence-closure or Python
+    version change raised, on a path that exists precisely to carry pre-1.8
+    occurrences across the upgrade.
+
+    Nothing was given up by relaxing it: every writer of that column
+    (``create_current``, the three in ``schedule_external``, and the v1_8
+    migration backfill) writes the Brain's own constants, so no peer-supplied
+    value has ever reached it, and the Boundary D triggers test IS NULL only.
+
+    This had zero coverage -- reverting the hunk left the whole brain suite
+    green -- which is why it is asserted here rather than left to review.
+    """
+
+    database = DatabaseManager(migrated_engine)
+    project_id = uuid.uuid4()
+    planning_at = datetime(2026, 7, 25, 12, 3, 7, tzinfo=UTC)
+    stale_fingerprint = "0" * 64
+    assert stale_fingerprint != cadence_runtime_fingerprint()
+
+    async with database.session(write=True) as session:
+        session.add(
+            Project(id=project_id, slug=f"lg-{project_id.hex[:11]}", name="LegacyCadence"),
+        )
+        await session.commit()
+
+    with mock.patch.object(
+        schedule_control_repository_module,
+        "cadence_runtime_fingerprint",
+        return_value=stale_fingerprint,
+    ):
+        async with database.session(write=True) as session:
+            schedule = await ScheduleControlRepository(session).create_current(
+                project_id=project_id,
+                data=_definition(),
+                planning_at=planning_at,
+            )
+            await session.commit()
+            schedule_id = schedule.id
+
+    async with database.session(write=True) as session:
+        snapshot = await ScheduleControlRepository(session).stable_snapshot(
+            project_id=project_id,
+        )
+        row = snapshot.rows[0]
+        assert row.cadence_runtime_fingerprint == stale_fingerprint, (
+            "the pre-upgrade state was not established; this test would prove nothing"
+        )
+        slot = row.next_run_at
+        assert slot is not None
+        fire_id = derive_scheduler_fire_id(schedule_id, slot)
+
+        # The assertion is that it does NOT raise for a stale stamp. Whatever
+        # disposition it returns is that path's own business; what matters is
+        # that a pre-upgrade row is no longer refused for being pre-upgrade.
+        try:
+            await ScheduleControlRepository(session).accept_legacy_fire_progress(
+                project_id=project_id,
+                schedule_id=schedule_id,
+                fire_id=fire_id,
+                scheduled_for=slot,
+                occurred_at=slot + timedelta(seconds=1),
+            )
+        except ScheduleControlStateUnavailableError as exc:  # pragma: no cover - the defect
+            msg = (
+                "the legacy path rejected a row purely because its stored cadence "
+                f"stamp predates the current closure: {exc}"
+            )
+            raise AssertionError(msg) from exc

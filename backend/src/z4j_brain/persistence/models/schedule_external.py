@@ -347,7 +347,13 @@ class ScheduleExternalStreamEpoch(Base):
 
 
 class ScheduleExternalProjection(Base):
-    """Immutable exact-replay ledger for accepted external projections."""
+    """Exact-replay ledger for accepted external projections.
+
+    A trigger refuses UPDATE and DELETE, so no application path revises a
+    row once accepted. Like every guard in this schema that holds against
+    code rather than against credentials, a role writing the table directly
+    is outside its reach.
+    """
 
     __tablename__ = "schedule_external_projections"
 
@@ -396,7 +402,12 @@ class ScheduleExternalProjection(Base):
 
 
 class ScheduleExternalSnapshotFrame(Base):
-    """Immutable durable staging for one framed stable snapshot."""
+    """Durable staging for one framed stable snapshot.
+
+    Write-once through the application: a trigger refuses UPDATE and
+    DELETE, which is what stops a partially reframed snapshot, not what
+    stops a role holding direct write access to the table.
+    """
 
     __tablename__ = "schedule_external_snapshot_frames"
 

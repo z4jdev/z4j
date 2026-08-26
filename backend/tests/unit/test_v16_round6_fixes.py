@@ -115,32 +115,8 @@ class TestInmemorySubsystemRegistrationGuards:
 # ---------------------------------------------------------------------------
 
 
-class TestActivityFeedPersonalBadge:
-    """The G fix widened the non-admin filter to include the
-    caller's user-scoped rows (project_id IS NULL AND user_id ==
-    caller). The dashboard rendered those rows under the "brain-wide"
-    label, which lies about the scope. fix: branch on whether
-    user_id matches the caller, render "personal" instead."""
-
-    def test_dashboard_branches_on_user_id_for_personal_badge(
-        self,
-    ) -> None:
-        from pathlib import Path
-
-        # Find the dashboard route file (project layout permitting).
-        candidates = [
-            Path(__file__).resolve().parent.parent.parent
-            / "../dashboard/src/routes/_authenticated.activity.tsx",
-            Path("j:/z4j/packages/z4j/dashboard/src/routes/_authenticated.activity.tsx"),
-        ]
-        path = next((p for p in candidates if p.exists()), None)
-        if path is None:
-            pytest.skip("dashboard route file not reachable from this checkout")
-        text = path.read_text(encoding="utf-8")
-        # The personal/brain-wide branch must be present.
-        assert '"personal"' in text and '"brain-wide"' in text
-        # The branch MUST consult the caller's user id.
-        assert "currentUserId" in text
+# The personal/brain-wide branch now has a runtime Vitest oracle in
+# ``dashboard/tests/unit/activity-scope.test.ts`` and is called by the route.
 
 
 # ---------------------------------------------------------------------------

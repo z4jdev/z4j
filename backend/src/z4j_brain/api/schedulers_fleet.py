@@ -23,13 +23,14 @@ Why fan-out from brain rather than dashboard-direct:
   exception handling on the client.
 
 Auth: ADMIN. Operator-fleet visibility is privileged - the
-``/info`` payload includes brain endpoint URLs and scheduler
-versions that aid reconnaissance.
+``/info`` payload includes scheduler versions, instance identifiers,
+and runtime-readiness details that aid reconnaissance.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -53,12 +54,13 @@ class FleetEntry(BaseModel):
 
     ``ok`` distinguishes the three observable states:
 
-    - ``True``: scheduler responded with a parseable /info payload.
-      ``info`` carries the full payload.
-    - ``False``: scheduler responded but the response was bad
-      (non-200, non-JSON, schema mismatch). ``error`` describes.
-    - ``None``: scheduler did not respond within the timeout.
-      ``error`` carries the connection error text.
+    - ``True``: scheduler returned HTTP 200 and a payload matching the
+      required /info schema. ``info`` carries the full payload, including
+      any additional fields introduced by compatible scheduler versions.
+    - ``False``: the configured URL was refused, or the scheduler responded
+      with a non-200, invalid JSON, or an invalid /info shape.
+    - ``None``: no HTTP response was obtained because the request timed out
+      or the transport failed. ``error`` describes the transport failure.
     """
 
     url: str
@@ -71,6 +73,59 @@ class FleetResponse(BaseModel):
     schedulers: list[FleetEntry]
     total: int
     healthy: int
+
+
+_REQUIRED_SUBSYSTEMS = frozenset(
+    {
+        "brain_client_connected",
+        "cache_initial_sync_complete",
+        "leader_gate_initialised",
+    },
+)
+
+
+def _info_schema_error(  # noqa: PLR0911  one explicit reason per schema field
+    payload: dict[str, Any],
+) -> str | None:
+    """Return a compact reason when a scheduler /info payload is invalid."""
+
+    for key in ("version", "instance_id", "started_at"):
+        value = payload.get(key)
+        if not isinstance(value, str) or not value:
+            return f"{key} must be a non-empty string"
+
+    if not isinstance(payload.get("ready"), bool):
+        return "ready must be a boolean"
+
+    uptime = payload.get("uptime_seconds")
+    if (
+        isinstance(uptime, bool)
+        or not isinstance(uptime, (int, float))
+        or not math.isfinite(uptime)
+        or uptime < 0
+    ):
+        return "uptime_seconds must be a non-negative number"
+
+    schedules_loaded = payload.get("schedules_loaded")
+    if (
+        isinstance(schedules_loaded, bool)
+        or not isinstance(schedules_loaded, int)
+        or schedules_loaded < 0
+    ):
+        return "schedules_loaded must be a non-negative integer"
+
+    subsystems = payload.get("subsystems")
+    if not isinstance(subsystems, dict):
+        return "subsystems must be an object"
+    missing = sorted(_REQUIRED_SUBSYSTEMS - subsystems.keys())
+    if missing:
+        return f"subsystems is missing {', '.join(missing)}"
+    invalid = sorted(
+        name for name in _REQUIRED_SUBSYSTEMS if not isinstance(subsystems.get(name), bool)
+    )
+    if invalid:
+        return f"subsystems has non-boolean required fields: {', '.join(invalid)}"
+    return None
 
 
 @router.get("", response_model=FleetResponse)
@@ -206,6 +261,13 @@ async def _probe_scheduler(  # noqa: PLR0911  probe result status mapping
             url=url,
             ok=False,
             error=f"expected JSON object, got {type(payload).__name__}",
+        )
+    schema_error = _info_schema_error(payload)
+    if schema_error is not None:
+        return FleetEntry(
+            url=url,
+            ok=False,
+            error=f"invalid /info schema: {schema_error}",
         )
     return FleetEntry(url=url, ok=True, info=payload)
 

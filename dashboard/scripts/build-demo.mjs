@@ -24,11 +24,15 @@
  * See DEMO-Z4J-DEV-DESIGN.md for the full architecture.
  */
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, access, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  requireDemoDataTree,
+  stampDemoVersions,
+} from "./stamp-demo-versions.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dashboardRoot = resolve(__dirname, "..");
@@ -86,7 +90,9 @@ const result = spawnSync(
   },
 );
 if (result.status !== 0) {
-  console.error(`[build:demo] vite build failed with exit code ${result.status}`);
+  console.error(
+    `[build:demo] vite build failed with exit code ${result.status}`,
+  );
   process.exit(result.status ?? 1);
 }
 
@@ -125,22 +131,33 @@ console.log("[build:demo] OK: 0 .map files in dist-demo (R7-L6 guard)");
 
 const dataSrc = resolve(dashboardRoot, "src/lib/demo-data");
 const dataDst = resolve(dashboardRoot, "dist-demo/demo-data");
-let hasDataTree = false;
-try {
-  await access(dataSrc);
-  hasDataTree = true;
-} catch {
-  console.log(
-    "[build:demo] no src/lib/demo-data/ tree to copy (skipping); the " +
-      "interceptor will return 404 for unknown routes which surfaces in " +
-      "the dashboard as empty states until seed data is added.",
+await requireDemoDataTree(dataSrc);
+await mkdir(dataDst, { recursive: true });
+await cp(dataSrc, dataDst, { recursive: true });
+console.log(`[build:demo] copied demo data tree: ${dataSrc} -> ${dataDst}`);
+const versionFile = resolve(dashboardRoot, "../../../VERSION");
+const version = (await readFile(versionFile, "utf8")).trim();
+if (!/^\d+\.\d+\.\d+$/.test(version)) {
+  console.error(`[build:demo] VERSION is not a release number: ${version}`);
+  process.exit(1);
+}
+const inventory = await stampDemoVersions(dataDst, version, {
+  files: 7,
+  fields: 24,
+});
+if (inventory.files !== 7 || inventory.fields !== 24) {
+  console.error(
+    `[build:demo] unexpected z4j version inventory: ` +
+      `${inventory.fields} field(s) in ${inventory.files} file(s); ` +
+      "expected 24 fields in 7 files",
   );
+  process.exit(1);
 }
-if (hasDataTree) {
-  await mkdir(dataDst, { recursive: true });
-  await cp(dataSrc, dataDst, { recursive: true });
-  console.log(`[build:demo] copied demo data tree: ${dataSrc} -> ${dataDst}`);
-}
+console.log(
+  `[build:demo] stamped ${inventory.changedFields} z4j release field(s) ` +
+    `across ${inventory.changedFiles} demo file(s) to ${version} ` +
+    `(verified ${inventory.fields} fields in ${inventory.files} files)`,
+);
 
 // Cloudflare Pages uses _redirects (SPA fallback) and _headers
 // (cache + security headers). Vite does not generate these, so we

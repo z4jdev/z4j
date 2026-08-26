@@ -3,8 +3,8 @@
 The agent presents its plaintext token in the
 ``Authorization: Bearer <token>`` header on the WebSocket upgrade.
 We HMAC-hash it (same algorithm as the brain stores) and look up
-the agent row by hash. Constant-time compare via the unique index
-+ ``hmac.compare_digest`` on the hash itself.
+the agent row by a unique indexed equality query on that fixed-size
+digest. The plaintext token never reaches the database query.
 
 The plaintext token NEVER appears in logs, never in audit metadata,
 never in any persisted form.
@@ -51,10 +51,22 @@ async def resolve_agent_by_bearer(
 
     If the operator is mid-rotation (``Z4J_PREVIOUS_SECRETS``
     set), try every accepted secret. The token row in the DB was
-    hashed with whatever was the master secret at mint time;
-    without this loop a rotation would immediately invalidate
-    every live agent token until each agent re-mints one, which
-    itself requires a working bearer.
+    hashed with whatever was the master secret at mint time, so
+    without this loop a rotation would reject every live agent
+    token at the handshake.
+
+    Do NOT read that as "rotation is survivable for agents". It is
+    not, and an earlier version of this docstring said re-minting
+    "requires a working bearer", which is false and propagated into
+    the operator documentation. Minting is a human operation behind
+    a browser session, CSRF and project-admin authority; no
+    agent-authenticated path returns credentials. And the frame
+    signing key is derived from the CURRENT master alone (see
+    ``gateway.py``), with no fallback here or anywhere else. So all
+    this loop changes is the failure mode: instead of a clean 4401
+    at the handshake, the agent connects, registers online, and is
+    closed on its first data frame. Every agent still has to be
+    re-credentialed by an operator.
     """
     if not bearer:
         return None

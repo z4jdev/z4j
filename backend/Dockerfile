@@ -1,20 +1,34 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker.io/docker/dockerfile:1.20.0@sha256:26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d
 #
 # z4j-brain unified image (backend + dashboard).
 #
 # Multi-stage build:
-#   1. dashboard-builder - Node 24 + pnpm. Compiles the
-#      TanStack Router + Vite dashboard to static HTML/CSS/JS.
-#   2. python-builder    - Python 3.14 + uv. Builds the brain
-#      backend wheel and resolves all runtime deps into a venv.
-#   3. runtime           - Debian Trixie slim. Copies the venv
-#      from stage 2 and the dashboard dist from stage 1, then
-#      runs as a non-root user under tini.
+#   1. python-builder - Python 3.14.7 + uv. Builds the brain backend
+#      wheel plus its two workspace siblings from THIS tree and
+#      resolves every runtime dependency into /opt/venv.
+#   2. runtime        - Debian Trixie slim. Copies the venv from stage 1
+#      and the git-tracked compiled dashboard from the build context,
+#      then runs as a non-root user under tini.
+#   3. dev-runtime    - same venv, no bundled dashboard, hot-reload
+#      uvicorn. Used by docker-compose.dev.yml only.
 #
 # We deliberately base on python:3.14-slim-trixie (Debian 13).
-# Alpine is not supported - see docs/CLAUDE.md §4.6 for the
+# Alpine is not supported - see docs/CLAUDE.md 4.6 for the
 # rationale (glibc wheels, asyncpg + argon2-cffi + uvloop
 # compile-from-source pain on musl, enterprise scanner baselines).
+#
+# 1.9.0 provenance note. This file builds from ordinary upstream base
+# images. The production-authority apparatus that briefly lived here
+# (sealed wheelhouse / system-bundle / dashboard-bundle carrier images,
+# hash-locked offline installs, a sealed Debian .deb closure, a cosign
+# verifier, and manifest receipt labels) is deferred to 2.x. Its three
+# carrier images were never produced: packages/z4j/docker/production/
+# README.md says the finalizer tranche is deliberately absent, and the
+# manifest is pinned "unfinalized" with all-zero digests. Depending on
+# them here made the image unbuildable, which is strictly worse than
+# building it the way 1.8.0's shipping image was built. What that
+# apparatus bought, and what this file does instead, is noted at each
+# site below so nobody mistakes the ordinary build for the sealed one.
 #
 # Build context: the monorepo root, NOT this directory:
 #
@@ -24,61 +38,23 @@
 # stage in this file is dev-runtime (hot-reload uvicorn, no bundled
 # dashboard), and an untargeted build silently produces that.
 
-ARG PYTHON_VERSION=3.14
-ARG DEBIAN_RELEASE=trixie
-ARG NODE_VERSION=24
-
 # ---------------------------------------------------------------------------
-# Stage 1 - dashboard build
+# Stage 1 - python builder
 # ---------------------------------------------------------------------------
-FROM node:${NODE_VERSION}-bookworm-slim AS dashboard-builder
-
-ENV CI=true
-ENV PNPM_HOME=/root/.local/share/pnpm
-ENV PATH=/root/.local/share/pnpm:$PATH
-
-RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
-
-WORKDIR /dashboard
-
-# Copy package metadata first so the install layer caches when
-# only source changes. (Path was packages/z4j-brain/dashboard/
-# pre-1.4.0; the consolidation cut moved the dashboard under the
-# z4j package. Fixed in 1.6.5 after the e2e pre-publish harness
-# surfaced a "no such file" failure on the runtime build target.)
-COPY packages/z4j/dashboard/package.json packages/z4j/dashboard/pnpm-lock.yaml* ./
-
-# Audit H22: NO ``|| pnpm install`` fallback. The previous fallback
-# silently accepted a stale lockfile, which means a CVE'd
-# transitive could land in the production image without anyone
-# bumping the lockfile in source control. Build fails loudly if
-# the lockfile is out of date - contributor runs ``pnpm install``
-# locally, commits the new lockfile, push.
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile
-
-# Copy the rest of the dashboard source and build.
-COPY packages/z4j/dashboard/ ./
-
-RUN pnpm build
-
-# Source maps are emitted with ``sourcemap: "hidden"`` in
-# vite.config.ts - the bundle references them indirectly but the
-# browser never auto-fetches them. Dropping them here (in the
-# dashboard-builder stage, before ``COPY --from=dashboard-builder``)
-# keeps the runtime dist/ layer ~3.5 MB smaller. Dropping them in a
-# later ``RUN`` on the runtime stage would shadow but not reclaim.
-RUN find dist -name '*.map' -delete
-
-# ---------------------------------------------------------------------------
-# Stage 2 - python builder
-# ---------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim-${DEBIAN_RELEASE} AS python-builder
+# The base is pinned by tag AND digest. The tag documents intent, the
+# digest is what actually gets pulled. 3.14.7 is load-bearing rather than
+# cosmetic: the cadence runtime fingerprint hashes sys.version_info[:3]
+# (packages/z4j/docker/production/probe.py), and .python-version at the
+# repo root says 3.14.7. Bumping the patch here changes that fingerprint.
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS python-builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_CACHE_DIR=/tmp/uv-cache \
+    UV_NO_PROGRESS=1 \
+    UV_PYTHON_DOWNLOADS=never
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -88,13 +64,18 @@ RUN apt-get update \
         libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir "uv>=0.5.10"
+# uv 0.12.5 is the resolver version the 1.9.0 production manifest names
+# (packages/z4j/docker/production/manifest.json, "resolver"). Pinning it
+# exactly keeps this ordinary build on the same resolver the sealed build
+# would have used. UV_PYTHON_DOWNLOADS=never above forbids uv from
+# fetching some other CPython behind our back.
+RUN pip install --no-cache-dir "uv==0.12.5"
 
 # IMPORTANT: do NOT copy the workspace root pyproject.toml here.
 # If uv sees a workspace root, it installs every workspace member
 # as an editable .pth pointing at the build context - and the
 # runtime stage doesn't have the build context, so imports fail
-# at startup with "No module named z4j_core". By copying the two
+# at startup with "No module named z4j_core". By copying the three
 # package trees into a non-workspace directory, uv builds real
 # wheels from each pyproject.toml and installs them into /opt/venv.
 WORKDIR /build
@@ -108,21 +89,129 @@ COPY packages/z4j-core /build/packages/z4j-core
 # tree it was built from (caught by the 1.7.0 boot smoke: a
 # 1.7.0-tree image reported ``z4j --version`` = 1.6.9). Install the
 # real package from the tree.
+#
+# This COPY also carries backend/src/z4j_brain/dashboard/dist, which
+# [tool.hatch.build] artifacts pulls into the wheel, so the installed
+# package keeps its own copy of the dashboard as a fallback for the
+# ``pip install z4j`` path. That only works because .dockerignore
+# re-includes exactly that one directory out of its blanket **/dist.
 COPY packages/z4j /build/packages/z4j
 # z4j-scheduler is a separate PyPI package but bundling it inside the
 # brain image enables the optional ``Z4J_EMBEDDED_SCHEDULER=true``
-# sidecar (docs/SCHEDULER.md §21.3) without requiring a second image.
+# sidecar (docs/SCHEDULER.md 21.3) without requiring a second image.
 # The runtime cost is ~10 MB of pure-Python wheel; embedded mode stays
 # off by default so the brain starts identically to pre-1.x releases
 # unless the operator opts in.
 COPY packages/z4j-scheduler /build/packages/z4j-scheduler
 
-RUN uv venv /opt/venv \
-    && VIRTUAL_ENV=/opt/venv uv pip install \
+# All three distributions are installed FROM THIS TREE, never from
+# PyPI. Passing all three paths to one uv invocation is what makes the
+# intra-wave requirements (z4j depends on z4j-core>=1.9.0,<2) resolve to
+# the local trees instead of whatever the index happens to hold.
+#
+# Deferred with the apparatus: --require-hashes, --no-index and
+# --offline against a sealed wheelhouse. This resolution reaches PyPI
+# and is pinned only by the floors in each pyproject.toml, so two builds
+# of the same commit on different days can carry different transitive
+# versions.
+RUN uv venv --python /usr/local/bin/python /opt/venv \
+    && uv pip install \
+        --python /opt/venv/bin/python \
         --no-cache \
         /build/packages/z4j-core \
         "/build/packages/z4j[postgres,scheduler-grpc]" \
-        /build/packages/z4j-scheduler
+        /build/packages/z4j-scheduler \
+    && uv pip check --python /opt/venv/bin/python \
+    && rm -rf /tmp/uv-cache
+
+# -----------------------------------------------------------------
+# Cadence closure guard.
+#
+# The sealed build ran probe.py and compared its output against a
+# manifest expectation. The manifest is unfinalized, so that comparison
+# has no authority to check against; but the half of it that depends on
+# nothing outside this tree still works, and it still catches the
+# failure that matters most: an install where the brain and the
+# scheduler disagree about how a schedule fires.
+#
+# Checked here:
+#   * the interpreter really is 3.14.7, because the runtime fingerprint
+#     hashes sys.version_info[:3];
+#   * the five cadence-affecting distributions resolved to the exact
+#     versions both pyproject.toml files pin with ``==`` (tzdata 2026.3
+#     in particular: 2026a computes fire times an hour wrong for seven
+#     zones with future effect);
+#   * z4j and z4j-scheduler agree on semantics version, behavior vector,
+#     tzdata tree digest and runtime fingerprint.
+#
+# NOT checked here: that those values match a sealed, externally
+# reviewed expectation. This proves internal agreement, not authority.
+# -----------------------------------------------------------------
+RUN /opt/venv/bin/python <<'PY'
+import sys
+from importlib import metadata
+
+expected_python = (3, 14, 7)
+actual_python = tuple(sys.version_info[:3])
+if actual_python != expected_python:
+    raise SystemExit(
+        f"cadence guard: interpreter is {actual_python}, expected {expected_python}"
+    )
+
+pinned = {
+    "astral": "3.2",
+    "croniter": "6.2.2",
+    "python-dateutil": "2.9.0.post0",
+    "six": "1.17.0",
+    "tzdata": "2026.3",
+}
+for name, want in sorted(pinned.items()):
+    got = metadata.version(name)
+    if got != want:
+        raise SystemExit(f"cadence guard: {name} resolved to {got}, expected {want}")
+
+from z4j_brain.domain.schedule_cadence import (
+    CADENCE_SEMANTICS_VERSION as brain_semantics,
+)
+from z4j_brain.domain.schedule_cadence import (
+    cadence_behavior_vector_digest as brain_behavior,
+)
+from z4j_brain.domain.schedule_cadence import (
+    cadence_runtime_fingerprint as brain_fingerprint,
+)
+from z4j_brain.domain.schedule_runtime import packaged_tzdata_digest as brain_tzdata
+from z4j_scheduler.tick._runtime import packaged_tzdata_digest as scheduler_tzdata
+from z4j_scheduler.tick.cadence import (
+    CADENCE_SEMANTICS_VERSION as scheduler_semantics,
+)
+from z4j_scheduler.tick.cadence import (
+    cadence_behavior_vector_digest as scheduler_behavior,
+)
+from z4j_scheduler.tick.cadence import (
+    cadence_runtime_fingerprint as scheduler_fingerprint,
+)
+
+for label, brain_value, scheduler_value in (
+    ("semantics version", brain_semantics, scheduler_semantics),
+    ("behavior vector", brain_behavior(), scheduler_behavior()),
+    ("tzdata tree", brain_tzdata(), scheduler_tzdata()),
+    ("runtime fingerprint", brain_fingerprint(), scheduler_fingerprint()),
+):
+    if brain_value != scheduler_value:
+        raise SystemExit(
+            f"cadence guard: brain and scheduler disagree on {label}: "
+            f"{brain_value!r} != {scheduler_value!r}"
+        )
+
+print(
+    "cadence guard: python "
+    + ".".join(str(part) for part in actual_python)
+    + ", fingerprint "
+    + brain_fingerprint()
+    + ", tzdata "
+    + brain_tzdata()
+)
+PY
 
 # -----------------------------------------------------------------
 # Image-leanness pass. The installed venv carries a few classes of
@@ -166,15 +255,20 @@ RUN set -eux; \
         2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# Stage 3 - runtime
+# Stage 2 - runtime
 # ---------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim-${DEBIAN_RELEASE} AS runtime
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS runtime
 
 # OCI image metadata. Version is injected at build time via --build-arg
 # Z4J_VERSION=... so we never have to keep a hardcoded version in sync
 # with pyproject.toml. ``org.opencontainers.image.*`` labels are what
 # Docker Hub, GitHub Container Registry, Syft, Trivy, and Docker Scout
 # consume to render "Source", "License", etc.
+#
+# The org.z4j.production.* receipt labels are NOT emitted. They named a
+# manifest digest, a source-projection digest and three carrier index
+# digests that do not exist; emitting them carrying the literal string
+# "unfinalized" would be a provenance claim this image cannot back.
 ARG Z4J_VERSION=dev
 LABEL org.opencontainers.image.title="z4j" \
       org.opencontainers.image.description="z4j: open-source control plane for Python task infrastructure" \
@@ -198,6 +292,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     Z4J_DASHBOARD_DIST=/app/dashboard/dist \
     Z4J_ALEMBIC_INI=/app/alembic.ini
 
+# Deferred with the apparatus: the exact, signature-verified transitive
+# .deb closure for these three packages, unpacked with the network off
+# and then compared against a sealed package list. This is the ordinary
+# apt path, so the versions are whatever trixie and trixie-security
+# serve on the day of the build.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -210,9 +309,23 @@ RUN apt-get update \
 # Backend venv from python-builder.
 COPY --from=python-builder /opt/venv /opt/venv
 
-# Dashboard dist from dashboard-builder. Static files only -
-# no Node runtime in the final image.
-COPY --from=dashboard-builder /dashboard/dist /app/dashboard/dist
+# The compiled dashboard, straight from the tree.
+#
+# This is the git-tracked production bundle (151 files, carrying its own
+# .build-inputs.sha256 / .build-output.sha256 receipts), not something
+# rebuilt here. 1.8.0 compiled it in a Node stage; 1.9.0 tracks the
+# compiled output instead, so the image needs no Node toolchain and no
+# npm registry reachability at build time.
+#
+# Static files only, no Node runtime in the final image.
+#
+# If this COPY ever fails with "not found", the cause is almost
+# certainly .dockerignore: its blanket ``**/dist`` rule has to keep the
+# matching ``!packages/z4j/backend/src/z4j_brain/dashboard/dist`` pair
+# of lines or this directory never reaches the build context. An image
+# built without it answers 404 on ``/``, which is exactly the
+# dashboard-less 1.8.0 release that 1.8.1 existed to fix.
+COPY packages/z4j/backend/src/z4j_brain/dashboard/dist /app/dashboard/dist
 
 # -----------------------------------------------------------------
 # Runtime leanness pass. The base image + our COPY'd venv + the
@@ -223,7 +336,8 @@ COPY --from=dashboard-builder /dashboard/dist /app/dashboard/dist
 #     with ``sourcemap: "hidden"`` so the browser never fetches
 #     them automatically; they're only useful to whoever holds
 #     the image. We strip them so they're not shipped to every
-#     operator.
+#     operator. The tracked bundle already carries none, and the
+#     sweep stays so a future bundle that does cannot leak them.
 #   - python:slim ships ``pip`` + ``ensurepip`` + ``idlelib`` +
 #     ``tkinter`` + ``pydoc_data`` + ``turtledemo`` (~13 MB
 #     combined). The brain runs against the /opt/venv wheel
@@ -333,7 +447,7 @@ CMD ["serve"]
 
 
 # ---------------------------------------------------------------------------
-# Stage 4 - dev-runtime (used by docker-compose.dev.yml only)
+# Stage 3 - dev-runtime (used by docker-compose.dev.yml only)
 # ---------------------------------------------------------------------------
 # Same venv as production but:
 #   - no dashboard dist (Vite serves the dashboard from a sibling
@@ -344,7 +458,7 @@ CMD ["serve"]
 #
 # This stage exists so contributors can run the brain in Docker
 # without paying the dashboard build cost on every restart.
-FROM python:${PYTHON_VERSION}-slim-${DEBIAN_RELEASE} AS dev-runtime
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS dev-runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

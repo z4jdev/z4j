@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import Boolean, Index, String
+from sqlalchemy import Boolean, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
@@ -118,6 +118,21 @@ class Project(PKMixin, TimestampsMixin, Base):
         Uuid(as_uuid=True),
         nullable=True,
     )  # Org hierarchy (Phase 3)
+
+    #: Monotonic authority epoch for the project automation kill switch.
+    #: Every actual ``automation_enabled`` transition advances this value in
+    #: the same database write. A stale dispatch is therefore rejected after
+    #: an off/on ABA sequence even though the final boolean is enabled again.
+    #:
+    #: 0014 appends this column on upgrades; the explicit sort order puts it
+    #: after the inherited id/timestamps on consolidated fresh installs too.
+    automation_revision: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        sort_order=1000,
+    )
 
     __table_args__ = (
         # The CHECK constraint that enforces the slug regex is added

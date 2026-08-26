@@ -6,7 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { Suspense } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { bulkRetryStorageKey } from "@/lib/bulk-retry-storage";
 
@@ -17,6 +17,12 @@ const apiMocks = vi.hoisted(() => ({
 }));
 const routeMocks = vi.hoisted(() => ({
   search: { state: "failure" } as Record<string, string>,
+}));
+const tableMocks = vi.hoisted(() => ({
+  selectionMode: "all-pages" as "all-pages" | "explicit-empty",
+}));
+const permissionMocks = vi.hoisted(() => ({
+  role: "admin" as "admin" | "operator" | "viewer",
 }));
 
 vi.mock("lucide-react", async () => {
@@ -71,7 +77,18 @@ vi.mock("@/lib/api", () => ({
 }));
 
 vi.mock("@/hooks/use-memberships", () => ({
-  useCan: () => true,
+  useCan: (_slug: string, action: string) => {
+    if (permissionMocks.role === "admin") return true;
+    if (permissionMocks.role === "viewer") return action === "view";
+    return [
+      "view",
+      "retry_task",
+      "cancel_task",
+      "bulk_action",
+      "operate_schedules",
+      "manage_automation",
+    ].includes(action);
+  },
 }));
 
 vi.mock("@/hooks/use-tasks", () => ({
@@ -253,7 +270,7 @@ vi.mock("@/components/ui/data-table", async () => {
         }),
         toolbar({
           selectedCount: 1,
-          allPagesSelected: true,
+          allPagesSelected: tableMocks.selectionMode === "all-pages",
           showSelectAllPages: false,
           selectedRows: [],
           clearSelection: vi.fn(),
@@ -273,16 +290,151 @@ const TasksPage = (
 ).options.component;
 
 describe("durable bulk-retry response Location binding", () => {
+  beforeAll(async () => {
+    await (
+      TasksPage as React.ComponentType & {
+        preload?: () => Promise<void>;
+      }
+    ).preload?.();
+  });
+
   beforeEach(() => {
     window.localStorage.clear();
     routeMocks.search = { state: "failure" };
+    tableMocks.selectionMode = "all-pages";
+    permissionMocks.role = "admin";
     vi.restoreAllMocks();
+    apiMocks.get.mockReset();
+    apiMocks.post.mockReset();
     apiMocks.postResource.mockReset();
     vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.spyOn(window, "alert").mockImplementation(() => undefined);
     vi.spyOn(window.crypto, "randomUUID").mockReturnValue(
       "01234567-89ab-4def-8123-456789abcdef",
     );
+  });
+
+  it("posts the exact all-pages bulk-delete state, priority, and literal search", async () => {
+    await act(async () => {
+      render(
+        <Suspense fallback={null}>
+          <TasksPage />
+        </Suspense>,
+      );
+      await Promise.resolve();
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "toggle-critical-priority" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "toggle-high-priority" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "set-search-filter" }));
+    fireEvent.click(screen.getByRole("button", { name: /delete/i }));
+
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledOnce());
+    expect(apiMocks.post).toHaveBeenCalledWith(
+      "/projects/project/tasks/bulk-delete",
+      {
+        filter_state: "failure",
+        filter_priority: ["critical", "high"],
+        filter_search: "needle",
+      },
+    );
+    expect(window.confirm).toHaveBeenCalledWith(
+      "Delete up to 10,000 matching task records? This cannot be undone.",
+    );
+  });
+
+  it("never broadens a priority-only all-pages delete to an empty body", async () => {
+    routeMocks.search = {};
+    await act(async () => {
+      render(
+        <Suspense fallback={null}>
+          <TasksPage />
+        </Suspense>,
+      );
+      await Promise.resolve();
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "toggle-critical-priority" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /delete/i }));
+
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledOnce());
+    expect(apiMocks.post).toHaveBeenCalledWith(
+      "/projects/project/tasks/bulk-delete",
+      { filter_priority: ["critical"] },
+    );
+  });
+
+  it("does not issue an unfiltered all-pages bulk-delete", async () => {
+    routeMocks.search = {};
+    await act(async () => {
+      render(
+        <Suspense fallback={null}>
+          <TasksPage />
+        </Suspense>,
+      );
+      await Promise.resolve();
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /delete/i }));
+
+    expect(apiMocks.post).not.toHaveBeenCalled();
+    expect(window.alert).toHaveBeenCalledWith(
+      expect.stringContaining("at least one task filter"),
+    );
+  });
+
+  it("does not issue an explicit-ID bulk-delete for an empty selection", async () => {
+    tableMocks.selectionMode = "explicit-empty";
+    await act(async () => {
+      render(
+        <Suspense fallback={null}>
+          <TasksPage />
+        </Suspense>,
+      );
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /delete/i }));
+
+    expect(apiMocks.post).not.toHaveBeenCalled();
+    expect(window.alert).toHaveBeenCalledWith(
+      expect.stringContaining("at least one task"),
+    );
+  });
+
+  it("shows operator retry and revoke controls but not admin-only delete", async () => {
+    permissionMocks.role = "operator";
+    tableMocks.selectionMode = "explicit-empty";
+    await act(async () => {
+      render(
+        <Suspense fallback={null}>
+          <TasksPage />
+        </Suspense>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Delete" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows task delete only to an admin", async () => {
+    permissionMocks.role = "admin";
+    await act(async () => {
+      render(
+        <Suspense fallback={null}>
+          <TasksPage />
+        </Suspense>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
   });
 
   it.each([
@@ -400,8 +552,9 @@ describe("durable bulk-retry response Location binding", () => {
     fireEvent.click(await screen.findByRole("button", { name: /retry/i }));
 
     expect(apiMocks.postResource).not.toHaveBeenCalled();
+    expect(apiMocks.post).not.toHaveBeenCalled();
     expect(window.alert).toHaveBeenCalledWith(
-      expect.stringContaining("explicit task state"),
+      "Choose an explicit task state before retrying all matching tasks.",
     );
   });
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
+import z4j_brain.domain.schedule_cadence as cadence_module
 from z4j_brain.domain.schedule_cadence import (
     CADENCE_SEMANTICS_VERSION,
     ScheduleCadenceError,
@@ -13,6 +15,9 @@ from z4j_brain.domain.schedule_cadence import (
 from z4j_brain.domain.schedule_definition import (
     CONTROL_FIELDS,
     schedule_definition_digest,
+)
+from z4j_brain.domain.schedule_runtime import (
+    cadence_runtime_fingerprint as raw_cadence_runtime_fingerprint,
 )
 
 
@@ -97,6 +102,22 @@ def test_cadence_runtime_identity_is_complete_and_stable() -> None:
     assert cadence_runtime_fingerprint() == cadence_runtime_fingerprint()
 
 
+@pytest.mark.parametrize(
+    "digest",
+    [
+        "0" * 63,
+        "0" * 65,
+        "g" * 64,
+        "A" * 64,
+        f" {'0' * 64}",
+        f"{'0' * 64} ",
+    ],
+)
+def test_cadence_runtime_rejects_noncanonical_sha256_digest(digest: str) -> None:
+    with pytest.raises(ValueError, match="64 lowercase SHA-256 hex digits"):
+        raw_cadence_runtime_fingerprint(digest)
+
+
 def test_canonical_successor_is_utc_and_one_shot_exhaustion_is_explicit() -> None:
     anchor = datetime(2026, 1, 1, 12, 3, 7, tzinfo=UTC)
     assert canonical_next_run_at(
@@ -139,6 +160,57 @@ def test_invalid_definition_fails_closed(
             kind=kind,
             expression=expression,
             timezone=timezone,
+            last_run_at=None,
+            anchor_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize("coordinate", ["nan", "inf", "-inf"])
+def test_solar_coordinates_must_be_finite(coordinate: str) -> None:
+    with pytest.raises(ScheduleCadenceError, match="finite"):
+        canonical_next_run_at(
+            kind="solar",
+            expression=f"sunrise:{coordinate}:0",
+            timezone="UTC",
+            last_run_at=None,
+            anchor_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+
+def test_solar_no_event_value_error_advances_to_the_next_date(monkeypatch) -> None:
+    calls = 0
+
+    def no_event(*args: Any, **kwargs: Any) -> datetime:
+        nonlocal calls
+        calls += 1
+        raise ValueError("sun stays below the horizon")
+
+    monkeypatch.setitem(cadence_module._SOLAR_EVENTS, "sunrise", no_event)
+
+    assert (
+        canonical_next_run_at(
+            kind="solar",
+            expression="sunrise:89:0",
+            timezone="UTC",
+            last_run_at=None,
+            anchor_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        is None
+    )
+    assert calls == 365
+
+
+def test_solar_programming_error_is_not_hidden_as_no_successor(monkeypatch) -> None:
+    def broken_dependency(*args: Any, **kwargs: Any) -> datetime:
+        raise RuntimeError("astral runtime is broken")
+
+    monkeypatch.setitem(cadence_module._SOLAR_EVENTS, "sunrise", broken_dependency)
+
+    with pytest.raises(RuntimeError, match="astral runtime is broken"):
+        canonical_next_run_at(
+            kind="solar",
+            expression="sunrise:0:0",
+            timezone="UTC",
             last_run_at=None,
             anchor_at=datetime(2026, 1, 1, tzinfo=UTC),
         )

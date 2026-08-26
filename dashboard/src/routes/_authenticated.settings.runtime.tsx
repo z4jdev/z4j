@@ -16,7 +16,13 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Copy, ExternalLink, Info, Search, SlidersHorizontal } from "lucide-react";
+import {
+  Copy,
+  ExternalLink,
+  Info,
+  Search,
+  SlidersHorizontal,
+} from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -184,19 +190,16 @@ function RuntimeNotice() {
   return (
     <div className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
       <p className="max-w-3xl">
-        Sources, in resolution order:{" "}
-        <code className="font-mono">env</code> (a{" "}
+        Sources, in resolution order: <code className="font-mono">env</code> (a{" "}
         <code className="font-mono">Z4J_*</code> environment variable),{" "}
-        <code className="font-mono">config.env</code> (
+        <code className="font-mono">.env</code> (a{" "}
+        <code className="font-mono">.env</code> file in the brain's working
+        directory), <code className="font-mono">config.env</code> (
         <code className="font-mono">~/.z4j/config.env</code>),{" "}
         <code className="font-mono">secret.env</code> (
-        <code className="font-mono">~/.z4j/secret.env</code>),{" "}
-        <code className="font-mono">.env</code> (a{" "}
-        <code className="font-mono">.env</code> file in the brain's
-        working directory), and{" "}
-        <code className="font-mono">default</code> (the value baked
-        into the Settings model). Hover any badge for a one-line
-        reminder.
+        <code className="font-mono">~/.z4j/secret.env</code>), and{" "}
+        <code className="font-mono">default</code> (the value baked into the
+        Settings model). Hover any badge for a one-line reminder.
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-3 text-xs">
         <a
@@ -251,7 +254,11 @@ function Z4jHomeCard({ z4jHome }: { z4jHome: string }) {
 
 const SOURCE_VARIANT: Record<
   SettingItem["source"],
-  { variant: "default" | "secondary" | "success" | "warning" | "muted" | "outline"; label: string }
+  {
+    variant:
+      "default" | "secondary" | "success" | "warning" | "muted" | "outline";
+    label: string;
+  }
 > = {
   // Tailwind class hints encoded via Badge's variant tokens. We
   // reuse the existing variants instead of introducing new color
@@ -283,9 +290,7 @@ function SettingsTableCard({ settings }: { settings: SettingItem[] }) {
   const filtered = React.useMemo(() => {
     if (!filter) return settings;
     const needle = filter.toLowerCase();
-    return settings.filter((row) =>
-      row.name.toLowerCase().includes(needle),
-    );
+    return settings.filter((row) => row.name.toLowerCase().includes(needle));
   }, [settings, filter]);
 
   return (
@@ -338,9 +343,9 @@ function SettingsTableCard({ settings }: { settings: SettingItem[] }) {
                       <Info className="size-3 cursor-help text-muted-foreground" />
                     </TooltipTrigger>
                     <TooltipContent className="max-w-sm text-xs">
-                      Inline description on the Pydantic field. Most
-                      fields document themselves in the Z4J_* env-vars
-                      reference instead -- follow the docs link above.
+                      Inline description on the Pydantic field. Most fields
+                      document themselves in the Z4J_* env-vars reference
+                      instead -- follow the docs link above.
                     </TooltipContent>
                   </Tooltip>
                 </span>
@@ -385,7 +390,9 @@ function SettingRow({ row }: { row: SettingItem }) {
             </TooltipContent>
           </Tooltip>
         ) : (
-          <span className="break-all">{row.value || <em className="text-muted-foreground">empty</em>}</span>
+          <span className="break-all">
+            {row.value || <em className="text-muted-foreground">empty</em>}
+          </span>
         )}
       </TableCell>
       <TableCell className="py-2.5">
@@ -442,8 +449,8 @@ function ActionsCard({
       <h3 className="text-sm font-semibold">Actions</h3>
       <p className="mt-1 text-xs text-muted-foreground">
         Copy the current effective settings as a{" "}
-        <code className="font-mono">.env</code> block, or restart the brain
-        to pick up edits to <code className="font-mono">~/.z4j/config.env</code>.
+        <code className="font-mono">.env</code> block, or restart the brain to
+        pick up edits to <code className="font-mono">~/.z4j/config.env</code>.
       </p>
 
       <div className="mt-4 flex flex-wrap gap-2">
@@ -459,9 +466,9 @@ function ActionsCard({
           Reload after editing config.env
         </h4>
         <p className="mt-2 text-xs text-muted-foreground">
-          Pick the line that matches your deployment. z4j re-reads its
-          config files at startup, so a restart is enough -- no special
-          reload command exists.
+          Pick the line that matches your deployment. z4j re-reads its config
+          files at startup, so a restart is enough -- no special reload command
+          exists.
         </p>
         <div className="mt-3 space-y-2">
           <ReloadInstruction
@@ -480,10 +487,15 @@ function ActionsCard({
             label="macOS launchd"
             command="sudo launchctl kickstart -k system/z4j"
           />
-          <ReloadInstruction
-            label="bare process (POSIX)"
-            command="kill -HUP $(pidof z4j)"
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="w-32 shrink-0 text-xs font-medium text-muted-foreground">
+              bare process (POSIX)
+            </span>
+            <span className="flex-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs">
+              Send SIGTERM, wait for exit, then start the same command again. A
+              bare process has no supervisor to restart it automatically.
+            </span>
+          </div>
           <ReloadInstruction
             label="Windows Service"
             command="Restart-Service z4j"
@@ -526,7 +538,7 @@ function ReloadInstruction({
  * operator who pastes this into version control later remembers it
  * was a snapshot, not a configuration intent.
  */
-function buildDotenvBlock(
+export function buildDotenvBlock(
   settings: SettingItem[],
   z4jHome: string,
 ): string {
@@ -538,9 +550,22 @@ function buildDotenvBlock(
   ];
   const lines = settings.map((row) => {
     const key = `Z4J_${row.name.toUpperCase()}`;
-    return `${key}=${row.value}`;
+    return `${key}=${quoteDotenvValue(row.value)}`;
   });
   return [...header, ...lines, ""].join("\n");
+}
+
+/**
+ * Quote one value for the exact python-dotenv reader used at startup.
+ *
+ * Single quotes protect whitespace and inline `#` characters. The startup
+ * reader disables variable interpolation, so `${NAME}` remains literal.
+ * Backslashes and apostrophes are the two escapes recognized inside a
+ * single-quoted dotenv value.
+ */
+function quoteDotenvValue(value: string): string {
+  const escaped = value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  return `'${escaped}'`;
 }
 
 // ---------------------------------------------------------------------------
@@ -580,4 +605,3 @@ function CopyButton({
     </Button>
   );
 }
-

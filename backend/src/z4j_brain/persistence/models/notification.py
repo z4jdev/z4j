@@ -424,18 +424,28 @@ class UserNotification(PKMixin, Base):
 
 
 class NotificationDelivery(PKMixin, Base):
-    """Immutable record of one EXTERNAL delivery attempt.
+    """Record of one EXTERNAL delivery attempt, never updated after write.
 
     Created when the dispatcher sends to a webhook / email / slack /
     telegram channel. In-app deliveries do NOT create delivery rows;
     they go to ``user_notifications`` directly. Use this table for
     "did the Slack POST succeed?" debugging.
 
+    No code path revises a row once written, which is why the channel name
+    and type are snapshotted here rather than joined at read time. Rows are
+    not permanent, though: an admin can clear them from the deliveries UI,
+    and that clear is itself audited. Operators who need delivery history to
+    outlive the table should forward it to an external log store.
+
     Attributes:
         subscription_id: Which subscription fired this delivery.
             SET NULL on subscription delete (audit history outlives
             the subscription). Always NULL for test fires (they
             aren't owned by any subscription).
+        recipient_user_id: Immutable snapshot of the subscription owner at
+            delivery time. SET NULL only when the user itself is deleted, so
+            personal history survives subscription deletion without retaining
+            user identity after account deletion. NULL for channel test rows.
         channel_id: NotificationChannel target. NULL if the channel
             was a UserChannel (we only audit project-channel sends
             globally; user-channel sends are owned by the user).
@@ -485,7 +495,7 @@ class NotificationDelivery(PKMixin, Base):
     response_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     response_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Snapshot at insert time (audit L-2, added v1.0.14). Pre-1.0.14
+    # Snapshot at insert time (added v1.0.14). Pre-1.0.14
     # the dashboard resolved channel_name + channel_type via a live
     # join on read - which let an admin rename a channel after a
     # sensitive dispatch and retroactively rewrite the audit story.
@@ -508,6 +518,21 @@ class NotificationDelivery(PKMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # v1.9.0: durable personal-history ownership for subscription-driven
+    # deliveries. ``subscription_id`` is intentionally SET NULL when a user
+    # deletes a subscription, so deriving ownership through the live
+    # subscription table made those audit rows disappear from that user's
+    # history. Snapshot the owner instead. Account deletion still erases the
+    # association through SET NULL, preserving the existing privacy boundary.
+    #
+    # Migration 0015 appends this column on upgrades. The explicit sort order
+    # keeps consolidated fresh installs physically identical to that path.
+    recipient_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        sort_order=1000,
+    )
 
     # Hot-path index for the admin Delivery Log page -
     # ``list_for_project`` filters by ``project_id`` and orders by
@@ -524,6 +549,11 @@ class NotificationDelivery(PKMixin, Base):
         Index(
             "ix_notification_deliveries_triggered_by_user",
             "triggered_by_user_id",
+        ),
+        Index(
+            "ix_notification_deliveries_recipient_sent",
+            "recipient_user_id",
+            desc("sent_at"),
         ),
     )
 

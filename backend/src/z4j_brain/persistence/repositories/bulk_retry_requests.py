@@ -18,6 +18,7 @@ from z4j_brain.domain.bulk_retry import (
 )
 from z4j_brain.persistence.enums import CommandStatus
 from z4j_brain.persistence.models import (
+    Agent,
     BulkRetryControlState,
     BulkRetryDeliveryState,
     BulkRetryOutcome,
@@ -97,6 +98,13 @@ class BulkRetryRequestRepository(BaseRepository[BulkRetryRequest]):
             if self.session.in_transaction():
                 await self.session.rollback()
             await self.session.execute(text("BEGIN IMMEDIATE"))
+            # Re-arm the audited write unit as well. The rollback above ends
+            # the previous one, which clears this marker, and Boundary F
+            # refuses to write an audit row inside a unit that did not begin
+            # with BEGIN IMMEDIATE. Without this the seal path raises on its
+            # own audit row after the seal has already succeeded, so the
+            # request 500s while the work is done.
+            self.session.sync_session.info["z4j_sqlite_immediate"] = True
 
     async def get_by_key(
         self,
@@ -406,12 +414,23 @@ class BulkRetryRequestRepository(BaseRepository[BulkRetryRequest]):
         child = child_result.scalar_one_or_none()
         if child is None:
             return None
+        live_agent = (
+            await self.session.execute(
+                select(Agent)
+                .where(
+                    Agent.id == agent_id,
+                    Agent.project_id == child.project_id,
+                    Agent.revoked_at.is_(None),
+                )
+                .with_for_update(),
+            )
+        ).scalar_one_or_none()
         # This is the irreversible claim edge, so re-derive the retry
         # requirement from the sealed payload here rather than trusting the
         # denormalized child.engine or any upstream issuer.
         from z4j_brain.domain.retry_contract import required_retry_engine
 
-        if required_retry_engine("bulk_retry", child.payload) != child.engine:
+        if live_agent is None or required_retry_engine("bulk_retry", child.payload) != child.engine:
             return None
         parent = await self.get_for_project(
             project_id=child.project_id,

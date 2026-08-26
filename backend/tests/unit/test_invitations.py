@@ -15,14 +15,30 @@ auth machinery):
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import secrets
+import uuid
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import StaticPool
+from starlette.responses import Response
+from z4j_brain.api import invitations as invitation_api
+from z4j_brain.api.invitations import (
+    InvitationMintPublic,
+    InvitationPreviewRequest,
+)
+from z4j_brain.errors import NotFoundError
 from z4j_brain.persistence import models  # noqa: F401  (registers metadata)
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import Project, User
@@ -72,6 +88,105 @@ async def project(session: AsyncSession):
 
 def _hash(plaintext: str, key: str = "unit-test-secret") -> str:
     return hmac.new(key.encode(), plaintext.encode(), sha256).hexdigest()
+
+
+def test_mint_schema_documents_fragment_token_transport() -> None:
+    token_schema = InvitationMintPublic.model_json_schema()["properties"]["token"]
+    description = token_schema["description"]
+    assert "/invite#token=" in description
+    assert "/invite?token=" not in description
+
+
+def test_preview_schema_is_body_only_post() -> None:
+    app = FastAPI()
+    app.include_router(invitation_api.public_router, prefix="/api/v1")
+
+    path = app.openapi()["paths"]["/api/v1/invitations/preview"]
+    assert set(path) == {"post"}
+    operation = path["post"]
+    assert "requestBody" in operation
+    assert not any(
+        parameter.get("name") == "token" for parameter in operation.get("parameters", [])
+    )
+
+
+@pytest.mark.asyncio
+class TestInvitationPreviewTransport:
+    async def test_body_token_is_hashed_and_response_is_not_cacheable(
+        self,
+        brain_settings,
+    ) -> None:  # type: ignore[no-untyped-def]
+        token = "P" * 43
+        project_id = uuid.uuid4()
+        row = SimpleNamespace(
+            project_id=project_id,
+            email="preview@example.com",
+            role="viewer",
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+            accepted_at=None,
+            revoked_at=None,
+        )
+        invitations = SimpleNamespace(get_by_hash=AsyncMock(return_value=row))
+        projects = SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    id=project_id,
+                    slug="preview",
+                    name="Preview Project",
+                ),
+            ),
+        )
+        response = Response()
+
+        result = await invitation_api.preview_invitation(
+            body=InvitationPreviewRequest(token=token),
+            response=response,
+            invitations=invitations,
+            projects=projects,
+            settings=brain_settings,
+        )
+
+        invitations.get_by_hash.assert_awaited_once_with(
+            invitation_api._hash_token(token, brain_settings),
+        )
+        assert result.email == "preview@example.com"
+        assert response.headers["Cache-Control"] == "no-store"
+
+    @pytest.mark.parametrize(
+        "state",
+        ["missing", "expired", "revoked", "accepted"],
+    )
+    async def test_unusable_states_share_one_generic_error(
+        self,
+        state: str,
+        brain_settings,
+    ) -> None:  # type: ignore[no-untyped-def]
+        row = None
+        if state != "missing":
+            row = SimpleNamespace(
+                project_id=uuid.uuid4(),
+                expires_at=(
+                    datetime.now(UTC) - timedelta(seconds=1)
+                    if state == "expired"
+                    else datetime.now(UTC) + timedelta(days=1)
+                ),
+                revoked_at=datetime.now(UTC) if state == "revoked" else None,
+                accepted_at=datetime.now(UTC) if state == "accepted" else None,
+            )
+        projects = SimpleNamespace(get=AsyncMock())
+
+        with pytest.raises(NotFoundError, match="invalid_or_expired"):
+            await invitation_api.preview_invitation(
+                body=InvitationPreviewRequest(token=f"invalid-{state}"),
+                response=Response(),
+                invitations=SimpleNamespace(
+                    get_by_hash=AsyncMock(return_value=row),
+                ),
+                projects=projects,
+                settings=brain_settings,
+            )
+
+        projects.get.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -175,6 +290,77 @@ class TestInvitationRepository:
         assert updated is not None
         assert updated.revoked_at is not None
 
+    async def test_accept_and_revoke_are_one_way_mutually_exclusive(
+        self,
+        session,
+        admin_user,
+        project,
+    ):
+        repo = InvitationRepository(session)
+        accepted = await repo.create(
+            project_id=project.id,
+            email="accepted@example.com",
+            role="viewer",
+            invited_by=admin_user.id,
+            token_hash=_hash("accepted-first"),
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+        )
+        assert (
+            await repo.accept(
+                accepted.id,
+                accepted_by_user_id=admin_user.id,
+            )
+            is not None
+        )
+        assert await repo.revoke(accepted.id) is None
+        await session.refresh(accepted)
+        assert accepted.accepted_at is not None
+        assert accepted.revoked_at is None
+
+        revoked = await repo.create(
+            project_id=project.id,
+            email="revoked@example.com",
+            role="viewer",
+            invited_by=admin_user.id,
+            token_hash=_hash("revoked-first"),
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+        )
+        assert await repo.revoke(revoked.id) is not None
+        assert (
+            await repo.accept(
+                revoked.id,
+                accepted_by_user_id=admin_user.id,
+            )
+            is None
+        )
+        await session.refresh(revoked)
+        assert revoked.accepted_at is None
+        assert revoked.revoked_at is not None
+
+    async def test_expiry_is_rechecked_at_terminal_update(
+        self,
+        session,
+        admin_user,
+        project,
+    ):
+        repo = InvitationRepository(session)
+        row = await repo.create(
+            project_id=project.id,
+            email="expired@example.com",
+            role="viewer",
+            invited_by=admin_user.id,
+            token_hash=_hash("expired-at-claim"),
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        assert (
+            await repo.accept(
+                row.id,
+                accepted_by_user_id=admin_user.id,
+            )
+            is None
+        )
+        assert await repo.revoke(row.id) is None
+
     async def test_list_excludes_accepted_revoked_expired(
         self,
         session,
@@ -220,6 +406,80 @@ class TestInvitationRepository:
         assert pending.id in ids
         assert rev.id not in ids
         assert len(listing) == 1
+
+    async def test_concurrent_accept_and_revoke_have_exactly_one_winner(
+        self,
+        tmp_path,
+    ):
+        database_path = tmp_path / "invitation-race.sqlite3"
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{database_path}",
+            connect_args={"timeout": 10},
+        )
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with sessions() as seed:
+                admin = User(
+                    email="race-admin@example.com",
+                    password_hash="hash",
+                    is_admin=True,
+                    is_active=True,
+                )
+                race_project = Project(slug="race", name="Race")
+                seed.add_all([admin, race_project])
+                await seed.flush()
+                invitation = await InvitationRepository(seed).create(
+                    project_id=race_project.id,
+                    email="race@example.com",
+                    role="viewer",
+                    invited_by=admin.id,
+                    token_hash=_hash("accept-revoke-race"),
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+                await seed.commit()
+                invitation_id = invitation.id
+                admin_id = admin.id
+
+            gate = asyncio.Event()
+
+            async def accept() -> bool:
+                async with sessions() as contender:
+                    await gate.wait()
+                    result = await InvitationRepository(contender).accept(
+                        invitation_id,
+                        accepted_by_user_id=admin_id,
+                    )
+                    await (contender.commit() if result is not None else contender.rollback())
+                    return result is not None
+
+            async def revoke() -> bool:
+                async with sessions() as contender:
+                    await gate.wait()
+                    result = await InvitationRepository(contender).revoke(
+                        invitation_id,
+                    )
+                    await (contender.commit() if result is not None else contender.rollback())
+                    return result is not None
+
+            accept_task = asyncio.create_task(accept())
+            revoke_task = asyncio.create_task(revoke())
+            gate.set()
+            accept_won, revoke_won = await asyncio.gather(
+                accept_task,
+                revoke_task,
+            )
+            assert accept_won is not revoke_won
+
+            async with sessions() as check:
+                final = await InvitationRepository(check).get(invitation_id)
+                assert final is not None
+                assert (final.accepted_at is not None) is accept_won
+                assert (final.revoked_at is not None) is revoke_won
+                assert not (final.accepted_at is not None and final.revoked_at is not None)
+        finally:
+            await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -303,10 +563,16 @@ class TestAcceptPathInvariants:
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
         await repo.revoke(row.id)
-        # Calling accept() on a revoked row does stamp accepted_at at
-        # the repo layer (no enforcement), but the public accept
-        # endpoint's _is_pending() guard filters this out BEFORE the
-        # repo call. The guard's correctness is what we test here.
+        # The repository update is itself authoritative: even if an accept
+        # request passed an earlier pending check before this revoke committed,
+        # its terminal compare-and-set cannot overwrite the revoked state.
+        assert (
+            await repo.accept(
+                row.id,
+                accepted_by_user_id=admin_user.id,
+            )
+            is None
+        )
         reloaded = await repo.get(row.id)
         now = datetime.now(UTC)
         expires_at = reloaded.expires_at
@@ -314,3 +580,64 @@ class TestAcceptPathInvariants:
             expires_at = expires_at.replace(tzinfo=UTC)
         pending = reloaded.accepted_at is None and reloaded.revoked_at is None and expires_at > now
         assert not pending, "revoked row must not be 'pending'"
+        assert reloaded.accepted_at is None
+
+
+@pytest.mark.asyncio
+class TestAcceptRouteArbitration:
+    async def test_lost_terminal_claim_aborts_before_commit(
+        self,
+        brain_settings,
+    ) -> None:  # type: ignore[no-untyped-def]
+        project_id = uuid.uuid4()
+        invitation_id = uuid.uuid4()
+        row = SimpleNamespace(
+            id=invitation_id,
+            project_id=project_id,
+            email="claim-loser@example.com",
+            role="viewer",
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+            accepted_at=None,
+            revoked_at=None,
+        )
+        project = SimpleNamespace(id=project_id, slug="claim", name="Claim")
+        invitation_repo = SimpleNamespace(
+            get_by_hash=AsyncMock(return_value=row),
+            accept=AsyncMock(return_value=None),
+        )
+
+        async def add_user(user) -> None:  # type: ignore[no-untyped-def]
+            user.id = uuid.uuid4()
+
+        users = SimpleNamespace(
+            get_by_email=AsyncMock(return_value=None),
+            add=AsyncMock(side_effect=add_user),
+        )
+        memberships = SimpleNamespace(grant=AsyncMock())
+        db_session = SimpleNamespace(commit=AsyncMock())
+
+        with pytest.raises(NotFoundError, match="invalid_or_expired"):
+            await invitation_api.accept_invitation(
+                body=invitation_api.InvitationAcceptRequest(
+                    token="long-enough-invitation-token",
+                    display_name="Claim Loser",
+                    password="Correct-Horse-Battery-9!",
+                ),
+                invitations=invitation_repo,
+                users=users,
+                memberships=memberships,
+                projects=SimpleNamespace(get=AsyncMock(return_value=project)),
+                settings=brain_settings,
+                audit=SimpleNamespace(record=AsyncMock()),
+                audit_log=object(),
+                db_session=db_session,
+                ip="127.0.0.1",
+            )
+
+        assert users.add.await_count == 1
+        assert memberships.grant.await_count == 1
+        invitation_repo.accept.assert_awaited_once_with(
+            invitation_id,
+            accepted_by_user_id=users.add.await_args.args[0].id,
+        )
+        assert db_session.commit.await_count == 0

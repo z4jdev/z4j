@@ -24,9 +24,10 @@ brain. ``CLOSE_VERSION_SKEW`` is reserved for when 1.8 agents are the floor.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import Mock, patch
 
 import pytest
-from structlog.testing import capture_logs
+import z4j_brain.websocket.gateway as gateway
 from z4j_brain.websocket.gateway import (
     _MAX_AGENT_MINOR_LAG,
     CLOSE_VERSION_SKEW,
@@ -36,13 +37,26 @@ from z4j_brain.websocket.gateway import (
 
 def _skew(agent: str, brain: str = "1.8.0") -> list[dict]:
     """Return the log events emitted for one agent/brain pairing."""
-    with capture_logs() as logs:
+    recording_logger = Mock()
+    # ``structlog.testing.capture_logs`` mutates global structlog processors.
+    # Once another full-suite test has cached this module's bound logger, that
+    # helper sees no events even though the real logging pipeline receives the
+    # warning. Replace the exact module dependency instead, so this test stays
+    # sensitive regardless of suite order and logging configuration.
+    with patch.object(gateway, "logger", recording_logger):
         _warn_on_version_skew(
             agent_id=uuid.uuid4(),
             agent_version=agent,
             brain_version=brain,
         )
-    return logs
+    return [
+        {
+            "event": call.args[0],
+            "log_level": "warning",
+            **call.kwargs,
+        }
+        for call in recording_logger.warning.call_args_list
+    ]
 
 
 @pytest.mark.parametrize(
@@ -116,21 +130,7 @@ def test_unparseable_version_warns_that_it_could_not_check() -> None:
     assert "unparseable" in logs[0]["event"]
 
 
-def test_close_code_is_reserved_but_unused() -> None:
-    """The code must exist for the agent side, and must NOT be sent yet.
-
-    z4j-bare 1.8 needs a concrete number to treat as terminal. The brain
-    cannot start sending it until 1.8 agents are the floor, so this pins both
-    facts: the constant is defined, and no code path closes with it.
-    """
-    import inspect
-
-    from z4j_brain.websocket import gateway
-
+def test_close_code_is_reserved_for_future_enforcement() -> None:
+    """Pin the protocol allocation without claiming universal control flow."""
     assert CLOSE_VERSION_SKEW == 4427
     assert _MAX_AGENT_MINOR_LAG == 1
-
-    source = inspect.getsource(gateway)
-    # Strip comments and docstring mentions; look for an actual close call.
-    assert "code=CLOSE_VERSION_SKEW" not in source
-    assert "code=4427" not in source

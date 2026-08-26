@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain.persistence.models import AuditChainState, AuditLog, Z4JMeta
@@ -38,6 +38,40 @@ AUDIT_CHAIN_ADVISORY_LOCK_KEY = 0x7A_34_6A_DA
 
 #: Domain-separation label for the watermark MAC (see below).
 _WATERMARK_MAC_LABEL = b"audit_prune_watermark|"
+
+
+def _action_prefix_clauses(
+    session: AsyncSession,
+    action_prefix: str,
+) -> tuple[ColumnElement[bool], ...]:
+    """Return the exact setup-action prefix predicate for this dialect.
+
+    These repository methods are intentionally private to ``SetupService``;
+    accepting SQL wildcard characters would turn its brute-force budget into
+    a different query.  PostgreSQL's ``varchar_pattern_ops`` index services
+    the LIKE predicate directly.  SQLite's default LIKE is case-insensitive
+    and cannot range-seek a binary index, so canonical lower-case setup
+    actions also receive an equivalent binary half-open range.
+    """
+
+    if (
+        not action_prefix
+        or len(action_prefix) >= 80
+        or not action_prefix.isascii()
+        or action_prefix != action_prefix.lower()
+        or any(character in action_prefix for character in ("%", "_", "\\"))
+    ):
+        raise ValueError("action_prefix must be canonical lower-case ASCII without SQL wildcards")
+    clauses: list[ColumnElement[bool]] = [
+        AuditLog.action.like(f"{action_prefix}%", escape="\\"),
+    ]
+    if session.bind is not None and session.bind.dialect.name == "sqlite":
+        # All accepted prefixes are ASCII. Incrementing the final code point
+        # yields the exact upper bound for values beginning with the prefix;
+        # the LIKE predicate remains present as the semantic backstop.
+        upper = action_prefix[:-1] + chr(ord(action_prefix[-1]) + 1)
+        clauses.extend((AuditLog.action >= action_prefix, AuditLog.action < upper))
+    return tuple(clauses)
 
 
 def _watermark_mac(secret: bytes, row_hmac: str) -> str:
@@ -403,6 +437,18 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         )
         return int(result.scalar_one())
 
+    async def count_all_rows(self) -> int:
+        """Count every audit row, claimed by the chain or not.
+
+        The two counts above are the chain's own view of the table: one
+        generation and the frozen manifest. A row that belongs to neither is
+        invisible to both, so a total is the only thing that can reveal it.
+        """
+        result = await self.session.execute(
+            select(func.count()).select_from(AuditLog),
+        )
+        return int(result.scalar_one())
+
     async def count_recent_by_action_and_ip(
         self,
         *,
@@ -416,15 +462,15 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         ``setup.attempt`` rows that survives across worker restarts
         and across multiple uvicorn workers - a per-process deque
         cannot do that. The query is bounded by the
-        ``ix_audit_log_action_pattern`` index added in migration
-        0002 (``(project_id, action text_pattern_ops, occurred_at DESC)``)
-        for fast prefix lookups.
+        ``ix_audit_log_action_pattern`` index added in the 1.9 migration
+        chain (``action varchar_pattern_ops, occurred_at DESC, source_ip``
+        on PostgreSQL) for fast bounded prefix lookups.
         """
         result = await self.session.execute(
             select(func.count())
             .select_from(AuditLog)
             .where(
-                AuditLog.action.like(f"{action_prefix}%"),
+                *_action_prefix_clauses(self.session, action_prefix),
                 AuditLog.source_ip == source_ip,
                 AuditLog.occurred_at >= since,
             ),
@@ -455,7 +501,7 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         on a brand-new install before the first failed attempt.
         """
         where_clauses = [
-            AuditLog.action.like(f"{action_prefix}%"),
+            *_action_prefix_clauses(self.session, action_prefix),
             AuditLog.occurred_at >= since,
         ]
         for excluded in exclude_actions:

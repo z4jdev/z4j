@@ -70,6 +70,7 @@ class _PendingDelivery:
     """One queued outbound HTTP delivery to run outside the DB txn."""
 
     subscription_id: UUID
+    recipient_user_id: UUID  # immutable subscription owner at delivery time
     channel_id: UUID | None  # project channel id (or None for user channel)
     user_channel_id: UUID | None  # user channel id (or None for project channel)
     channel_type: str  # webhook / email / slack / telegram
@@ -91,6 +92,226 @@ class _DeliveryOutcome:
     status_code: int | None = None
     response_body: str | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveDeliveryReferences:
+    """Nullable audit pointers proven live immediately before insertion."""
+
+    subscription_id: UUID | None
+    recipient_user_id: UUID | None
+    channel_id: UUID | None
+    user_channel_id: UUID | None
+
+    def intersect(self, other: _LiveDeliveryReferences) -> _LiveDeliveryReferences:
+        """Clear stale pointers without ever restoring one during a retry."""
+
+        return _LiveDeliveryReferences(
+            subscription_id=(
+                self.subscription_id if self.subscription_id == other.subscription_id else None
+            ),
+            recipient_user_id=(
+                self.recipient_user_id
+                if self.recipient_user_id == other.recipient_user_id
+                else None
+            ),
+            channel_id=self.channel_id if self.channel_id == other.channel_id else None,
+            user_channel_id=(
+                self.user_channel_id if self.user_channel_id == other.user_channel_id else None
+            ),
+        )
+
+
+async def _resolve_live_delivery_references(
+    *,
+    session: AsyncSession,
+    pending: _PendingDelivery,
+) -> _LiveDeliveryReferences:
+    """Resolve every nullable FK carried across the outbound network gap."""
+
+    from sqlalchemy import select
+
+    from z4j_brain.persistence.models import User
+    from z4j_brain.persistence.models.notification import (
+        NotificationChannel,
+        UserChannel,
+        UserSubscription,
+    )
+
+    recipient_user_id = await session.scalar(
+        select(User.id).where(User.id == pending.recipient_user_id),
+    )
+    subscription_id = None
+    if recipient_user_id is not None:
+        subscription_id = await session.scalar(
+            select(UserSubscription.id).where(
+                UserSubscription.id == pending.subscription_id,
+                UserSubscription.user_id == recipient_user_id,
+            ),
+        )
+
+    channel_id = None
+    if pending.channel_id is not None:
+        channel_id = await session.scalar(
+            select(NotificationChannel.id).where(
+                NotificationChannel.id == pending.channel_id,
+                NotificationChannel.project_id == pending.project_id,
+            ),
+        )
+
+    user_channel_id = None
+    if pending.user_channel_id is not None and recipient_user_id is not None:
+        user_channel_id = await session.scalar(
+            select(UserChannel.id).where(
+                UserChannel.id == pending.user_channel_id,
+                UserChannel.user_id == recipient_user_id,
+            ),
+        )
+
+    return _LiveDeliveryReferences(
+        subscription_id=subscription_id,
+        recipient_user_id=recipient_user_id,
+        channel_id=channel_id,
+        user_channel_id=user_channel_id,
+    )
+
+
+async def _flush_delivery_audit(
+    *,
+    session: AsyncSession,
+    pending: _PendingDelivery,
+    outcome: _DeliveryOutcome,
+    references: _LiveDeliveryReferences,
+    sanitized_error: str | None,
+    sanitized_body: str | None,
+) -> None:
+    """Flush one audit row inside a savepoint for FK-race recovery."""
+
+    from z4j_brain.persistence.models.notification import NotificationDelivery
+
+    async with session.begin_nested():
+        session.add(
+            NotificationDelivery(
+                subscription_id=references.subscription_id,
+                recipient_user_id=references.recipient_user_id,
+                channel_id=references.channel_id,
+                user_channel_id=references.user_channel_id,
+                project_id=pending.project_id,
+                trigger=pending.trigger,
+                task_id=pending.task_id,
+                task_name=pending.task_name,
+                status="sent" if outcome.success else "failed",
+                response_code=outcome.status_code,
+                response_body=sanitized_body,
+                error=sanitized_error,
+                channel_name=pending.channel_name,
+                channel_type=pending.channel_type,
+            ),
+        )
+        await session.flush()
+
+
+async def _persist_delivery_audit(
+    *,
+    session: AsyncSession,
+    pending: _PendingDelivery,
+    outcome: _DeliveryOutcome,
+    sanitized_error: str | None,
+    sanitized_body: str | None,
+) -> None:
+    """Persist one audit while tolerating deletes of nullable FK targets."""
+
+    from sqlalchemy.exc import IntegrityError
+
+    references = await _resolve_live_delivery_references(
+        session=session,
+        pending=pending,
+    )
+    # One initial insert plus at most one monotonic clearing step for each of
+    # the four nullable foreign keys.  Continuous unrelated integrity failures
+    # therefore cannot turn notification dispatch into an unbounded retry.
+    for attempt in range(5):
+        try:
+            await _flush_delivery_audit(
+                session=session,
+                pending=pending,
+                outcome=outcome,
+                references=references,
+                sanitized_error=sanitized_error,
+                sanitized_body=sanitized_body,
+            )
+            return
+        except IntegrityError:
+            # PostgreSQL can commit a target delete after the probes but
+            # before the INSERT's FK check.  The savepoint has isolated that
+            # failure, so resolve again and retry after clearing only pointers
+            # proven stale.  ``intersect`` makes progress monotonic: at most
+            # the four nullable references can be cleared, and an unrelated
+            # integrity failure is re-raised instead of looping.
+            if attempt == 4:
+                raise
+            refreshed = references.intersect(
+                await _resolve_live_delivery_references(
+                    session=session,
+                    pending=pending,
+                ),
+            )
+            if refreshed == references:
+                raise
+            references = refreshed
+    raise AssertionError("unreachable delivery-audit retry state")
+
+
+async def _reserve_sqlite_delivery_audit_writer(session: AsyncSession) -> None:
+    """Serialize SQLite subscription probes with their audit inserts.
+
+    SQLite's default deferred transactions do not reserve the writer until the
+    first write.  A subscription delete can therefore acquire the writer after
+    pass 3 has read the subscription but before the delivery audit is flushed.
+    The read transaction then cannot be upgraded and fails immediately with
+    ``SQLITE_BUSY``, losing the audit for an outbound call that already ran.
+
+    Reserve the single SQLite writer before the ownership probe.  A delete
+    that committed first is visible to the probe; one that starts afterward
+    waits for the audit commit and then applies the FK's ``ON DELETE SET NULL``
+    action.  PostgreSQL already provides the required MVCC/FK behaviour and
+    must not receive SQLite transaction syntax.
+    """
+
+    if session.get_bind().dialect.name == "sqlite":
+        from sqlalchemy import text
+
+        await session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _delivery_metric_status(outcome: _DeliveryOutcome) -> str:
+    """Map an outbound result to the dashboard's metric vocabulary."""
+
+    if outcome.success:
+        return "success"
+    error = (outcome.error or "").lower()
+    if "block" in error or "unsafe" in error or "ssrf" in error:
+        return "blocked"
+    return "failed"
+
+
+def _record_delivery_metric(outcome: _DeliveryOutcome) -> str:
+    """Increment the delivery counter best-effort and return its status."""
+
+    status = _delivery_metric_status(outcome)
+    try:
+        from z4j_brain.api.metrics import z4j_notifications_sent_total
+    except Exception:
+        return status
+
+    pending = outcome.pending
+    with contextlib.suppress(Exception):
+        z4j_notifications_sent_total.labels(
+            project=str(pending.project_id) if pending.project_id else "",
+            channel_type=pending.channel_type or "unknown",
+            status=status,
+        ).inc()
+    return status
 
 
 #: Max concurrent outbound HTTP deliveries per dispatch batch.
@@ -172,7 +393,6 @@ class NotificationService:
         the calling request handler.
         """
         from z4j_brain.persistence.models.notification import (
-            NotificationDelivery,
             NotificationReason,
             UserNotification,
         )
@@ -353,6 +573,7 @@ class NotificationService:
                         pending.append(
                             _PendingDelivery(
                                 subscription_id=sub.id,
+                                recipient_user_id=sub.user_id,
                                 channel_id=channel.id,
                                 user_channel_id=None,
                                 channel_type=channel.type,
@@ -374,6 +595,7 @@ class NotificationService:
                         pending.append(
                             _PendingDelivery(
                                 subscription_id=sub.id,
+                                recipient_user_id=sub.user_id,
                                 channel_id=None,
                                 user_channel_id=user_channel.id,
                                 channel_type=user_channel.type,
@@ -425,43 +647,16 @@ class NotificationService:
                     sanitize_audit_text,
                 )
 
-                # Best-effort Prometheus counter. Imported inline so a
-                # broken metrics module never breaks dispatch.
-                try:
-                    from z4j_brain.api.metrics import (
-                        z4j_notifications_sent_total,
-                    )
-                except Exception:
-                    z4j_notifications_sent_total = None  # type: ignore[assignment]
+                # A file-backed SQLite connection otherwise begins this as a
+                # deferred read transaction.  Reserve its writer before any
+                # live-subscription probe so a concurrent delete cannot land
+                # between the probe and audit insert and make the read
+                # snapshot fail its write upgrade with SQLITE_BUSY.
+                await _reserve_sqlite_delivery_audit_writer(session)
 
                 for outcome in outcomes:
                     p = outcome.pending
-                    # Prometheus: count every dispatch by channel_type +
-                    # status so the v1.6 Grafana panels show real data.
-                    # The status taxonomy here MUST match the dashboard
-                    # filters: `success` / `failed` / `blocked` (the
-                    # last is SSRF/host-lock rejection, surfaced by
-                    # outcome.error containing `block`).
-                    if z4j_notifications_sent_total is not None:
-                        if outcome.success:
-                            _status = "success"
-                        else:
-                            err_lower = (outcome.error or "").lower()
-                            _status = (
-                                "blocked"
-                                if (
-                                    "block" in err_lower
-                                    or "unsafe" in err_lower
-                                    or "ssrf" in err_lower
-                                )
-                                else "failed"
-                            )
-                        with contextlib.suppress(Exception):
-                            z4j_notifications_sent_total.labels(
-                                project=str(p.project_id) if p.project_id else "",
-                                channel_type=p.channel_type or "unknown",
-                                status=_status,
-                            ).inc()
+                    _record_delivery_metric(outcome)
                     # Sanitize error + response_body before persistence
                     # (audit H-1 / H-2 / H-3): the dispatcher's raw
                     # error / body text can carry the channel's
@@ -490,35 +685,18 @@ class NotificationService:
                         channel_config=p.config,
                         max_len=2048,
                     )
-                    session.add(
-                        NotificationDelivery(
-                            subscription_id=p.subscription_id,
-                            channel_id=p.channel_id,
-                            user_channel_id=p.user_channel_id,
-                            project_id=p.project_id,
-                            trigger=p.trigger,
-                            task_id=p.task_id,
-                            task_name=p.task_name,
-                            status="sent" if outcome.success else "failed",
-                            response_code=outcome.status_code,
-                            # PERF-18: only persist response_body on
-                            # failure. For successes it's just noise.
-                            response_body=sanitized_body,
-                            error=sanitized_error,
-                            # Audit L-2: snapshot channel name + type
-                            # at insert time so a future channel
-                            # rename / delete can't rewrite the audit
-                            # row's view of which destination the
-                            # send actually went to. twin fix
-                            # (1.6.6): both fields now read directly
-                            # off the dataclass. Previously
-                            # `channel_name` used getattr against a
-                            # slots dataclass field that was never
-                            # declared, silently writing NULL on
-                            # every row since the code path landed.
-                            channel_name=p.channel_name,
-                            channel_type=p.channel_type,
-                        ),
+                    # The outbound call intentionally runs after pass 1 has
+                    # committed.  Users can delete the subscription, account,
+                    # or target channel during that network gap.  Preserve the
+                    # immutable audit snapshots while retaining only nullable
+                    # live FKs; a savepoint retry handles a PostgreSQL delete
+                    # that commits after these probes.
+                    await _persist_delivery_audit(
+                        session=session,
+                        pending=p,
+                        outcome=outcome,
+                        sanitized_error=sanitized_error,
+                        sanitized_body=sanitized_body,
                     )
                     if outcome.success:
                         logger.info(
@@ -532,7 +710,7 @@ class NotificationService:
                             "z4j notification failed (trigger=%s channel_type=%s error=%s)",
                             p.trigger,
                             p.channel_type,
-                            outcome.error,
+                            sanitized_error,
                         )
                 await session.commit()
             except Exception:

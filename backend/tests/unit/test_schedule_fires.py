@@ -12,6 +12,13 @@ Three layers:
 The brain handler integration (FireSchedule + AcknowledgeFireResult
 writing rows) is covered indirectly by the scheduler-side e2e
 tests in packages/z4j-scheduler/tests/integration.
+
+The worker layers run against a MIGRATED database. That matters most for
+the breaker, which has two completely different disable paths depending on
+whether Boundary D is activated, and for the prune worker, whose per-row
+evidence-descriptor arming is inert on a create_all() schema. Layer 1 is
+the legacy ``record``/``acknowledge`` API, which an activated database
+refuses outright; those tests keep the create_all() fixtures.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
@@ -38,22 +45,43 @@ from z4j_brain.persistence.models import (
     UserSubscription,
 )
 from z4j_brain.persistence.repositories import ScheduleFireRepository
+from z4j_brain.persistence.repositories.schedule_control import (
+    ScheduleControlRepository,
+)
 from z4j_brain.settings import Settings
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_db_url,
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated, so it refuses an
+        # audit row that carries no chain authentication.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
         environment="dev",
         log_json=False,
     )
 
 
 @pytest.fixture
-async def engine():
+async def engine(migrated_db_url: str):
+    eng = create_async_engine(migrated_db_url)
+    yield eng
+    await eng.dispose()
+
+
+@pytest.fixture
+async def db(engine) -> DatabaseManager:
+    # DatabaseManager installs the per-connection SQLite guard UDFs, exactly
+    # as it does in production.
+    return DatabaseManager(engine)
+
+
+@pytest.fixture
+async def legacy_db():
+    """A create_all() manager, for the legacy record/acknowledge API."""
     eng = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         poolclass=StaticPool,
@@ -61,13 +89,8 @@ async def engine():
     )
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    yield eng
+    yield DatabaseManager(eng)
     await eng.dispose()
-
-
-@pytest.fixture
-async def db(engine) -> DatabaseManager:
-    return DatabaseManager(engine)
 
 
 async def _seed_project_and_schedule(
@@ -75,6 +98,37 @@ async def _seed_project_and_schedule(
     *,
     enabled: bool = True,
 ) -> tuple[uuid.UUID, uuid.UUID]:
+    project_id = uuid.uuid4()
+    async with db.session() as s:
+        s.add(Project(id=project_id, slug="proj", name="P"))
+        await s.flush()
+        # Through the control repository, because Boundary D refuses a direct
+        # INSERT into schedules. It is also the only way to get the control
+        # token and digest every fire receipt has to carry.
+        row = await ScheduleControlRepository(s).create_current(
+            project_id=project_id,
+            data={
+                "engine": "celery",
+                "scheduler": "z4j-scheduler",
+                "name": "hourly",
+                "task_name": "t.t",
+                "kind": ScheduleKind.CRON.value,
+                "expression": "0 * * * *",
+                "timezone": "UTC",
+                "args": [],
+                "kwargs": {},
+                "is_enabled": enabled,
+            },
+            planning_at=datetime.now(UTC),
+        )
+        await s.commit()
+        return project_id, row.id
+
+
+async def _seed_legacy_project_and_schedule(
+    db: DatabaseManager,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Seed the pre-Boundary-D shape, with no D identity on the row."""
     project_id = uuid.uuid4()
     schedule_id = uuid.uuid4()
     async with db.session() as s:
@@ -92,11 +146,51 @@ async def _seed_project_and_schedule(
                 timezone="UTC",
                 args=[],
                 kwargs={},
-                is_enabled=enabled,
+                is_enabled=True,
             ),
         )
         await s.commit()
     return project_id, schedule_id
+
+
+async def _record_fire(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    schedule_id: uuid.UUID,
+    status: str,
+    scheduled_for: datetime | None = None,
+    fired_at: datetime | None = None,
+) -> ScheduleFire:
+    """Write one fire the way an accepted current-protocol fire writes it.
+
+    An activated database refuses a fire row whose receipt tuple is
+    incomplete, so history a worker will later read has to be minted with
+    the owning schedule's real control token, digest and revision.
+    """
+    row = await session.get(Schedule, schedule_id)
+    assert row is not None
+    assert row.control_token is not None
+    assert row.definition_digest is not None
+    slot = scheduled_for or datetime.now(UTC).replace(microsecond=0)
+    fire, _created = await ScheduleFireRepository(session).record_current(
+        fire_id=uuid.uuid4(),
+        schedule_id=schedule_id,
+        project_id=project_id,
+        command_id=None,
+        status=status,
+        scheduled_for=slot,
+        observed_control_token=row.control_token,
+        receipt_control_token=row.control_token,
+        acceptance_revision=int(row.schedule_revision or 1),
+        definition_digest=row.definition_digest,
+        expected_schedule_revision=int(row.schedule_revision or 1),
+        expected_last_run_at=None,
+        expected_next_run_at=slot,
+        prepared_next_run_at=slot + timedelta(hours=1),
+        fired_at=fired_at,
+    )
+    return fire
 
 
 # =====================================================================
@@ -105,9 +199,23 @@ async def _seed_project_and_schedule(
 
 
 class TestRecord:
+    """The legacy tokenless writer.
+
+    Stays on create_all(). ``record()`` inserts a fire with no protocol
+    marker and no receipt token, which an activated database refuses
+    ('schedule fire protocol marker required'). That is not a gap in the
+    test: the method is reachable only when Boundary D is NOT active.
+    ``FireSchedule`` diverts to the legacy handler the moment
+    ``control_is_active()`` is true (scheduler_grpc/handlers.py:1523), and
+    the pending-fires replay worker that also calls it selects only
+    ``protocol_marker IS NULL`` buffers (domain/workers/pending_fires.py:114),
+    which an activated database cannot create either.
+    """
+
     @pytest.mark.asyncio
-    async def test_insert_returns_row(self, db: DatabaseManager) -> None:
-        project_id, schedule_id = await _seed_project_and_schedule(db)
+    async def test_insert_returns_row(self, legacy_db: DatabaseManager) -> None:
+        db = legacy_db
+        project_id, schedule_id = await _seed_legacy_project_and_schedule(db)
         async with db.session() as s:
             row = await ScheduleFireRepository(s).record(
                 fire_id=uuid.uuid4(),
@@ -123,9 +231,10 @@ class TestRecord:
     @pytest.mark.asyncio
     async def test_duplicate_fire_id_returns_existing(
         self,
-        db: DatabaseManager,
+        legacy_db: DatabaseManager,
     ) -> None:
-        project_id, schedule_id = await _seed_project_and_schedule(db)
+        db = legacy_db
+        project_id, schedule_id = await _seed_legacy_project_and_schedule(db)
         fire_id = uuid.uuid4()
         # scheduled_for is STABLE per fire_id in production (fire_id =
         # uuid5(schedule_id + scheduled_for)), so both record() calls for the
@@ -158,7 +267,7 @@ class TestRecord:
     @pytest.mark.asyncio
     async def test_triggered_by_set_and_preserved_on_upgrade(
         self,
-        db: DatabaseManager,
+        legacy_db: DatabaseManager,
     ) -> None:
         """A5: a triggered fire records triggered_by_user_id, and a later
         status upgrade that passes None (the replay path) does NOT clobber
@@ -167,7 +276,8 @@ class TestRecord:
 
         from z4j_brain.persistence.models import User
 
-        project_id, schedule_id = await _seed_project_and_schedule(db)
+        db = legacy_db
+        project_id, schedule_id = await _seed_legacy_project_and_schedule(db)
         user_id = uuid.uuid4()
         async with db.session() as s:
             s.add(
@@ -217,6 +327,17 @@ class TestRecord:
 
 
 class TestAcknowledge:
+    """The legacy scheduler-receipt path.
+
+    Stays on create_all(). ``acknowledge()`` rewrites ``status`` in place
+    without rotating ``state_write_nonce``, and the activated fire-update
+    guard requires a fresh nonce and one of a fixed set of transitions, so
+    the UPDATE is refused. Like ``record()`` it is legacy-only: the current
+    receipt path (``_acknowledge_current_fire_result``) hands over to it only
+    when neither the command nor the retained history is current-protocol
+    evidence (scheduler_grpc/handlers.py:2731-2733).
+    """
+
     def test_latency_is_non_negative_and_saturates_for_retained_history(
         self,
     ) -> None:
@@ -248,9 +369,10 @@ class TestAcknowledge:
     @pytest.mark.asyncio
     async def test_ack_sets_acked_at_and_latency(
         self,
-        db: DatabaseManager,
+        legacy_db: DatabaseManager,
     ) -> None:
-        project_id, schedule_id = await _seed_project_and_schedule(db)
+        db = legacy_db
+        project_id, schedule_id = await _seed_legacy_project_and_schedule(db)
         fire_id = uuid.uuid4()
         async with db.session() as s:
             await ScheduleFireRepository(s).record(
@@ -283,8 +405,9 @@ class TestAcknowledge:
     @pytest.mark.asyncio
     async def test_ack_unknown_fire_id_returns_none(
         self,
-        db: DatabaseManager,
+        legacy_db: DatabaseManager,
     ) -> None:
+        db = legacy_db
         async with db.session() as s:
             row, was_first, _became = await ScheduleFireRepository(s).acknowledge(
                 fire_id=uuid.uuid4(),
@@ -303,13 +426,11 @@ class TestListRecent:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         async with db.session() as s:
             for offset_min in (10, 5, 0):  # write older → newer
-                await ScheduleFireRepository(s).record(
-                    fire_id=uuid.uuid4(),
-                    schedule_id=schedule_id,
+                await _record_fire(
+                    s,
                     project_id=project_id,
-                    command_id=None,
+                    schedule_id=schedule_id,
                     status="delivered",
-                    scheduled_for=datetime.now(UTC),
                     fired_at=datetime.now(UTC) - timedelta(minutes=offset_min),
                 )
             await s.commit()
@@ -329,13 +450,11 @@ class TestListRecent:
         # return nothing - IDOR defence.
         project_id, schedule_id = await _seed_project_and_schedule(db)
         async with db.session() as s:
-            await ScheduleFireRepository(s).record(
-                fire_id=uuid.uuid4(),
-                schedule_id=schedule_id,
+            await _record_fire(
+                s,
                 project_id=project_id,
-                command_id=None,
+                schedule_id=schedule_id,
                 status="delivered",
-                scheduled_for=datetime.now(UTC),
             )
             await s.commit()
 
@@ -354,6 +473,16 @@ class TestListRecent:
 
 
 class TestCircuitBreaker:
+    """The breaker has two disable paths and only one of them ships.
+
+    On a create_all() schema ``control_is_active()`` is false, so every test
+    here used to drive the raw ``UPDATE schedules SET is_enabled=false``
+    fallback -- a statement an operator's database rejects outright. Against
+    a migrated schema the worker takes the Boundary-D branch
+    (``control.update_current``) instead, which is the only one a real trip
+    can ever use.
+    """
+
     @pytest.mark.asyncio
     async def test_disables_after_threshold_consecutive_failures(
         self,
@@ -371,13 +500,11 @@ class TestCircuitBreaker:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         async with db.session() as s:
             for _ in range(3):
-                await ScheduleFireRepository(s).record(
-                    fire_id=uuid.uuid4(),
-                    schedule_id=schedule_id,
+                await _record_fire(
+                    s,
                     project_id=project_id,
-                    command_id=None,
+                    schedule_id=schedule_id,
                     status="acked_failed",
-                    scheduled_for=datetime.now(UTC),
                 )
             await s.commit()
 
@@ -387,6 +514,11 @@ class TestCircuitBreaker:
         async with db.session() as s:
             row = await s.get(Schedule, schedule_id)
         assert row.is_enabled is False
+        # The trip is a real Boundary-D transition, not a raw column write.
+        # The worker keeps a pre-activation fallback that writes is_enabled
+        # directly, and an operator's database rejects that statement; a
+        # moved revision is the cheapest proof the shipping branch ran.
+        assert row.schedule_revision == 2
 
     @pytest.mark.asyncio
     async def test_trip_notifies_circuit_breaker_subscriber(
@@ -435,13 +567,11 @@ class TestCircuitBreaker:
                 ),
             )
             for _ in range(3):
-                await ScheduleFireRepository(s).record(
-                    fire_id=uuid.uuid4(),
-                    schedule_id=schedule_id,
+                await _record_fire(
+                    s,
                     project_id=project_id,
-                    command_id=None,
+                    schedule_id=schedule_id,
                     status="acked_failed",
-                    scheduled_for=datetime.now(UTC),
                 )
             await s.commit()
 
@@ -489,11 +619,10 @@ class TestCircuitBreaker:
                 (20, "acked_failed"),
                 (10, "acked_failed"),
             ):
-                await ScheduleFireRepository(s).record(
-                    fire_id=uuid.uuid4(),
-                    schedule_id=schedule_id,
+                await _record_fire(
+                    s,
                     project_id=project_id,
-                    command_id=None,
+                    schedule_id=schedule_id,
                     status=status,
                     scheduled_for=now,
                     fired_at=now - timedelta(seconds=offset_sec),
@@ -524,13 +653,11 @@ class TestCircuitBreaker:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         async with db.session() as s:
             for _ in range(2):
-                await ScheduleFireRepository(s).record(
-                    fire_id=uuid.uuid4(),
-                    schedule_id=schedule_id,
+                await _record_fire(
+                    s,
                     project_id=project_id,
-                    command_id=None,
+                    schedule_id=schedule_id,
                     status="acked_failed",
-                    scheduled_for=datetime.now(UTC),
                 )
             await s.commit()
 
@@ -560,13 +687,11 @@ class TestCircuitBreaker:
         project_id, schedule_id = await _seed_project_and_schedule(db)
         async with db.session() as s:
             for _ in range(20):
-                await ScheduleFireRepository(s).record(
-                    fire_id=uuid.uuid4(),
-                    schedule_id=schedule_id,
+                await _record_fire(
+                    s,
                     project_id=project_id,
-                    command_id=None,
+                    schedule_id=schedule_id,
                     status="acked_failed",
-                    scheduled_for=datetime.now(UTC),
                 )
             await s.commit()
 
@@ -607,11 +732,10 @@ class TestPrune:
                 (-10, "old"),
                 (-3, "fresh"),
             ):
-                await ScheduleFireRepository(s).record(
-                    fire_id=uuid.uuid4(),
-                    schedule_id=schedule_id,
+                await _record_fire(
+                    s,
                     project_id=project_id,
-                    command_id=None,
+                    schedule_id=schedule_id,
                     status="delivered",
                     scheduled_for=now,
                     fired_at=now + timedelta(days=delta_days),

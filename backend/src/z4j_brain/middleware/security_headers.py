@@ -15,8 +15,8 @@ Headers set on EVERY response:
 - ``Cross-Origin-Resource-Policy: same-origin``
 
 Conditional:
-- ``Strict-Transport-Security`` only when ``environment="production"``
-  AND ``public_url`` starts with ``https://``.
+- ``Strict-Transport-Security`` in every non-``dev`` environment when
+  ``public_url`` starts with ``https://``.
 - ``Content-Security-Policy`` only on HTML responses (those whose
   ``Content-Type`` starts with ``text/html``).
 - ``Cache-Control: no-store`` only on responses to authenticated
@@ -194,10 +194,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 csp = _BASE_CSP
             headers.setdefault("Content-Security-Policy", csp)
 
-        # HSTS only in production HTTPS deployments.
-        if self._settings.environment == "production" and self._settings.public_url.startswith(
-            "https://"
-        ):
+        # HSTS on any HTTPS deployment that is not dev. This was gated on the
+        # exact string "production", so a deployment labelled "staging" served
+        # HTTPS with production cookies and production host validation and no
+        # HSTS, which is the one combination nobody would choose deliberately.
+        if not self._settings.is_dev and self._settings.public_url.startswith("https://"):
             hsts_value = f"max-age={self._settings.hsts_max_age_seconds}"
             if self._settings.hsts_include_subdomains:
                 hsts_value += "; includeSubDomains"

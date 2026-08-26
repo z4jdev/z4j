@@ -19,7 +19,7 @@ import os
 import sqlite3
 import stat
 import uuid
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -32,7 +32,6 @@ from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
     AsyncSession,
-    create_async_engine,
 )
 
 from z4j_brain.domain.audit_chain import (
@@ -44,6 +43,7 @@ from z4j_brain.domain.audit_verifier import (
     verify_active_audit_generation,
 )
 from z4j_brain.management_reset import (
+    SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST,
     _normalize_sqlite_schema_definition,
     assert_release_schema_contract,
     external_authority_manifest,
@@ -51,7 +51,10 @@ from z4j_brain.management_reset import (
     release_manifest_digest,
     release_schema_contract_manifest,
 )
-from z4j_brain.persistence.database import DatabaseManager
+from z4j_brain.persistence.database import (
+    DatabaseManager,
+    create_async_engine_from_url,
+)
 from z4j_brain.persistence.models import (
     AuditChainState,
     AuditLog,
@@ -94,15 +97,53 @@ from z4j_brain.settings import Settings
 
 RESTORE_PHASE_VERSION = 1
 _LEGACY_SOURCE_HEAD = "v1_7_security_hardening"
+#: The head shipped by the previous release. Kept restorable so a backup
+#: taken before this upgrade can still be restored after it.
+_PREVIOUS_RELEASE_HEAD = "v1_8_schedule_cursor_repair"
 _AUDIT_PREPARATION_HEAD = "v1_8_audit_chain_prepare"
 # The legacy value is an external oracle captured from the immutable 6b12719c
 # release baseline.  It must never be derived by running current migrations.
+#: Exact SQLite schema signature accepted per restorable head.
+#:
+#: A restore is refused unless the staged database matches one of these
+#: byte-for-byte, which is what stops a subtly different schema being
+#: restored into a brain that assumes otherwise. Adding a migration
+#: therefore means adding its head here with a freshly computed digest,
+#: and keeping the PREVIOUS release head so a backup taken before the
+#: upgrade is still restorable afterwards. Dropping the old entry would
+#: silently invalidate every existing backup.
 _SQLITE_SOURCE_SCHEMA_DIGESTS = {
-    RELEASE_MIGRATION_HEAD: ("bc99362d610d37ae64ea3002dc249670911830d4d712ecbf127312253fd8a770"),
+    RELEASE_MIGRATION_HEAD: SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST,
+    _PREVIOUS_RELEASE_HEAD: ("0778f20252e9b32f7a859d85e2de29c446409e40b602fa63cd2ec143ac537640"),
     _LEGACY_SOURCE_HEAD: ("f41f542e03cf81562c1eb3167041549fff0623eca9de919c1d0ffd91619933c8"),
 }
 _PHASE_ROOT_NAME = ".z4j-restore"
 _PHASE_FILE_NAME = "phase.json"
+
+#: Phase states that provably precede ``_install_candidate``, which is the
+#: first step that moves the live database aside. Everything else, including
+#: the marker commit and the audit activation (both of which run against the
+#: already-installed candidate), gets the cautious message instead. Kept as an
+#: allowlist so a state added later defaults to caution rather than to a
+#: reassurance that would be false.
+#:
+#: These justify "not displaced or replaced by installation". They do NOT
+#: justify "untouched", and an earlier version of this comment said they did.
+#: An abandoned rollback commits its marker row into the LIVE database before
+#: the phase recording it reaches disk, so a crash in that window leaves a
+#: pre-install phase beside a database that is one audit row different from
+#: the one the operator started with. The file is intact and startable; it is
+#: not byte-identical. Promising more than that is how a true statement turns
+#: into a false one.
+_PRE_INSTALL_PHASE_STATES = frozenset(
+    {
+        "CREATED",
+        "SOURCE_STAGED",
+        "PREFLIGHT_COMPLETE",
+        "CANDIDATE_AUDIT_PREPARED",
+        "CANDIDATE_FINALIZED",
+    },
+)
 _MAX_PHASE_BYTES = 64 * 1024 * 1024
 _MAX_BIGINT = (1 << 63) - 1
 _restore_allowance: ContextVar[frozenset[Path]] = ContextVar(
@@ -117,6 +158,52 @@ class DatabaseRestoreRefused(RuntimeError):  # noqa: N818
 
 class DatabaseRestorePending(RuntimeError):  # noqa: N818
     """Normal startup or migration encountered an unfinished restore."""
+
+
+def _restore_migration_config() -> Any:
+    """Load only the migration assets bundled beside this installed module.
+
+    Restore is allowed to replace the live database, so it must not inherit an
+    operator's working directory or a source-checkout layout when selecting
+    the code that upgrades the candidate.  Wheels install ``alembic.ini`` and
+    ``migrations`` directly inside ``z4j_brain``; source and editable installs
+    expose that same package layout.  Refuse before opening the candidate when
+    any member of that bundle is absent, substituted by a symlink, or has the
+    wrong filesystem type.
+    """
+
+    from alembic.config import Config
+
+    try:
+        package_directory = Path(__file__).resolve(strict=True).parent
+    except (OSError, RuntimeError) as exc:
+        raise DatabaseRestoreRefused(
+            "bundled restore migration module cannot be resolved",
+        ) from exc
+
+    config_path = package_directory / "alembic.ini"
+    migrations_path = package_directory / "migrations"
+    required_assets = (
+        (config_path, "regular file", stat.S_ISREG),
+        (migrations_path, "directory", stat.S_ISDIR),
+        (migrations_path / "env.py", "regular file", stat.S_ISREG),
+        (migrations_path / "versions", "directory", stat.S_ISDIR),
+    )
+    for asset, expected_type, predicate in required_assets:
+        try:
+            observed = asset.lstat()
+        except OSError as exc:
+            raise DatabaseRestoreRefused(
+                f"bundled restore migration asset is missing: {asset}",
+            ) from exc
+        if stat.S_ISLNK(observed.st_mode) or not predicate(observed.st_mode):
+            raise DatabaseRestoreRefused(
+                f"bundled restore migration asset must be a real {expected_type}: {asset}",
+            )
+
+    config = Config(str(config_path))
+    config.set_main_option("script_location", str(migrations_path))
+    return config
 
 
 def _sqlite_path_from_url(database_url: str) -> Path:
@@ -187,6 +274,51 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _absent_directories(path: Path) -> list[Path]:
+    """The directories on the way to ``path`` that do not exist yet.
+
+    Deepest first. Ask BEFORE creating anything: afterwards there is no way
+    to tell which names the process is responsible for persisting.
+    """
+
+    absent: list[Path] = []
+    probe = path
+    while not probe.exists():
+        absent.append(probe)
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+    return absent
+
+
+def _fsync_new_directory_names(absent: Iterable[Path]) -> None:
+    """Persist the entry for each directory that was just created.
+
+    Fsyncing a new directory persists what gets written inside it and nothing
+    about the entry in the parent that reaches it, so a crash can return a
+    parent with no such child. Shallowest first, because each fsync persists
+    the entry that the next directory in the chain lives in.
+    """
+
+    for created in reversed(list(absent)):
+        _fsync_directory(created.parent)
+
+
+def _ensure_durable_directory(path: Path) -> Path:
+    """Create ``path`` so its own name survives a crash, not just its contents.
+
+    That distinction decides whether a restore is survivable: the live
+    database is moved INTO the operation directory before the replacement is
+    installed, so a parent that comes back without that entry has taken the
+    live database and its only recovery copy with it.
+    """
+
+    absent = _absent_directories(path)
+    ensure_secret_store_directory(path)
+    _fsync_new_directory_names(absent)
+    return path
 
 
 def _replace_phase(  # noqa: PLR0915  platform-specific durable writer
@@ -373,6 +505,55 @@ def _phase_path(target: Path, operation_id: uuid.UUID) -> Path:
     return _phase_root(target) / str(operation_id) / _PHASE_FILE_NAME
 
 
+def _phase_file_present(phase_path: Path) -> bool:
+    """True when a phase file exists at ``phase_path``.
+
+    Asked separately from reading it because the readers do not agree on how
+    absence arrives: the POSIX reader raises ``FileNotFoundError`` and the
+    Windows one turns every OS error into a refusal, so a caller that
+    branches on the exception type gets a different answer per platform for
+    the same missing file. ``_read_phase`` remains the authority on whether
+    a file that IS there is acceptable.
+    """
+    try:
+        phase_path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Unreadable is not absent; let the reader refuse with its own words.
+        return True
+    return True
+
+
+def _operation_directory_is_empty(operation_dir: Path) -> bool:
+    """True when a restore operation directory holds nothing at all."""
+
+    try:
+        return not any(operation_dir.iterdir())
+    except OSError:
+        # A directory that cannot be listed is not one we may call harmless.
+        return False
+
+
+def _require_rollbackable_operation(
+    phase_path: Path,
+    operation_id: uuid.UUID,
+) -> None:
+    """Refuse a rollback of an operation that was never written down.
+
+    Rollback reads a phase somebody else wrote, so it creates nothing.
+    Creating the operation directory first meant a mistyped id left an
+    operation behind with no phase in it, and startup refuses to boot past
+    one of those: the command an operator runs to clear a fence could raise
+    one instead. Refusing in these words also beats the bare
+    ``FileNotFoundError`` the reader would otherwise surface.
+    """
+    if not _phase_file_present(phase_path):
+        raise DatabaseRestoreRefused(
+            f"no restore operation {operation_id} to roll back",
+        )
+
+
 @contextlib.contextmanager
 def allow_database_restore(
     database_url: str,
@@ -419,18 +600,74 @@ def assert_database_restore_not_pending(database_url: str) -> None:
                 f"restore operation path is unsafe: {operation_dir}",
             )
         phase_path = operation_dir / _PHASE_FILE_NAME
-        try:
-            phase = _read_phase(phase_path)
-        except FileNotFoundError:
+        if not _phase_file_present(phase_path):
+            # No phase means no ceremony: the phase is written before the
+            # first artifact and before the target is touched, so a
+            # directory without one describes nothing that happened. An
+            # empty one is the crash window between creating the directory
+            # and writing the phase, and refusing to start on it was a stop
+            # with no exit -- rollback reads the same phase file that is
+            # missing, so neither of the two remedies the operator is
+            # offered can clear it.
+            if _operation_directory_is_empty(operation_dir):
+                continue
+            # Artifacts without a phase are a different animal: the phase
+            # was written and then lost, so what is in there, and what was
+            # done to the target, is exactly what cannot be established.
             raise DatabaseRestorePending(
-                f"restore operation lacks its durable phase: {operation_dir}",
-            ) from None
+                f"restore operation kept its artifacts without its durable "
+                f"phase: {operation_dir}. Move that directory somewhere safe "
+                f"(it may hold the only copy of the pre-restore database) to "
+                f"return the brain to service.",
+            )
+        phase = _read_phase(phase_path)
         if phase.get("target_path") == str(target) and phase.get("state") not in {
             "COMPLETE",
             "ROLLED_BACK",
         }:
+            operation_id = phase.get("operation_id")
+            # Name BOTH exits. A restore that refused mid-flight leaves this
+            # fence up, and resuming re-enters the same refusal, so an operator
+            # told only to resume has been handed a loop: the brain will not
+            # start and the one command that clears it is not mentioned
+            # anywhere in the message they are reading.
+            # The reassurance below is only true BEFORE installation begins.
+            # It used to be appended unconditionally, which meant that after a
+            # crash during install the operator was told the database was
+            # untouched at the exact moment it had been moved aside or already
+            # replaced. That is the worst direction for this message to be
+            # wrong in: it invites deleting the operation directory, which is
+            # holding the only copy of the pre-restore database.
+            #
+            # Deliberately an ALLOWLIST of states proven to precede
+            # installation, not a denylist of the installing ones. A denylist
+            # defaults every state it does not know about to "untouched",
+            # which is the dangerous answer, and it silently mis-reports any
+            # state added later. Post-install states include more than the
+            # obvious two: the marker commit and the audit activation both
+            # happen against the already-installed candidate.
+            state = phase.get("state")
+            if state in _PRE_INSTALL_PHASE_STATES:
+                disposition = (
+                    f"The live database has not been displaced or replaced: "
+                    f"this operation stopped at {state}, before installation "
+                    f"begins. An abandoned rollback of this operation can "
+                    f"have committed one audit row to it, so it may not be "
+                    f"byte-identical to the file you started with."
+                )
+            else:
+                disposition = (
+                    f"The live database may already have been displaced by "
+                    f"this operation (state {state}), so do not assume it is "
+                    f"the file you started with. The pre-restore copy is "
+                    f"inside {operation_dir}: do not delete that directory."
+                )
             raise DatabaseRestorePending(
-                f"database restore is pending; resume operation {phase.get('operation_id')}",
+                f"database restore is pending; resume operation {operation_id} "
+                f"with `z4j restore --force --operation {operation_id}`, or "
+                f"abandon it with `z4j restore --force --rollback-operation "
+                f"{operation_id}` to return the brain to service. "
+                f"{disposition}",
             )
 
 
@@ -492,9 +729,17 @@ def install_database_restore_fence_engine_hook(
             raise DatabaseRestorePending(
                 "PostgreSQL restore fence has an invalid envelope",
             )
+        # Name BOTH exits, in the words an operator can paste. A refusal
+        # mid-ceremony leaves this fence up on every connection the brain
+        # opens, and an operator told only that a restore is "unfinished" has
+        # nothing to type: neither command appeared anywhere they were looking.
+        operation_id = envelope["operation_id"]
         raise DatabaseRestorePending(
-            "PostgreSQL database restore is unfinished; resume operation "
-            f"{envelope['operation_id']}",
+            f"PostgreSQL database restore is unfinished; resume operation "
+            f"{operation_id} with `z4j restore --force --operation "
+            f"{operation_id}`, or abandon it with `z4j restore --force "
+            f"--rollback-operation {operation_id}` to return the brain to "
+            f"service.",
         )
 
     def reject_pending_restore(
@@ -770,6 +1015,377 @@ def _immutable_sqlite_connection(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _preflight_supported_source_head(source_path: Path) -> None:
+    """Refuse a source this release cannot restore, before an operation exists.
+
+    Read-only and best effort. A file that cannot be opened or read here is not
+    refused: staging below computes the authoritative digest and head, and this
+    check exists to avoid stranding the operator, not to be a second gate.
+    """
+    try:
+        connection = _immutable_sqlite_connection(source_path)
+    except Exception:
+        return
+    try:
+        rows = connection.execute("SELECT version_num FROM alembic_version").fetchall()
+    except Exception:
+        return
+    finally:
+        connection.close()
+    if len(rows) != 1:
+        return
+    head = str(rows[0][0])
+    if head in _SQLITE_SOURCE_SCHEMA_DIGESTS:
+        return
+    raise DatabaseRestoreRefused(
+        f"this release cannot restore a backup taken at migration head "
+        f"{head!r}. Supported heads are "
+        f"{', '.join(sorted(_SQLITE_SOURCE_SCHEMA_DIGESTS))}. Install the z4j "
+        f"release matching that head, restore there, then upgrade.",
+    )
+
+
+# Every statement below fixes its own row order. The manifest these rows
+# feed is what the stopped-executor attestation challenge is derived from,
+# and a resumed operation re-derives that challenge, so reading in SQLite's
+# physical order would let a page rewrite between two runs of the same
+# operation produce a different challenge and strand the operator mid
+# ceremony with no way to finish it.
+_SOURCE_REVISION_STATE_QUERY = "SELECT * FROM schedule_revision_state ORDER BY singleton_id"
+_SOURCE_EPOCH_ALLOCATOR_QUERY = (
+    "SELECT * FROM schedule_external_epoch_allocator ORDER BY singleton_id"
+)
+_SOURCE_EXTERNAL_STREAM_QUERY = "SELECT * FROM schedule_external_streams ORDER BY id"
+_SOURCE_EXTERNAL_EPOCH_QUERY = (
+    "SELECT * FROM schedule_external_stream_epochs ORDER BY epoch_number, epoch_uuid"
+)
+# Resolved control operations carry no live executor authority, so the
+# PostgreSQL archive reader counts and digests only the unresolved ones.
+# Filtering in SQL keeps the two backends describing the same rows.
+_SOURCE_EXTERNAL_OPERATION_QUERY = (
+    "SELECT * FROM schedule_external_control_operations "
+    "WHERE status IN ('PENDING', 'CLAIMED', 'AMBIGUOUS') "
+    "ORDER BY id"
+)
+_EXECUTOR_AUTHORITY_COLUMNS = (
+    "authorized_adapter_instance_id",
+    "executor_agent_id",
+    "executor_registry_owner_id",
+    "executor_session_generation",
+)
+
+
+def _json_scalar(value: Any) -> Any:
+    """Render one raw SQLite column value as a canonical-JSON scalar."""
+
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
+    return str(value)
+
+
+def _sqlite_manifest_rows(
+    connection: sqlite3.Connection,
+    statement: str,
+) -> list[dict[str, Any]]:
+    """Read one ordered table of a staged source into manifest rows."""
+
+    rows = connection.execute(statement).fetchall()
+    return [{key: _json_scalar(row[key]) for key in row.keys()} for row in rows]  # noqa: SIM118
+
+
+def _uuid_text(value: Any, column: str) -> str | None:
+    """Render a stored identifier the way both backends spell it.
+
+    SQLite keeps these as bare 32-character hex while PostgreSQL renders the
+    dashed form. Normalizing here is what lets the two backends describe the
+    same logical database identically.
+    """
+
+    if value is None:
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise DatabaseRestoreRefused(
+            f"staged SQLite source has a malformed identifier in {column}",
+        ) from exc
+
+
+def _sqlite_singleton_int(
+    rows: list[dict[str, Any]],
+    column: str,
+    table_name: str,
+) -> int:
+    if len(rows) != 1 or rows[0].get(column) is None:
+        raise DatabaseRestoreRefused(
+            f"staged SQLite source {table_name} singleton is malformed",
+        )
+    return int(str(rows[0][column]))
+
+
+def _assert_activated_boundary_singleton(
+    rows: list[dict[str, Any]],
+    table_name: str,
+) -> None:
+    """Refuse a source claiming an activated head without activated state."""
+
+    if len(rows) != 1 or rows[0].get("guard_version") != 1:
+        raise DatabaseRestoreRefused(
+            f"staged SQLite source {table_name} is not Boundary-D activated",
+        )
+
+
+def _carries_executor_authority(row: Mapping[str, Any]) -> bool:
+    return any(row.get(column) is not None for column in _EXECUTOR_AUTHORITY_COLUMNS)
+
+
+def _legacy_source_boundary_authority(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Describe the Boundary-D authority of the supported 1.7 source head.
+
+    The connection is unused but kept for one uniform builder signature.
+
+    Boundary D did not exist at that head. Historical migration replay must
+    therefore contain no revision singleton to inspect; its restore rebase
+    starts at revision zero.
+    """
+
+    return {
+        "revision": 0,
+        "revision_classification": "pre_d_empty",
+        "epoch": 0,
+        "external_authority_manifest": _empty_external_authority_manifest(),
+    }
+
+
+def _activated_source_boundary_authority(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Derive the real Boundary-D authority of an already-activated source.
+
+    This mirrors the PostgreSQL archive reader so both backends describe the
+    same logical database the same way. Nothing here may be stubbed out to
+    the pre-Boundary-D shape: the derived
+    ``requires_stopped_executor_attestation`` is what decides whether the
+    operator has to prove every external executor is stopped, so reporting an
+    empty external authority for a source that does carry one would silently
+    drop that ceremony and let a live executor race the restored database.
+    """
+
+    revisions = _sqlite_manifest_rows(connection, _SOURCE_REVISION_STATE_QUERY)
+    allocators = _sqlite_manifest_rows(connection, _SOURCE_EPOCH_ALLOCATOR_QUERY)
+    _assert_activated_boundary_singleton(revisions, "schedule_revision_state")
+    _assert_activated_boundary_singleton(
+        allocators,
+        "schedule_external_epoch_allocator",
+    )
+    streams = _sqlite_manifest_rows(connection, _SOURCE_EXTERNAL_STREAM_QUERY)
+    epochs = _sqlite_manifest_rows(connection, _SOURCE_EXTERNAL_EPOCH_QUERY)
+    operations = _sqlite_manifest_rows(
+        connection,
+        _SOURCE_EXTERNAL_OPERATION_QUERY,
+    )
+    stream_authority = [
+        {
+            "stream_id": _uuid_text(row.get("id"), "schedule_external_streams.id"),
+            "epoch_uuid": _uuid_text(
+                row.get("current_epoch_uuid"),
+                "schedule_external_streams.current_epoch_uuid",
+            ),
+            "epoch_number": int(str(row["current_epoch_number"])),
+            "phase": row.get("phase"),
+            "adapter_instance_id": row.get(
+                "authorized_adapter_instance_id",
+            ),
+            "agent_id": _uuid_text(
+                row.get("executor_agent_id"),
+                "schedule_external_streams.executor_agent_id",
+            ),
+            "registry_owner_id": _uuid_text(
+                row.get("executor_registry_owner_id"),
+                "schedule_external_streams.executor_registry_owner_id",
+            ),
+            "session_generation": row.get(
+                "executor_session_generation",
+            ),
+            "worker_id": row.get("executor_worker_id"),
+        }
+        for row in streams
+        if _carries_executor_authority(row)
+    ]
+    epoch_authority = [
+        {
+            "stream_id": _uuid_text(
+                row.get("stream_id"),
+                "schedule_external_stream_epochs.stream_id",
+            ),
+            "epoch_uuid": _uuid_text(
+                row.get("epoch_uuid"),
+                "schedule_external_stream_epochs.epoch_uuid",
+            ),
+            "epoch_number": int(str(row["epoch_number"])),
+            "phase": row.get("phase"),
+            "adapter_instance_id": row.get(
+                "authorized_adapter_instance_id",
+            ),
+            "agent_id": _uuid_text(
+                row.get("executor_agent_id"),
+                "schedule_external_stream_epochs.executor_agent_id",
+            ),
+            "registry_owner_id": _uuid_text(
+                row.get("executor_registry_owner_id"),
+                "schedule_external_stream_epochs.executor_registry_owner_id",
+            ),
+            "session_generation": row.get(
+                "executor_session_generation",
+            ),
+            "worker_id": row.get("executor_worker_id"),
+        }
+        for row in epochs
+        if _carries_executor_authority(row)
+    ]
+    operation_authority = [
+        {
+            "operation_id": _uuid_text(
+                row.get("id"),
+                "schedule_external_control_operations.id",
+            ),
+            "command_id": _uuid_text(
+                row.get("command_id"),
+                "schedule_external_control_operations.command_id",
+            ),
+            "stream_id": _uuid_text(
+                row.get("stream_id"),
+                "schedule_external_control_operations.stream_id",
+            ),
+            "epoch_uuid": _uuid_text(
+                row.get("epoch_uuid"),
+                "schedule_external_control_operations.epoch_uuid",
+            ),
+            "epoch_number": int(str(row["epoch_number"])),
+            "status": row.get("status"),
+            "adapter_instance_id": row.get("adapter_instance_id"),
+            "agent_id": _uuid_text(
+                row.get("agent_id"),
+                "schedule_external_control_operations.agent_id",
+            ),
+            "registry_owner_id": _uuid_text(
+                row.get("registry_owner_id"),
+                "schedule_external_control_operations.registry_owner_id",
+            ),
+            "session_generation": row.get("session_generation"),
+            "dispatch_lease": _uuid_text(
+                row.get("dispatch_lease"),
+                "schedule_external_control_operations.dispatch_lease",
+            ),
+        }
+        for row in operations
+    ]
+    external = {
+        "allocator_digest": release_manifest_digest(allocators),
+        "stream_digest": release_manifest_digest(streams),
+        "epoch_digest": release_manifest_digest(epochs),
+        "operation_digest": release_manifest_digest(operations),
+        "stream_count": len(streams),
+        "epoch_count": len(epochs),
+        "operation_count": len(operations),
+        "executor_authority": {
+            "streams": stream_authority,
+            "epochs": epoch_authority,
+            "unresolved_operations": operation_authority,
+        },
+        "requires_stopped_executor_attestation": bool(
+            stream_authority or epoch_authority or operation_authority,
+        ),
+    }
+    return {
+        "revision": _sqlite_singleton_int(
+            revisions,
+            "current_revision",
+            "schedule_revision_state",
+        ),
+        "pruned_through": _sqlite_singleton_int(
+            revisions,
+            "change_log_pruned_through",
+            "schedule_revision_state",
+        ),
+        "epoch": _sqlite_singleton_int(
+            allocators,
+            "current_epoch_number",
+            "schedule_external_epoch_allocator",
+        ),
+        "external_authority_manifest": external,
+    }
+
+
+#: How each restorable pre-current head describes its own source authority.
+#:
+#: The current head is deliberately absent: its manifest arrives later, from
+#: the authenticated snapshot taken over a copy of the staged source, and it
+#: is the only head that can be snapshotted directly because it is the only
+#: one this release's ORM already matches.
+_SQLITE_SOURCE_MANIFEST_BUILDERS: dict[
+    str,
+    Callable[[sqlite3.Connection], dict[str, Any]],
+] = {
+    _LEGACY_SOURCE_HEAD: _legacy_source_boundary_authority,
+    _PREVIOUS_RELEASE_HEAD: _activated_source_boundary_authority,
+}
+
+#: How a candidate staged at each pre-current head reaches the current head.
+#:
+#: ``audit_preparation`` sources stop at the authenticated audit-preparation
+#: boundary and need a separate operator activation ceremony to continue.
+#: ``direct`` sources are already audit- and Boundary-D activated, so the
+#: remaining release migrations apply straight through.
+_SQLITE_SOURCE_UPGRADE_MODES = {
+    _LEGACY_SOURCE_HEAD: "audit_preparation",
+    _PREVIOUS_RELEASE_HEAD: "direct",
+}
+
+
+def _assert_source_heads_are_consumed() -> None:
+    """Refuse to import while a restorable head has no code behind it.
+
+    Declaring a head in the digest allowlist is what makes preflight promise
+    the operator that their backup can be restored. Bumping the release head
+    without also teaching these two registries about the head it displaced
+    would leave that promise unbacked: the displaced head would pass every
+    gate and then fail deep inside the ceremony on a manifest nobody built.
+    Failing at import instead turns that into a test-suite failure on the
+    commit that causes it.
+    """
+
+    restorable = set(_SQLITE_SOURCE_SCHEMA_DIGESTS)
+    if RELEASE_MIGRATION_HEAD not in restorable:
+        raise RuntimeError(
+            "SQLite restore allowlist does not contain the current release head",
+        )
+    # The current head needs neither registry entry, so exclude it from both
+    # directions of the comparison rather than special-casing one side.
+    pre_current = restorable - {RELEASE_MIGRATION_HEAD}
+    for registry_name, registry in (
+        ("manifest builder", set(_SQLITE_SOURCE_MANIFEST_BUILDERS)),
+        ("upgrade mode", set(_SQLITE_SOURCE_UPGRADE_MODES)),
+    ):
+        missing = sorted(pre_current - registry)
+        if missing:
+            raise RuntimeError(
+                f"restorable SQLite source heads without a {registry_name}: {', '.join(missing)}",
+            )
+        stale = sorted(registry - pre_current)
+        if stale:
+            raise RuntimeError(
+                f"SQLite {registry_name} entries for unrestorable heads: {', '.join(stale)}",
+            )
+
+
+_assert_source_heads_are_consumed()
+
+
 def _sqlite_source_authority(
     path: Path,
     *,
@@ -842,19 +1458,15 @@ def _sqlite_source_authority(
             "schema_contract_digest": schema_digest,
             "source_digest": source_digest,
         }
-        if source_head == _LEGACY_SOURCE_HEAD:
-            # Boundary D did not exist at the supported 1.7 source head.
-            # Historical migration replay must therefore contain no revision
-            # singleton to inspect; its restore rebase starts at revision zero.
-            revision = 0
-            revision_classification = "pre_d_empty"
-            external = _empty_external_authority_manifest()
+        build_manifest = _SQLITE_SOURCE_MANIFEST_BUILDERS.get(source_head)
+        if build_manifest is not None:
+            # Every head older than the current one needs its full manifest
+            # built right here, over this same immutable connection: the
+            # attestation envelope is assembled from it before anything is
+            # allowed to touch the candidate.
             source_manifest = {
                 **authority,
-                "revision": revision,
-                "revision_classification": revision_classification,
-                "epoch": 0,
-                "external_authority_manifest": external,
+                **build_manifest(connection),
             }
             authority = {
                 **source_manifest,
@@ -910,14 +1522,8 @@ def _upgrade_sqlite_database(
     """Run release migrations on the exact restore-owned SQLite file."""
 
     from alembic import command
-    from alembic.config import Config
 
-    backend_root = Path(__file__).resolve().parents[2]
-    config = Config(str(backend_root / "alembic.ini"))
-    config.set_main_option(
-        "script_location",
-        str(backend_root / "src" / "z4j_brain" / "migrations"),
-    )
+    config = _restore_migration_config()
     engine = create_engine(f"sqlite:///{_lexical_absolute(path)}")
     try:
         with engine.connect() as connection:
@@ -928,6 +1534,60 @@ def _upgrade_sqlite_database(
             command.upgrade(config, "head")
     finally:
         engine.dispose()
+
+
+#: Boundary-D facts a release migration carries forward without rewriting.
+#:
+#: Migrating a restored source up to the current head moves rows between
+#: schemas; it does not allocate revisions or epochs, so every one of these
+#: has to read back off the migrated candidate exactly as the source
+#: derivation declared it.
+_MIGRATED_SOURCE_AUTHORITY_FIELDS = ("revision", "pruned_through", "epoch")
+
+
+def _assert_candidate_matches_source_authority(
+    source_authority: Mapping[str, Any],
+    upgraded_snapshot: Mapping[str, Any],
+) -> None:
+    """Refuse unless the migrated candidate is the source that was attested.
+
+    The source authority is derived by reading the staged file with raw SQL at
+    its own older schema, because this release's ORM cannot open that schema.
+    Everything the operator sees and everything the ceremony signs is built
+    from that derivation: the stopped-executor challenge, the attestation
+    envelope, and the source half of the restore marker. Nothing downstream
+    re-reads the source, so a derivation that describes the wrong database, or
+    describes the right one wrongly, would simply be believed all the way to a
+    signed marker.
+
+    Re-reading the same facts off the migrated candidate through the ORM is
+    what turns that derivation from trusted into checked, and it is the SQLite
+    counterpart of the PostgreSQL check that the restored D singletons match
+    the staged archive preflight.
+    """
+
+    disagreements: list[str] = []
+    for field in _MIGRATED_SOURCE_AUTHORITY_FIELDS:
+        restored = upgraded_snapshot[field]
+        # A builder that omits the field entirely is as wrong as one that
+        # reports the wrong value, so read it without assuming it is there.
+        declared = source_authority.get(field)
+        if declared != restored:
+            disagreements.append(
+                f"{field} (source authority {declared!r}, restored {restored!r})",
+            )
+    declared_external = source_authority.get("external_authority_manifest") or {}
+    restored_external = upgraded_snapshot["external_authority_manifest"]
+    if declared_external.get("executor_authority") != restored_external["executor_authority"]:
+        # This one decides whether the operator had to prove every external
+        # executor was stopped, so an under-reported source authority here
+        # silently drops that ceremony.
+        disagreements.append("external executor authority")
+    if disagreements:
+        raise DatabaseRestoreRefused(
+            "restored SQLite source authority differs from the migrated "
+            f"candidate: {', '.join(disagreements)}",
+        )
 
 
 def _sqlite_installed_identity(path: Path) -> dict[str, Any]:
@@ -1107,7 +1767,11 @@ async def authenticated_database_snapshot(
         raise DatabaseRestoreRefused(
             "restore snapshot received both a connection and a session",
         )
-    engine = create_async_engine(database_url) if connection is None and session is None else None
+    engine = (
+        create_async_engine_from_url(database_url)
+        if connection is None and session is None
+        else None
+    )
     database = DatabaseManager(engine) if engine is not None else None
     try:
         async with _restore_session(
@@ -1234,7 +1898,7 @@ async def finalize_restored_database(  # noqa: PLR0912, PLR0915
     known_head: Mapping[str, Any] | None,
     ceremony_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    engine = create_async_engine(database_url) if connection is None else None
+    engine = create_async_engine_from_url(database_url) if connection is None else None
     database = DatabaseManager(engine) if engine is not None else None
     try:
         async with _restore_session(
@@ -1703,6 +2367,11 @@ def _install_candidate(
                     f"restore displaced artifact already exists: {destination}",
                 )
             live.replace(destination)
+            # A rename crosses two directories and each one holds half of it.
+            # The destination is persisted first: what must never be lost is
+            # the new name of the live database, because until the candidate
+            # is installed the displaced copy is the only one there is.
+            _fsync_directory(operation_dir)
             displaced[suffix or "main"] = name
     _fsync_directory(target.parent)
     if not candidate.exists():
@@ -1720,6 +2389,7 @@ def _install_candidate(
     candidate.replace(target)
     target.chmod(0o600)
     _fsync_directory(target.parent)
+    _fsync_directory(operation_dir)
     _, installed_digest = _file_digest(target)
     if installed_digest != expected_candidate_digest:
         raise DatabaseRestoreRefused(
@@ -1769,7 +2439,7 @@ async def _authenticated_activation_snapshot(
     settings: Settings,
 ) -> tuple[dict[str, Any], str]:
     snapshot = await _authenticated_snapshot(path, settings)
-    engine = create_async_engine(_async_sqlite_url(path))
+    engine = create_async_engine_from_url(_async_sqlite_url(path))
     database = DatabaseManager(engine)
     try:
         async with database.session() as session:
@@ -1816,7 +2486,7 @@ async def _recover_sqlite_committed_finalization(
     source_digest: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     snapshot = await _authenticated_snapshot(path, settings)
-    engine = create_async_engine(_async_sqlite_url(path))
+    engine = create_async_engine_from_url(_async_sqlite_url(path))
     database = DatabaseManager(engine)
     try:
         async with database.session() as session:
@@ -2059,6 +2729,40 @@ def apply_restore_activation_manifest(
         return phase
 
 
+def staged_restore_source(
+    database_url: str,
+    *,
+    operation: str | uuid.UUID,
+) -> Path:
+    """Return the source path one already-staged SQLite operation carries.
+
+    A resume reads its source from the durable phase and never reopens the
+    operator's file, which is why the fence advertises ``--operation`` on its
+    own. Handing that recorded path back lets the command an operator is told
+    to run be the command they can run, without teaching the positional
+    argument a second meaning it would then have to be checked for.
+    """
+
+    if not database_url.startswith(("sqlite", "sqlite+aiosqlite")):
+        raise DatabaseRestoreRefused(
+            "SQLite restore received a non-SQLite database URL",
+        )
+    operation_id = operation if isinstance(operation, uuid.UUID) else uuid.UUID(str(operation))
+    target = _lexical_absolute(_sqlite_path_from_url(database_url))
+    phase_path = _phase_path(target, operation_id)
+    if not _phase_file_present(phase_path):
+        raise DatabaseRestoreRefused(
+            f"there is no staged restore operation {operation_id}; supply the "
+            f"backup PATH to start one",
+        )
+    phase = _read_phase(phase_path)
+    if phase.get("operation_id") != str(operation_id) or phase.get("target_path") != str(target):
+        raise DatabaseRestoreRefused(
+            "restore phase identity does not match this operation",
+        )
+    return Path(str(phase["source_provenance"]["supplied_path"]))
+
+
 def restore_sqlite_database(  # noqa: PLR0912, PLR0915
     database_url: str,
     source: Path,
@@ -2100,11 +2804,14 @@ def restore_sqlite_database(  # noqa: PLR0912, PLR0915
         else uuid.uuid4()
     )
 
-    ensure_secret_store_directory(target.parent)
+    _ensure_durable_directory(target.parent)
     root = _phase_root(target)
-    ensure_secret_store_directory(root)
+    _ensure_durable_directory(root)
     operation_dir = root / str(operation_id)
-    ensure_secret_store_directory(operation_dir)
+    # The operation directory is created where the phase is written, not
+    # here. Startup treats an operation directory as an unfinished restore,
+    # so creating one before the refusals below have had their say fenced a
+    # healthy brain on an operation that never began.
     phase_path = _phase_path(target, operation_id)
 
     with audit_bootstrap_coordinator(target.parent):
@@ -2169,6 +2876,17 @@ def restore_sqlite_database(  # noqa: PLR0912, PLR0915
                 raise DatabaseRestoreRefused(
                     "restore source and target are the same file",
                 )
+            # Refuse an unsupportable source BEFORE any phase exists on disk.
+            # Every phase state other than COMPLETE and ROLLED_BACK raises the
+            # startup fence, so a refusal that happens after the phase is
+            # written stops the brain booting, and resuming re-enters the same
+            # refusal forever. The authoritative head check still runs below
+            # against the staged copy; this one only decides whether it is
+            # worth creating an operation at all.
+            _preflight_supported_source_head(source_path)
+            # Everything that can refuse this operation has now spoken, so
+            # the operation gets a home and its phase in the same breath.
+            _ensure_durable_directory(operation_dir)
             phase = {
                 "phase_version": RESTORE_PHASE_VERSION,
                 "operation_id": str(operation_id),
@@ -2290,8 +3008,9 @@ def restore_sqlite_database(  # noqa: PLR0912, PLR0915
                     raise DatabaseRestoreRefused(
                         "restore is staged and requires the exact "
                         "stopped-executor attestation challenge "
-                        f"{challenge}; resume with --operation {operation_id} "
-                        f"--attest-stopped-executors {challenge}",
+                        f"{challenge}; resume with `z4j restore --force "
+                        f"--operation {operation_id} "
+                        f"--attest-stopped-executors {challenge}`",
                     )
                 phase = {
                     **phase,
@@ -2329,7 +3048,9 @@ def restore_sqlite_database(  # noqa: PLR0912, PLR0915
         if phase["state"] == "PREFLIGHT_COMPLETE":
             _discard_working_database(candidate)
             _sqlite_backup(staged_source, candidate)
-            if phase["source_authority"]["source_head"] == _LEGACY_SOURCE_HEAD:
+            source_head = str(phase["source_authority"]["source_head"])
+            upgrade_mode = _SQLITE_SOURCE_UPGRADE_MODES.get(source_head)
+            if upgrade_mode == "audit_preparation":
                 from alembic.util import CommandError
 
                 try:
@@ -2356,6 +3077,96 @@ def restore_sqlite_database(  # noqa: PLR0912, PLR0915
                     "candidate_size": candidate_size,
                     "candidate_digest": candidate_digest,
                     "audit_preparation": preparation,
+                    "attestation_digest": attestation_digest,
+                }
+            elif upgrade_mode == "direct":
+                import asyncio
+
+                # A previous-release source is already audit- and Boundary-D
+                # activated, so the remaining release migrations must apply
+                # cleanly. This is the exact opposite of the legacy arm above,
+                # which requires the upgrade to stop at the audit-preparation
+                # boundary, and reusing that arm here would refuse every
+                # previous-release restore.
+                try:
+                    _upgrade_sqlite_database(candidate)
+                except Exception as exc:
+                    # A candidate that will not migrate is an ordinary refusal,
+                    # and the operator has to be told which archive could not
+                    # be carried forward and why. Letting the alembic failure
+                    # out raw makes a restore that stopped safely look like a
+                    # crash in the restore code itself.
+                    raise DatabaseRestoreRefused(
+                        f"SQLite restore could not migrate its {source_head} "
+                        f"candidate to {RELEASE_MIGRATION_HEAD}: {exc}",
+                    ) from exc
+                _checkpoint_sqlite(candidate)
+                # Everything downstream compares the candidate against the
+                # source snapshot, and the pre-upgrade authority carries the
+                # older release's schema contract and manifest. Re-authenticate
+                # the migrated candidate so those comparisons describe what the
+                # candidate actually is now. The attestation challenge stays
+                # bound to the pre-upgrade authority, which is what the
+                # operator was shown and what a resume re-derives.
+                upgraded_snapshot = asyncio.run(
+                    _authenticated_snapshot(candidate, settings),
+                )
+                _assert_candidate_matches_source_authority(
+                    phase["source_authority"],
+                    upgraded_snapshot,
+                )
+                finalization = asyncio.run(
+                    finalize_restored_database(
+                        _async_sqlite_url(candidate),
+                        settings,
+                        operation_id=operation_id,
+                        source_digest=source_digest,
+                        source_snapshot=upgraded_snapshot,
+                        target_recovery_digest=phase["target_recovery_digest"],
+                        target_snapshot=phase["target_snapshot"],
+                        attestation=attestation,
+                        attestation_digest=attestation_digest,
+                        known_head=known_head,
+                        ceremony_metadata={
+                            "source_provenance": {
+                                "kind": phase["source_provenance"]["kind"],
+                                "expected_sha256": phase["source_provenance"].get(
+                                    "expected_sha256"
+                                ),
+                                "verified_digest": source_digest,
+                            },
+                            # The signed marker records where the data came
+                            # from, not where the ceremony left it, so these
+                            # two stay on the pre-upgrade head.
+                            "source_migration_head": source_head,
+                            "source_schema_contract_digest": phase["source_authority"][
+                                "schema_contract_digest"
+                            ],
+                            "upgraded_migration_head": (upgraded_snapshot["migration_head"]),
+                            "upgraded_schema_contract_digest": (
+                                upgraded_snapshot["schema_contract_digest"]
+                            ),
+                            "target_recovery_migration_head": phase["target_snapshot"][
+                                "migration_head"
+                            ],
+                            "target_recovery_schema_contract_digest": phase["target_snapshot"][
+                                "schema_contract_digest"
+                            ],
+                        },
+                    ),
+                )
+                _checkpoint_sqlite(candidate)
+                candidate_size, candidate_digest = _file_digest(
+                    candidate,
+                )
+                phase = {
+                    **phase,
+                    "state": "CANDIDATE_FINALIZED",
+                    "candidate_mode": "upgraded_finalized",
+                    "candidate_size": candidate_size,
+                    "candidate_digest": candidate_digest,
+                    "upgraded_snapshot": upgraded_snapshot,
+                    "finalization": finalization,
                     "attestation_digest": attestation_digest,
                 }
             else:
@@ -2461,7 +3272,8 @@ def restore_sqlite_database(  # noqa: PLR0912, PLR0915
                 raise DatabaseRestoreRefused(
                     "legacy SQLite restore is awaiting manifest-bound audit "
                     "activation; run `z4j audit activate-chain-state "
-                    f"--restore-operation {operation_id} ...`",
+                    f"--restore-operation {operation_id} --manifest PATH`, "
+                    "then the same command again with --apply added",
                 )
             import asyncio
 
@@ -2508,7 +3320,8 @@ def restore_sqlite_database(  # noqa: PLR0912, PLR0915
             raise DatabaseRestoreRefused(
                 "legacy SQLite restore is awaiting manifest-bound audit "
                 "activation; run `z4j audit activate-chain-state "
-                f"--restore-operation {operation_id} ...`",
+                f"--restore-operation {operation_id} --manifest PATH`, "
+                "then the same command again with --apply added",
             )
 
         if phase["state"] in {
@@ -2645,7 +3458,7 @@ async def _record_database_rollback_marker(
     recovery_digest: str,
     target_snapshot: Mapping[str, Any],
 ) -> str:
-    engine = create_async_engine(database_url)
+    engine = create_async_engine_from_url(database_url)
     database = DatabaseManager(engine)
     try:
         async with database.session(write=True) as session:
@@ -2695,7 +3508,7 @@ async def _recover_sqlite_committed_rollback_marker(
 ) -> str | None:
     """Return one already-committed rollback marker bound to this phase."""
 
-    engine = create_async_engine(_async_sqlite_url(target))
+    engine = create_async_engine_from_url(_async_sqlite_url(target))
     database = DatabaseManager(engine)
     try:
         async with database.session(write=True) as session:
@@ -2851,11 +3664,15 @@ def _install_sqlite_recovery(  # noqa: PLR0912
                     f"components for {suffix or 'main'}",
                 )
             live.replace(destination)
+            # Destination first: the rejected live set is evidence an operator
+            # may still need, and only the operation directory names it.
+            _fsync_directory(operation_dir)
             _fsync_directory(target.parent)
     if candidate.exists():
         candidate.replace(target)
         target.chmod(0o600)
         _fsync_directory(target.parent)
+        _fsync_directory(operation_dir)
     elif not target.exists():
         raise DatabaseRestoreRefused(
             "SQLite rollback candidate disappeared before install",
@@ -2914,9 +3731,8 @@ def rollback_sqlite_database(
     operation_id = operation if isinstance(operation, uuid.UUID) else uuid.UUID(str(operation))
     target = _lexical_absolute(_sqlite_path_from_url(database_url))
     operation_dir = _phase_root(target) / str(operation_id)
-    ensure_secret_store_directory(_phase_root(target))
-    ensure_secret_store_directory(operation_dir)
     phase_path = operation_dir / _PHASE_FILE_NAME
+    _require_rollbackable_operation(phase_path, operation_id)
     with audit_bootstrap_coordinator(target.parent):
         phase = _read_phase(phase_path)
         if (
@@ -2962,7 +3778,21 @@ def rollback_sqlite_database(
         settings = Settings()  # type: ignore[call-arg]
         import asyncio
 
-        if phase.get("state") == "ROLLBACK_INSTALLED":
+        # The rollback marker commits into the live database before the phase
+        # that records it, and committing it moves the live manifest by exactly
+        # one audit row. Every state below then compares that manifest against
+        # the captured one, so the marker's own effect reads as the target
+        # having changed underfoot. Ask the database whether this operation's
+        # marker is already there before any of those comparisons speak: the
+        # pre-install states are where it bit hardest, because there the live
+        # target IS the captured one and the crash left an operation that
+        # neither retry nor resume could finish.
+        if phase.get("state") in {
+            "PREFLIGHT_COMPLETE",
+            "CANDIDATE_FINALIZED",
+            "CANDIDATE_AUDIT_PREPARED",
+            "ROLLBACK_INSTALLED",
+        }:
             committed_marker_id = asyncio.run(
                 _recover_sqlite_committed_rollback_marker(
                     target,
@@ -3050,4 +3880,5 @@ __all__ = [
     "install_database_restore_fence_engine_hook",
     "restore_sqlite_database",
     "rollback_sqlite_database",
+    "staged_restore_source",
 ]

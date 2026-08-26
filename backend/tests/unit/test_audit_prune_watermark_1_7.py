@@ -18,7 +18,16 @@ HMAC chain seeded through ``AuditService`` and assert:
     watermark and (regression proof) FAILS without it;
   * the watermark equals the newest-deleted row's ``row_hmac``;
   * a genuine tamper on a surviving row STILL fails even with the
-    watermark."""
+    watermark.
+
+Deliberately still on a ``create_all()`` schema. The mechanism under test
+is the keyless one: the ``z4j_meta`` watermark is written by ``_do_sweep``,
+and ``_do_sweep`` hands off to ``_do_sweep_v2`` whenever
+``audit_chain_secret`` is set, where the prune boundary lives in
+``audit_chain_state`` instead and no watermark is ever stored. The tests
+also backdate rows with an UPDATE and delete rows outright, which the
+Boundary-F triggers refuse. Moving this file would not test the same thing
+against a stricter database, it would test a different boundary."""
 
 from __future__ import annotations
 
@@ -282,7 +291,7 @@ class TestWatermarkRotationAndReseal:
         stored = format_prune_watermark(old_secret, row_hmac)
 
         # After rotation the current secret is new_secret and old_secret
-        # moved into Z4J_SECRETS_PREVIOUS -> the rotation window is
+        # moved into Z4J_PREVIOUS_SECRETS -> the rotation window is
         # [new, old]. The watermark must still authenticate (M1).
         assert authenticate_prune_watermark([new_secret, old_secret], stored) == row_hmac
 

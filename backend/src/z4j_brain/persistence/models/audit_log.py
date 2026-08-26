@@ -1,21 +1,33 @@
 """``audit_log`` table - append-only audit trail.
 
-Every command execution and every privileged action writes a row
-here. The migration installs database-level triggers that REVOKE
-``UPDATE`` and ``DELETE`` from the public role and raise an
-exception on attempted mutation - application-level guards alone
-are not sufficient for an audit trail.
+Mutating workflows write rows transactionally where their contract requires
+it. Some denials and security breadcrumbs are best-effort, and an
+infrastructure failure can prevent such a record. The migration installs
+database-level triggers that raise on mutation, because application-level
+guards alone cannot constrain a code path that forgets to call them.
 
 Each row also carries a per-row HMAC-SHA256 over its canonical
-content, computed by :class:`AuditService` using
-``settings.secret`` as the key. The verifier is exposed via the
-``z4j audit verify`` CLI subcommand. Combined with the
-append-only trigger, this gives us tamper-evidence for any
-modification short of a privileged DBA who also holds the master
-secret.
+content chained to its predecessor, computed by
+:class:`AuditService` under the dedicated audit-chain key. The
+verifier is exposed via the ``z4j audit verify`` CLI subcommand.
 
-Retention is handled out-of-band by a privileged role that bypasses
-the trigger. Intentional, audited exception.
+The scope of that evidence is narrower than it looks, and the
+narrowness is deliberate rather than an oversight. The head and row
+counts the verifier compares against live in ``audit_chain_state``,
+in this same database, so a role that can write both tables can
+delete recent rows and restore an earlier copy of that state row;
+the copy still authenticates, because it was signed when it was
+current, and verification then reports the shortened history as
+clean. What these guards do defend is every path that goes through
+the application: a bug that writes outside the audit service, a
+downgraded adapter, an operator running a ``DELETE`` by hand.
+Evidence that must survive a hostile database role has to be
+anchored outside the database (see ``docs/SECURITY.md`` section 10.2).
+
+The DELETE trigger admits a statement whose ``z4j.audit_transition``
+session setting names a recognised transition, which is how retention
+and generation reset remove rows. That setting is not an identity
+check; it separates code paths, not people.
 """
 
 from __future__ import annotations
@@ -29,6 +41,7 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    desc,
     func,
     text,
 )
@@ -74,7 +87,7 @@ class AuditLog(PKMixin, Base):
     #: actions performed via session cookie (dashboard) or for
     #: legacy rows written before 1.2.2.
     #:
-    #: NOTE (1.2.2 third-pass audit fix): this column intentionally
+    #: NOTE: this column intentionally
     #: has NO FOREIGN KEY constraint. The HMAC at v4 includes
     #: ``api_key_id``; an ``ON DELETE SET NULL`` cascade would
     #: silently rewrite the column on key revoke and break the
@@ -170,6 +183,20 @@ class AuditLog(PKMixin, Base):
             "ix_audit_log_action_occurred",
             "action",
             "occurred_at",
+        ),
+        # Setup's unauthenticated brute-force budget performs bounded
+        # ``action LIKE 'setup.%'`` scans.  A normal varchar B-tree cannot
+        # service that prefix predicate under a non-C PostgreSQL collation;
+        # bind the matching operator class explicitly and cover both the
+        # global and per-IP time-window counters.  SQLite uses the same
+        # physical column order and receives an additional binary prefix
+        # range in the repository query.
+        Index(
+            "ix_audit_log_action_pattern",
+            "action",
+            desc("occurred_at"),
+            "source_ip",
+            postgresql_ops={"action": "varchar_pattern_ops"},
         ),
         # Standalone index on occurred_at so the retention
         # sweeper's ``WHERE occurred_at < ? ORDER BY occurred_at``

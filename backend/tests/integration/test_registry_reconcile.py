@@ -1,9 +1,10 @@
-"""Integration test: registry's periodic reconcile sweeper.
+"""Integration tests for the registry's durable-row reconcile sweeper.
 
-The reconcile loop closes the gap when a NOTIFY is lost in
-transit OR when the agent connects AFTER a command was already
-issued (the row sits as ``status='pending'`` until reconcile
-picks it up).
+``NOTIFY`` is a best-effort post-commit wake-up, not an outbox.  The
+reconcile loop closes the gap when publishing fails, a notification is
+lost in transit, or the agent connects after a command was issued.  In
+all three cases the committed ``status='pending'`` row remains the
+delivery authority until reconciliation picks it up.
 
 We test the latter case here because it's the simpler shape:
 
@@ -80,6 +81,63 @@ async def _seed_pending_command(
 
 
 class TestReconcile:
+    async def test_failed_wakeup_leaves_pending_row_for_reconciliation(
+        self,
+        migrated_engine: AsyncEngine,
+        integration_settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_id, agent_id, command_id = await _seed_pending_command(
+            migrated_engine,
+        )
+        deliver_calls: list[tuple[uuid.UUID, str]] = []
+        db = DatabaseManager(migrated_engine)
+
+        async def deliver(cmd_id: uuid.UUID, ws: Any) -> bool:
+            deliver_calls.append((cmd_id, ws.name))
+            return True
+
+        registry = PostgresNotifyRegistry(
+            settings=integration_settings,
+            db=db,
+            dsn_provider=lambda: integration_settings.database_url,
+            deliver_local=deliver,
+        )
+
+        async def fail_publish(*_args: object, **_kwargs: object) -> None:
+            raise OSError("forced NOTIFY failure")
+
+        # No local connection means deliver() takes the cross-worker wake-up
+        # path.  Its failure must not mutate or consume the committed row.
+        with monkeypatch.context() as patch:
+            patch.setattr(registry, "_publish_command_notify", fail_publish)
+            with pytest.raises(OSError, match="forced NOTIFY failure"):
+                await registry.deliver(
+                    command_id=command_id,
+                    agent_id=agent_id,
+                    required_retry_engine="celery",
+                )
+
+        async with migrated_engine.connect() as connection:
+            status = (
+                await connection.execute(
+                    text("SELECT status FROM commands WHERE id = :id"),
+                    {"id": command_id},
+                )
+            ).scalar_one()
+        assert status == "pending"
+
+        await registry.register(
+            project_id=project_id,
+            agent_id=agent_id,
+            ws=FakeWebSocket("reconcile-target"),
+            worker_id="current",
+            retry_contracts={"celery": 1},
+        )
+        await registry._reconcile_pending()  # type: ignore[attr-defined]
+
+        assert deliver_calls == [(command_id, "reconcile-target")]
+
     async def test_pending_command_picked_up_after_register(
         self,
         migrated_engine: AsyncEngine,

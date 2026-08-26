@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from z4j_brain.api.deps import (
     get_current_user,
@@ -53,7 +54,7 @@ class WorkerPublic(BaseModel):
 class WorkerDetailPublic(WorkerPublic):
     """Extended worker data from control.inspect()."""
 
-    metadata: dict = {}
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 def _worker_payload(
@@ -102,6 +103,128 @@ def _worker_detail_payload(
     return WorkerDetailPublic(
         **base.model_dump(),
         metadata=worker.worker_metadata or {},
+    )
+
+
+class LintFindingPublic(BaseModel):
+    """One dangerous setting on one worker."""
+
+    rule_id: str
+    severity: str
+    setting: str
+    title: str
+    detail: str
+    remedy: str
+
+
+class WorkerLintPublic(BaseModel):
+    """Lint results for a single worker."""
+
+    worker_id: uuid.UUID
+    worker_name: str
+    engine: str
+    hostname: str | None
+    evaluated: bool
+    findings: list[LintFindingPublic]
+
+
+class ProjectLintPublic(BaseModel):
+    """Project-wide lint summary.
+
+    ``workers_not_evaluated`` is reported separately from a clean result on
+    purpose. A worker whose engine has no rules, or which reported no
+    configuration, has not been judged, and presenting that as "no problems
+    found" would overstate what the check actually knows.
+    """
+
+    workers_evaluated: int
+    workers_not_evaluated: int
+    findings_by_severity: dict[str, int]
+    workers: list[WorkerLintPublic]
+
+
+@router.get("/lint", response_model=ProjectLintPublic)
+async def lint_workers(
+    slug: str,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+) -> ProjectLintPublic:
+    """Flag worker configurations that lose or leak work.
+
+    Evaluates the configuration each worker already reports on its
+    heartbeat, so this costs one query and no new collection. Read-only and
+    advisory: nothing here changes a worker, and a finding is a prompt to
+    look rather than a fault.
+    """
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.domain.worker_lint import (
+        SEVERITY_ORDER,
+        Severity,
+        lint_worker_conf,
+        supported_engines,
+    )
+    from z4j_brain.persistence.repositories import WorkerRepository
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.VIEWER,
+    )
+
+    repo = WorkerRepository(db_session)
+    rows = await repo.list_for_project(project.id)
+    engines_with_rules = supported_engines()
+
+    results: list[WorkerLintPublic] = []
+    counts: dict[str, int] = {}
+    evaluated = 0
+    for worker in rows:
+        conf = (worker.worker_metadata or {}).get("conf")
+        # ``None`` means the worker did not report configuration. An empty
+        # mapping is still a report and is meaningful to rules whose unsafe
+        # state is the absence of a setting (currently the time-limit rule).
+        can_evaluate = worker.engine.lower() in engines_with_rules and conf is not None
+        findings = lint_worker_conf(worker.engine, conf) if can_evaluate else []
+        if can_evaluate:
+            evaluated += 1
+        for finding in findings:
+            counts[finding.severity] = counts.get(finding.severity, 0) + 1
+        results.append(
+            WorkerLintPublic(
+                worker_id=worker.id,
+                worker_name=worker.name,
+                engine=worker.engine,
+                hostname=worker.hostname,
+                evaluated=can_evaluate,
+                # asdict, not vars: Finding is a slots dataclass and has no
+                # __dict__ to read.
+                findings=[LintFindingPublic(**dataclasses.asdict(f)) for f in findings],
+            )
+        )
+
+    # Worst-affected workers first, then the unevaluated ones last: an
+    # operator opening this wants the problems, not the inventory.
+    results.sort(
+        key=lambda w: (
+            min(
+                (SEVERITY_ORDER[cast(Severity, f.severity)] for f in w.findings),
+                default=len(SEVERITY_ORDER),
+            ),
+            -len(w.findings),
+            w.worker_name,
+        )
+    )
+
+    return ProjectLintPublic(
+        workers_evaluated=evaluated,
+        workers_not_evaluated=len(rows) - evaluated,
+        findings_by_severity=counts,
+        workers=results,
     )
 
 

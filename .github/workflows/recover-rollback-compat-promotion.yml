@@ -1,0 +1,889 @@
+# Bounded recovery for a failed/cancelled Ceremony B after the immutable tag exists.
+# This workflow never builds, retags, or writes the compatibility image/tag.  Its
+# only registry writes are digest-addressed OCI 1.1 evidence referrers.
+
+name: recover-rollback-compat-promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_run_id:
+        description: "Successful Ceremony-A workflow run id"
+        required: true
+        type: string
+      recovery_of_run_id:
+        description: "Failed/cancelled Ceremony-B workflow run id"
+        required: true
+        type: string
+      confirmation:
+        description: "Type the exact recovery confirmation phrase"
+        required: true
+        type: string
+
+concurrency:
+  group: z4j-rollback-compat-publisher
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+env:
+  IMAGE: docker.io/z4jdev/z4j
+  TARGET_TAG: 1.8.2-py3.14.7-rollback-1.9.0
+  HUB_API_REPOSITORY: https://hub.docker.com/v2/namespaces/z4jdev/repositories/z4j
+  Z4J_GITHUB_AUTHORITY_REPOSITORY_ID: "1228454287"
+  Z4J_GITHUB_AUTHORITY_REPOSITORY_NODE_ID: R_kgDOSTi5jw
+  IMMUTABLE_TAG_RULE: '^1\.8\.2-py3\.14\.7-rollback-1\.9\.0$'
+  RECIPE: docker/rollback-1.8.2-py3147
+
+jobs:
+  finalized-authority-boundary:
+    name: Refuse before any recovery file, credential, network, or tool
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 1
+    steps:
+      - name: Unconditional finalized-authority refusal
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          printf '%s\n' \
+            '::error::sealed release runtime and finalized material authorities are UNFINALIZED; refusing before checkout, protected environments, credentials, files, network, or release tools'
+          exit 97
+
+  recover:
+    name: Recover exact immutable outcome and publish evidence only
+    runs-on: ubuntu-24.04
+    needs: finalized-authority-boundary
+    environment: rollback-compat-publisher
+    steps:
+      - name: Require protected default-branch manual recovery authority
+        env:
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          RECOVERY_OF_RUN_ID: ${{ inputs.recovery_of_run_id }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != workflow_dispatch ]; then
+            echo "::error::rollback compatibility recovery is manual-only"
+            exit 1
+          fi
+          if [ "${GITHUB_REPOSITORY}" != z4jdev/z4j ]; then
+            echo "::error::recovery authority is restricted to z4jdev/z4j"
+            exit 1
+          fi
+          if [ "${GITHUB_REPOSITORY_ID}" != "${Z4J_GITHUB_AUTHORITY_REPOSITORY_ID}" ]; then
+            echo "::error::recovery repository numeric identity differs"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event = json.loads(
+              Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")
+          )
+          repository = event.get("repository") or {}
+          expected = {
+              "full_name": "z4jdev/z4j",
+              "id": int(os.environ["Z4J_GITHUB_AUTHORITY_REPOSITORY_ID"]),
+              "node_id": os.environ["Z4J_GITHUB_AUTHORITY_REPOSITORY_NODE_ID"],
+          }
+          for field, value in expected.items():
+              if repository.get(field) != value:
+                  raise SystemExit(
+                      f"recovery event repository {field} differs: "
+                      f"{repository.get(field)!r}"
+                  )
+          if repository.get("private") is not False:
+              raise SystemExit("recovery repository is not public")
+          if repository.get("visibility") != "public":
+              raise SystemExit("recovery repository visibility differs")
+          PY
+          if [ "${GITHUB_REF}" != refs/heads/main ]; then
+            echo "::error::recovery must run from refs/heads/main"
+            exit 1
+          fi
+          if ! printf '%s' "${QUALIFICATION_RUN_ID}" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "::error::qualification_run_id must be a positive integer"
+            exit 1
+          fi
+          if ! printf '%s' "${RECOVERY_OF_RUN_ID}" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "::error::recovery_of_run_id must be a positive integer"
+            exit 1
+          fi
+          if [ "${QUALIFICATION_RUN_ID}" = "${RECOVERY_OF_RUN_ID}" ]; then
+            echo "::error::qualification and recovery-of runs must be distinct"
+            exit 1
+          fi
+          expected=recover-existing-rollback-compat-1.8.2-py3.14.7-for-1.9.0
+          if [ "${CONFIRMATION}" != "${expected}" ]; then
+            echo "::error::exact recovery confirmation is required"
+            exit 1
+          fi
+
+      - name: Checkout exact recovery workflow source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Require signed runtime registry authority before recovery
+        run: |
+          set -euo pipefail
+          # Recovery may read or publish durable OCI evidence only after the
+          # reviewed common E0 receipt/bundle and PAT-HMAC validator land.
+          # This guard precedes Cosign setup, Docker credentials, registry access,
+          # and every evidence mutation.
+          python3 "${RECIPE}/durable_evidence.py" require-runtime-registry-authority
+
+      - name: Install Cosign 3.1.3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.1.3
+
+      - name: Authenticate prior runs and exact Git source
+        id: authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          RECOVERY_OF_RUN_ID: ${{ inputs.recovery_of_run_id }}
+        run: |
+          set -euo pipefail
+          authority=/tmp/rollback-compat-recovery-authority
+          install -d -m 0700 "${authority}"
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${QUALIFICATION_RUN_ID}" \
+            > "${authority}/qualification-run.json"
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${RECOVERY_OF_RUN_ID}" \
+            > "${authority}/recovery-of-run.json"
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${QUALIFICATION_RUN_ID}/artifacts?per_page=100" \
+            > "${authority}/qualification-artifacts.json"
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${RECOVERY_OF_RUN_ID}/artifacts?per_page=100" \
+            > "${authority}/recovery-of-artifacts.json"
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=rollback-compat-recovery-of-${RECOVERY_OF_RUN_ID}&per_page=100" \
+            > "${authority}/prior-recovery-artifacts.json"
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > "${authority}/observed-at"
+          python3 - "${authority}" "${QUALIFICATION_RUN_ID}" "${RECOVERY_OF_RUN_ID}" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          qualification_id = int(sys.argv[2])
+          recovery_of_id = int(sys.argv[3])
+          qualification = json.loads((root / "qualification-run.json").read_bytes())
+          recovery_of = json.loads((root / "recovery-of-run.json").read_bytes())
+          expected_common = {
+              "event": "workflow_dispatch",
+              "head_branch": "main",
+              "status": "completed",
+              "path": ".github/workflows/release-rollback-compat.yml",
+          }
+          for label, run, run_id, conclusions in (
+              ("qualification", qualification, qualification_id, {"success"}),
+              ("recovery-of", recovery_of, recovery_of_id, {"failure", "cancelled"}),
+          ):
+              if run.get("id") != run_id:
+                  raise SystemExit(f"{label} run id differs")
+              for field, value in expected_common.items():
+                  if run.get(field) != value:
+                      raise SystemExit(f"{label} run {field} differs")
+              if run.get("conclusion") not in conclusions:
+                  raise SystemExit(f"{label} run conclusion differs")
+              repository = run.get("head_repository") or {}
+              expected_repository = {
+                  "full_name": "z4jdev/z4j",
+                  "id": 1228454287,
+                  "node_id": "R_kgDOSTi5jw",
+              }
+              for field, value in expected_repository.items():
+                  if repository.get(field) != value:
+                      raise SystemExit(
+                          f"{label} run repository {field} differs"
+                      )
+              if re.fullmatch(r"[0-9a-f]{40}", run.get("head_sha", "")) is None:
+                  raise SystemExit(f"{label} run head SHA is invalid")
+          prior = json.loads((root / "prior-recovery-artifacts.json").read_bytes())
+          if prior.get("total_count") != 0 or prior.get("artifacts"):
+              raise SystemExit("prior recovery Actions evidence already exists")
+          for name, run in (("qualification", qualification), ("recovery_of", recovery_of)):
+              print(f"{name}_sha={run['head_sha']}")
+          PY
+          qualification_sha=$(python3 -c 'import json; print(json.load(open("/tmp/rollback-compat-recovery-authority/qualification-run.json"))["head_sha"])')
+          recovery_of_sha=$(python3 -c 'import json; print(json.load(open("/tmp/rollback-compat-recovery-authority/recovery-of-run.json"))["head_sha"])')
+          for source_sha in "${qualification_sha}" "${recovery_of_sha}"; do
+            if ! git cat-file -e "${source_sha}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "${source_sha}"
+            fi
+          done
+          source=/tmp/rollback-compat-recovery-source
+          install -d -m 0700 "${source}/qualification" "${source}/finalization"
+          git archive "${qualification_sha}" -- \
+            .github/workflows/release-rollback-compat.yml \
+            docker/rollback-1.8.2-py3147 \
+            | tar -x -C "${source}/qualification"
+          git archive "${recovery_of_sha}" -- \
+            .github/workflows/release-rollback-compat.yml \
+            docker/rollback-1.8.2-py3147 \
+            | tar -x -C "${source}/finalization"
+          if find "${source}" -type l -print -quit | grep -q .; then
+            echo "::error::historical recovery source contains a symlink"
+            exit 1
+          fi
+          qualification_tree=$(git rev-parse "${qualification_sha}^{tree}")
+          recovery_of_tree=$(git rev-parse "${recovery_of_sha}^{tree}")
+          recovery_tree=$(git rev-parse "${GITHUB_SHA}^{tree}")
+          printf 'qualification_sha=%s\n' "${qualification_sha}" >> "${GITHUB_OUTPUT}"
+          printf 'recovery_of_sha=%s\n' "${recovery_of_sha}" >> "${GITHUB_OUTPUT}"
+          printf 'qualification_tree=%s\n' "${qualification_tree}" >> "${GITHUB_OUTPUT}"
+          printf 'recovery_of_tree=%s\n' "${recovery_of_tree}" >> "${GITHUB_OUTPUT}"
+          printf 'recovery_tree=%s\n' "${recovery_tree}" >> "${GITHUB_OUTPUT}"
+
+      - name: Require finalized historical candidate authority
+        id: candidate
+        run: |
+          set -euo pipefail
+          manifest=/tmp/rollback-compat-recovery-source/finalization/${RECIPE}/manifest.json
+          verifier=/tmp/rollback-compat-recovery-source/finalization/${RECIPE}/verify.py
+          python3 "${verifier}" --manifest "${manifest}" --static-only
+          python3 - "${manifest}" "${GITHUB_OUTPUT}" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          lock = json.loads(Path(sys.argv[1]).read_bytes())
+          candidate = lock["candidate_image"]
+          if candidate.get("finalized") is not True:
+              raise SystemExit("recovery requires finalized candidate authority")
+          if candidate.get("repository") != "docker.io/z4jdev/z4j":
+              raise SystemExit("candidate repository differs")
+          if candidate.get("public_tag") != "1.8.2-py3.14.7-rollback-1.9.0":
+              raise SystemExit("candidate tag differs")
+          digest = candidate.get("index", {}).get("digest", "")
+          size = candidate.get("index", {}).get("size")
+          if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+              raise SystemExit("candidate index digest is invalid")
+          if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+              raise SystemExit("candidate index size is invalid")
+          qualification = candidate.get("qualification_durable_evidence")
+          if not isinstance(qualification, dict):
+              raise SystemExit("durable qualification authority is absent")
+          artifact = qualification.get("artifact") or {}
+          recovery = lock["publication_gate"].get("recovery")
+          if not isinstance(recovery, dict):
+              raise SystemExit("recovery policy is absent")
+          values = {
+              "index_digest": digest,
+              "index_size": size,
+              "qualification_artifact_digest": artifact.get("digest"),
+              "qualification_artifact_size": artifact.get("size"),
+          }
+          with Path(sys.argv[2]).open("a", encoding="ascii") as output:
+              for key, value in values.items():
+                  output.write(f"{key}={value}\n")
+          PY
+
+      - name: Discover and authenticate durable qualification and finalization evidence
+        id: terminal
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+          INDEX_SIZE: ${{ steps.candidate.outputs.index_size }}
+          QUALIFICATION_ARTIFACT_DIGEST: ${{ steps.candidate.outputs.qualification_artifact_digest }}
+          QUALIFICATION_ARTIFACT_SIZE: ${{ steps.candidate.outputs.qualification_artifact_size }}
+        run: |
+          set -euo pipefail
+          manifest=/tmp/rollback-compat-recovery-source/finalization/${RECIPE}/manifest.json
+          durable="${RECIPE}/durable_evidence.py"
+          python3 "${durable}" discover \
+            --manifest "${manifest}" \
+            --stage qualification \
+            --subject-digest "${INDEX_DIGEST}" \
+            --subject-size "${INDEX_SIZE}" \
+            --expected-artifact-digest "${QUALIFICATION_ARTIFACT_DIGEST}" \
+            --expected-artifact-size "${QUALIFICATION_ARTIFACT_SIZE}" \
+            --output-dir /tmp/rollback-compat-durable-qualification \
+            > /tmp/rollback-compat-durable-qualification.json
+          python3 "${durable}" discover \
+            --manifest "${manifest}" \
+            --stage finalization \
+            --subject-digest "${INDEX_DIGEST}" \
+            --subject-size "${INDEX_SIZE}" \
+            --predecessor-record /tmp/rollback-compat-durable-qualification/record.json \
+            --output-dir /tmp/rollback-compat-durable-finalization \
+            > /tmp/rollback-compat-durable-finalization.json
+          set +e
+          python3 "${durable}" discover \
+            --manifest "${manifest}" \
+            --stage promotion \
+            --subject-digest "${INDEX_DIGEST}" \
+            --subject-size "${INDEX_SIZE}" \
+            --predecessor-record /tmp/rollback-compat-durable-finalization/record.json \
+            --output-dir /tmp/rollback-compat-durable-promotion \
+            > /tmp/rollback-compat-durable-promotion.json
+          promotion_status=$?
+          set -e
+          case "${promotion_status}" in
+            0)
+              terminal_mode=promotion-index-only
+              ;;
+            3)
+              terminal_mode=recovery
+              ;;
+            *)
+              echo "::error::durable promotion classification failed with ${promotion_status}"
+              exit 1
+              ;;
+          esac
+          printf 'mode=%s\n' "${terminal_mode}" >> "${GITHUB_OUTPUT}"
+
+      - name: Materialize exact signed prior evidence roots
+        env:
+          TERMINAL_MODE: ${{ steps.terminal.outputs.mode }}
+        run: |
+          set -euo pipefail
+          manifest=/tmp/rollback-compat-recovery-source/finalization/${RECIPE}/manifest.json
+          durable="${RECIPE}/durable_evidence.py"
+          python3 "${durable}" materialize-original \
+            --manifest "${manifest}" \
+            --directory /tmp/rollback-compat-durable-qualification \
+            --output-dir /tmp/rollback-compat-prior-qualification \
+            > /tmp/rollback-compat-materialized-qualification.json
+          python3 "${durable}" materialize-original \
+            --manifest "${manifest}" \
+            --directory /tmp/rollback-compat-durable-finalization \
+            --predecessor-record /tmp/rollback-compat-durable-qualification/record.json \
+            --output-dir /tmp/rollback-compat-prior-finalization \
+            > /tmp/rollback-compat-materialized-finalization.json
+          if [ "${TERMINAL_MODE}" = promotion-index-only ]; then
+            python3 "${durable}" materialize-original \
+              --manifest "${manifest}" \
+              --directory /tmp/rollback-compat-durable-promotion \
+              --predecessor-record /tmp/rollback-compat-durable-finalization/record.json \
+              --output-dir /tmp/rollback-compat-prior-promotion \
+              > /tmp/rollback-compat-materialized-promotion.json
+          fi
+
+      - name: Live-reverify prior signed receipt and immutable authority
+        run: |
+          set -euo pipefail
+          payload=/tmp/rollback-compat-recovery-payload
+          install -d -m 0700 "${payload}/sigstore"
+          prior=/tmp/rollback-compat-prior-finalization
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign verify-blob \
+            --bundle "${prior}/rollback-compat-finalization-receipt.sigstore.json" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${prior}/rollback-compat-finalization-receipt.json" \
+            > "${payload}/sigstore/prior-finalization-receipt-verification.txt" 2>&1
+          cosign verify-blob \
+            --bundle "${prior}/docker-hub-immutable-tag-authority.sigstore.json" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${prior}/docker-hub-immutable-tag-authority.json" \
+            > "${payload}/sigstore/prior-immutable-authority-verification.txt" 2>&1
+          printf 'sigstore blob verification exit=0\n' \
+            >> "${payload}/sigstore/prior-finalization-receipt-verification.txt"
+          printf 'sigstore blob verification exit=0\n' \
+            >> "${payload}/sigstore/prior-immutable-authority-verification.txt"
+
+      - name: Pull-read the exact public tag and reject completed evidence
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+          TERMINAL_MODE: ${{ steps.terminal.outputs.mode }}
+        run: |
+          set -euo pipefail
+          registry=/tmp/rollback-compat-recovery-payload/registry
+          install -d -m 0700 "${registry}/native/amd64" "${registry}/native/arm64"
+          token_json=$(mktemp)
+          token_file=$(mktemp)
+          headers=$(mktemp)
+          chmod 0600 "${token_json}" "${token_file}" "${headers}"
+          trap 'rm -f "${token_json}" "${token_file}" "${headers}"' EXIT
+          curl --silent --show-error --fail-with-body \
+            --get 'https://auth.docker.io/token' \
+            --user "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
+            --data-urlencode 'service=registry.docker.io' \
+            --data-urlencode 'scope=repository:z4jdev/z4j:pull' \
+            --output "${token_json}"
+          python3 - "${token_json}" "${token_file}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          value = json.loads(Path(sys.argv[1]).read_bytes())
+          token = value.get("token") if isinstance(value, dict) else None
+          if not isinstance(token, str) or not token:
+              raise SystemExit("pull-only registry token is absent")
+          path = Path(sys.argv[2])
+          path.write_text(token, encoding="utf-8")
+          path.chmod(0o600)
+          PY
+          token=$(cat "${token_file}")
+          status=$(curl --silent --show-error \
+            --write-out '%{http_code}' \
+            --dump-header "${headers}" \
+            --header "Authorization: Bearer ${token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            --output "${registry}/public.index.oci.json" \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${TARGET_TAG}")
+          if [ "${status}" != 200 ]; then
+            echo "::error::public compatibility tag must exist, found HTTP ${status}"
+            exit 1
+          fi
+          observed=$(awk -F': *' \
+            'tolower($1) == "docker-content-digest" {gsub(/\r/,"",$2); print $2}' \
+            "${headers}" | tail -n 1)
+          if [ "${observed}" != "${INDEX_DIGEST}" ]; then
+            echo "::error::public tag digest differs from qualified candidate"
+            exit 1
+          fi
+          python3 - "${registry}/public-tag-readback.json" "${INDEX_DIGEST}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          value = {
+              "format": "z4j-rollback-compat-public-tag-readback-v1",
+              "result": "pass",
+              "reference": "docker.io/z4jdev/z4j:1.8.2-py3.14.7-rollback-1.9.0",
+              "http_status": 200,
+              "digest": sys.argv[2],
+              "authentication": "docker-registry-short-lived-pull-only-bearer",
+          }
+          Path(sys.argv[1]).write_bytes(
+              (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+          )
+          PY
+          manifest=/tmp/rollback-compat-recovery-source/finalization/${RECIPE}/manifest.json
+          python3 "${RECIPE}/durable_evidence.py" assert-absent \
+            --manifest "${manifest}" \
+            --stage recovery \
+            --subject-digest "${INDEX_DIGEST}" \
+            --output "${registry}/recovery-referrers-before.oci.json"
+          python3 "${RECIPE}/durable_evidence.py" assert-absent \
+            --manifest "${manifest}" \
+            --stage release-index \
+            --subject-digest "${INDEX_DIGEST}" \
+            --output "${registry}/release-index-referrers-before.oci.json"
+          for arch in amd64 arm64; do
+            manifest_digest=$(python3 - "${manifest}" "${arch}" <<'PY'
+          import json
+          import sys
+          print(json.load(open(sys.argv[1]))["candidate_image"]["platforms"][sys.argv[2]]["manifest"]["digest"])
+          PY
+          )
+            config_digest=$(python3 - "${manifest}" "${arch}" <<'PY'
+          import json
+          import sys
+          print(json.load(open(sys.argv[1]))["candidate_image"]["platforms"][sys.argv[2]]["config"]["digest"])
+          PY
+          )
+            curl --silent --show-error --fail-with-body \
+              --header "Authorization: Bearer ${token}" \
+              --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+              --output "${registry}/native/${arch}/manifest.oci.json" \
+              "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${manifest_digest}"
+            curl --silent --show-error --fail-with-body \
+              --header "Authorization: Bearer ${token}" \
+              --output "${registry}/native/${arch}/config.oci.json" \
+              "https://registry-1.docker.io/v2/z4jdev/z4j/blobs/${config_digest}"
+          done
+          curl --silent --show-error --fail-with-body \
+            --header "Authorization: Bearer ${token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            --output "${registry}/referrers-before-recovery.oci.json" \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/referrers/${INDEX_DIGEST}"
+          python3 - \
+            "${manifest}" \
+            "${registry}/referrers-before-recovery.oci.json" \
+            "${TERMINAL_MODE}" \
+            /tmp/rollback-compat-durable-promotion/record.json <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          lock = json.loads(Path(sys.argv[1]).read_bytes())
+          response = json.loads(Path(sys.argv[2]).read_bytes())
+          if response.get("schemaVersion") != 2 or not isinstance(response.get("manifests"), list):
+              raise SystemExit("registry referrers response is invalid")
+          stages = lock["publication_gate"]["durable_evidence"]["stages"]
+          terminal_mode = sys.argv[3]
+          forbidden = {
+              stages["recovery"]["artifact_type"],
+              stages["release-index"]["artifact_type"],
+          }
+          if any(
+              isinstance(item, dict) and item.get("artifactType") in forbidden
+              for item in response["manifests"]
+          ):
+              raise SystemExit("recovery or release-index evidence already exists")
+          promotion_type = stages["promotion"]["artifact_type"]
+          promotions = [
+              item
+              for item in response["manifests"]
+              if isinstance(item, dict) and item.get("artifactType") == promotion_type
+          ]
+          if terminal_mode == "promotion-index-only":
+              record = json.loads(Path(sys.argv[4]).read_bytes())
+              if promotions != [record["artifact"]]:
+                  raise SystemExit("unfiltered promotion referrer differs from authenticated P")
+          elif terminal_mode == "recovery":
+              if promotions:
+                  raise SystemExit("unexpected promotion referrer exists in recovery-terminal mode")
+          else:
+              raise SystemExit("terminal mode is invalid")
+          PY
+
+      - name: Live-reverify candidate signature, SBOM, and provenance
+        env:
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+        run: |
+          set -euo pipefail
+          proof=/tmp/rollback-compat-recovery-payload/sigstore
+          reference="${IMAGE}@${INDEX_DIGEST}"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --output json \
+            "${reference}" > "${proof}/candidate-signature-verification.json"
+          cosign verify-attestation \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --type spdxjson \
+            --output json \
+            "${reference}" > "${proof}/candidate-sbom-attestation-verification.json"
+          cosign verify-attestation \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --type https://slsa.dev/provenance/v1 \
+            --output json \
+            "${reference}" > "${proof}/candidate-provenance-verification.json"
+
+      - name: Fresh-read exact Docker Hub immutable-tag authority
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          output=/tmp/rollback-compat-recovery-payload/authority
+          install -d -m 0700 "${output}"
+          request=$(mktemp)
+          token_json=$(mktemp)
+          config=$(mktemp)
+          response=$(mktemp)
+          chmod 0600 "${request}" "${token_json}" "${config}" "${response}"
+          trap 'rm -f "${request}" "${token_json}" "${config}" "${response}"' EXIT
+          python3 - "${request}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          username = os.environ.get("DOCKERHUB_USERNAME")
+          token = os.environ.get("DOCKERHUB_TOKEN")
+          if not username or not token:
+              raise SystemExit("Docker Hub credentials are absent")
+          Path(sys.argv[1]).write_bytes(
+              (json.dumps({"identifier": username, "secret": token}, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+          )
+          PY
+          status=$(curl --silent --show-error --fail-with-body \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data-binary "@${request}" \
+            --output "${token_json}" \
+            'https://hub.docker.com/v2/auth/token')
+          if [ "${status}" != 200 ]; then
+            echo "::error::Docker Hub authentication returned HTTP ${status}"
+            exit 1
+          fi
+          python3 - "${token_json}" "${config}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          value = json.loads(Path(sys.argv[1]).read_bytes())
+          if not isinstance(value, dict) or set(value) != {"access_token"}:
+              raise SystemExit("Docker Hub token response differs")
+          token = value["access_token"]
+          if not isinstance(token, str) or not token:
+              raise SystemExit("Docker Hub access token is invalid")
+          path = Path(sys.argv[2])
+          path.write_text(f'header = "Authorization: Bearer {token}"\n', encoding="ascii")
+          path.chmod(0o600)
+          PY
+          status=$(curl --silent --show-error --fail-with-body \
+            --write-out '%{http_code}' \
+            --config "${config}" \
+            --request GET \
+            --output "${response}" \
+            "${HUB_API_REPOSITORY}")
+          if [ "${status}" != 200 ]; then
+            echo "::error::Docker Hub settings read returned HTTP ${status}"
+            exit 1
+          fi
+          python3 - "${response}" "${output}/fresh-docker-hub-immutable-tag-authority.json" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          response = json.loads(Path(sys.argv[1]).read_bytes())
+          settings = response.get("immutable_tags_settings") if isinstance(response, dict) else None
+          expected = {"enabled": True, "rules": [os.environ["IMMUTABLE_TAG_RULE"]]}
+          if response.get("namespace") != "z4jdev" or response.get("name") != "z4j":
+              raise SystemExit("Docker Hub repository identity differs")
+          if settings != expected:
+              raise SystemExit("Docker Hub immutable-tag settings drifted")
+          if re.fullmatch(os.environ["IMMUTABLE_TAG_RULE"], os.environ["TARGET_TAG"]) is None:
+              raise SystemExit("immutable rule does not match the target tag")
+          authority = {
+              "format": "z4j-docker-hub-immutable-tag-authority-v1",
+              "result": "pass",
+              "source": {
+                  "api": os.environ["HUB_API_REPOSITORY"],
+                  "operation": "GetRepository",
+                  "authentication": "docker-hub-short-lived-bearer",
+              },
+              "repository": {"namespace": "z4jdev", "name": "z4j"},
+              "immutable_tags_settings": expected,
+              "target_tag": os.environ["TARGET_TAG"],
+          }
+          Path(sys.argv[2]).write_bytes(
+              (json.dumps(authority, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+          )
+          PY
+
+      - name: Validate exact terminal and emit bounded completion evidence
+        env:
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          RECOVERY_OF_RUN_ID: ${{ inputs.recovery_of_run_id }}
+          QUALIFICATION_TREE: ${{ steps.authority.outputs.qualification_tree }}
+          RECOVERY_OF_TREE: ${{ steps.authority.outputs.recovery_of_tree }}
+          RECOVERY_TREE: ${{ steps.authority.outputs.recovery_tree }}
+          TERMINAL_MODE: ${{ steps.terminal.outputs.mode }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-recovery
+          authority=/tmp/rollback-compat-recovery-authority
+          source=/tmp/rollback-compat-recovery-source
+          payload=/tmp/rollback-compat-recovery-payload
+          install -d -m 0700 "${root}/predecessors" "${payload}/predecessors"
+          install -m 0400 /tmp/rollback-compat-durable-qualification/record.json \
+            "${root}/predecessors/qualification-record.json"
+          install -m 0400 /tmp/rollback-compat-durable-finalization/record.json \
+            "${root}/predecessors/finalization-record.json"
+          install -m 0400 /tmp/rollback-compat-durable-qualification/record.json \
+            "${payload}/predecessors/qualification-record.json"
+          install -m 0400 /tmp/rollback-compat-durable-finalization/record.json \
+            "${payload}/predecessors/finalization-record.json"
+          manifest="${source}/finalization/${RECIPE}/manifest.json"
+          completion="${root}/rollback-compat-release-index-completion-authority.json"
+          common=(
+            --manifest "${manifest}" \
+            --qualification-durable-record "${payload}/predecessors/qualification-record.json" \
+            --finalization-durable-record "${payload}/predecessors/finalization-record.json" \
+            --qualification-root /tmp/rollback-compat-prior-qualification \
+            --finalization-root /tmp/rollback-compat-prior-finalization \
+            --qualification-source "${source}/qualification" \
+            --finalization-source "${source}/finalization" \
+            --qualification-run-json "${authority}/qualification-run.json" \
+            --recovery-of-run-json "${authority}/recovery-of-run.json" \
+            --qualification-artifacts-json "${authority}/qualification-artifacts.json" \
+            --recovery-of-artifacts-json "${authority}/recovery-of-artifacts.json" \
+            --prior-recovery-artifacts-json "${authority}/prior-recovery-artifacts.json" \
+            --qualification-run-id "${QUALIFICATION_RUN_ID}" \
+            --recovery-of-run-id "${RECOVERY_OF_RUN_ID}" \
+            --qualification-git-tree "${QUALIFICATION_TREE}" \
+            --recovery-of-git-tree "${RECOVERY_OF_TREE}" \
+            --registry-root "${payload}/registry" \
+            --fresh-authority "${payload}/authority/fresh-docker-hub-immutable-tag-authority.json" \
+            --finalization-live-verification "${payload}/sigstore/prior-finalization-receipt-verification.txt" \
+            --authority-live-verification "${payload}/sigstore/prior-immutable-authority-verification.txt" \
+            --live-proofs-root "${payload}/sigstore" \
+            --payload-root "${payload}" \
+            --observed-at "$(cat "${authority}/observed-at")" \
+            --recovery-run-id "${GITHUB_RUN_ID}" \
+            --recovery-actor "${GITHUB_ACTOR}" \
+            --recovery-repository "${GITHUB_REPOSITORY}" \
+            --recovery-ref "${GITHUB_REF}" \
+            --recovery-git-sha "${GITHUB_SHA}" \
+            --recovery-git-tree "${RECOVERY_TREE}"
+          )
+          if [ "${TERMINAL_MODE}" = promotion-index-only ]; then
+            install -m 0400 /tmp/rollback-compat-durable-promotion/record.json \
+              "${root}/predecessors/promotion-record.json"
+            python3 "${RECIPE}/recovery_evidence.py" "${common[@]}" \
+              --terminal-mode promotion-index-only \
+              --promotion-durable-record /tmp/rollback-compat-durable-promotion/record.json \
+              --promotion-root /tmp/rollback-compat-prior-promotion \
+              --output "${completion}"
+          elif [ "${TERMINAL_MODE}" = recovery ]; then
+            python3 "${RECIPE}/recovery_evidence.py" "${common[@]}" \
+              --terminal-mode recovery \
+              --completion-authority-output "${completion}" \
+              --output "${root}/rollback-compat-recovery-evidence.json"
+          else
+            echo "::error::terminal mode is invalid"
+            exit 1
+          fi
+
+      - name: Sign and authenticate exact recovery evidence bytes
+        if: steps.terminal.outputs.mode == 'recovery'
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-recovery
+          subject="${root}/rollback-compat-recovery-evidence.json"
+          bundle="${root}/rollback-compat-recovery-evidence.sigstore.json"
+          verification="${root}/rollback-compat-recovery-evidence-verification.txt"
+          authentication="${root}/rollback-compat-recovery-authentication.json"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/recover-rollback-compat-promotion.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign sign-blob --yes --bundle "${bundle}" "${subject}" > /dev/null
+          cosign verify-blob \
+            --bundle "${bundle}" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${subject}" > "${verification}" 2>&1
+          printf 'sigstore blob verification exit=0\n' >> "${verification}"
+          python3 "${RECIPE}/durable_evidence.py" authentication \
+            --manifest /tmp/rollback-compat-recovery-source/finalization/${RECIPE}/manifest.json \
+            --stage recovery \
+            --format z4j-rollback-compat-recovery-authentication-v1 \
+            --subject "${subject}" \
+            --bundle "${bundle}" \
+            --verification "${verification}" \
+            --identity "${identity}" \
+            --issuer "${issuer}" \
+            --output "${authentication}"
+
+      - name: Publish and fresh-read recovery evidence OCI referrer
+        if: steps.terminal.outputs.mode == 'recovery'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+          INDEX_SIZE: ${{ steps.candidate.outputs.index_size }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-recovery
+          manifest=/tmp/rollback-compat-recovery-source/finalization/${RECIPE}/manifest.json
+          durable="${RECIPE}/durable_evidence.py"
+          install -d -m 0700 "${root}/durable"
+          python3 "${durable}" publish \
+            --manifest "${manifest}" \
+            --stage recovery \
+            --subject-digest "${INDEX_DIGEST}" \
+            --subject-size "${INDEX_SIZE}" \
+            --receipt "${root}/rollback-compat-recovery-evidence.json" \
+            --bundle "${root}/rollback-compat-recovery-evidence.sigstore.json" \
+            --authentication "${root}/rollback-compat-recovery-authentication.json" \
+            --payload-root /tmp/rollback-compat-recovery-payload \
+            --predecessor-record "${root}/predecessors/finalization-record.json" \
+            --output-dir "${root}/durable/recovery" \
+            > "${root}/durable/recovery-record.stdout.json"
+          python3 "${durable}" verify \
+            --manifest "${manifest}" \
+            --record "${root}/durable/recovery/record.json" \
+            --stage recovery \
+            --subject-digest "${INDEX_DIGEST}" \
+            --subject-size "${INDEX_SIZE}" \
+            --predecessor-record "${root}/predecessors/finalization-record.json" \
+            --output-dir "${root}/durable/recovery-fresh-readback" \
+            > "${root}/durable/recovery-fresh-verification.json"
+
+      - name: Emit, sign, publish, and reread release evidence index
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+          INDEX_SIZE: ${{ steps.candidate.outputs.index_size }}
+          TERMINAL_MODE: ${{ steps.terminal.outputs.mode }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-recovery
+          manifest=/tmp/rollback-compat-recovery-source/finalization/${RECIPE}/manifest.json
+          durable="${RECIPE}/durable_evidence.py"
+          index="${root}/rollback-compat-release-evidence-index.json"
+          bundle="${root}/rollback-compat-release-evidence-index.sigstore.json"
+          verification="${root}/rollback-compat-release-evidence-index-verification.txt"
+          authentication="${root}/rollback-compat-release-evidence-index-authentication.json"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/recover-rollback-compat-promotion.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          completion="${root}/rollback-compat-release-index-completion-authority.json"
+          case "${TERMINAL_MODE}" in
+            promotion-index-only)
+              terminal=/tmp/rollback-compat-durable-promotion/record.json
+              ;;
+            recovery)
+              terminal="${root}/durable/recovery/record.json"
+              ;;
+            *) echo "::error::terminal mode is invalid"; exit 1 ;;
+          esac
+          python3 "${durable}" make-index \
+            --manifest "${manifest}" \
+            --record "${root}/predecessors/qualification-record.json" \
+            --record "${root}/predecessors/finalization-record.json" \
+            --record "${terminal}" \
+            --completion-authority "${completion}" \
+            --output "${index}"
+          cosign sign-blob --yes --bundle "${bundle}" "${index}" > /dev/null
+          cosign verify-blob \
+            --bundle "${bundle}" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${index}" > "${verification}" 2>&1
+          printf 'sigstore blob verification exit=0\n' >> "${verification}"
+          python3 "${durable}" authentication \
+            --manifest "${manifest}" \
+            --stage release-index \
+            --format z4j-rollback-compat-release-evidence-index-authentication-v1 \
+            --subject "${index}" \
+            --bundle "${bundle}" \
+            --verification "${verification}" \
+            --identity "${identity}" \
+            --issuer "${issuer}" \
+            --output "${authentication}"
+          python3 "${durable}" publish \
+            --manifest "${manifest}" \
+            --stage release-index \
+            --subject-digest "${INDEX_DIGEST}" \
+            --subject-size "${INDEX_SIZE}" \
+            --receipt "${index}" \
+            --bundle "${bundle}" \
+            --authentication "${authentication}" \
+            --payload-root "${root}" \
+            --predecessor-record "${terminal}" \
+            --output-dir "${root}/durable/release-index" \
+            > "${root}/durable/release-index-record.stdout.json"
+          python3 "${durable}" verify \
+            --manifest "${manifest}" \
+            --record "${root}/durable/release-index/record.json" \
+            --stage release-index \
+            --subject-digest "${INDEX_DIGEST}" \
+            --subject-size "${INDEX_SIZE}" \
+            --predecessor-record "${terminal}" \
+            --output-dir "${root}/durable/release-index-fresh-readback" \
+            > "${root}/durable/release-index-fresh-verification.json"
+
+      - name: Upload convenience copy of complete signed recovery evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rollback-compat-recovery-of-${{ inputs.recovery_of_run_id }}
+          path: /tmp/rollback-compat-recovery
+          if-no-files-found: error
+          retention-days: 90

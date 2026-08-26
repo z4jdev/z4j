@@ -1,16 +1,8 @@
-"""``z4j`` command-line entry point.
+"""``z4j`` operator CLI.
 
-Subcommands:
-
-- ``z4j serve`` - run uvicorn against ``create_app``
-- ``z4j migrate upgrade [revision]`` - alembic upgrade
-- ``z4j migrate downgrade <revision>`` - alembic downgrade
-- ``z4j migrate revision -m "msg"`` - generate a new migration
-- ``z4j version`` - print the version
-
-The CLI is intentionally tiny - operators run uvicorn directly in
-production. This entry point exists so contributors do not need to
-remember the uvicorn invocation flags.
+It owns normal server startup plus migration, backup/restore, audit,
+credential-recovery, configuration and release-maintenance commands.
+``z4j <command> --help`` is the authoritative command inventory.
 """
 
 from __future__ import annotations
@@ -21,7 +13,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from z4j_core.paths import (
     ensure_z4j_home,
@@ -30,6 +22,9 @@ from z4j_core.paths import (
 )
 
 from z4j_brain import __version__
+
+if TYPE_CHECKING:
+    from z4j_brain.settings import Settings
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, PLR0915  flat CLI dispatch
@@ -53,9 +48,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             f"  {prog} status                    # current-state summary\n"
             f"  {prog} createsuperuser ...       # create the first admin\n"
             f"  {prog} changepassword <email>    # reset a user's password\n"
-            f"  {prog} reset [--all]             # nuke DB state\n"
+            f"  {prog} reset --force             # reset domain state\n"
             f"  {prog} migrate upgrade head      # run alembic migrations\n"
-            f"  {prog} audit verify              # verify audit-log HMAC chain\n"
+            f"  {prog} audit verify              # verify active HMACs + frozen digest\n"
             f"  {prog} --version                 # print installed version\n"
             "\n"
             f"Run `{prog} <command> --help` for per-command flags."
@@ -94,7 +89,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             "min(4, os.cpu_count()). The pre-1.5 default of 1 caused "
             "agent flap under modest load (single asyncio event loop "
             "couldn't dispatch WebSocket PONGs while ingesting events). "
-            "Set explicitly to override."
+            "Set explicitly to request another count. SQLite / the "
+            "in-memory registry and embedded-scheduler mode always force "
+            "one worker for correctness, even when a larger value is "
+            "requested."
         ),
     )
     serve.add_argument("--reload", action="store_true")
@@ -171,6 +169,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             "current",
             "history",
             "sync",
+            "prepare-runtime-rollback",
         ),
     )
     migrate.add_argument("rest", nargs=argparse.REMAINDER)
@@ -182,10 +181,11 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             "When the DB head is unknown to this code (e.g. you "
             "downgraded brain across a migration boundary), "
             "``migrate sync`` STAMPS the DB back to this code's "
-            "head and DROPS the unknown tables/columns the newer "
-            "code added. Destructive - rows in those tables are "
-            "lost. Required for the sync action to proceed when a "
-            "future schema is detected."
+            "head and DROPS identifier-safe unknown tables the newer "
+            "code added. It does not remove newer columns from tables "
+            "this code knows. Destructive - rows in dropped tables are "
+            "lost. Required for the sync action to proceed when a future "
+            "schema is detected."
         ),
     )
     migrate.add_argument(
@@ -206,7 +206,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     audit_sub = audit.add_subparsers(dest="audit_command", required=True)
     audit_verify = audit_sub.add_parser(
         "verify",
-        help="verify the per-row HMAC for every audit_log entry",
+        help=(
+            "verify active-row HMACs and the authenticated aggregate "
+            "snapshot of frozen audit history"
+        ),
     )
     audit_verify.add_argument(
         "--limit",
@@ -214,9 +217,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         default=1_000,
         help=(
             "page size for the chain walk (default: 1000, max: 5000). "
-            "The command pages through the ENTIRE audit log in chain "
-            "order and verifies every row; this only controls how many "
-            "rows are fetched per query, not how many are verified."
+            "The command pages through the ENTIRE active generation in "
+            "chain order; this only controls active rows fetched per query. "
+            "Frozen legacy rows are loaded as one canonical snapshot and "
+            "checked against its authenticated count and aggregate digest."
         ),
     )
     audit_verify.add_argument(
@@ -417,7 +421,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         help=(
             "also reseal a TAGGED watermark that fails to verify under the "
             "current secret window (normally that means a forged value OR a "
-            "secret rotated fully out of Z4J_SECRETS_PREVIOUS). Prefer "
+            "secret rotated fully out of Z4J_PREVIOUS_SECRETS). Prefer "
             "restoring the rotated-out secret instead; use this only if you "
             "are certain the embedded row_hmac is genuine."
         ),
@@ -610,15 +614,17 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         help="password on the command line (NOT recommended - visible in ps/history)",
     )
 
-    # reset-setup (narrow: only pending tokens + setup.* audit rows;
-    # refuses if admin exists). The broader `reset` below wipes
+    # reset-setup (narrow: only pending tokens; signed setup audit evidence is
+    # preserved and a reset record is appended; refuses if any user exists). The
+    # broader `reset` below wipes
     # everything including the admin. Both exist because they solve
     # different problems.
     reset_setup = sub.add_parser(
         "reset-setup",
         help=(
-            "wipe pending first-boot tokens + recent setup audit rows. "
-            "REFUSES if an admin user already exists."
+            "wipe pending first-boot tokens while preserving signed setup "
+            "audit evidence. "
+            "REFUSES if any user already exists."
         ),
     )
     reset_setup.add_argument(
@@ -627,27 +633,29 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         help="proceed without the safety prompt (for scripts)",
     )
 
-    # reset (destructive; full DB wipe)
+    # reset (destructive; authenticated generation reset)
     reset = sub.add_parser(
         "reset",
         help=(
-            "wipe every runtime table (users, sessions, projects, "
-            "agents, tasks, events, schedules, audit, ...). Schema "
-            "stays; alembic doesn't re-run. Pre-first-boot state "
-            "after this."
+            "delete domain data and start a new authenticated generation. "
+            "Schema, installation identity, monotonic namespaces, and a "
+            "signed reset genesis are retained."
         ),
         description=(
-            "Wipe every runtime table and put the brain back into "
-            "pre-first-boot state. After this command, the next "
-            "`serve` mints a fresh setup token and prints a new "
+            "Delete domain data and put the brain into first-boot setup "
+            "state. The next `serve` mints a new setup token and prints a "
             "one-time admin-creation URL.\n"
             "\n"
-            "Does NOT touch:\n"
-            "  - the alembic schema (run `migrate downgrade base` for that)\n"
-            "  - ~/.z4j/secret.env (unless --nuke-secrets)\n"
-            "  - ~/.z4j/z4j.db file (rows only, not the file itself)\n"
+            "The ordinary reset intentionally retains:\n"
+            "  - the alembic schema and ~/.z4j/secret.env\n"
+            "  - authenticated installation identity\n"
+            "  - monotonic schedule revision / external-epoch namespaces\n"
+            "  - one signed reset-genesis audit row replacing prior history\n"
             "\n"
-            "REQUIRES --force to proceed. Destructive. Irrecoverable."
+            "Domain rows are not recoverable without a backup. --nuke-secrets "
+            "instead performs packaged-SQLite retirement: it creates a fresh "
+            "replacement while retaining the old database/key pair in an "
+            "explicitly recoverable retirement bundle. REQUIRES --force."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -660,9 +668,11 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         "--nuke-secrets",
         action="store_true",
         help=(
-            "also delete ~/.z4j/secret.env so the next serve mints "
-            "fresh HMAC keys. Any existing session cookies + agent "
-            "tokens become invalid."
+            "for a packaged SQLite install, retire the existing database/key "
+            "pair into a recoverable bundle and create a fresh replacement. "
+            "Existing credentials do not authenticate to the replacement; "
+            "the retained bundle is destroyed only by the explicit recovery "
+            "command and matching manifest digest."
         ),
     )
     reset.add_argument(
@@ -782,8 +792,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     sub.add_parser(
         "check",
         help=(
-            "validate config + DB connectivity + that alembic is "
-            "at head. Non-destructive. Exit 0 = healthy."
+            "validate config + DB connectivity, and print whatever migration "
+            "revision is stored. Does NOT compare it against this build's "
+            "head, and exits 0 even with no alembic_version table: use "
+            "`z4j migrate current --check-heads` for that. Non-destructive."
         ),
     )
 
@@ -791,8 +803,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     sub.add_parser(
         "status",
         help=(
-            "print a summary of current brain state: user count, "
-            "project count, agent count, recent task activity."
+            "print the stored migration revision and total row counts for "
+            "users, projects, agents, tasks, sessions, and audit history."
         ),
     )
 
@@ -824,11 +836,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     sub.add_parser(
         "doctor",
         help=(
-            "run a full health + configuration audit: check (config/DB/"
-            "migrations) + status (counts) + warnings for common pitfalls "
-            "(dev mode + public bind, no admin user, secrets file "
-            "un-backed-up, etc.). Use this before exposing the brain to "
-            "the internet or before a release."
+            "run `check`, then report configuration warnings it cannot "
+            "raise: dev mode on a public bind, debug host errors, "
+            "auto-minted secrets needing an off-host backup, public "
+            "metrics, and first-boot gaps. Takes no options. Like `check` "
+            "it does NOT verify the schema is at head; use "
+            "`migrate current --check-heads` for that."
         ),
     )
 
@@ -862,7 +875,11 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         "source",
         nargs="?",
         metavar="PATH",
-        help="path to a backup file produced by `z4j backup`",
+        help=(
+            "path to a backup file produced by `z4j backup`; omit it when "
+            "resuming with --operation, which takes its source from the "
+            "staged operation"
+        ),
     )
     restore.add_argument(
         "--force",
@@ -874,7 +891,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         metavar="UUID",
         help=(
             "resume one exact staged restore operation (required when "
-            "the first pass reports a stopped-executor challenge)"
+            "the first pass reports a stopped-executor challenge); needs "
+            "no PATH, because the staged operation already holds one"
         ),
     )
     restore.add_argument(
@@ -908,8 +926,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     mt = sub.add_parser(
         "metrics-token",
         help=(
-            "manage the /metrics bearer token (auto-minted on first "
-            "boot, persisted to ~/.z4j/secret.env). Default action "
+            "manage the /metrics bearer token (auto-minted for a fresh "
+            "packaged SQLite install, otherwise configured explicitly). Default action "
             "prints the token; `rotate` mints a new one."
         ),
     )
@@ -920,17 +938,19 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     )
     mt_sub.add_parser(
         "show",
-        help="print the current token (default action when no <action>)",
+        help=(
+            "print the effective token using startup precedence: process "
+            "environment, .env, config.env, then secret.env"
+        ),
     )
     mt_sub.add_parser(
         "rotate",
         help=(
-            "mint a fresh token, replace it in ~/.z4j/secret.env, and "
-            "print the new value. Requires a brain restart for the new "
-            "token to take effect on the live process - the running "
-            "brain still validates against the old token in memory until "
-            "it re-reads secret.env at startup. Update your Prometheus "
-            "scrape config with the new token before restarting."
+            "when secret.env is the effective source, mint and persist a "
+            "fresh token there, then print it; refuses when process env, "
+            ".env, or config.env wins. Requires a brain restart for the "
+            "new token to take effect on the live process. Update your "
+            "Prometheus scrape config before restarting."
         ),
     )
 
@@ -990,8 +1010,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             "compatible version).\n"
             "\n"
             "By default this is a check-only dry run: no installs, no\n"
-            "venv mutation. Useful from a scheduled job: a non-zero\n"
-            "exit code means at least one package is behind."
+            "venv mutation. For scheduled jobs, exit 1 means at least\n"
+            "one package is behind; exit 2 means a lookup/configuration\n"
+            "error made the result incomplete. An installed version newer\n"
+            "than PyPI is reported as newer and is not treated as behind."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -999,8 +1021,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         "--apply",
         action="store_true",
         help=(
-            "run `pip install -U z4j` to apply upgrades. Default is "
-            "check-only (lists outdated packages and exits non-zero)."
+            "after a complete successful scan, run `pip install -U z4j` "
+            "to apply upgrades. A lookup/comparison error refuses to mutate "
+            "the environment. Default is check-only."
         ),
     )
     upgrade.add_argument(
@@ -1012,7 +1035,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         "--timeout",
         type=float,
         default=10.0,
-        help="HTTP timeout per PyPI lookup in seconds (default: 10)",
+        help=(
+            "PyPI scan budget in seconds (default: 10). No new lookup starts "
+            "after max(5, 2x budget); an in-flight request may finish later."
+        ),
     )
 
     # init - scaffold ~/.z4j/config.env from a documented template.
@@ -1155,15 +1181,16 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     return 2
 
 
-def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  upgrade check + apply dispatch
+def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0911, PLR0912, PLR0915  upgrade check + apply dispatch
     """Dispatch ``z4j upgrade``.
 
     Compares installed z4j package versions against PyPI's
     /pypi/<pkg>/json endpoint and prints a one-row-per-package
-    summary. Exit code is 0 when everything is current, 1 when at
-    least one package is behind, 2 on a hard error (network down,
-    PyPI 5xx). With --apply the umbrella ``z4j`` is upgraded via
-    a child ``pip install -U`` call.
+    summary. Exit code is 0 when every installed package is current
+    or newer than PyPI, 1 when at least one package is behind, and 2
+    when a lookup/comparison error makes the scan incomplete. With
+    --apply the umbrella ``z4j`` is upgraded via a child ``pip
+    install -U`` call only after a complete scan.
     """
     import json as _json
     import shlex
@@ -1172,42 +1199,34 @@ def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  up
     from importlib.metadata import PackageNotFoundError, version
 
     import httpx
+    from packaging.version import InvalidVersion, Version
 
-    # The ecosystem packages we own. Listed here statically rather
-    # than walking ``pkg_resources`` so an unrelated third-party
-    # package whose name happens to start with "z4j" never gets
-    # confused for one of ours.
-    _z4j_packages = (
-        "z4j",
-        "z4j-brain",
-        "z4j-scheduler",
-        "z4j-core",
-        "z4j-bare",
-        "z4j-django",
-        "z4j-flask",
-        "z4j-fastapi",
-        "z4j-celery",
-        "z4j-celerybeat",
-        "z4j-rq",
-        "z4j-arq",
-        "z4j-dramatiq",
-        "z4j-huey",
-        "z4j-taskiq",
-    )
+    from z4j_brain.domain.version_check import load_bundled
+
+    # The release-generated snapshot is already the runtime's package
+    # catalogue. Derive from it rather than keeping a second hand-maintained
+    # list that can omit a newly-added adapter.
+    _z4j_packages = tuple(sorted(load_bundled().packages))
+    if not _z4j_packages:
+        print(  # noqa: T201  CLI output
+            "z4j upgrade: bundled package catalogue is missing or invalid",
+            file=sys.stderr,
+        )
+        return 2
 
     rows: list[dict[str, str | bool]] = []
     network_errors: list[str] = []  # aggregate
     behind = 0
+    newer = 0
 
-    # Bound the CLI's wall-clock at ``args.timeout`` total (not
-    # per-call). 15 sequential 10s
-    # timeouts would otherwise let a slow PyPI keep us spinning
-    # for 150s. We give each call ``min(per_pkg, time_remaining)``
-    # so the whole loop fits inside the operator's expectation.
+    # Bound when the CLI may START another request. Each request receives a
+    # share of the catalogue-wide budget (with a 2s floor); after
+    # max(5s, 2 * args.timeout) no further request starts. The final in-flight
+    # request can finish after that threshold, exactly as the CLI help says.
     import time
 
     started_at = time.monotonic()
-    walltime_budget = max(5.0, args.timeout * 2)  # 2x timeout for 15 pkgs
+    walltime_budget = max(5.0, args.timeout * 2)
     per_call_timeout = max(2.0, args.timeout / max(1, len(_z4j_packages)))
 
     with httpx.Client(timeout=per_call_timeout) as client:
@@ -1229,6 +1248,7 @@ def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  up
                         "installed": installed,
                         "latest": "(skipped: timeout)",
                         "behind": False,
+                        "status": "lookup failed",
                     }
                 )
                 continue
@@ -1242,6 +1262,7 @@ def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  up
                             "installed": installed,
                             "latest": "(not on PyPI)",
                             "behind": False,
+                            "status": "unpublished",
                         }
                     )
                     continue
@@ -1257,19 +1278,42 @@ def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  up
                         "installed": installed,
                         "latest": "(lookup failed)",
                         "behind": False,
+                        "status": "lookup failed",
                     }
                 )
                 continue
 
-            is_behind = installed != latest
+            try:
+                installed_version = Version(installed)
+                latest_version = Version(str(latest))
+            except InvalidVersion as exc:
+                network_errors.append(
+                    f"{pkg}: invalid version in comparison: {exc}",
+                )
+                rows.append(
+                    {
+                        "package": pkg,
+                        "installed": installed,
+                        "latest": str(latest),
+                        "behind": False,
+                        "status": "comparison failed",
+                    }
+                )
+                continue
+
+            is_behind = installed_version < latest_version
+            is_newer = installed_version > latest_version
             if is_behind:
                 behind += 1
+            elif is_newer:
+                newer += 1
             rows.append(
                 {
                     "package": pkg,
                     "installed": installed,
-                    "latest": latest,
+                    "latest": str(latest),
                     "behind": is_behind,
+                    "status": ("behind" if is_behind else "newer" if is_newer else "current"),
                 }
             )
 
@@ -1283,6 +1327,7 @@ def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  up
                 {
                     "ok": behind == 0 and network_error is None,
                     "behind_count": behind,
+                    "newer_count": newer,
                     "rows": rows,
                     "network_error": network_error,
                 }
@@ -1299,7 +1344,7 @@ def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  up
         print(header)  # noqa: T201
         print("-" * len(header))  # noqa: T201
         for r in rows:
-            status = "behind" if r["behind"] else "current"
+            status = str(r["status"])
             print(  # noqa: T201
                 f"{r['package']!s:<{col_pkg}}"
                 f"{r['installed']!s:<{col_inst}}"
@@ -1316,12 +1361,21 @@ def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  up
                 "to upgrade the umbrella (and adapters via dependency "
                 "constraints), or pip install each one explicitly.",
             )
+        elif network_error:
+            print("upgrade status is incomplete because a lookup failed.")  # noqa: T201
+        elif newer:
+            print(  # noqa: T201
+                f"all z4j packages are current or newer than PyPI ({newer} newer).",
+            )
         else:
             print("all z4j packages are up to date.")  # noqa: T201
 
+    # A partial scan is never a safe basis for mutation. This also keeps the
+    # documented hard-error status stable when another package was found
+    # behind before the failed lookup: incompleteness wins over "behind".
+    if network_error:
+        return 2
     if not args.apply:
-        if network_error and behind == 0:
-            return 2
         return 1 if behind else 0
 
     # --apply: shell out to pip install -U z4j
@@ -1420,9 +1474,11 @@ def _run_metrics_token_show(args: argparse.Namespace) -> int:
 
     Resolution (first match wins):
       1. ``Z4J_METRICS_AUTH_TOKEN`` env var (operator override).
-      2. ``Z4J_METRICS_AUTH_TOKEN`` line in ``~/.z4j/secret.env``
-         (auto-minted by ``z4j serve`` on first boot).
-      3. Prints an error to stderr and exits 2.
+      2. ``Z4J_METRICS_AUTH_TOKEN`` in ``./.env``.
+      3. ``Z4J_METRICS_AUTH_TOKEN`` in ``~/.z4j/config.env``.
+      4. ``Z4J_METRICS_AUTH_TOKEN`` line in ``~/.z4j/secret.env``
+         (auto-minted by ``z4j serve`` for a fresh packaged SQLite install).
+      5. Prints an error to stderr and exits 2.
 
     Writes ONLY the token to stdout so scripts can use
     ``$(z4j metrics-token)`` safely.
@@ -1441,8 +1497,8 @@ def _run_metrics_token_show(args: argparse.Namespace) -> int:
 
     print(  # noqa: T201
         "z4j metrics-token: no token found. "
-        "Run `z4j serve` once to auto-mint one, or set "
-        "Z4J_METRICS_AUTH_TOKEN explicitly.",
+        "A fresh packaged SQLite install mints one during `z4j serve`; "
+        "otherwise set Z4J_METRICS_AUTH_TOKEN explicitly.",
         file=sys.stderr,
     )
     return 2
@@ -1452,7 +1508,10 @@ def _run_metrics_token_rotate(args: argparse.Namespace) -> int:
     """Mint a fresh ``/metrics`` bearer token and replace it in
     ``~/.z4j/secret.env``.
 
-    Atomically rewrites the file: read all lines, replace (or
+    Refuses unless ``secret.env`` is the effective source after normal
+    startup precedence (process environment, ``.env``, ``config.env``,
+    then ``secret.env``). When eligible, atomically rewrites the file:
+    read all lines, replace (or
     append) the ``Z4J_METRICS_AUTH_TOKEN=`` line, write to a temp
     file in the same dir, ``rename()`` over the original. This way
     a concurrent ``z4j serve`` boot reads either the old file or
@@ -1535,7 +1594,7 @@ def _run_metrics_token_rotate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_doctor(args: argparse.Namespace) -> int:
+def _run_doctor(args: argparse.Namespace) -> int:  # noqa: PLR0915  flat diagnostic inventory
     """Full health + configuration audit.
 
     Composes ``check`` (DB + migrations) with a set of warnings that
@@ -1618,18 +1677,30 @@ def _run_doctor(args: argparse.Namespace) -> int:
     secret_env = z4j_home() / "secret.env"
     if secret_env.exists():
         warnings.append(
-            f"Brain secrets were auto-minted and persisted to "
-            f"{secret_env}. This file is the ONLY copy of Z4J_SECRET and "
-            f"Z4J_SESSION_SECRET for this install. Losing it invalidates "
-            f"every existing agent HMAC and the audit chain. Back it up "
-            f"off-host now (rsync / S3 / password manager)."
+            f"A brain secret store exists at {secret_env}. Back it up "
+            f"off-host (rsync / S3 / password manager) and use `z4j config "
+            f"show` to confirm which values are effective. Losing an effective "
+            f"Z4J_SECRET breaks agent credentials and stored TOTP secrets; "
+            f"losing Z4J_SESSION_SECRET invalidates sessions; losing "
+            f"Z4J_AUDIT_CHAIN_SECRET prevents audit-chain verification."
         )
 
     # Warning 4: /metrics exposed without auth. Prometheus labels
     # expose project IDs, queue names, task names, in-memory state.
     # Fail-secure default was introduced in 1.0.13; before that, every
     # install was public by default.
-    if os.environ.get("Z4J_METRICS_PUBLIC", "").lower() in ("1", "true", "yes", "on"):
+    metrics_enabled = os.environ.get("Z4J_METRICS_ENABLED", "true").lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    if metrics_enabled and os.environ.get("Z4J_METRICS_PUBLIC", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
         warnings.append(
             "Z4J_METRICS_PUBLIC=1 is set. /metrics is served without "
             "authentication. Prometheus labels leak project IDs, "
@@ -1655,7 +1726,20 @@ def _run_doctor(args: argparse.Namespace) -> int:
                     text("SELECT COUNT(*) FROM projects"),
                 )
                 projects = r_projects.scalar_one() or 0
-                r_agents = await session.execute(text("SELECT COUNT(*) FROM agents"))
+                # A revoked agent is a historical tombstone, not an available
+                # credential. Doctor's warning is operational ("none minted"),
+                # unlike ``z4j status``'s explicitly physical row counts.
+                # Fall back for a pre-1.9 schema, where the column does not yet
+                # exist and every remaining row is necessarily live.
+                try:
+                    async with session.begin_nested():
+                        r_agents = await session.execute(
+                            text("SELECT COUNT(*) FROM agents WHERE revoked_at IS NULL"),
+                        )
+                except Exception:
+                    r_agents = await session.execute(
+                        text("SELECT COUNT(*) FROM agents"),
+                    )
                 agents = r_agents.scalar_one() or 0
         finally:
             await engine.dispose()
@@ -1727,6 +1811,21 @@ def _run_backup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _staged_restore_source(database_url: str, operation: str) -> Path:
+    """Read one staged operation's own source path, per backend."""
+
+    from z4j_brain.backup import detect_backend
+
+    if detect_backend(database_url) == "postgres":
+        from z4j_brain.management_restore_postgres import (
+            staged_restore_source,
+        )
+    else:
+        from z4j_brain.management_restore import staged_restore_source
+
+    return staged_restore_source(database_url, operation=operation)
+
+
 def _run_restore(args: argparse.Namespace) -> int:  # noqa: PLR0911
     """Restore the brain DB from a backup file. Brain MUST be stopped."""
     if not args.force:
@@ -1753,9 +1852,9 @@ def _run_restore(args: argparse.Namespace) -> int:  # noqa: PLR0911
             "z4j: restore failed: rollback does not accept --known-head",
         )
         return 1
-    if not args.rollback_operation and args.source is None:
+    if not args.rollback_operation and args.source is None and args.operation is None:
         print(  # noqa: T201
-            "z4j: restore failed: PATH or --rollback-operation UUID is required",
+            "z4j: restore failed: PATH, --operation UUID, or --rollback-operation UUID is required",
         )
         return 1
     try:
@@ -1771,8 +1870,14 @@ def _run_restore(args: argparse.Namespace) -> int:  # noqa: PLR0911
                 f"  marker:     {result.get('marker_id', 'n/a')}",
             )
             return 0
-        assert args.source is not None
-        src = Path(args.source)
+        # A resume never reopens the operator's file: it takes its source from
+        # the durable phase. Asking for a PATH it will not read is how the
+        # fence came to advertise a resume command the CLI then rejected.
+        src = (
+            Path(args.source)
+            if args.source is not None
+            else _staged_restore_source(settings.database_url, args.operation)
+        )
         if args.known_head is None:
             known_head = None
         else:
@@ -1919,13 +2024,13 @@ def _setup_multiprocess_metrics_env(
       increments under a recycled PID).
     - The directory is removed via ``atexit`` on normal shutdown; a
       SIGKILL'd parent leaves it behind for the OS tmp cleaner.
-    - Worker-death cleanup: prometheus_client's
-      ``multiprocess.mark_process_dead`` is designed to run from a
-      child-exit hook, which uvicorn does not expose cleanly. The
-      accepted bound is this fresh-dir-per-run policy: a worker that
-      dies mid-run leaves its files until the run ends -- its counter
-      contributions remain correctly counted, and its live-mode gauge
-      samples linger for the remainder of the run.
+    - Worker-death cleanup: before each aggregate scrape, the metrics
+      handler probes worker PIDs and calls
+      ``multiprocess.mark_process_dead`` for dead workers. That removes
+      their live-gauge files, bounding ordinary gauge staleness to the
+      next successful scrape. Counter and histogram files intentionally
+      remain so completed work is never un-counted. Reaping is best-effort;
+      PID reuse or a failed probe can delay live-gauge cleanup.
     - Operators who export ``PROMETHEUS_MULTIPROC_DIR`` themselves
       own that directory's lifecycle; it is left untouched.
 
@@ -2012,6 +2117,51 @@ def resolve_serve_workers(
         )
         return 1, note
     return workers, None
+
+
+def resolve_serve_workers_for_settings(
+    requested: int | None,
+    *,
+    settings: Settings,
+    cpu_count: int,
+) -> tuple[int, str | None]:
+    """Resolve workers from the effective settings, not raw environment.
+
+    Keeping this decision in an executable helper lets startup tests pass a
+    real ``Settings`` object (including SQLite's registry coercion) without
+    driving the rest of the CLI ceremony.
+    """
+
+    return resolve_serve_workers(
+        requested,
+        local_registry=str(settings.registry_backend).lower() == "local",
+        cpu_count=cpu_count,
+        embedded_scheduler=bool(settings.embedded_scheduler),
+    )
+
+
+def enforce_cli_admin_password_topology(
+    password: str | None,
+    *,
+    workers: int,
+    reload: bool,
+) -> None:
+    """Refuse an in-process bootstrap password for spawned interpreters."""
+
+    if password and (workers > 1 or reload):
+        raise SystemExit(
+            "z4j: --admin-password requires a single non-reload "
+            f"worker, but the resolved topology is workers={workers}"
+            f"{', reload=on' if reload else ''}. uvicorn spawns "
+            "fresh worker interpreters that never receive the "
+            "in-process password, so the admin would not be "
+            "provisioned (a setup-token banner would print instead), "
+            "and a forked child would expose the cleartext in memory. "
+            "Pass --workers=1 without --reload, set the password via "
+            "the Z4J_BOOTSTRAP_ADMIN_PASSWORD env var (eagerly popped "
+            "by startup.py and inherited safely), or run "
+            "bootstrap-admin separately before serving."
+        )
 
 
 def _sqlite_database_path(database_url: str) -> Path | None:
@@ -2555,11 +2705,11 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
     #   - public_url: can be plain http://
     # All four are catastrophic if the brain is reachable from the
     # internet, a LAN, Tailscale, or anywhere off-loopback. The
-    # auto-promote logic above already flips to production when the
-    # operator's config shape (https Z4J_PUBLIC_URL + explicit
-    # Z4J_ALLOWED_HOSTS) declares production intent, so this gate
-    # only fires when the operator has neither: dev mode AND a
-    # non-loopback bind WITHOUT the production-shaped config.
+    # Local-SQLite auto-detection above flips an UNSET environment to
+    # production when https Z4J_PUBLIC_URL + explicit Z4J_ALLOWED_HOSTS
+    # declare production intent. It never overrides explicit dev mode,
+    # so this gate also fires when production-shaped values accompany an
+    # explicit Z4J_ENVIRONMENT=dev on a non-loopback bind.
     bind = args.host or settings.bind_host
     _loopback = ("127.0.0.1", "localhost", "[::1]", "::1")
     if settings.environment == "dev" and bind not in _loopback:
@@ -2593,10 +2743,10 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
             "       Z4J_ALLOWED_HOSTS='[\"tasks.example.com\"]' \\\n"
             "       z4j serve --host 0.0.0.0\n"
             "\n"
-            "  Setting BOTH Z4J_PUBLIC_URL=https://... AND\n"
-            "  Z4J_ALLOWED_HOSTS auto-promotes the environment to\n"
-            "  production - you don't have to set Z4J_ENVIRONMENT\n"
-            "  explicitly.\n"
+            "  Because Z4J_ENVIRONMENT is explicitly dev here, those\n"
+            "  values will not auto-promote it. Set production as above,\n"
+            "  or unset Z4J_ENVIRONMENT on the local SQLite serve path\n"
+            "  to allow production-shaped auto-detection.\n"
             "\n"
             "  See: https://z4j.dev/operations/dev-vs-production",
             file=sys.stderr,
@@ -2650,11 +2800,10 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
     # in-memory registry + one SQLite file (the split-brain/contention/
     # bootstrap-race the single-worker guard exists to prevent).
     local_registry = str(settings.registry_backend).lower() == "local"
-    workers_resolved, worker_note = resolve_serve_workers(
+    workers_resolved, worker_note = resolve_serve_workers_for_settings(
         args.workers,
-        local_registry=local_registry,
+        settings=settings,
         cpu_count=cpu,
-        embedded_scheduler=bool(settings.embedded_scheduler),
     )
     if worker_note:
         print(worker_note)  # noqa: T201
@@ -2666,22 +2815,12 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
     # prints instead); a forked child would also expose the cleartext in
     # its memory. Only a single, non-reload, in-process worker can carry
     # it safely.
+    enforce_cli_admin_password_topology(
+        args.admin_password,
+        workers=workers_resolved,
+        reload=bool(args.reload),
+    )
     if args.admin_password:
-        if workers_resolved > 1 or args.reload:
-            raise SystemExit(
-                "z4j: --admin-password requires a single non-reload "
-                f"worker, but the resolved topology is workers="
-                f"{workers_resolved}"
-                f"{', reload=on' if args.reload else ''}. uvicorn spawns "
-                "fresh worker interpreters that never receive the "
-                "in-process password, so the admin would not be "
-                "provisioned (a setup-token banner would print instead), "
-                "and a forked child would expose the cleartext in memory. "
-                "Pass --workers=1 without --reload, set the password via "
-                "the Z4J_BOOTSTRAP_ADMIN_PASSWORD env var (eagerly popped "
-                "by startup.py and inherited safely), or run "
-                "bootstrap-admin separately before serving.",
-            )
         from z4j_brain import startup as _startup
 
         _startup.set_cli_bootstrap_password(args.admin_password)
@@ -2775,6 +2914,9 @@ def _run_migrate(args: argparse.Namespace) -> int:
     # instantiate Settings(). Fresh installs don't have these yet.
     _bootstrap_env_for_management_commands()
 
+    if args.action == "prepare-runtime-rollback":
+        return _run_migrate_prepare_runtime_rollback(args.rest)
+
     config_path = _find_alembic_config_path()
     if config_path is None:
         print(  # noqa: T201
@@ -2800,6 +2942,284 @@ def _run_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_migrate_prepare_runtime_rollback(  # noqa: PLR0911, PLR0915
+    rest: Sequence[str],
+) -> int:
+    """Run the two-phase, image-bound 1.9 -> 1.8.2 preparation ceremony."""
+
+    import asyncio
+    import hmac
+    import json
+    import re as _re
+    import uuid
+    from datetime import UTC, datetime
+
+    from sqlalchemy import text
+
+    from z4j_brain.domain.audit_service import AuditService
+    from z4j_brain.domain.runtime_rollback import (
+        ROLLBACK_COSIGN_PATH,
+        ROLLBACK_TARGET,
+        ROLLBACK_TARGET_RELEASE,
+        SEALED_TARGET_CADENCE_FINGERPRINT,
+        RuntimeRollbackRefused,
+        build_preview,
+        challenge_sha256,
+        durable_evidence_sha256,
+        load_finalized_production_carrier,
+        verify_durable_rollback_evidence,
+    )
+    from z4j_brain.persistence.database import (
+        DatabaseManager,
+        create_engine_from_settings,
+    )
+    from z4j_brain.persistence.repositories.audit_log import AuditLogRepository
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+    )
+    from z4j_brain.schema_transition import RELEASE_MIGRATION_HEAD
+    from z4j_brain.settings import Settings
+
+    ceremony = argparse.ArgumentParser(
+        prog="z4j migrate prepare-runtime-rollback",
+        description=(
+            "preview or apply the sealed 1.9.0 -> 1.8.2/Python-3.14.7 schedule preparation"
+        ),
+    )
+    ceremony.add_argument("--target", required=True)
+    ceremony.add_argument("--target-image", required=True)
+    ceremony.add_argument(
+        "--candidate-authority-root",
+        required=True,
+        help=(
+            "read-only production-finalization-attestation-1.9.0 directory; "
+            "must contain exactly the signed receipt, bundle, attestation "
+            "transcript, and staging index"
+        ),
+    )
+    ceremony.add_argument(
+        "--rollback-evidence-root",
+        required=True,
+        help=(
+            "read-only portable OCI evidence graph containing exactly "
+            "qualification, finalization, one promotion-or-recovery terminal, "
+            "and release-index stage directories"
+        ),
+    )
+    ceremony.add_argument(
+        "--stopped-executors-challenge",
+        default=None,
+        help=(
+            "exact challenge emitted by preview; supplying it explicitly "
+            "attests that every Brain and scheduler executor is stopped"
+        ),
+    )
+    options = ceremony.parse_args(list(rest))
+    if options.target != ROLLBACK_TARGET:
+        print(  # noqa: T201
+            "z4j migrate prepare-runtime-rollback: unsupported target; "
+            f"expected {ROLLBACK_TARGET!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    source_revision = os.environ.get("Z4J_RELEASE_SOURCE_REVISION", "").strip()
+    source_image = os.environ.get("Z4J_RELEASE_IMAGE", "").strip()
+    if _re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        print(  # noqa: T201
+            "z4j migrate prepare-runtime-rollback: "
+            "Z4J_RELEASE_SOURCE_REVISION must bind the candidate's 40-hex "
+            "Git revision",
+            file=sys.stderr,
+        )
+        return 2
+    if not source_image:
+        print(  # noqa: T201
+            "z4j migrate prepare-runtime-rollback: Z4J_RELEASE_IMAGE must "
+            "bind the candidate image by OCI sha256 digest",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        source_authority = load_finalized_production_carrier(
+            Path(options.candidate_authority_root),
+            asserted_revision=source_revision,
+            asserted_image=source_image,
+        )
+    except RuntimeRollbackRefused as exc:
+        print(  # noqa: T201
+            "z4j migrate prepare-runtime-rollback: REFUSED: "
+            f"production carrier proof failed: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        durable_evidence = verify_durable_rollback_evidence(
+            Path(options.rollback_evidence_root),
+            cosign_path=ROLLBACK_COSIGN_PATH,
+        )
+    except RuntimeRollbackRefused as exc:
+        print(  # noqa: T201
+            "z4j migrate prepare-runtime-rollback: REFUSED: "
+            f"durable rollback evidence failed: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    source_revision = str(source_authority["source_revision"])
+    source_image = str(source_authority["source_image"])
+    try:
+        settings = Settings()  # type: ignore[call-arg]
+    except Exception as exc:
+        print(  # noqa: T201
+            f"z4j migrate prepare-runtime-rollback: failed to load settings: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return 2
+
+    async def _run() -> int:
+        engine = create_engine_from_settings(settings)
+        database = DatabaseManager(engine)
+        try:
+            async with database.session(write=True) as session:
+                database_head = (
+                    await session.execute(
+                        text("SELECT version_num FROM alembic_version"),
+                    )
+                ).scalar_one()
+                if database_head != RELEASE_MIGRATION_HEAD:
+                    raise RuntimeRollbackRefused(
+                        "database must be at exact release head "
+                        f"{RELEASE_MIGRATION_HEAD!r}; found {database_head!r}",
+                    )
+                repository = ScheduleControlRepository(session)
+                plan = await repository.plan_runtime_rollback(lock_rows=True)
+                preview = build_preview(
+                    source_authority=source_authority,
+                    durable_evidence=durable_evidence,
+                    database_head=database_head,
+                    target_image=options.target_image,
+                    row_set_digest=plan.row_set_digest,
+                    reserved_schedule_count=len(plan.rows),
+                    external_schedule_count=plan.external_schedule_count,
+                )
+                supplied_challenge = options.stopped_executors_challenge
+                if supplied_challenge is None:
+                    await session.rollback()
+                    print(json.dumps(preview, indent=2, sort_keys=True))  # noqa: T201
+                    return 0
+                expected_challenge = str(preview["stopped_executors_challenge"])
+                if not hmac.compare_digest(supplied_challenge, expected_challenge):
+                    raise RuntimeRollbackRefused(
+                        "stopped-executors challenge does not match the current "
+                        "database/image/runtime preview",
+                    )
+                challenge_digest = challenge_sha256(supplied_challenge)
+                operation_id = uuid.UUID(hex=str(preview["operation_id"]))
+                target_authority = preview["target_image_authority"]
+                preparation = await repository.prepare_runtime_rollback(
+                    target_release=ROLLBACK_TARGET_RELEASE,
+                    target_image=options.target_image,
+                    operation_id=operation_id,
+                    expected_row_set_digest=plan.row_set_digest,
+                    quiescence_challenge_sha256=challenge_digest,
+                    target_durable_evidence_sha256=durable_evidence_sha256(
+                        durable_evidence,
+                    ),
+                    target_release_evidence_index=durable_evidence["release_index"],
+                    target_evidence_terminal_stage=str(
+                        durable_evidence["terminal_stage"],
+                    ),
+                    occurred_at=datetime.now(UTC),
+                )
+                audit_metadata = {
+                    "operation_id": str(operation_id),
+                    "candidate_source_revision": source_revision,
+                    "candidate_image": source_image,
+                    "candidate_production_authority": source_authority,
+                    "candidate_production_authority_sha256": source_authority["authority_sha256"],
+                    "target_release": ROLLBACK_TARGET_RELEASE,
+                    "target_image": options.target_image,
+                    "target_cadence_runtime_fingerprint": (SEALED_TARGET_CADENCE_FINGERPRINT),
+                    "target_image_manifest_sha256": target_authority["manifest_sha256"],
+                    "target_image_platforms": target_authority["platforms"],
+                    "target_image_release_receipt_sha256": target_authority[
+                        "release_receipt_sha256"
+                    ],
+                    "target_durable_evidence": durable_evidence,
+                    "target_durable_evidence_sha256": durable_evidence_sha256(
+                        durable_evidence,
+                    ),
+                    "target_release_evidence_index": durable_evidence["release_index"],
+                    "target_evidence_terminal_stage": durable_evidence["terminal_stage"],
+                    "changed_count": preparation.changed_count,
+                    "noop_count": preparation.noop_count,
+                    "block_count": 0,
+                    "external_schedule_count": (preparation.external_schedule_count),
+                    "schedule_revision_watermark": (preparation.schedule_revision_watermark),
+                    "change_log_pruned_through": preparation.change_log_pruned_through,
+                    "prepared_schedule_ids": sorted(
+                        str(row["schedule_id"]) for row in preparation.rows if row["changed"]
+                    ),
+                    "noop_schedule_ids": sorted(
+                        str(row["schedule_id"]) for row in preparation.rows if not row["changed"]
+                    ),
+                    "schedule_revisions": {
+                        str(row["schedule_id"]): (row["new_revision"] or row["schedule_revision"])
+                        for row in preparation.rows
+                    },
+                    "row_set_digest": preparation.row_set_digest,
+                    "quiescence_assertion": ("all Brain and scheduler executors are stopped"),
+                    "quiescence_challenge_sha256": challenge_digest,
+                    "invoked_via": "cli",
+                }
+                await AuditService(settings).record(
+                    AuditLogRepository(session),
+                    action="system.prepare_runtime_rollback",
+                    target_type="runtime_rollback",
+                    target_id=str(operation_id),
+                    result="success",
+                    outcome="allow",
+                    metadata=audit_metadata,
+                )
+                receipt = {
+                    "format": "z4j-runtime-rollback-preparation-receipt-v1",
+                    "preview": preview,
+                    "operation_id": str(operation_id),
+                    "changed_count": preparation.changed_count,
+                    "noop_count": preparation.noop_count,
+                    "external_schedule_count": (preparation.external_schedule_count),
+                    "schedule_revision_watermark": (preparation.schedule_revision_watermark),
+                    "change_log_pruned_through": preparation.change_log_pruned_through,
+                    "revisions": [
+                        {"schedule_id": str(schedule_id), "revision": revision}
+                        for schedule_id, revision in preparation.revisions
+                    ],
+                    "rows": list(preparation.rows),
+                    "audit": audit_metadata,
+                }
+                await session.commit()
+                print(json.dumps(receipt, indent=2, sort_keys=True))  # noqa: T201
+                return 0
+        finally:
+            await database.dispose()
+
+    try:
+        return asyncio.run(_run())
+    except RuntimeRollbackRefused as exc:
+        print(  # noqa: T201
+            f"z4j migrate prepare-runtime-rollback: REFUSED: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as exc:
+        print(  # noqa: T201
+            "z4j migrate prepare-runtime-rollback: failed before commit: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+
 def _run_migrate_sync(  # noqa: PLR0915  one destructive command boundary
     config_path: Path,
     *,
@@ -2817,8 +3237,10 @@ def _run_migrate_sync(  # noqa: PLR0915  one destructive command boundary
       ``--allow-future-schema`` AND
       ``--i-know-this-can-corrupt-data`` are passed. With both,
       stamps the DB ``alembic_version`` row back to this code's
-      head and drops every table the newer migrations added.
-      DESTRUCTIVE - rows in those tables are lost forever.
+      head and drops identifier-safe tables the newer migrations
+      added. It does not remove newer columns from known tables, so
+      this is not a complete reverse migration. DESTRUCTIVE - rows in
+      dropped tables are lost forever.
 
     Added v1.0.19 so operators have a documented escape hatch
     instead of editing ``alembic_version`` with sqlite3.
@@ -2855,8 +3277,9 @@ def _run_migrate_sync(  # noqa: PLR0915  one destructive command boundary
     if not (allow_future and confirm_destructive):
         print(  # noqa: T201
             "z4j migrate sync: refusing to proceed. To stamp "
-            "the DB back to this code's head AND drop the tables "
-            "the newer code added, re-run with both:\n"
+            "the DB back to this code's head AND drop unknown tables "
+            "the newer code added (newer columns on known tables remain), "
+            "re-run with both:\n"
             "    --allow-future-schema\n"
             "    --i-know-this-can-corrupt-data\n"
             "Recommended alternative: install z4j at the "
@@ -2885,7 +3308,9 @@ def _run_migrate_sync(  # noqa: PLR0915  one destructive command boundary
         )
         return 1
 
-    # Operator confirmed: stamp + drop unknown tables.
+    # Operator confirmed: stamp + drop unknown tables. This deliberately does
+    # not attempt to infer or remove columns that newer migrations may have
+    # added to tables this code still knows.
     print(  # noqa: T201
         f"z4j migrate sync: STAMPING DB back to {code_head!r} "
         f"and dropping unknown tables (DESTRUCTIVE).",
@@ -3051,10 +3476,13 @@ def _auto_migrate(
     config_path = next((p for p in candidates if p.exists()), None)
     if config_path is None:
         print(  # noqa: T201
-            "z4j: auto-migrate skipped (alembic.ini not found); "
-            "set Z4J_ALEMBIC_INI or run from the source tree.",
+            "z4j: auto-migrate failed closed (alembic.ini not found); "
+            "set Z4J_ALEMBIC_INI to a readable migration config or install "
+            "a complete z4j package. To manage migrations separately, set "
+            "Z4J_AUTO_MIGRATE=false explicitly.",
+            file=sys.stderr,
         )
-        return
+        raise SystemExit(2)
     # v1.0.19: pre-flight the DB head against the code's known
     # revisions so we can convert "unknown revision" into a clean
     # _UnknownDBRevisionError instead of letting alembic exit
@@ -3180,7 +3608,7 @@ def _run_audit(args: argparse.Namespace) -> int:  # noqa: PLR0911  flat subcomma
 
 
 def _run_projects(args: argparse.Namespace) -> int:
-    """Dispatch ``z4j-brain projects <subcommand>``."""
+    """Dispatch ``z4j projects <subcommand>``."""
     if args.projects_command == "rewrite-scheduler":
         return _run_projects_rewrite_scheduler(args)
     print(  # noqa: T201
@@ -3726,7 +4154,7 @@ def _run_audit_reseal_watermark(args: argparse.Namespace) -> int:
                         "watermark is tagged but verifies under no current or "
                         "previous secret. That usually means the signing secret "
                         "was rotated fully out of the window -- restore it to "
-                        "Z4J_SECRETS_PREVIOUS and re-run `z4j audit verify` -- OR "
+                        "Z4J_PREVIOUS_SECRETS and re-run `z4j audit verify` -- OR "
                         "the value was forged. Only if you are certain the "
                         "embedded anchor is genuine, re-run with --force-bare "
                         "--i-have-verified-the-chain.",
@@ -4422,7 +4850,13 @@ def _run_audit_retire_chain_key(  # noqa: PLR0915  state/file retirement
 
 
 def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit chain verification
-    """Stream the audit log and report any HMAC mismatches.
+    """Verify active row HMACs and the frozen-history aggregate.
+
+    Active rows are walked in keyset pages and each row HMAC/chain link
+    is checked. Frozen legacy rows are immutable history represented by
+    an authenticated count and canonical snapshot digest; they are loaded
+    as one snapshot and verified as that aggregate, not as independent
+    per-row HMACs.
 
     Returns 0 on clean verification, 1 on at least one mismatch,
     2 on configuration / connection failure. Operators wire this
@@ -4514,11 +4948,18 @@ def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit 
                 return 1
             await db.dispose()
             print(f"verified active: {report.verified_active_rows}")  # noqa: T201
-            print(f"verified frozen: {report.verified_frozen_rows}")  # noqa: T201
+            print(  # noqa: T201
+                f"canonical frozen rows assessed in aggregate: {report.verified_frozen_rows}",
+            )
             if report.known_head_result is not None:
                 print(f"known-head: {report.known_head_result}")  # noqa: T201
             if report.mismatches:
-                print(f"MISMATCHES ({len(report.mismatches)}):")  # noqa: T201
+                # The findings, not the lines. Past the reporting cap the tuple
+                # holds a hundred findings plus the line naming the overflow,
+                # so measuring it here announced 101 for a chain with 123 wrong
+                # rows, on the one screen an operator reads while sizing the
+                # damage.
+                print(f"MISMATCHES ({report.mismatch_count}):")  # noqa: T201
                 for mismatch in report.mismatches:
                     print(f"  {mismatch}")  # noqa: T201
             return 0 if report.clean else 1
@@ -4623,11 +5064,18 @@ def _verify_fork_cleanup_backup(
         final_path.st_size,
     ):
         raise RuntimeError("fork-cleanup backup pathname changed")
-    directory_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    # Flushing the parent directory is what makes the new directory entry
+    # itself durable, and only POSIX lets you open a directory to flush it:
+    # on Windows ``os.open`` on one raises PermissionError, and no supported
+    # substitute exists (SQLite's own Windows VFS skips the directory sync
+    # for the same reason). The file fsync above is the whole guarantee
+    # available there, so skip the entry flush rather than fail the fence.
+    if os.name == "posix":
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     uri = f"file:{quote(str(path))}?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
@@ -4905,10 +5353,12 @@ def _run_audit_fork_cleanup(  # noqa: PLR0911, PLR0915  quarantine dispatch
 
 
 def _run_reset_setup(args: argparse.Namespace) -> int:
-    """Wipe pending first-boot tokens and the recent setup audit-log
-    rows so the next ``serve`` mints a fresh token from a clean slate.
+    """Wipe pending first-boot tokens and append signed reset evidence.
 
-    Refuses if a first admin already exists (that's a security hole,
+    Existing setup audit rows remain intact so the next ``serve`` mints a
+    fresh token without erasing the history that explains the reset.
+
+    Refuses if any user already exists (that's a security hole,
     not a recovery path - someone is trying to reset onboarding for
     a configured brain). Use the dashboard's account-recovery flow
     or restore from backup instead.
@@ -4921,9 +5371,16 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
     import asyncio
     import sys
 
-    # Refuse early if there's no DB to reset (pre-first-boot state).
-    db_path = z4j_home() / "z4j.db"
-    if not db_path.exists():
+    # Resolve the effective database before deciding whether there is anything
+    # to reset.  The old shortcut always inspected ``Z4J_HOME/z4j.db`` and
+    # therefore returned success without contacting a configured PostgreSQL
+    # database (or a SQLite database at a non-default path).
+    snapshot = _bootstrap_env_for_management_commands(
+        allow_absent_file_sqlite_without_secrets=True,
+    )
+    database_url = str(snapshot.values.get("Z4J_DATABASE_URL", ""))
+    db_path = _sqlite_database_path(database_url)
+    if db_path is not None and not db_path.exists():
         print(  # noqa: T201
             f"z4j reset-setup: no DB found at {db_path}. "
             "Nothing to reset - run `z4j serve` to bootstrap.",
@@ -4931,10 +5388,9 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
         )
         return 0
 
-    _bootstrap_env_for_management_commands()
-
     from sqlalchemy import delete, func, select
 
+    from z4j_brain.configuration import settings_from_snapshot
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.persistence.database import (
         DatabaseManager,
@@ -4946,20 +5402,19 @@ def _run_reset_setup(args: argparse.Namespace) -> int:
         User,
     )
     from z4j_brain.persistence.repositories import AuditLogRepository
-    from z4j_brain.settings import Settings
 
-    settings = Settings()  # type: ignore[call-arg]
+    settings = settings_from_snapshot(snapshot)
     engine = create_engine_from_settings(settings)
     db = DatabaseManager(engine)
 
     async def _run() -> int:
         try:
             async with db.session(write=True) as session:
-                first_admin = (await session.execute(select(User).limit(1))).scalars().first()
-                if first_admin is not None:
+                existing_user = (await session.execute(select(User).limit(1))).scalars().first()
+                if existing_user is not None:
                     print(  # noqa: T201
-                        "z4j reset-setup: REFUSED - an admin user "
-                        "already exists. Reset-setup is only for the "
+                        "z4j reset-setup: REFUSED - a user already exists. "
+                        "Reset-setup is only for the "
                         "pre-first-boot state. Use the dashboard's "
                         "account-recovery flow or restore from backup "
                         "if you need to regain access.",
@@ -5056,7 +5511,10 @@ _TABLES_TO_WIPE_ORDER: tuple[str, ...] = (
 )
 
 
-def _bootstrap_env_for_management_commands() -> Any:
+def _bootstrap_env_for_management_commands(
+    *,
+    allow_absent_file_sqlite_without_secrets: bool = False,
+) -> Any:
     """Set Z4J_* env vars so Settings() and alembic's env.py can
     construct. Mirrors the early part of ``_run_serve`` but stops
     before instantiating anything - callers that need Settings +
@@ -5073,6 +5531,11 @@ def _bootstrap_env_for_management_commands() -> Any:
     every legacy secret but no audit-chain key.  The documented
     offline activation ceremony persists that one new independent
     key under the same bootstrap coordinator used by ``serve``.
+
+    ``reset-setup`` alone opts into returning the captured snapshot for an
+    absent file-backed SQLite database before this secret fence. There is no
+    database to mutate in that state. PostgreSQL, in-memory SQLite, and every
+    existing file-backed SQLite database still require installation secrets.
     """
     from z4j_brain.configuration import (
         capture_configuration,
@@ -5103,6 +5566,11 @@ def _bootstrap_env_for_management_commands() -> Any:
         snapshot = overlay_runtime_environment(snapshot)
 
     database_url = str(snapshot.values.get("Z4J_DATABASE_URL", ""))
+    if allow_absent_file_sqlite_without_secrets:
+        database_path = _sqlite_database_path(database_url)
+        if database_path is not None and not database_path.exists():
+            return snapshot
+
     legacy_secret_keys = (
         "Z4J_SECRET",
         "Z4J_SESSION_SECRET",
@@ -5156,23 +5624,31 @@ def _build_settings_from_env() -> tuple[Any, Any]:
 
 
 def _run_reset(args: argparse.Namespace) -> int:
-    """Wipe every runtime table + optionally the persisted secrets.
+    """Reset the authenticated generation or retire a packaged install.
 
-    Destructive: this command irrecoverably deletes all user data in
-    the brain's database (users, projects, agents, tasks, events,
-    schedules, audit log, notifications, etc.). Schema is preserved;
-    alembic does not re-run.
+    The ordinary reset deletes domain data (users, projects, agents,
+    tasks, events, schedules, notifications, and prior audit history)
+    while retaining the schema, authenticated installation identity,
+    monotonic schedule namespaces, and one signed reset genesis.
 
     After this, the brain is in pre-first-boot state: the next
     ``serve`` mints a fresh setup token and prints a new admin-
-    creation URL, just like a brand-new install.
+    creation URL. It is intentionally not a byte-for-byte brand-new
+    installation.
+
+    ``--nuke-secrets`` takes a separate packaged-SQLite retirement
+    path. It creates a fresh replacement and retains the prior
+    database/key pair in a recoverable bundle until an explicitly
+    authenticated destroy command removes it.
 
     Use when:
       - starting over on a dev / evaluation machine
       - recovering from a test that left junk data
       - cleaning a staging environment between runs
 
-    Do NOT use on production without a DB backup. There is no undo.
+    Do NOT use on production without a DB backup. Ordinary-reset domain
+    rows have no CLI undo; retirement-bundle recovery is a different,
+    explicitly managed workflow.
     """
     import asyncio
     import sys
@@ -5183,9 +5659,11 @@ def _run_reset(args: argparse.Namespace) -> int:
         print(  # noqa: T201
             "z4j reset: REQUIRED --force flag missing.\n"
             "\n"
-            "This command wipes every runtime row in the brain's DB\n"
-            "(users, projects, agents, tasks, events, audit log,\n"
-            "sessions, ...). Irrecoverable without a backup.\n"
+            "The ordinary reset deletes domain rows (users, projects,\n"
+            "agents, tasks, events, sessions, and prior audit history)\n"
+            "while preserving installation identity, monotonic namespaces,\n"
+            "and a signed reset genesis. Deleted domain data needs a backup\n"
+            "to restore. --nuke-secrets uses recoverable retirement instead.\n"
             "\n"
             "If you really mean it:\n"
             "  z4j reset --force\n"
@@ -5343,9 +5821,10 @@ def _run_recovery(args: argparse.Namespace) -> int:
 def _run_changepassword(args: argparse.Namespace) -> int:
     """Reset a user's password from the CLI.
 
-    Invalidates every existing session for the user (by bumping
-    ``password_changed_at``), so sessions issued before this
-    command fail the live-session check on their next request.
+    Explicitly revokes every existing session and removes trusted-device
+    records in the same transaction as the password change. The
+    ``password_changed_at`` anchor remains defense in depth; it is not the
+    revocation boundary because SQLite timestamps have a one-second grace.
     """
     import asyncio
     import sys
@@ -5364,7 +5843,11 @@ def _run_changepassword(args: argparse.Namespace) -> int:
         from z4j_brain.domain.audit_service import AuditService
         from z4j_brain.persistence.database import DatabaseManager
         from z4j_brain.persistence.models import User
-        from z4j_brain.persistence.repositories import AuditLogRepository
+        from z4j_brain.persistence.repositories import (
+            AuditLogRepository,
+            SessionRepository,
+            TrustedDeviceRepository,
+        )
 
         hasher = PasswordHasher(settings)
         try:
@@ -5398,6 +5881,10 @@ def _run_changepassword(args: argparse.Namespace) -> int:
                 user.password_changed_at = datetime.now(UTC)
                 user.failed_login_count = 0
                 user.locked_until = None
+                revoked_sessions = await SessionRepository(
+                    session,
+                ).revoke_all_for_user(user.id, reason="password_changed")
+                await TrustedDeviceRepository(session).delete_all_for_user(user.id)
                 await AuditService(settings).record(
                     AuditLogRepository(session),
                     action="user.password.changed_by_cli",
@@ -5407,6 +5894,7 @@ def _run_changepassword(args: argparse.Namespace) -> int:
                     outcome="allow",
                     metadata={
                         "operator_uid": (os.getuid() if hasattr(os, "getuid") else None),
+                        "revoked_sessions": revoked_sessions,
                     },
                 )
                 await session.commit()
@@ -5586,13 +6074,19 @@ def _read_password_from_args(args: argparse.Namespace) -> str | None:
 
 
 def _run_check(args: argparse.Namespace) -> int:
-    """Validate config + DB connectivity + migrations-at-head.
+    """Validate config + DB connectivity, and REPORT the stamped revision.
+
+    It does not compare that revision against this build's head. Use
+    ``z4j migrate current --check-heads`` for that; a database two minors
+    behind still exits 0 here. This docstring claimed a head check for
+    several releases while the code never performed one, which is how the
+    same false claim reached the CLI help and three documentation pages.
 
     Non-destructive. Returns:
-      0 = all green
+      0 = config loads, DB answers (whatever revision, including none)
       1 = config invalid
       2 = DB unreachable
-      3 = schema not at alembic head (operator must run migrate)
+      3 = alembic_version exists but is EMPTY (no revision stamped at all)
     """
     import asyncio
     import sys
@@ -5609,9 +6103,9 @@ def _run_check(args: argparse.Namespace) -> int:
         # Marked production-mode rows with the secure-default tag,
         # dev-mode rows with the relaxed-defaults tag.
         env_tag = (
-            "production (TLS-required, host validation, secure cookies)"
-            if settings.environment == "production"
-            else "dev (loopback-only, relaxed cookies, no HSTS)"
+            "dev (loopback-only, relaxed cookies, no HSTS)"
+            if settings.is_dev
+            else "production (TLS-required, host validation, secure cookies)"
         )
         checks.append(("environment", f"{settings.environment}  -  {env_tag}"))
     except Exception as exc:
@@ -5679,7 +6173,9 @@ def _run_status(args: argparse.Namespace) -> int:
 
     Intended for quick "what's going on" visibility - not a full
     health check (see `check` for that). Counts rows across the
-    user-visible tables and shows the alembic HEAD revision.
+    user-visible tables and shows the revision currently stamped in
+    ``alembic_version``. It does not claim that stamp equals this build's
+    migration head.
     """
     import asyncio
 
@@ -5744,13 +6240,13 @@ def _run_status(args: argparse.Namespace) -> int:
                 return f"{v:>8,}" if isinstance(v, int) else f"{v:>8}"
 
             env_tag = (
-                "(TLS-required, host validation, secure cookies)"
-                if settings.environment == "production"
-                else "(loopback-only, relaxed cookies, no HSTS)"
+                "(loopback-only, relaxed cookies, no HSTS)"
+                if settings.is_dev
+                else "(TLS-required, host validation, secure cookies)"
             )
             print("z4j status")  # noqa: T201
             print(f"  version             {__version__}")  # noqa: T201
-            print(f"  alembic head        {rev}")  # noqa: T201
+            print(f"  alembic revision    {rev}")  # noqa: T201
             print(f"  environment         {settings.environment}  {env_tag}")  # noqa: T201
             print(f"  database            {settings.database_url.split('@')[-1]}")  # noqa: T201
             print("")  # noqa: T201
@@ -5759,7 +6255,7 @@ def _run_status(args: argparse.Namespace) -> int:
             print(f"    projects          {_fmt(projects)}")  # noqa: T201
             print(f"    agents            {_fmt(agents)}")  # noqa: T201
             print(f"    tasks             {_fmt(tasks)}")  # noqa: T201
-            print(f"    active sessions   {_fmt(sessions)}")  # noqa: T201
+            print(f"    sessions          {_fmt(sessions)}")  # noqa: T201
             print(f"    audit rows        {_fmt(audit_rows)}")  # noqa: T201
             if any(v == "n/a" for v in (users, projects, agents, tasks, sessions, audit_rows)):
                 print("")  # noqa: T201
@@ -5960,6 +6456,7 @@ _CONFIG_ENV_TEMPLATE = """\
 # format) live in $Z4J_HOME/secret.env or your environment - they
 # are intentionally not in this file because the operator usually
 # wants them sourced from a secret manager.
+# Do not put credentials, tokens, or secrets in this 0644 tunables file.
 
 # How long to retain task events before the periodic sweeper purges
 # them. Increase for forensic / compliance environments. Decrease to
@@ -5982,16 +6479,18 @@ _CONFIG_ENV_TEMPLATE = """\
 
 # Per-IP rate limit for the public setup endpoint (unauthenticated
 # first-boot URL). Tighten if you suspect token-guessing attempts.
-# Z4J_RATELIMIT_FIRST_BOOT_ATTEMPTS_PER_IP=5
+# Z4J_FIRST_BOOT_ATTEMPTS_PER_IP=30
 
 # Maximum size of a single inbound payload (events, commands, etc.).
-# Defaults to 10 MB. Bump for environments that ship oversized task
+# Defaults to 8192 bytes. Increase only for environments that ship larger task
 # arguments, but be aware of memory implications.
-# Z4J_MAX_PAYLOAD_SIZE_BYTES=10485760
+# Z4J_MAX_PAYLOAD_SIZE_BYTES=8192
 
-# WebSocket frame size limit. Should match or exceed
-# Z4J_MAX_PAYLOAD_SIZE_BYTES.
-# Z4J_MAX_WS_FRAME_BYTES=10485760
+# WebSocket frame limits. The smaller value is effective, so change both when
+# increasing the default 1 MiB cap. Each must remain at least as large as the
+# payload limit for WebSocket event frames to reach the payload validator.
+# Z4J_MAX_WS_FRAME_BYTES=1048576
+# Z4J_WS_MAX_FRAME_BYTES=1048576
 """
 
 
@@ -6027,13 +6526,51 @@ def _run_init(args: argparse.Namespace) -> int:
     return 0
 
 
+_CONFIG_SECRET_NAME_SUFFIXES: tuple[str, ...] = (
+    "_secret",
+    "_password",
+    "_token",
+    "_api_key",
+    "_private_key",
+    "_credential",
+    "_credentials",
+)
+_CONFIG_SECRET_NAME_EXACT: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "credential",
+        "credentials",
+        "database_url",
+        "password",
+        "private_key",
+        "secret",
+        "token",
+    }
+)
+
+
+def _config_field_looks_secret(field: str) -> bool:
+    """Recognize plain-string credential carriers defensively.
+
+    Most Settings secrets use ``SecretStr``. The name check closes the
+    remaining gap for ``database_url`` and for a future field that carries a
+    credential as plain ``str``. Suffix-only matching avoids masking benign
+    counters such as ``first_boot_token_ttl_seconds``.
+    """
+
+    normalized = field.lower()
+    return normalized in _CONFIG_SECRET_NAME_EXACT or any(
+        normalized.endswith(suffix) for suffix in _CONFIG_SECRET_NAME_SUFFIXES
+    )
+
+
 def _config_source(field: str, settings: object, env: dict[str, str]) -> str:
     """Identify where a setting's effective value came from.
 
     Thin wrapper around :func:`z4j_brain.config_introspect.config_source`
     that preserves the original kwargs shape used by ``z4j config show``.
-    Detects whether the field is a secret on the Settings instance and
-    omits secret.env from the search path when it is.
+    The shared introspector reads immutable captured provenance and may
+    therefore report ``secret.env`` for a secret field without reopening it.
     """
     from z4j_brain.config_introspect import config_source as _shared
 
@@ -6042,7 +6579,7 @@ def _config_source(field: str, settings: object, env: dict[str, str]) -> str:
         from pydantic import SecretStr
 
         value = getattr(settings, field, None)
-        is_secret = isinstance(value, SecretStr)
+        is_secret = isinstance(value, SecretStr) or _config_field_looks_secret(field)
     except Exception:  # noqa: S110  best-effort secret-field detection
         pass
     return _shared(field, env=env, is_secret_field=is_secret)
@@ -6088,8 +6625,11 @@ def _run_config_show(args: argparse.Namespace) -> int:
     )
     for field_name in sorted(settings.model_fields):
         value: Any = getattr(settings, field_name)
-        if isinstance(value, SecretStr):
-            display = value.get_secret_value() if args.reveal_secrets else "***"
+        is_secret = isinstance(value, SecretStr) or _config_field_looks_secret(field_name)
+        if is_secret and not args.reveal_secrets:
+            display = "***"
+        elif isinstance(value, SecretStr):
+            display = value.get_secret_value()
         elif isinstance(value, list) and not value:
             display = "[]"
         elif isinstance(value, dict) and not value:
@@ -6115,6 +6655,10 @@ def _run_config_validate(args: argparse.Namespace) -> int:
     from z4j_brain.configuration import (
         ConfigurationCaptureError,
         capture_explicit_configuration_file,
+        configuration_snapshot_from_values,
+        settings_from_snapshot,
+        supported_settings_environment_keys,
+        validate_non_settings_tunable_values,
     )
 
     try:
@@ -6126,48 +6670,52 @@ def _run_config_validate(args: argparse.Namespace) -> int:
         )
         return 2
 
-    unsupported = sorted(key for key in parsed if not key.startswith("Z4J_"))
+    supported = supported_settings_environment_keys()
+    unsupported = sorted(key for key in parsed if key not in supported)
     if unsupported:
         print(  # noqa: T201
-            f"z4j config validate: unsupported non-Z4J key(s): {unsupported!r}",
+            f"z4j config validate: unsupported setting key(s): {unsupported!r}",
             file=sys.stderr,
         )
         return 1
 
-    # Build a Settings instance from this file's contents alone. We
-    # snapshot os.environ, replace it with the parsed values, attempt
-    # construction, and restore. Settings reads its own bootstrap
-    # values from env (DB URL, secrets); we have to inject those if
-    # the candidate file isn't expected to provide them.
-    # Build a Settings instance directly from the parsed dict instead
-    # of round-tripping through ``os.environ.clear()``. The earlier
-    # design called ``os.environ.clear()`` then repopulated, which
-    # works on Linux but breaks on Windows: clearing wipes
-    # ``SystemRoot`` / ``ComSpec`` / ``USERPROFILE`` / ``WINDIR``
-    # which Python's ``asyncio.windows_events._overlapped`` C
-    # extension needs to load. ``import pydantic_settings`` triggers
-    # the asyncio import and dies with WinError 10106. The audit
-    # M-2 finding flagged the underlying race risk; this is the
-    # concrete consequence on Windows.
-    init_kwargs: dict[str, object] = {}
-    for key, value in parsed.items():
-        field_name = key.removeprefix("Z4J_").lower()
-        init_kwargs[field_name] = value
+    try:
+        validate_non_settings_tunable_values(parsed)
+    except ConfigurationCaptureError as exc:
+        print(  # noqa: T201
+            f"z4j config validate: {candidate} failed validation: {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
-    # Required fields the candidate file isn't expected to carry get
-    # placeholder values so Settings construction reaches the
-    # cross-field validators (which is what we are actually testing).
-    init_kwargs.setdefault(
-        "database_url",
-        "sqlite+aiosqlite:///:memory:",
-    )
-    init_kwargs.setdefault("secret", "x" * 48)
-    init_kwargs.setdefault("session_secret", "y" * 48)
-
-    from z4j_brain.settings import Settings
+    # ``config.env`` is a tunables-only layer. Supply inert bootstrap
+    # placeholders for required values that normally come from secret.env or
+    # the process environment, then use the exact startup decoder so list and
+    # mapping values are parsed as JSON rather than passed as raw strings.
+    bootstrap = {
+        "Z4J_SECRET": "x" * 48,
+        "Z4J_SESSION_SECRET": "y" * 48,
+        "Z4J_AUDIT_CHAIN_SECRET": "z" * 48,
+        "Z4J_ALLOWED_HOSTS": '["localhost"]',
+        "Z4J_PUBLIC_URL": "https://localhost",
+    }
+    structured_database = {
+        "Z4J_DATABASE_HOST",
+        "Z4J_DATABASE_PORT",
+        "Z4J_DATABASE_USER",
+        "Z4J_DATABASE_PASSWORD",
+        "Z4J_DATABASE_NAME",
+    }
+    if "Z4J_DATABASE_URL" not in parsed and not (structured_database & parsed.keys()):
+        bootstrap["Z4J_DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+    candidate_values = bootstrap | parsed
 
     try:
-        Settings(**init_kwargs)
+        snapshot = configuration_snapshot_from_values(
+            candidate_values,
+            source=str(candidate),
+        )
+        settings_from_snapshot(snapshot)
     except Exception as exc:
         print(  # noqa: T201
             f"z4j config validate: {candidate} failed validation: {exc}",
@@ -6176,7 +6724,8 @@ def _run_config_validate(args: argparse.Namespace) -> int:
         return 1
 
     print(  # noqa: T201
-        f"z4j config validate: {candidate} is valid ({len(parsed)} setting(s) parsed).",
+        f"z4j config validate: {candidate} tunables are valid "
+        f"({len(parsed)} setting(s) parsed; runtime bootstrap sources not checked).",
     )
     return 0
 

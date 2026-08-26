@@ -83,6 +83,7 @@ class SystemHealth(BaseModel):
 class StatsResponse(BaseModel):
     """The aggregated overview the dashboard's stat cards render."""
 
+    window_hours: int
     tasks_by_state: TaskStateCounts
     tasks_total: int
     tasks_failed_24h: int
@@ -112,8 +113,11 @@ async def get_stats(
     """Return aggregated project statistics.
 
     ``hours`` controls the time window for rate-based metrics
-    (failure rate, command counts). Accepts 1, 6, 24, 72, 168.
-    Defaults to 24.
+    (task outcomes, failure rate, and command outcomes). Accepts
+    1, 6, 24, 72, 168 and defaults to 24. ``window_hours`` reports
+    the effective value in the response. The historical ``*_24h``
+    field names are retained for API compatibility, but their values
+    use this selected window.
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
 
@@ -131,7 +135,7 @@ async def get_stats(
         min_role=ProjectRole.VIEWER,
     )
 
-    cutoff_24h = datetime.now(UTC) - timedelta(hours=hours)
+    window_cutoff = datetime.now(UTC) - timedelta(hours=hours)
 
     # tasks by state
     state_rows = (
@@ -147,14 +151,15 @@ async def get_stats(
         setattr(counts, state.value if hasattr(state, "value") else str(state), int(count))
     tasks_total = sum(getattr(counts, name) for name in TaskStateCounts.model_fields)
 
-    # 24h failure / success counts
+    # Selected-window failure / success counts. Public field names retain
+    # the historical ``_24h`` suffix for API compatibility.
     tasks_failed_24h = int(
         (
             await db_session.execute(
                 select(func.count(Task.id)).where(
                     Task.project_id == project.id,
                     Task.state == TaskState.FAILURE,
-                    Task.finished_at >= cutoff_24h,
+                    Task.finished_at >= window_cutoff,
                 ),
             )
         ).scalar_one(),
@@ -165,13 +170,13 @@ async def get_stats(
                 select(func.count(Task.id)).where(
                     Task.project_id == project.id,
                     Task.state == TaskState.SUCCESS,
-                    Task.finished_at >= cutoff_24h,
+                    Task.finished_at >= window_cutoff,
                 ),
             )
         ).scalar_one(),
     )
-    total_24h = tasks_failed_24h + tasks_succeeded_24h
-    failure_rate_24h = tasks_failed_24h / total_24h if total_24h > 0 else 0.0
+    total_in_window = tasks_failed_24h + tasks_succeeded_24h
+    failure_rate_24h = tasks_failed_24h / total_in_window if total_in_window > 0 else 0.0
 
     # agents online/offline
     agents_online = int(
@@ -180,6 +185,7 @@ async def get_stats(
                 select(func.count(Agent.id)).where(
                     Agent.project_id == project.id,
                     Agent.state == AgentState.ONLINE,
+                    Agent.revoked_at.is_(None),
                 ),
             )
         ).scalar_one(),
@@ -190,6 +196,7 @@ async def get_stats(
                 select(func.count(Agent.id)).where(
                     Agent.project_id == project.id,
                     Agent.state != AgentState.ONLINE,
+                    Agent.revoked_at.is_(None),
                 ),
             )
         ).scalar_one(),
@@ -236,7 +243,7 @@ async def get_stats(
                 select(func.count(Command.id)).where(
                     Command.project_id == project.id,
                     Command.status == CommandStatus.COMPLETED,
-                    Command.completed_at >= cutoff_24h,
+                    Command.completed_at >= window_cutoff,
                 ),
             )
         ).scalar_one(),
@@ -247,7 +254,7 @@ async def get_stats(
                 select(func.count(Command.id)).where(
                     Command.project_id == project.id,
                     Command.status == CommandStatus.FAILED,
-                    Command.completed_at >= cutoff_24h,
+                    Command.completed_at >= window_cutoff,
                 ),
             )
         ).scalar_one(),
@@ -258,7 +265,7 @@ async def get_stats(
                 select(func.count(Command.id)).where(
                     Command.project_id == project.id,
                     Command.status == CommandStatus.TIMEOUT,
-                    Command.completed_at >= cutoff_24h,
+                    Command.completed_at >= window_cutoff,
                 ),
             )
         ).scalar_one(),
@@ -302,6 +309,7 @@ async def get_stats(
         health.status = "critical"
 
     return StatsResponse(
+        window_hours=hours,
         tasks_by_state=counts,
         tasks_total=tasks_total,
         tasks_failed_24h=tasks_failed_24h,

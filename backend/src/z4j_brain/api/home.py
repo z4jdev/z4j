@@ -10,17 +10,16 @@ Two endpoints, both available to any authenticated user:
 
 - ``GET /home/recent-failures``
     Recent ``task.failed`` events across every project the user is a
-    member of (or every project if the user is a global admin), with
-    keyset pagination on ``occurred_at``.
+    member of (or the configured first page of projects if the user is
+    a global admin), with keyset pagination on ``(occurred_at, id)``.
 
 Both endpoints scope to the caller's memberships - a non-admin user
 only sees projects they have a row for in ``memberships``. Global
-admins see everything.
-
-The queries are written to be O(project-count) at worst: every
-aggregate is a single ``GROUP BY project_id`` over the already-indexed
-paths, so the endpoint stays flat regardless of how many projects the
-user has access to.
+admins are bounded by ``Settings.admin_project_list_cap`` (configured
+as ``Z4J_ADMIN_PROJECT_LIST_CAP``; default 500) so one request cannot
+materialize an unbounded tenant-wide dashboard. Aggregate queries are
+grouped over that visible project set; their database and response cost
+therefore grows with the number of visible rows and matching events.
 """
 
 from __future__ import annotations
@@ -173,7 +172,10 @@ async def _visible_projects(
     projects they don't belong to).
 
     Archived (``is_active=False``) projects are filtered out - they
-    shouldn't appear on the Home dashboard.
+    shouldn't appear on the Home dashboard. For global admins, the
+    repository query is capped at ``admin_project_cap`` before that
+    filtering, so this is a bounded first page rather than an exhaustive
+    tenant-wide project list.
 
     When ``bound_slug`` is non-None (caller authenticated via a
     project-scoped Bearer key), the returned list is filtered to
@@ -182,10 +184,11 @@ async def _visible_projects(
     home / recent-failures aggregates.
     """
     if user.is_admin:
-        # Global admin: every active project, with their actual role
-        # where one exists, and None otherwise.
-        rows = await projects_repo.list(limit=admin_project_cap, offset=0)
-        active = [p for p in rows if p.is_active]
+        # Global admin: the configured first page of projects, retaining
+        # active projects and their actual role where one exists (None
+        # otherwise). The cap is a deliberate request-memory/DB guardrail.
+        admin_rows = await projects_repo.list(limit=admin_project_cap, offset=0)
+        active = [project for project in admin_rows if project.is_active]
         member_rows = await memberships.list_for_user(user.id)
         role_map: dict[uuid.UUID, str | None] = {
             m.project_id: m.role.value if hasattr(m.role, "value") else str(m.role)
@@ -203,12 +206,12 @@ async def _visible_projects(
     role_by_project = {
         m.project_id: m.role.value if hasattr(m.role, "value") else str(m.role) for m in member_rows
     }
-    # Single IN-query for the member's projects instead of N round
-    # trips. Keeps this endpoint O(1) regardless of how many
-    # memberships the caller has.
+    # Use one IN-query for the member's projects instead of one round trip
+    # per membership. Query and materialisation cost still scales with the
+    # membership set; this only bounds the number of round trips.
     from sqlalchemy import select as _select
 
-    rows = (
+    member_projects = (
         (
             await projects_repo.session.execute(
                 _select(Project).where(
@@ -220,11 +223,63 @@ async def _visible_projects(
         .scalars()
         .all()
     )
-    visible = list(rows)
+    visible = list(member_projects)
     if bound_slug is not None:
         visible = [p for p in visible if p.slug == bound_slug]
         role_by_project = {p.id: role_by_project.get(p.id) for p in visible}
     return visible, role_by_project
+
+
+def _bounded_failure_rate(*, tasks_24h: int, failures_24h: int) -> float:
+    """Return a bounded failure signal for the rolling event window.
+
+    ``task.failed`` can fall inside the window while its matching
+    ``task.received`` falls outside it, so the two counters are not a strict
+    ratio denominator/numerator pair. Any observed failure with zero receives
+    must remain visible as the maximum bounded signal rather than being
+    reported as a healthy-looking zero. Values above 100% are likewise capped.
+    """
+    if failures_24h <= 0:
+        return 0.0
+    if tasks_24h <= 0:
+        return 1.0
+    return min(failures_24h / tasks_24h, 1.0)
+
+
+def _failure_attention_severity(
+    *,
+    tasks_24h: int,
+    failures_24h: int,
+    failure_rate_24h: float,
+) -> str | None:
+    """Choose attention severity without hiding a zero-denominator failure.
+
+    Ordinary ratios retain the existing ``>20``-task noise floor. A failure
+    with no receive events is a distinct, severe signal: it both degrades the
+    project health and emits a critical attention item so the dashboard can
+    explain the card state.
+    """
+    if failures_24h > 0 and tasks_24h == 0:
+        return "critical"
+    if failure_rate_24h <= 0.05 or tasks_24h <= 20:
+        return None
+    return "critical" if failure_rate_24h > 0.20 else "warning"
+
+
+def _failure_attention_message(
+    *,
+    tasks_24h: int,
+    failures_24h: int,
+    failure_rate_24h: float,
+) -> str:
+    """Describe the evidence behind a high-failure attention item."""
+    if tasks_24h == 0:
+        return (
+            f"{failures_24h} failure(s) with no task.received events (24h)"
+            if failures_24h != 1
+            else "1 failure with no task.received events (24h)"
+        )
+    return f"Failure rate {failure_rate_24h:.1%} over {tasks_24h} tasks (24h)"
 
 
 def _compute_health(
@@ -277,7 +332,13 @@ async def get_summary(  # noqa: PLR0915  home summary aggregation
     db_session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> HomeSummaryPublic:
-    """Home dashboard summary - one blob the SPA renders as cards."""
+    """Return the bounded project set the SPA renders as Home cards.
+
+    Non-admins are scoped to their active memberships. Global-admin results
+    are bounded by ``Settings.admin_project_list_cap``
+    (``Z4J_ADMIN_PROJECT_LIST_CAP``, default 500); this endpoint is not an
+    exhaustive tenant-wide project export.
+    """
     bound_slug: str | None = getattr(
         request.state,
         "api_key_project_slug",
@@ -320,12 +381,8 @@ async def get_summary(  # noqa: PLR0915  home summary aggregation
     cutoff_24h = now - timedelta(hours=24)
 
     # ------------------------------------------------------------------
-    # Event aggregates per project: tasks_24h, failures_24h,
-    # last_activity_at.
+    # Event aggregates per project: tasks_24h and failures_24h.
     # ------------------------------------------------------------------
-    # last_activity_at is MAX(occurred_at) over ALL events for the
-    # project, not just the last 24h - we want to show the most
-    # recent timestamp even if it's older than the rolling window.
     task_stats: dict[uuid.UUID, tuple[int, int]] = {}
     event_rows = (
         await db_session.execute(
@@ -348,12 +405,11 @@ async def get_summary(  # noqa: PLR0915  home summary aggregation
     for row in event_rows:
         task_stats[row.project_id] = (int(row.tasks_24h or 0), int(row.failures_24h or 0))
 
-    # Bound last_activity_at to a rolling 30-day window
-    # so the MAX aggregate doesn't scan every events partition for
-    # every home/summary load. The card already shows "no recent
-    # activity" when the value is null - quiet projects fall into
-    # that branch automatically. 30d covers any plausible "what
-    # changed last week?" use case.
+    # last_activity_at is MAX(occurred_at) within a rolling 30-day window,
+    # deliberately distinct from the 24-hour task counters above. Bounding
+    # the aggregate avoids scanning every events partition on every summary
+    # load. Projects with no event in the window return null and the card
+    # renders "no recent activity".
     cutoff_activity = now - timedelta(days=30)
     last_activity: dict[uuid.UUID, datetime | None] = {}
     last_rows = (
@@ -385,7 +441,10 @@ async def get_summary(  # noqa: PLR0915  home summary aggregation
                 ).label("online"),
                 func.count(Agent.id).label("total"),
             )
-            .where(Agent.project_id.in_(project_ids))
+            .where(
+                Agent.project_id.in_(project_ids),
+                Agent.revoked_at.is_(None),
+            )
             .group_by(Agent.project_id),
         )
     ).all()
@@ -454,14 +513,10 @@ async def get_summary(  # noqa: PLR0915  home summary aggregation
         stuck = stuck_stats.get(project.id, 0)
         last_at = last_activity.get(project.id)
 
-        # Clamp to [0.0, 1.0]. ``task.failed`` and ``task.received``
-        # come from the same event stream but can arrive out of
-        # order: a failure can be recorded for a task whose receive
-        # event fell outside the 24h window, which produces a ratio
-        # > 1.0 and the UI would otherwise render "120%". Cap here
-        # so every downstream consumer (per-project card, aggregate
-        # banner, health heuristic) sees a sensible number.
-        failure_rate = min(failures_24h / tasks_24h, 1.0) if tasks_24h > 0 else 0.0
+        failure_rate = _bounded_failure_rate(
+            tasks_24h=tasks_24h,
+            failures_24h=failures_24h,
+        )
         health = _compute_health(
             failure_rate_24h=failure_rate,
             stuck_commands=stuck,
@@ -524,19 +579,27 @@ async def get_summary(  # noqa: PLR0915  home summary aggregation
                 ),
             )
 
-        # High failure rate - only flag when there's meaningful
-        # volume (>20 tasks) so a single flaky dev-run doesn't light
-        # the dashboard up. Escalate to critical at 20%.
-        if failure_rate > 0.05 and tasks_24h > 20:
-            severity = "critical" if failure_rate > 0.20 else "warning"
+        # Ordinary high rates retain the >20-task noise floor. A failure
+        # with no receives is handled as a separate critical signal because
+        # suppressing it would leave a degraded card with no explanation.
+        failure_severity = _failure_attention_severity(
+            tasks_24h=tasks_24h,
+            failures_24h=failures_24h,
+            failure_rate_24h=failure_rate,
+        )
+        if failure_severity is not None:
             attention.append(
                 AttentionItem(
                     kind="high_failure_rate",
-                    severity=severity,
+                    severity=failure_severity,
                     project_id=project.id,
                     project_slug=project.slug,
                     project_name=project.name,
-                    message=(f"Failure rate {failure_rate:.1%} over {tasks_24h} tasks (24h)"),
+                    message=_failure_attention_message(
+                        tasks_24h=tasks_24h,
+                        failures_24h=failures_24h,
+                        failure_rate_24h=failure_rate,
+                    ),
                     count=failures_24h,
                 ),
             )
@@ -572,8 +635,10 @@ async def get_summary(  # noqa: PLR0915  home summary aggregation
     # Keep cards in a deterministic order too - by name ascending.
     cards.sort(key=lambda c: c.name)
 
-    total_tasks = agg_tasks_24h
-    agg_failure_rate = min(agg_failures_24h / total_tasks, 1.0) if total_tasks > 0 else 0.0
+    agg_failure_rate = _bounded_failure_rate(
+        tasks_24h=agg_tasks_24h,
+        failures_24h=agg_failures_24h,
+    )
 
     return HomeSummaryPublic(
         user=user_mini,
@@ -642,6 +707,10 @@ async def get_recent_failures(
     settings: Settings = Depends(get_settings),
 ) -> RecentFailuresPublic:
     """Recent ``task.failed`` events across every visible project.
+
+    Non-admin visibility follows active project memberships. Global-admin
+    project visibility is bounded by ``Settings.admin_project_list_cap``
+    (``Z4J_ADMIN_PROJECT_LIST_CAP``, default 500), just like Home summary.
 
     Keyset pagination on ``(occurred_at, id)`` - the second element
     is required to break ties when multiple failures share an exact

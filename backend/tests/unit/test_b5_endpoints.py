@@ -97,7 +97,9 @@ async def seeded(settings: Settings, brain_app):
             ip_at_issue="127.0.0.1",
             user_agent_at_issue="test",
         )
-        s.add_all([project, user, session_row])
+        s.add_all([project, user])
+        await s.flush()
+        s.add(session_row)
         await s.commit()
 
     return {
@@ -325,6 +327,131 @@ class TestAuditRouter:
         # Only the selected columns should be present.
         assert set(body[0].keys()) == {"action", "result"}
 
+    async def test_audit_export_uses_format_specific_row_caps(
+        self,
+        brain_app,
+        client,
+        seeded,
+        monkeypatch,
+    ) -> None:
+        from z4j_brain.api import audit as audit_api
+
+        assert audit_api._export_row_cap("xlsx") == 25_000
+        assert audit_api._export_row_cap("csv") == 50_000
+        assert audit_api._export_row_cap("json") == 50_000
+        operation = brain_app.openapi()["paths"]["/api/v1/projects/{slug}/audit"]["get"]
+        format_parameter = next(
+            parameter for parameter in operation["parameters"] if parameter["name"] == "format"
+        )
+        description = format_parameter["description"]
+        assert "CSV and JSON are capped at 50 000 rows" in description
+        assert "XLSX is capped at 25 000 rows" in description
+
+        async with brain_app.state.db.session() as s:
+            now = datetime.now(UTC)
+            for index in range(2):
+                s.add(
+                    AuditLog(
+                        project_id=seeded["project_id"],
+                        user_id=seeded["user_id"],
+                        action=f"cap.test.{index}",
+                        target_type="test",
+                        result="success",
+                        audit_metadata={},
+                        occurred_at=now,
+                    ),
+                )
+            await s.commit()
+
+        # Use small ceilings to exercise the route without manufacturing
+        # tens of thousands of rows. CSV/JSON retain the larger general cap;
+        # XLSX fails at its lower in-memory-workbook cap.
+        monkeypatch.setattr(audit_api, "_EXPORT_ROW_CAP", 2)
+        monkeypatch.setattr(audit_api, "XLSX_ROW_CAP", 1)
+
+        xlsx = await client.get("/api/v1/projects/default/audit?format=xlsx")
+        assert xlsx.status_code == 422
+        assert "xlsx audit export is capped at 1 rows" in xlsx.text
+
+        csv = await client.get("/api/v1/projects/default/audit?format=csv")
+        assert csv.status_code == 200
+        json_response = await client.get("/api/v1/projects/default/audit?format=json")
+        assert json_response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Command and issue request validation
+# ---------------------------------------------------------------------------
+
+
+def test_pool_resize_request_accepts_only_real_resize_deltas() -> None:
+    from pydantic import ValidationError as PydanticValidationError
+    from z4j_brain.api.commands import PoolResizeRequest
+
+    agent_id = uuid.uuid4()
+    for delta in (-100, -1, 1, 100):
+        request = PoolResizeRequest(
+            agent_id=agent_id,
+            worker_name="worker-1",
+            delta=delta,
+        )
+        assert request.delta == delta
+
+    with pytest.raises(PydanticValidationError, match="delta must be non-zero"):
+        PoolResizeRequest(
+            agent_id=agent_id,
+            worker_name="worker-1",
+            delta=0,
+        )
+
+
+@pytest.mark.asyncio
+class TestRequestValidation:
+    async def test_pool_resize_zero_is_422(self, client, seeded) -> None:
+        response = await client.post(
+            "/api/v1/projects/default/commands/pool-resize",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={
+                "agent_id": str(uuid.uuid4()),
+                "worker_name": "worker-1",
+                "delta": 0,
+            },
+        )
+        assert response.status_code == 422
+        assert "delta must be non-zero" in response.text
+
+    async def test_issue_status_rejects_unknown_value_instead_of_widening(
+        self,
+        client,
+    ) -> None:
+        invalid = await client.get(
+            "/api/v1/projects/default/issues?status=not-a-status",
+        )
+        assert invalid.status_code == 422
+
+        for status in ("ongoing", "recovered"):
+            accepted = await client.get(
+                f"/api/v1/projects/default/issues?status={status}",
+            )
+            assert accepted.status_code == 200
+
+
+def test_command_and_automation_module_contracts_are_current() -> None:
+    from z4j_brain.api import automation_rules, commands
+
+    commands_contract = " ".join((commands.__doc__ or "").split())
+    assert "worker pool/consumer/rate controls" in commands_contract
+    assert "land in B5" not in commands_contract
+
+    bulk_contract = " ".join((commands.BulkRetryRequest.__doc__ or "").split())
+    assert "selection keys" in bulk_contract
+    assert "ownership-checks" in bulk_contract
+    assert "forwarded to the agent verbatim" not in bulk_contract
+
+    automation_contract = " ".join((automation_rules.__doc__ or "").split())
+    assert "/automation/settings" in automation_contract
+    assert "lands in a follow-up" not in automation_contract
+
 
 # ---------------------------------------------------------------------------
 # Projects CRUD
@@ -512,12 +639,24 @@ class TestMembershipsRouter:
 # ---------------------------------------------------------------------------
 
 
+def test_metrics_module_contract_describes_fail_secure_default() -> None:
+    from z4j_brain.api import metrics
+
+    contract = " ".join((metrics.__doc__ or "").split())
+    assert "fail-secure by default" in contract
+    assert "Z4J_METRICS_PUBLIC=1" in contract
+    assert "fresh self-contained SQLite installation" in contract
+    assert "other deployments must configure one explicitly" in contract
+    assert 'legacy "open" behaviour' not in contract
+
+
 @pytest.mark.asyncio
 class TestMetricsEndpoint:
-    async def test_metrics_returns_prometheus_text(self, client) -> None:
+    async def test_metrics_returns_prometheus_text(self, client, brain_app) -> None:
         """Default unit-test fixture has metrics_public=True so the
         scrape works without a bearer token. Mirrors a closed-network
         deployment where Prometheus runs on the same host."""
+        assert str(brain_app.url_path_for("metrics_endpoint")) == "/metrics"
         r = await client.get("/metrics")
         assert r.status_code == 200
         assert "text/plain" in r.headers.get("content-type", "")
@@ -595,6 +734,34 @@ class TestMetricsEndpoint:
                 )
                 assert r.status_code == 200
                 assert "z4j_events_ingested_total" in r.text
+        finally:
+            await engine.dispose()
+
+    async def test_metrics_disabled_removes_route_even_when_public(
+        self,
+        brain_settings,
+    ) -> None:
+        """The route-presence switch wins over the public-auth opt-in."""
+        from httpx import ASGITransport, AsyncClient
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from starlette.routing import NoMatchFound
+        from z4j_brain.main import create_app
+
+        disabled_settings = brain_settings.model_copy(
+            update={"metrics_enabled": False, "metrics_public": True},
+        )
+        engine = create_async_engine(disabled_settings.database_url, future=True)
+        try:
+            app = create_app(disabled_settings, engine=engine)
+            with pytest.raises(NoMatchFound):
+                app.url_path_for("metrics_endpoint")
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as ac:
+                response = await ac.get("/metrics")
+                assert response.status_code == 404
         finally:
             await engine.dispose()
 

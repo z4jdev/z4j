@@ -1,15 +1,12 @@
 """Compact "weak password" denylist.
 
 A small in-memory frozenset of obvious bad-choice passwords. This is
-NOT a substitute for the Have-I-Been-Pwned k-Anonymity check (which
-ships in Phase 1.1 as an opt-in network call) - it just catches the
-top tier of "wouldn't even need a botnet" guesses without any IO.
+not a substitute for a comprehensive breached-password service; z4j
+does not currently make a Have-I-Been-Pwned network check. It catches
+the top tier of guesses without any I/O.
 
 The list is intentionally short. Bigger lists are mostly garbage
 duplicates and inflate import time and memory for marginal benefit.
-For real coverage, enable :data:`Settings.hibp_check_enabled` once
-that ships.
-
 Source: composite of OWASP, NIST 800-63B Appendix A guidance, and
 the SecLists project's top-100 list, lower-cased and de-duplicated.
 """
@@ -118,8 +115,8 @@ def _generate_patterns() -> frozenset[str]:
     of `Summer2024` / `Winter2025` / `Z4j2024!` / `Celery123!`
     variants.
 
-    Audit A3: expands the denylist from ~90 entries to ~1,500
-    including the "bad but technically meets policy" tail.
+    Audit A3: expands the small curated denylist with the "bad but
+    technically meets policy" tail.
     """
     out: set[str] = set()
     seasons = ("spring", "summer", "autumn", "fall", "winter")

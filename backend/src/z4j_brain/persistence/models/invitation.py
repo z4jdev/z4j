@@ -3,8 +3,10 @@
 An admin mints an invitation for a specific ``(email, project,
 role)``. The brain stores the token as an HMAC-SHA256 hash (the
 plaintext is shown once at mint, never persisted). The invitee
-accepts by visiting ``/invite?token=<plaintext>``, which verifies
-the hash, creates the user, grants membership, and stamps
+accepts by visiting ``/invite#token=<plaintext>``. The browser reads the
+fragment (which is not sent in the initial request or Referer header) and
+submits the token to the API, which verifies the hash, creates the user,
+grants membership, and stamps
 ``accepted_at`` + ``accepted_by_user_id`` in the same transaction.
 
 Lifecycle (mutually exclusive states):
@@ -24,7 +26,8 @@ Security invariants (mirror first_boot_tokens per audit H5):
 - TTL default 7 days (overridable per-invite).
 - Accept endpoint re-checks "user with this email doesn't already
   exist" inside the same transaction as the user insert (TOCTOU).
-- Token comparison uses ``hmac.compare_digest`` (constant-time).
+- Acceptance HMAC-SHA256 digests the submitted token and performs an indexed
+  equality lookup on the fixed-size digest.
 """
 
 from __future__ import annotations
@@ -53,7 +56,7 @@ class Invitation(PKMixin, TimestampsMixin, Base):
             user delete (invite stays as an audit row).
         token_hash: HMAC-SHA256 hex digest of the plaintext token.
             Plaintext shown once at mint, never stored. Indexed
-            for constant-time accept-path lookups.
+            for direct accept-path equality lookups.
         expires_at: TTL. Default 7 days; accept endpoint refuses
             after this point.
         accepted_at: ``NULL`` until accepted. Set in the same
@@ -102,7 +105,7 @@ class Invitation(PKMixin, TimestampsMixin, Base):
     )
 
     __table_args__ = (
-        # Constant-time accept-path lookup by token hash.
+        # Direct accept-path lookup by fixed-size token digest.
         Index("ix_invitations_token_hash", "token_hash", unique=True),
         # Hot path: admin lists pending invites per project
         # (WHERE project_id = ? AND accepted_at IS NULL AND

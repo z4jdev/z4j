@@ -126,8 +126,12 @@ class CreateApiKeyRequest(BaseModel):
 class ScopeCatalogue(BaseModel):
     """Served by ``GET /api-keys/scopes`` so the UI stays in sync."""
 
-    scopes: list[str]
-    admin_only: list[str]
+    scopes: list[str] = Field(
+        description="All scope names that may be requested at key-mint time.",
+    )
+    admin_only: list[str] = Field(
+        description="Subset that only a global-admin session may grant.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,11 +196,16 @@ async def list_scopes(
 
     1.6.3 security advisory: requires authentication. Pre-1.6.3 this
     endpoint was public on the rationale that the shape was static.
-    Auth-gating costs nothing (any logged-in dashboard user OR API
-    key qualifies), prevents future scope additions (e.g.
-    ``secrets:write``, ``audit:purge``) from being silently
-    discoverable, and keeps the principle that the brain does not
-    return anything substantive to anonymous callers.
+    A valid cookie session qualifies. For Bearer authentication, the
+    ``api-keys`` route tag and GET method require ``admin:read``;
+    currently that derived requirement is satisfied by the mintable
+    ``admin:*`` umbrella. The API key must also be unbound: a
+    project-bound key cannot call this non-project route because
+    ``api-keys`` is not in the project-scoped non-slug allowlist.
+
+    These stricter Bearer semantics prevent a narrow or project-bound
+    key from discovering future administrative scope additions while
+    preserving the scope picker for every logged-in dashboard user.
     """
     from z4j_brain.auth.scopes import ADMIN_ONLY_SCOPES, ALL_SCOPES
 

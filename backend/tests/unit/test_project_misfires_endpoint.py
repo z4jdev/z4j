@@ -8,6 +8,12 @@ the response; a non-member is refused (404 -- ``require_member`` returns
 404, not 403, for non-members by design, to keep project slugs
 non-enumerable, exactly like the per-schedule endpoint); a project with
 no misfires returns [].
+
+These run against a MIGRATED database rather than a create_all() one. The
+Boundary-D guards that refuse a direct INSERT into ``schedules`` and the
+Boundary-F chain that authenticates every audit row both live in
+migrations, so a create_all() schema refuses nothing and cannot show what
+an operator's database does to this endpoint's seed data.
 """
 
 from __future__ import annotations
@@ -18,32 +24,36 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
 from z4j_brain.auth.csrf import csrf_cookie_name
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.main import create_app
 from z4j_brain.persistence import models  # noqa: F401
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ProjectRole, ScheduleKind
 from z4j_brain.persistence.models import (
     Membership,
     Project,
-    Schedule,
     Session,
     User,
 )
 from z4j_brain.persistence.repositories import AuditLogRepository
+from z4j_brain.persistence.repositories.schedule_control import (
+    ScheduleControlRepository,
+)
 from z4j_brain.settings import Settings
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_db_url,
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated, so it refuses an audit
+        # row that carries no chain authentication. The misfire rows this file
+        # seeds are audit rows, so without the key there is nothing to read.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
         environment="dev",
         log_json=False,
         argon2_time_cost=1,
@@ -57,13 +67,7 @@ def settings() -> Settings:
 
 @pytest.fixture
 async def brain_app(settings: Settings):
-    engine = create_async_engine(
-        settings.database_url,
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine = create_async_engine(settings.database_url)
     app = create_app(settings, engine=engine)
     yield app
     await engine.dispose()
@@ -78,8 +82,6 @@ async def _seed(*, settings: Settings, brain_app, with_misfires: bool = True) ->
     # A second authenticated user with NO membership on the project.
     nonmember_id = uuid.uuid4()
     nonmember_session_id = uuid.uuid4()
-    sched_a = uuid.uuid4()
-    sched_b = uuid.uuid4()
     csrf = secrets.token_urlsafe(32)
 
     async with db.session() as s:
@@ -100,6 +102,11 @@ async def _seed(*, settings: Settings, brain_app, with_misfires: bool = True) ->
                     is_admin=False,
                     is_active=True,
                 ),
+            ]
+        )
+        await s.flush()
+        s.add_all(
+            [
                 Session(
                     id=session_id,
                     user_id=user_id,
@@ -124,27 +131,33 @@ async def _seed(*, settings: Settings, brain_app, with_misfires: bool = True) ->
                 ),
             ]
         )
-        for sid, sched_name in (
-            (sched_a, "nightly"),
-            (sched_b, "hourly"),
-        ):
-            s.add(
-                Schedule(
-                    id=sid,
-                    project_id=project_id,
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name=sched_name,
-                    task_name="app.t",
-                    kind=ScheduleKind.INTERVAL,
-                    expression="60s",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                ),
+        await s.flush()
+        # Through the control repository, because Boundary D refuses a direct
+        # INSERT into schedules. The ids are assigned by the repository, so
+        # they are collected here rather than minted above.
+        control = ScheduleControlRepository(s)
+        created_ids: dict[str, uuid.UUID] = {}
+        for sched_name in ("nightly", "hourly"):
+            created = await control.create_current(
+                project_id=project_id,
+                data={
+                    "engine": "celery",
+                    "scheduler": "z4j-scheduler",
+                    "name": sched_name,
+                    "task_name": "app.t",
+                    "kind": ScheduleKind.INTERVAL.value,
+                    "expression": "60s",
+                    "timezone": "UTC",
+                    "args": [],
+                    "kwargs": {},
+                    "is_enabled": True,
+                },
+                planning_at=datetime.now(UTC),
             )
+            created_ids[sched_name] = created.id
         await s.commit()
+        sched_a = created_ids["nightly"]
+        sched_b = created_ids["hourly"]
 
         if with_misfires:
             audit = AuditService(settings)

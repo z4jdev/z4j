@@ -1,12 +1,13 @@
 """``/api/v1/projects/{slug}/commands`` REST router.
 
-Read endpoints + the two operator-facing write endpoints
-(retry-task, cancel-task) needed to demo the loop. Schedule
-mutations, bulk operations, and worker control land in B5.
+Read endpoints plus the operator-facing command write surface:
+task retry/cancel, explicit-selection bulk retry, queue purge,
+and worker pool/consumer/rate controls.
 """
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -277,9 +278,14 @@ class CancelTaskRequest(BaseModel):
 class BulkRetryRequest(BaseModel):
     """Bulk retry request body.
 
-    ``filter`` is forwarded to the agent verbatim. Common keys the
-    celery adapter understands: ``state``, ``queue``, ``name``,
-    ``since``, ``until``. ``max`` is hard-capped agent-side at 10000.
+    ``filter`` accepts only the selection keys in
+    :data:`CLIENT_ALLOWED_BULK_FILTER_KEYS`; executable and server-owned
+    keys are stripped and audit-recorded. This compatibility endpoint
+    requires a non-empty ``task_ids`` selection plus an explicit engine,
+    then deduplicates, caps, and ownership-checks those IDs before adding
+    server-derived task names and priorities. All-matching requests use
+    the versioned ``/bulk-retry-requests`` resource instead. ``max`` is
+    capped at 10 000 at the request boundary.
     """
 
     agent_id: uuid.UUID
@@ -342,6 +348,13 @@ class PoolResizeRequest(BaseModel):
     worker_name: str = Field(min_length=1, max_length=200)
     delta: int = Field(ge=-100, le=100)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("delta")
+    @classmethod
+    def _require_resize(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("delta must be non-zero (positive to grow, negative to shrink)")
+        return value
 
 
 class ConsumerRequest(BaseModel):
@@ -535,6 +548,12 @@ async def issue_retry_task(
     db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> CommandPublic:
+    # ``eta_seconds`` is a relative REST input, while every adapter receives
+    # ``eta`` as an absolute POSIX timestamp. Resolve the wall-clock deadline
+    # before any database / dispatch awaits so queueing or an offline agent
+    # cannot silently restart the requested delay later.
+    eta = time.time() + body.eta_seconds if body.eta_seconds is not None else None
+
     # Look up the original task's priority so the agent can
     # preserve it on the re-enqueue. Without this a "high"
     # priority task silently drops to broker default on every
@@ -627,6 +646,7 @@ async def issue_retry_task(
             "original_had_args": bool(
                 original is not None and (original.args is not None or original.kwargs is not None)
             ),
+            "eta": eta,
             "eta_seconds": body.eta_seconds,
             "priority": priority_label,
         },
@@ -1681,7 +1701,7 @@ async def _issue_generic_command(
     )
 
     # Cross-project agent guard.
-    agent = await AgentRepository(db_session).get(agent_id)
+    agent = await AgentRepository(db_session).get_live(agent_id, lock=True)
     if agent is None or agent.project_id != project.id:
         raise NotFoundError(
             "agent not found in this project",

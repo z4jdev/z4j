@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, Loader2, Shield, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { revokeOtherSessions } from "@/lib/session-actions";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -96,8 +97,8 @@ function MfaSection() {
     <Card className="p-6">
       <h3 className="text-sm font-semibold">Two-factor authentication</h3>
       <p className="mt-1 text-xs text-muted-foreground">
-        TOTP via your authenticator app, plus single-use recovery codes
-        in case you lose your phone.
+        TOTP via your authenticator app, plus single-use recovery codes in case
+        you lose your phone.
       </p>
       <div className="mt-4">
         {status.data.enrolled ? (
@@ -144,9 +145,7 @@ function MfaEnrollPanel() {
         }}
         disabled={enrollStart.isPending}
       >
-        {enrollStart.isPending && (
-          <Loader2 className="size-4 animate-spin" />
-        )}
+        {enrollStart.isPending && <Loader2 className="size-4 animate-spin" />}
         Set up two-factor authentication
       </Button>
     );
@@ -160,17 +159,12 @@ function MfaEnrollPanel() {
             Scan or type into your authenticator app
           </p>
           <p className="text-xs text-muted-foreground">
-            Open Authy / 1Password / Aegis / Bitwarden / Google
-            Authenticator. Scan the QR code below, or tap "Show secret"
-            and type the base32 string in manually.
+            Open Authy / 1Password / Aegis / Bitwarden / Google Authenticator.
+            Scan the QR code below, or tap "Show secret" and type the base32
+            string in manually.
           </p>
           <div className="flex justify-center rounded-md border bg-white p-4">
-            <QRCodeSVG
-              value={url}
-              size={192}
-              level="M"
-              includeMargin={false}
-            />
+            <QRCodeSVG value={url} size={192} level="M" includeMargin={false} />
           </div>
           <details className="space-y-2">
             <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
@@ -232,9 +226,7 @@ function MfaEnrollPanel() {
               autoComplete="one-time-code"
               maxLength={6}
               value={code}
-              onChange={(e) =>
-                setCode(e.target.value.replace(/\D/g, ""))
-              }
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
               required
             />
           </div>
@@ -266,17 +258,14 @@ function RecoveryCodesPanel({ codes }: { codes: string[] }) {
       <div className="rounded-md border border-amber-300/60 bg-amber-50 p-4 text-sm dark:border-amber-400/40 dark:bg-amber-400/10">
         <p className="font-medium">Save your recovery codes</p>
         <p className="mt-1 text-xs text-muted-foreground">
-          Each code is single-use. Store them somewhere only you can
-          access (password manager, printed copy in a safe). They
-          will not be shown again. Regenerate to invalidate the set.
+          Each code is single-use. Store them somewhere only you can access
+          (password manager, printed copy in a safe). They will not be shown
+          again. Regenerate to invalidate the set.
         </p>
       </div>
       <div className="grid grid-cols-2 gap-2 font-mono text-sm">
         {codes.map((c) => (
-          <code
-            key={c}
-            className="rounded bg-muted px-2 py-1 text-center"
-          >
+          <code key={c} className="rounded bg-muted px-2 py-1 text-center">
             {c}
           </code>
         ))}
@@ -321,10 +310,7 @@ function RecoveryCodesPanel({ codes }: { codes: string[] }) {
           I have saved my recovery codes
         </Label>
       </div>
-      <Button
-        disabled={!acknowledged}
-        onClick={() => window.location.reload()}
-      >
+      <Button disabled={!acknowledged} onClick={() => window.location.reload()}>
         Done
       </Button>
     </div>
@@ -380,14 +366,11 @@ function MfaEnabledPanel({
             ) : (
               <>
                 <p className="text-sm text-muted-foreground">
-                  This deletes your current codes and mints a fresh
-                  set. Any unused codes you've stored will stop working.
+                  This deletes your current codes and mints a fresh set. Any
+                  unused codes you've stored will stop working.
                 </p>
                 <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => setRegenOpen(false)}
-                  >
+                  <Button variant="outline" onClick={() => setRegenOpen(false)}>
                     Cancel
                   </Button>
                   <Button
@@ -421,9 +404,7 @@ function MfaEnabledPanel({
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>
-                Disable two-factor authentication
-              </DialogTitle>
+              <DialogTitle>Disable two-factor authentication</DialogTitle>
             </DialogHeader>
             <MfaDisableForm onDone={() => setDisableOpen(false)} />
           </DialogContent>
@@ -448,16 +429,14 @@ function MfaDisableForm({ onDone }: { onDone: () => void }) {
           onDone();
           window.location.reload();
         } catch (err) {
-          toast.error(
-            err instanceof Error ? err.message : String(err),
-          );
+          toast.error(err instanceof Error ? err.message : String(err));
         }
       }}
       className="space-y-3"
     >
       <p className="text-sm text-muted-foreground">
-        Enter your current password and a fresh code from your
-        authenticator app.
+        Enter your current password and a fresh code from your authenticator
+        app.
       </p>
       <div className="space-y-2">
         <Label htmlFor="disable-pwd">Password</Label>
@@ -492,9 +471,7 @@ function MfaDisableForm({ onDone }: { onDone: () => void }) {
           variant="destructive"
           disabled={disable.isPending || code.length !== 6}
         >
-          {disable.isPending && (
-            <Loader2 className="size-4 animate-spin" />
-          )}
+          {disable.isPending && <Loader2 className="size-4 animate-spin" />}
           Disable
         </Button>
       </DialogFooter>
@@ -526,15 +503,11 @@ function TrustedDevicesList() {
           await trustCurrent.mutateAsync();
           toast.success("This browser is now trusted for 30 days");
         } catch (err) {
-          toast.error(
-            err instanceof Error ? err.message : String(err),
-          );
+          toast.error(err instanceof Error ? err.message : String(err));
         }
       }}
     >
-      {trustCurrent.isPending && (
-        <Loader2 className="size-4 animate-spin" />
-      )}
+      {trustCurrent.isPending && <Loader2 className="size-4 animate-spin" />}
       Trust this device for 30 days
     </Button>
   );
@@ -545,10 +518,10 @@ function TrustedDevicesList() {
         <h4 className="text-sm font-semibold">Trusted devices</h4>
         <p className="text-xs text-muted-foreground">
           Trusting a browser lets it skip the two-factor step{" "}
-          <em>at sign-in</em> for 30 days. It does NOT skip the
-          re-verify prompt that appears before sensitive actions
-          like changing your password or minting an API key --
-          those still ask for a fresh code on every device.
+          <em>at sign-in</em> for 30 days. It does NOT skip the re-verify prompt
+          that appears before sensitive actions like changing your password or
+          minting an API key -- those still ask for a fresh code on every
+          device.
         </p>
         {trustCurrentButton}
       </div>
@@ -606,9 +579,7 @@ function TrustedDevicesList() {
                         toast.success("Device revoked");
                       } catch (err) {
                         toast.error(
-                          err instanceof Error
-                            ? err.message
-                            : String(err),
+                          err instanceof Error ? err.message : String(err),
                         );
                       }
                     }}
@@ -649,14 +620,7 @@ function SessionsSection() {
   });
 
   const revokeAllOther = useMutation({
-    mutationFn: async () => {
-      const others = (sessions ?? []).filter((s) => !s.is_current);
-      await Promise.all(
-        others.map((s) =>
-          api.post<void>(`/auth/sessions/${s.id}/revoke`),
-        ),
-      );
-    },
+    mutationFn: revokeOtherSessions,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["sessions"] });
       toast.success("All other sessions revoked");
@@ -712,9 +676,7 @@ function SessionsSection() {
               {sessions.map((session) => (
                 <TableRow
                   key={session.id}
-                  className={
-                    session.is_current ? "bg-primary/5" : undefined
-                  }
+                  className={session.is_current ? "bg-primary/5" : undefined}
                 >
                   <TableCell
                     className="max-w-[250px] truncate text-xs"

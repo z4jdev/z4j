@@ -20,6 +20,11 @@ Three fixes landed before declaring Phase 3 done:
 
 The cron-exporter shell-quote fix lives in the scheduler-package
 test_audit_phase3_fixes.py.
+
+These run against a MIGRATED database rather than a create_all() one. Both
+guarded boundaries matter here: the reconcile writes an audit row (Boundary
+F) and deletes schedules (Boundary D), and neither guard exists in a
+create_all() schema.
 """
 
 from __future__ import annotations
@@ -27,23 +32,25 @@ from __future__ import annotations
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
 from z4j_brain.persistence import models  # noqa: F401
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.enums import ScheduleKind
 from z4j_brain.persistence.models import (
     AuditLog,
     Project,
-    Schedule,
     Session,
     User,
+)
+from z4j_brain.persistence.repositories.schedule_control import (
+    ScheduleControlRepository,
 )
 from z4j_brain.settings import Settings
 
@@ -53,11 +60,15 @@ from z4j_brain.settings import Settings
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_db_url,
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated, so it refuses an
+        # audit row that carries no chain authentication. Production always
+        # has this configured; a test that omits it is not testing production.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
         environment="dev",
         log_json=False,
         argon2_time_cost=1,
@@ -71,14 +82,9 @@ def settings() -> Settings:
 
 @pytest.fixture
 async def brain_app(settings: Settings):
-    engine = create_async_engine(
-        settings.database_url,
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine = create_async_engine(settings.database_url)
     app = create_app(settings, engine=engine)
+    app.state.lifespan_ready = True
     yield app
     await engine.dispose()
 
@@ -90,40 +96,74 @@ async def _make_admin_seed(
 ) -> dict:
     db = brain_app.state.db
     hasher = PasswordHasher(settings)
-    project_id = uuid.uuid4()
     user_id = uuid.uuid4()
     session_id = uuid.uuid4()
     csrf = secrets.token_urlsafe(32)
 
     async with db.session() as s:
-        s.add_all(
-            [
-                Project(id=project_id, slug="default", name="Default"),
-                User(
-                    id=user_id,
-                    email=f"u-{uuid.uuid4().hex[:8]}@example.com",
-                    password_hash=hasher.hash("correct horse battery staple 9"),
-                    is_admin=True,
-                    is_active=True,
-                ),
-                Session(
-                    id=session_id,
-                    user_id=user_id,
-                    csrf_token=csrf,
-                    expires_at=datetime.now(UTC) + timedelta(hours=1),
-                    ip_at_issue="127.0.0.1",
-                    user_agent_at_issue="test",
-                ),
-            ],
+        project = (
+            await s.execute(select(Project).where(Project.slug == "default"))
+        ).scalar_one_or_none()
+        if project is None:
+            project = Project(id=uuid.uuid4(), slug="default", name="Default")
+            s.add(project)
+            await s.flush()
+        s.add(
+            User(
+                id=user_id,
+                email=f"u-{uuid.uuid4().hex[:8]}@example.com",
+                password_hash=hasher.hash("correct horse battery staple 9"),
+                is_admin=True,
+                is_active=True,
+            ),
+        )
+        await s.flush()
+        s.add(
+            Session(
+                id=session_id,
+                user_id=user_id,
+                csrf_token=csrf,
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+                ip_at_issue="127.0.0.1",
+                user_agent_at_issue="test",
+            ),
         )
         await s.commit()
 
     return {
-        "project_id": project_id,
+        "project_id": project.id,
         "user_id": user_id,
         "session_id": session_id,
         "csrf": csrf,
     }
+
+
+async def _seed_schedule(brain_app, seed: dict, **overrides) -> uuid.UUID:
+    """Create one schedule the way the product does.
+
+    Boundary D refuses a direct INSERT into ``schedules``: the row has to
+    arrive with an allocated revision and a matching change-log envelope,
+    which only the control repository produces.
+    """
+    data = {
+        "engine": "celery",
+        "scheduler": "z4j-scheduler",
+        "name": "x",
+        "task_name": "t.t",
+        "kind": ScheduleKind.CRON.value,
+        "expression": "0 * * * *",
+        "timezone": "UTC",
+        "is_enabled": True,
+    }
+    data.update(overrides)
+    async with brain_app.state.db.session() as s:
+        row = await ScheduleControlRepository(s).create_current(
+            project_id=seed["project_id"],
+            data=data,
+            planning_at=datetime.now(UTC),
+        )
+        await s.commit()
+    return row.id
 
 
 def _client(brain_app, settings: Settings, seed: dict):
@@ -159,6 +199,7 @@ class TestAuditCapturesSourceFilter:
         self,
         settings: Settings,
         brain_app,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The audit row MUST name the source label that was replaced.
 
@@ -170,27 +211,25 @@ class TestAuditCapturesSourceFilter:
             settings=settings,
             brain_app=brain_app,
         )
+        from z4j_brain.api import schedules as schedule_routes
+
+        acquire_lock = AsyncMock(
+            wraps=schedule_routes._acquire_replace_for_source_lock,
+        )
+        monkeypatch.setattr(
+            schedule_routes,
+            "_acquire_replace_for_source_lock",
+            acquire_lock,
+        )
         # Pre-seed two rows with source="declarative_django" so the
         # reconcile has something to delete.
-        async with brain_app.state.db.session() as s:
-            for name in ("a", "b"):
-                s.add(
-                    Schedule(
-                        project_id=seed["project_id"],
-                        engine="celery",
-                        scheduler="z4j-scheduler",
-                        name=name,
-                        task_name="t.t",
-                        kind=ScheduleKind.CRON,
-                        expression="0 * * * *",
-                        timezone="UTC",
-                        args=[],
-                        kwargs={},
-                        is_enabled=True,
-                        source="declarative_django",
-                    ),
-                )
-            await s.commit()
+        for name in ("a", "b"):
+            await _seed_schedule(
+                brain_app,
+                seed,
+                name=name,
+                source="declarative_django",
+            )
 
         async with _client(brain_app, settings, seed) as client:
             r = await client.post(
@@ -222,6 +261,9 @@ class TestAuditCapturesSourceFilter:
         assert meta["mode"] == "replace_for_source"
         assert meta["source_filter"] == "declarative_django"
         assert meta["deleted"] == 2
+        acquire_lock.assert_awaited_once()
+        assert acquire_lock.await_args.kwargs["project_id"] == seed["project_id"]
+        assert acquire_lock.await_args.kwargs["source_label"] == "declarative_django"
 
     @pytest.mark.asyncio
     async def test_upsert_mode_audit_omits_source_filter(
@@ -274,27 +316,43 @@ class TestAuditCapturesSourceFilter:
 
 
 class TestConcurrentReconcileGuard:
-    """Source-code pin for the advisory-lock fix.
+    @pytest.mark.asyncio
+    async def test_postgres_helper_executes_the_transaction_lock(self) -> None:
+        from z4j_brain.api.schedules import _acquire_replace_for_source_lock
 
-    The actual concurrency demonstration needs a real Postgres
-    (SQLite is single-writer so the race is impossible there).
-    This test pins the SQL string in the route source so a future
-    refactor can't silently drop the lock.
-    """
+        session = SimpleNamespace(
+            bind=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
+            execute=AsyncMock(),
+        )
 
-    def test_route_takes_advisory_lock_on_replace_mode(self) -> None:
-        import inspect
+        acquired = await _acquire_replace_for_source_lock(
+            session,
+            project_id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+            source_label="declarative_django",
+        )
 
-        from z4j_brain.api import schedules as routes
+        assert acquired is True
+        statement, parameters = session.execute.await_args.args
+        assert str(statement) == "SELECT pg_advisory_xact_lock(:p, :s)"
+        assert set(parameters) == {"p", "s"}
 
-        source = inspect.getsource(routes)
-        # The fix is the explicit advisory-lock call gated on
-        # postgres dialect + replace_for_source mode.
-        assert "pg_advisory_xact_lock" in source
-        # And it must be inside the import_schedules handler.
-        import_handler_src = inspect.getsource(routes.import_schedules)
-        assert "pg_advisory_xact_lock" in import_handler_src
-        assert "replace_for_source" in import_handler_src
+    @pytest.mark.asyncio
+    async def test_sqlite_helper_is_an_observable_noop(self) -> None:
+        from z4j_brain.api.schedules import _acquire_replace_for_source_lock
+
+        session = SimpleNamespace(
+            bind=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
+            execute=AsyncMock(),
+        )
+
+        acquired = await _acquire_replace_for_source_lock(
+            session,
+            project_id=uuid.uuid4(),
+            source_label="declarative_django",
+        )
+
+        assert acquired is False
+        session.execute.assert_not_awaited()
 
 
 # =====================================================================
@@ -344,25 +402,7 @@ class TestValidationStatusCode:
             brain_app=brain_app,
         )
         # Seed a schedule first.
-        sid = uuid.uuid4()
-        async with brain_app.state.db.session() as s:
-            s.add(
-                Schedule(
-                    id=sid,
-                    project_id=seed["project_id"],
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="x",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                ),
-            )
-            await s.commit()
+        sid = await _seed_schedule(brain_app, seed)
 
         async with _client(brain_app, settings, seed) as client:
             r = await client.patch(

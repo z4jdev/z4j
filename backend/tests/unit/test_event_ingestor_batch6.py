@@ -345,17 +345,17 @@ class TestStateMonotonicGuard:
         """Regression - a hostile agent stamping
         ``task.succeeded`` just under the clamp window cannot
         lock a task in SUCCESS against a subsequent legitimate
-        lifecycle event. The clamp normalises future-dated
-        incoming events AND ``_task_latest_lifecycle_at``
-        applies ``min(ts, now)`` defence in depth."""
+        lifecycle event. The database-side projection guard caps
+        existing lifecycle columns at its bound ``guard_now``
+        instant before comparing them."""
         proj = await _make_project(session, "alpha")
         agent = await _make_agent(session, proj)
         t_now = datetime.now(UTC)
         # Attacker sends task.succeeded with occurred_at = now + 55s.
         # The clamp (_OCCURRED_AT_FUTURE_LIMIT = 60s) allows this
-        # through (under the window) - but the clamp now also
-        # stamps it to now, so existing_latest after ingest is
-        # ~= now.
+        # through (under the window). The task projection must apply a
+        # processing-authority bound before this becomes a stored lifecycle
+        # watermark; the raw event keeps its source timestamp for audit/dedupe.
         attacker = [
             _event(kind="task.received", task_id="x", occurred_at=t_now - timedelta(seconds=10)),
             _event(
@@ -376,16 +376,14 @@ class TestStateMonotonicGuard:
         )
         await session.commit()
 
-        # A legitimate task.failed arrives a few seconds later.
-        # With the fix, the existing row's lifecycle timestamp
-        # never exceeds `now`, so the legitimate event's
-        # occurred_at is NOT < existing_latest, and the state
-        # transition lands.
+        # A legitimate task.failed arrives later with its REAL current source
+        # time. It must not need an artificially future-dated timestamp to
+        # clear the hostile observation.
         legit = [
             _event(
                 kind="task.failed",
                 task_id="x",
-                occurred_at=t_now + timedelta(seconds=30),
+                occurred_at=datetime.now(UTC),
                 data={"exception": "oops"},
             ),
         ]
@@ -405,8 +403,8 @@ class TestStateMonotonicGuard:
             )
         ).scalar_one()
         # The task should now be FAILURE, not the attacker-locked
-        # SUCCESS (the fix - clamp tight + min(ts, now) on
-        # the existing row's timestamps).
+        # SUCCESS (the source timestamp remains future-skewed only in the raw
+        # event; it never becomes an irreversible task watermark).
         assert task.state == TaskState.FAILURE, (
             f" regression: hostile near-future stamp locked state at {task.state}"
         )

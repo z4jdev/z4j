@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from z4j_brain.api._pagination import (
     clamp_limit,
@@ -26,7 +25,7 @@ from z4j_brain.api.deps import (
 )
 from z4j_brain.domain.ip_rate_limit import require_bulk_action_throttle
 from z4j_brain.errors import NotFoundError, ValidationError
-from z4j_brain.persistence.enums import ProjectRole, TaskState
+from z4j_brain.persistence.enums import ProjectRole, TaskPriority, TaskState
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,6 +89,7 @@ def _task_payload(task: Task) -> TaskPublic:
         name=task.name,
         queue=task.queue,
         state=task.state.value,
+        priority=task.priority.value,
         args=task.args,
         kwargs=task.kwargs,
         result=task.result,
@@ -140,10 +140,11 @@ async def list_tasks(
 
     New filters (Phase A):
     - ``priority`` - comma-separated: ``?priority=critical,high``
-    - ``search`` - full-text search across name, queue, worker
+    - ``search`` - case-insensitive substring search across name,
+      queue, worker, and task id
     - ``worker`` - exact match on worker_name
     - ``until`` - upper bound on received_at (pair with ``since``)
-    - ``format`` - ``csv`` or ``xlsx`` for export (overrides pagination)
+    - ``format`` - ``csv``, ``xlsx``, or ``json`` export (overrides pagination)
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import TaskRepository
@@ -158,24 +159,36 @@ async def list_tasks(
     )
 
     state_enum: TaskState | None = None
-    if state:
+    if state is not None:
         try:
             state_enum = TaskState(state)
-        except ValueError:
-            state_enum = None
+        except ValueError as exc:
+            raise ValidationError(
+                "invalid task state filter",
+                details={
+                    "field": "state",
+                    "value": state,
+                    "allowed": [candidate.value for candidate in TaskState],
+                },
+            ) from exc
 
     # Parse priority multi-select: ?priority=critical,high
-    from z4j_brain.persistence.enums import TaskPriority
-
     priority_list: list[TaskPriority] | None = None
-    if priority:
+    if priority is not None:
         priority_list = []
-        for p in priority.split(","):
-            p = p.strip().lower()  # noqa: PLW2901  normalized in-loop
-            with contextlib.suppress(ValueError):
-                priority_list.append(TaskPriority(p))
-        if not priority_list:
-            priority_list = None
+        for raw_priority in priority.split(","):
+            normalized_priority = raw_priority.strip().lower()
+            try:
+                priority_list.append(TaskPriority(normalized_priority))
+            except ValueError as exc:
+                raise ValidationError(
+                    "invalid task priority filter",
+                    details={
+                        "field": "priority",
+                        "value": raw_priority,
+                        "allowed": [candidate.value for candidate in TaskPriority],
+                    },
+                ) from exc
 
     cursor_pair = decode_cursor(cursor)
 
@@ -382,12 +395,63 @@ class BulkDeleteRequest(BaseModel):
     # parses + UUID-validates the whole list first, a 10M-element
     # list still OOM-walks the validator before the slice. The cap
     # matches the handler's existing trim ceiling.
-    task_ids: list[uuid.UUID] | None = Field(default=None, max_length=1000)
-    filter_state: str | None = None
-    filter_name: str | None = None
-    filter_queue: str | None = None
+    task_ids: list[uuid.UUID] | None = Field(default=None, min_length=1, max_length=1000)
+    filter_state: TaskState | None = None
+    filter_priority: list[TaskPriority] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=len(TaskPriority),
+    )
+    filter_search: str | None = Field(default=None, min_length=1, max_length=200)
+    filter_name: str | None = Field(default=None, min_length=1, max_length=200)
+    filter_queue: str | None = Field(default=None, min_length=1, max_length=200)
+    filter_worker: str | None = Field(default=None, min_length=1, max_length=200)
     filter_since: datetime | None = None
     filter_until: datetime | None = None
+
+    @field_validator("filter_search", "filter_name", "filter_queue", "filter_worker")
+    @classmethod
+    def reject_blank_filter(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("bulk-delete text filters must not be blank")
+        return value
+
+    @field_validator("filter_priority", mode="before")
+    @classmethod
+    def normalize_priorities(cls, value: Any) -> Any:
+        """Match the list endpoint's trim-and-lower priority parsing."""
+        if isinstance(value, list):
+            return [item.strip().lower() if isinstance(item, str) else item for item in value]
+        return value
+
+    @field_validator("filter_priority")
+    @classmethod
+    def reject_duplicate_priorities(
+        cls,
+        value: list[TaskPriority] | None,
+    ) -> list[TaskPriority] | None:
+        if value is not None and len(set(value)) != len(value):
+            raise ValueError("bulk-delete priorities must not repeat")
+        return value
+
+    @model_validator(mode="after")
+    def validate_selection_mode(self) -> BulkDeleteRequest:
+        filters = (
+            self.filter_state,
+            self.filter_priority,
+            self.filter_search,
+            self.filter_name,
+            self.filter_queue,
+            self.filter_worker,
+            self.filter_since,
+            self.filter_until,
+        )
+        has_filters = any(value is not None for value in filters)
+        if self.task_ids is not None and has_filters:
+            raise ValueError("task_ids cannot be combined with bulk-delete filters")
+        if self.task_ids is None and not has_filters:
+            raise ValueError("bulk-delete requires task_ids or at least one filter")
+        return self
 
 
 class BulkDeleteResponse(BaseModel):
@@ -426,6 +490,7 @@ async def bulk_delete_tasks(
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.models import Task
+    from z4j_brain.persistence.repositories import TaskRepository
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
@@ -436,7 +501,7 @@ async def bulk_delete_tasks(
         min_role=ProjectRole.ADMIN,
     )
 
-    if body.task_ids:
+    if body.task_ids is not None:
         # Delete by explicit IDs (max 1000).
         ids = body.task_ids[:1000]
         result = await db_session.execute(
@@ -448,23 +513,28 @@ async def bulk_delete_tasks(
         deleted = result.rowcount or 0
     else:
         # Delete by filter (max 10000).
-        q = select(Task.id).where(Task.project_id == project.id)
-        if body.filter_state:
-            with contextlib.suppress(ValueError):
-                q = q.where(Task.state == TaskState(body.filter_state))
-        if body.filter_name:
-            q = q.where(Task.name.ilike(f"%{body.filter_name}%"))
-        if body.filter_queue:
-            q = q.where(Task.queue == body.filter_queue)
-        if body.filter_since:
-            q = q.where(Task.received_at >= body.filter_since)
-        if body.filter_until:
-            q = q.where(Task.received_at <= body.filter_until)
-        q = q.limit(10_000)
+        q = (
+            TaskRepository.apply_list_filters(
+                select(Task.id).where(Task.project_id == project.id),
+                state=body.filter_state,
+                priority=body.filter_priority,
+                name_substring=body.filter_name,
+                search_query=body.filter_search,
+                queue=body.filter_queue,
+                worker=body.filter_worker,
+                since=body.filter_since,
+                until=body.filter_until,
+            )
+            .order_by(Task.id)
+            .limit(10_000)
+        )
 
         subq = q.subquery()
         result = await db_session.execute(
-            delete(Task).where(Task.id.in_(select(subq.c.id))),
+            delete(Task).where(
+                Task.project_id == project.id,
+                Task.id.in_(select(subq.c.id)),
+            ),
         )
         deleted = result.rowcount or 0
 
@@ -479,7 +549,10 @@ async def bulk_delete_tasks(
         project_id=project.id,
         source_ip=None,
         user_agent=None,
-        metadata={"deleted_count": deleted},
+        metadata={
+            "deleted_count": deleted,
+            "selection_mode": "task_ids" if body.task_ids is not None else "filters",
+        },
     )
     await db_session.commit()
     return BulkDeleteResponse(deleted_count=deleted)

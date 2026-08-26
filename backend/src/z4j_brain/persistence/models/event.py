@@ -46,9 +46,10 @@ class Event(Base):
         id: Per-row UUID. Defaults to ``uuid.uuid4`` Python-side; the
             migration installs ``uuidv7()`` (PG18+) or
             ``gen_random_uuid()`` (PG17) as the server default.
-        project_id: Owning project. ``ON DELETE CASCADE``.
-        agent_id: Agent that reported this event.
-            ``ON DELETE CASCADE``.
+        project_id: Owning project. ``ON DELETE RESTRICT``; event
+            retention must run before the project can be removed.
+        agent_id: Agent that reported this event. ``ON DELETE RESTRICT``
+            so durable agent revocation preserves historical identity.
         engine: Engine adapter that produced the event.
         task_id: Engine-native task id this event refers to. May be
             an empty string for non-task events (worker.online, ...).

@@ -70,6 +70,12 @@ class AgentStatusHistoryRepository(BaseRepository[AgentStatusHistory]):
     ) -> list[AgentStatusHistory]:
         """Return the most recent ``limit`` rows for one agent.
 
+        This is an explicit historical lookup, not live fleet inventory, so
+        soft-revoking the agent does not erase or hide its earlier snapshots.
+        There is currently no public API route for this repository method;
+        any future caller must authorize access to the owning project before
+        exposing the retained history.
+
         Ordered by ``captured_at`` DESCENDING so the dashboard's
         "show me the latest 100 status snapshots" view is index-only
         against ``agent_status_history_agent_time_idx``.

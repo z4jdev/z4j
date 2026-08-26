@@ -23,6 +23,12 @@ from z4j_brain.secret_store import (
     update_secret_store,
 )
 
+# This is only a runaway-process safety ceiling. Negative mutual-exclusion
+# probes below stay subsecond and assert the actual serialization edges. A
+# ten-second lifecycle ceiling races Python's spawn/import startup when the
+# full suite saturates WSL.
+_PROCESS_LIFECYCLE_TIMEOUT_SECONDS = 60
+
 
 def _hold_store_lock(
     state: str,
@@ -40,7 +46,7 @@ def _hold_store_lock(
     try:
         with _exclusive_named_lock(directory_fd, _LOCK_NAME):
             ready.set()
-            assert release.wait(10)
+            assert release.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
     finally:
         _close_directory(directory_fd)
 
@@ -66,7 +72,7 @@ def _hold_bootstrap_coordinator(
     try:
         with audit_bootstrap_coordinator(Path(state)):
             ready.set()
-            assert release.wait(10)
+            assert release.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
     except SecretStoreError:
         # Replacing the diagnostic lock pathname is still reported when the
         # holder exits. Mutual exclusion must remain intact until this point.
@@ -80,7 +86,7 @@ def _enter_bootstrap_coordinator(
 ) -> None:
     with audit_bootstrap_coordinator(Path(state)):
         entered.set()
-        assert release.wait(10)
+        assert release.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
 
 
 def _fork_child_then_exit_coordinator_owner(
@@ -109,7 +115,7 @@ def _fork_child_then_exit_coordinator_owner(
         child_pid_path.write_text(str(child_pid), encoding="ascii")
         child_pid_path.chmod(0o600)
         owner_ready.set()
-        assert release_owner.wait(10)
+        assert release_owner.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         os._exit(0)
 
 
@@ -189,7 +195,7 @@ def test_coordinator_replacement_cannot_create_concurrent_authority(
     )
     first.start()
     try:
-        assert first_ready.wait(10)
+        assert first_ready.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         lock = private_home / ".z4j-bootstrap-coordinator.lock"
         lock.unlink()
         lock.write_bytes(b"replacement inode")
@@ -197,13 +203,13 @@ def test_coordinator_replacement_cannot_create_concurrent_authority(
         second.start()
         assert not second_entered.wait(0.75)
         release_first.set()
-        assert second_entered.wait(10)
+        assert second_entered.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
     finally:
         release_first.set()
         release_second.set()
-        first.join(10)
+        first.join(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         if second.pid is not None:
-            second.join(10)
+            second.join(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
     assert first.exitcode == 0
     assert second.exitcode == 0
 
@@ -240,7 +246,12 @@ def test_forked_child_cannot_inherit_coordinator_authority(
                 f"still held it: {premature!r}"
             )
 
-        ready, _, _ = select.select([read_fd], [], [], 10)
+        ready, _, _ = select.select(
+            [read_fd],
+            [],
+            [],
+            _PROCESS_LIFECYCLE_TIMEOUT_SECONDS,
+        )
         assert ready, "forked child did not enter after the parent released authority"
         assert os.read(read_fd, 64) == b"entered"
         waited_pid, status = os.waitpid(child_pid, 0)
@@ -290,24 +301,24 @@ def test_forked_child_reacquires_after_owner_exits_without_cleanup(
     child_pid: int | None = None
     owner.start()
     try:
-        assert owner_ready.wait(10)
+        assert owner_ready.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         child_pid = int((private_home / ".fork-child.pid").read_text(encoding="ascii"))
-        assert child_started.wait(10)
+        assert child_started.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         assert not child_entered.wait(0.75)
         release_owner.set()
-        owner.join(10)
+        owner.join(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         assert owner.exitcode == 0
-        assert child_entered.wait(10), (
+        assert child_entered.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS), (
             "forked child retained the owner's inherited lock descriptors after the owner exited"
         )
-        assert child_exited.wait(10)
+        assert child_exited.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         assert not child_failed.is_set()
     finally:
         release_owner.set()
-        owner.join(2)
+        owner.join(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         if owner.is_alive():
             owner.terminate()
-            owner.join(10)
+            owner.join(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         if child_pid is not None and not child_exited.is_set():
             with contextlib.suppress(ProcessLookupError):
                 os.kill(child_pid, signal.SIGKILL)
@@ -393,15 +404,15 @@ def test_process_lock_serializes_whole_document_updates(
     )
     holder.start()
     try:
-        assert ready.wait(10)
+        assert ready.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         updater.start()
-        assert started.wait(10)
+        assert started.wait(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         assert not finished.wait(0.5)
     finally:
         release.set()
-        holder.join(10)
+        holder.join(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
         if updater.pid is not None:
-            updater.join(10)
+            updater.join(_PROCESS_LIFECYCLE_TIMEOUT_SECONDS)
     assert holder.exitcode == 0
     assert updater.exitcode == 0
     assert finished.is_set()

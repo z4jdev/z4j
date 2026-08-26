@@ -48,6 +48,23 @@ _STRUCTURED_DATABASE_KEYS = (
     "Z4J_DATABASE_NAME",
 )
 
+# These values are consumed by the CLI or middleware rather than the Pydantic
+# Settings model, but they are still legitimate, non-secret config.env
+# tunables. Keep the exception set here, beside the derived Settings allowlist,
+# so the validator does not regress to accepting every invented Z4J_* name.
+NON_SETTINGS_TUNABLE_ENV_KEYS = frozenset(
+    {
+        "Z4J_ALEMBIC_INI",
+        "Z4J_AUTO_MIGRATE",
+        "Z4J_DEBUG_HOST_ERRORS",
+    }
+)
+
+_NON_SETTINGS_TUNABLE_VALUE_SETS: dict[str, frozenset[str]] = {
+    "Z4J_AUTO_MIGRATE": frozenset({"false", "true"}),
+    "Z4J_DEBUG_HOST_ERRORS": frozenset({"0", "1", "false", "true", "no", "yes", "off", "on"}),
+}
+
 
 class ConfigurationCaptureError(RuntimeError):
     """A configuration input could not be proved safe and unambiguous."""
@@ -343,6 +360,55 @@ def capture_explicit_configuration_file(path: Path) -> dict[str, str]:
     return _read_explicit_file(path, required=True)
 
 
+def supported_settings_environment_keys() -> frozenset[str]:
+    """Exact environment keys accepted by the startup settings pipeline."""
+
+    from z4j_brain.settings import Settings
+
+    field_keys = {f"Z4J_{field.upper()}" for field in Settings.model_fields}
+    return frozenset(
+        field_keys | set(_STRUCTURED_DATABASE_KEYS) | set(NON_SETTINGS_TUNABLE_ENV_KEYS)
+    )
+
+
+def validate_non_settings_tunable_values(values: Mapping[str, str]) -> None:
+    """Validate config.env tunables that live outside ``Settings``."""
+
+    for key, accepted in _NON_SETTINGS_TUNABLE_VALUE_SETS.items():
+        if key not in values:
+            continue
+        raw_value = values[key]
+        if raw_value != raw_value.strip():
+            raise ConfigurationCaptureError(
+                f"{key} must not contain surrounding whitespace",
+            )
+        normalized = raw_value.lower()
+        if normalized not in accepted:
+            choices = ", ".join(sorted(accepted))
+            raise ConfigurationCaptureError(
+                f"{key} must be one of: {choices}",
+            )
+    if "Z4J_ALEMBIC_INI" in values and not values["Z4J_ALEMBIC_INI"].strip():
+        raise ConfigurationCaptureError("Z4J_ALEMBIC_INI cannot be empty")
+
+
+def configuration_snapshot_from_values(
+    values: Mapping[str, str],
+    *,
+    source: str,
+) -> ConfigurationSnapshot:
+    """Build one startup-equivalent snapshot from already-captured values."""
+
+    effective = {key.upper(): value for key, value in values.items()}
+    sources = dict.fromkeys(effective, source)
+    _normalize_database_configuration(effective, sources)
+    return ConfigurationSnapshot(
+        values=MappingProxyType(effective),
+        sources=MappingProxyType(sources),
+        process_environment=MappingProxyType({}),
+    )
+
+
 def capture_configuration(
     *,
     home: Path | None = None,
@@ -508,15 +574,19 @@ def export_snapshot_environment(snapshot: ConfigurationSnapshot) -> None:
 
 
 __all__ = [
+    "NON_SETTINGS_TUNABLE_ENV_KEYS",
     "ConfigurationCaptureError",
     "ConfigurationSnapshot",
     "active_configuration_snapshot",
     "apply_secret_store_winner",
     "capture_configuration",
     "capture_explicit_configuration_file",
+    "configuration_snapshot_from_values",
     "export_snapshot_environment",
     "merge_secret_store_snapshot",
     "overlay_runtime_environment",
     "set_active_configuration_snapshot",
     "settings_from_snapshot",
+    "supported_settings_environment_keys",
+    "validate_non_settings_tunable_values",
 ]

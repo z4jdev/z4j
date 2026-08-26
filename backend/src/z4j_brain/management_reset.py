@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -55,12 +56,27 @@ _PRESERVED_POSTGRES_SEQUENCES = frozenset(
         "schedule_change_log_revision_seq",
     },
 )
-_SQLITE_SCHEMA_CONTRACT_DIGEST = "bc99362d610d37ae64ea3002dc249670911830d4d712ecbf127312253fd8a770"
+SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST = (
+    "0c22ea7e3680cc7620ee582a1212157e9999be106c6cb8e99179448e91a75911"
+)
+# Derived per major from a clean migration-head database driven by that
+# major's OWN client. 16 and 17 agree because their catalog representation
+# of these objects is identical; 18 differs and is derived separately.
 _POSTGRES_SCHEMA_CONTRACT_DIGESTS = {
-    16: "71da2a7d7f32bad36ed0eadc0c0888a1af7a52f4faa13b9f70f6dd9e68ba93d6",
-    17: "71da2a7d7f32bad36ed0eadc0c0888a1af7a52f4faa13b9f70f6dd9e68ba93d6",
-    18: "45f9b9b9a6e6149de286acca2ed6e96918f268c9e2ce13c77672fe6117fdcdc3",
+    16: "bc24b315fa3b2a674ff1ceb4e9d2e36c82a41ecdba9022d6d8b043f5491058e0",
+    17: "bc24b315fa3b2a674ff1ceb4e9d2e36c82a41ecdba9022d6d8b043f5491058e0",
+    18: "4ec4063c2b62ef121701321d583d4163b4f8af7949d8fd3abd1b9e4babff7e8a",
 }
+
+# SQLite batch ALTER rebuilt these three tables while removing the post-1.8
+# compatibility columns.  That path adds quotes around the table name and
+# parentheses around CURRENT_* defaults even though both spellings have the
+# same SQLite semantics.  Keep the immutable prior-release digest stable by
+# canonicalising only the known compatibility rebuilds; older migrations have
+# their own frozen physical spellings and remain exact evidence.
+_SQLITE_COMPATIBILITY_REBUILT_TABLES = frozenset(
+    {"automation_rules", "notification_deliveries", "projects"},
+)
 
 # Reviewed with RESET_MIGRATION_HEAD.  Base.metadata is checked against this
 # frozen contract so merely importing a new model cannot silently teach reset
@@ -76,6 +92,7 @@ RESET_ORM_TABLES = frozenset(
         "audit_chain_state",
         "audit_log",
         "automation_firing_outbox",
+        "automation_rule_admissions",
         "automation_rules",
         "bulk_retry_request_children",
         "bulk_retry_requests",
@@ -247,7 +264,14 @@ def _normalize_sqlite_schema_definition(
         and lines[0].upper().startswith("CREATE TABLE ")
         and lines[-1] == ")"
     ):
-        body = [line.removesuffix(",") for line in lines[1:-1]]
+        # Split the table body by SQL structure, not by physical lines.
+        # SQLite implements ``ALTER TABLE ... ADD COLUMN`` by editing the
+        # stored CREATE statement in ``sqlite_schema``.  The added declaration
+        # is appended to the previous physical line, while the same column in
+        # a freshly-created table occupies its own line.  Treating lines as
+        # columns therefore gave semantically identical fresh and upgraded
+        # databases different contract digests.
+        body = _split_sqlite_table_items(" ".join(lines[1:-1]))
         constraints = [
             line
             for line in body
@@ -255,9 +279,33 @@ def _normalize_sqlite_schema_definition(
                 ("CONSTRAINT ", "PRIMARY KEY ", "FOREIGN KEY ", "UNIQUE ", "CHECK "),
             )
         ]
+        header = lines[0]
+        quoted_header = re.fullmatch(
+            r'CREATE TABLE "([A-Za-z_][A-Za-z0-9_]*)" \(',
+            header,
+            flags=re.IGNORECASE,
+        )
         columns = [line for line in body if line not in constraints]
+        if (
+            quoted_header is not None
+            and quoted_header.group(1) in _SQLITE_COMPATIBILITY_REBUILT_TABLES
+        ):
+            header = f"CREATE TABLE {quoted_header.group(1)} ("
+            columns = [
+                re.sub(
+                    r"\bDEFAULT \((CURRENT_(?:DATE|TIME|TIMESTAMP))\)",
+                    r"DEFAULT \1",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+                for line in columns
+            ]
         return {
-            "header": lines[0],
+            # SQLite's table-rebuild ALTER path quotes a simple identifier
+            # even when the original CREATE statement did not.  The names
+            # are the same SQL identifier, so retain one spelling in the
+            # schema contract.
+            "header": header,
             "columns": columns,
             # SQLite may rewrite an otherwise equivalent table with table-level
             # constraints in a different textual order. Their declarations are
@@ -265,6 +313,53 @@ def _normalize_sqlite_schema_definition(
             "constraints": sorted(constraints),
         }
     return " ".join(lines)
+
+
+def _split_sqlite_table_items(  # noqa: PLR0912  one explicit SQL lexical state machine
+    body: str,
+) -> list[str]:
+    """Return top-level column and constraint declarations from ``body``.
+
+    Commas inside expressions, quoted defaults, or table constraints are not
+    separators.  The result deliberately preserves declaration order while
+    removing formatting-only differences in SQLite's stored CREATE text.
+    """
+
+    items: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if quote is not None:
+            if quote == "[":
+                if char == "]":
+                    quote = None
+            elif char == quote:
+                # SQL quotes escape themselves by doubling.  Consume the
+                # second quote instead of treating it as the end delimiter.
+                if index + 1 < len(body) and body[index + 1] == quote:
+                    index += 1
+                else:
+                    quote = None
+        elif char in {"'", '"', "`", "["}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            item = " ".join(body[start:index].split())
+            if item:
+                items.append(item)
+            start = index + 1
+        index += 1
+
+    item = " ".join(body[start:].split())
+    if item:
+        items.append(item)
+    return items
 
 
 async def _sqlite_exact_schema_contract(
@@ -624,11 +719,11 @@ async def _assert_schema_contract(  # noqa: PLR0912  one closed dialect contract
                 f"unsupported_objects={unknown_objects})",
             )
         schema_digest = _digest(await _sqlite_exact_schema_contract(session))
-        if schema_digest != _SQLITE_SCHEMA_CONTRACT_DIGEST:
+        if schema_digest != SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST:
             raise GenerationResetRefused(
                 "reset SQLite migration-head schema signature mismatch "
                 f"(observed={schema_digest}, "
-                f"expected={_SQLITE_SCHEMA_CONTRACT_DIGEST})",
+                f"expected={SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST})",
             )
     elif dialect == "postgresql":
         await _lock_postgres_reset_domain(session)

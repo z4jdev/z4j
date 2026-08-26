@@ -4,8 +4,8 @@ Routes:
 
 - ``POST  /api/v1/auth/login`` - exchange (email, password) for a
   session cookie. NO csrf protection (no session yet) but tightly
-  rate-limited at the brain level by the per-account lockout +
-  exponential backoff in the auth service.
+  controlled by a per-IP throttle, per-account lockout, Argon2 dummy
+  work for unknown accounts, and a uniform response-time floor.
 - ``POST  /api/v1/auth/logout`` - revoke the current session.
   Requires CSRF.
 - ``GET   /api/v1/auth/me`` - return the current user.
@@ -15,10 +15,14 @@ Routes:
   current user.
 - ``POST  /api/v1/auth/sessions/{session_id}/revoke`` - revoke a
   specific session belonging to the current user. Requires CSRF.
+- ``POST  /api/v1/auth/sessions/revoke-others`` - revoke every session
+  belonging to the current user except the request session. Requires CSRF.
 
-Response shape for ALL endpoints uses an explicit Pydantic model
-so we never accidentally leak sensitive ORM fields like
-``password_hash``, ``failed_login_count``, ``locked_until``.
+Every endpoint that returns a JSON body uses an explicit Pydantic
+response model so we never accidentally leak sensitive ORM fields
+like ``password_hash``, ``failed_login_count``, ``locked_until``.
+``POST /api/v1/auth/logout`` is the sole bodyless exception: it
+intentionally returns ``204 No Content``.
 """
 
 from __future__ import annotations
@@ -81,6 +85,13 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+#: ``/auth/me`` is requested on every dashboard page load. Keep the
+#: global-admin project switcher bounded even on very large installations;
+#: the public response-field and route documentation below disclose the
+#: same limit so clients do not mistake this convenience projection for a
+#: complete project catalogue.
+_ADMIN_ME_PROJECT_MEMBERSHIP_CAP = 500
+
 
 # ---------------------------------------------------------------------------
 # Schemas (response models - explicit field whitelist)
@@ -102,8 +113,9 @@ class LoginRequest(BaseModel):
             "days) instead of the standard absolute lifetime, and "
             "the idle timeout is skipped. Intended for homelab and "
             "single-operator installs where the dashboard sits on "
-            "a trusted internal IP and re-authenticating every 30 "
-            "minutes of idle is friction without security gain."
+            "a trusted internal IP. This is an explicit convenience "
+            "tradeoff: a stolen remembered cookie stays usable until "
+            "its absolute expiry or server-side revocation."
         ),
     )
 
@@ -160,7 +172,15 @@ class UserMembershipSummary(BaseModel):
 class UserMePublic(UserPublic):
     """``/auth/me`` payload - :class:`UserPublic` + memberships."""
 
-    memberships: list[UserMembershipSummary]
+    memberships: list[UserMembershipSummary] = Field(
+        description=(
+            "Project-switcher memberships visible to this user. For a global "
+            "admin these are synthesized with role=admin from at most the first "
+            f"{_ADMIN_ME_PROJECT_MEMBERSHIP_CAP} projects returned by the bounded "
+            "project query; this field is not a complete project catalogue on "
+            "installations above that cap."
+        ),
+    )
 
 
 class LoginResponse(BaseModel):
@@ -170,8 +190,10 @@ class LoginResponse(BaseModel):
         description=(
             "True when the user has MFA enrolled AND a valid trust "
             "cookie was NOT presented. The dashboard should route "
-            "to the MFA-verify page and POST /auth/mfa/verify before "
-            "calling any other endpoint."
+            "to the MFA-verify page. Until verification succeeds, this "
+            "cookie session may call only POST /api/v1/auth/mfa/verify, "
+            "POST /api/v1/auth/logout, GET /api/v1/auth/me, and "
+            "GET /api/v1/auth/mfa/status."
         ),
     )
     mfa_enrollment_required: bool = Field(
@@ -182,9 +204,12 @@ class LoginResponse(BaseModel):
             "Z4J_MFA_ENFORCE_FOR_ALL) targets this user and they "
             "have not enrolled yet. Within the grace window the "
             "dashboard should show a persistent enroll-by banner; "
-            "once mfa_enrollment_deadline is in the past every "
-            "endpoint outside the enrollment flow answers 403 with "
-            "error code mfa_enrollment_required."
+            "once mfa_enrollment_deadline is in the past this cookie "
+            "session may call only GET /api/v1/auth/me, POST "
+            "/api/v1/auth/logout, GET /api/v1/auth/mfa/status, POST "
+            "/api/v1/auth/mfa/enroll-start, and POST "
+            "/api/v1/auth/mfa/enroll-complete. Every other authenticated "
+            "route answers 403 with error code mfa_enrollment_required."
         ),
     )
     mfa_enrollment_deadline: datetime | None = Field(
@@ -194,8 +219,10 @@ class LoginResponse(BaseModel):
             "(mfa_enforcement_started_at + "
             "Z4J_MFA_ENROLLMENT_GRACE_DAYS). Only set when "
             "mfa_enrollment_required is True. A deadline in the "
-            "past means this session is already restricted to the "
-            "MFA-enrollment endpoints."
+            "past means this cookie session is restricted to exactly "
+            "GET /api/v1/auth/me, POST /api/v1/auth/logout, GET "
+            "/api/v1/auth/mfa/status, POST /api/v1/auth/mfa/enroll-start, "
+            "and POST /api/v1/auth/mfa/enroll-complete."
         ),
     )
 
@@ -696,13 +723,18 @@ async def me(
 
     The dashboard's project switcher reads this on every page
     load to know which projects to render in the sidebar and what
-    role the user holds in each.
+    role the user holds in each. For a global admin, the synthesized
+    list is intentionally capped at 500 projects; it is a bounded
+    switcher projection, not a complete project catalogue.
     """
     if user.is_admin:
-        # Global admins see every active project. Synthesize an
-        # ADMIN membership row per project so the dashboard can
-        # render them in the switcher.
-        all_projects = await projects.list(limit=500, offset=0)
+        # Global admins see up to the documented cap of active projects.
+        # Synthesize an ADMIN membership row per returned project so the
+        # dashboard can render them in the switcher.
+        all_projects = await projects.list(
+            limit=_ADMIN_ME_PROJECT_MEMBERSHIP_CAP,
+            offset=0,
+        )
         membership_rows = [
             UserMembershipSummary(
                 project_id=p.id,
@@ -923,6 +955,8 @@ async def update_profile(
     Only fields present in the request body are changed. Returns
     the full ``UserMePublic`` payload (same shape as ``GET /me``)
     so the dashboard can update its local state in one round-trip.
+    As on ``GET /me``, a global admin's synthesized project list is
+    intentionally capped at 500 projects.
     """
     # Build kwargs - only pass fields that were explicitly set in
     # the request body so the repository sentinel logic works.
@@ -945,7 +979,10 @@ async def update_profile(
 
     # Re-use the same membership-loading logic as GET /me.
     if user.is_admin:
-        all_projects = await projects.list(limit=500, offset=0)
+        all_projects = await projects.list(
+            limit=_ADMIN_ME_PROJECT_MEMBERSHIP_CAP,
+            offset=0,
+        )
         membership_rows = [
             UserMembershipSummary(
                 project_id=p.id,
@@ -1001,8 +1038,8 @@ async def list_sessions(
     session_row: SessionRow = Depends(get_current_session),
     sessions: SessionRepository = Depends(get_session_repo),
 ) -> list[SessionPublic]:
-    """Return every active (non-revoked, non-expired) session for the
-    current user.
+    """Return up to 100 active (non-revoked, non-expired) sessions for
+    the current user, newest first.
 
     The ``is_current`` flag marks which session corresponds to the
     cookie that made this request, so the dashboard can highlight
@@ -1025,6 +1062,50 @@ async def list_sessions(
         )
         for s in active
     ]
+
+
+@router.post(
+    "/sessions/revoke-others",
+    response_model=SessionRevokedResponse,
+    dependencies=[Depends(require_csrf)],
+)
+async def revoke_other_sessions(
+    user: User = Depends(get_current_user),
+    session_row: SessionRow = Depends(get_current_session),
+    sessions: SessionRepository = Depends(get_session_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    ip: str = Depends(get_client_ip),
+) -> SessionRevokedResponse:
+    """Revoke all of the caller's sessions except the current one.
+
+    The revocation runs as one unbounded database UPDATE and is independent
+    of the display-only 100-row session listing cap.
+    """
+    from z4j_brain.domain.audit_service import AuditService
+
+    revoked_count = await sessions.revoke_all_except(
+        user.id,
+        except_session_id=session_row.id,
+        reason="user_revoke_others",
+    )
+    await AuditService(settings).record(
+        audit_log,
+        action="auth.other_sessions_revoked",
+        target_type="user",
+        target_id=str(user.id),
+        result="success",
+        outcome="allow",
+        user_id=user.id,
+        source_ip=ip,
+        metadata={
+            "current_session_id": str(session_row.id),
+            "revoked_count": revoked_count,
+        },
+    )
+    await db_session.commit()
+    return SessionRevokedResponse(revoked=True)
 
 
 @router.post(
@@ -1135,11 +1216,11 @@ async def password_reset_request(
 ) -> PasswordResetRequestResponse:
     """Request a password-reset token.
 
-    Response is constant-shape + constant-time (audit M2): token
-    minting + email dispatch happen in a background task after
-    the response is flushed, so the known-user path and the
-    unknown-user path are indistinguishable to a timing attacker.
-    The caller ALWAYS gets ``accepted=True``. If nothing arrives
+    Response shape is identical for known and unknown users. SMTP delivery is
+    deferred to a background task and the route applies the configured login
+    timing floor, reducing account-enumeration signal. Token/audit database
+    work still occurs only for a known user, so this is not a cryptographic
+    constant-time guarantee. The caller ALWAYS gets ``accepted=True``. If nothing arrives
     in the user's inbox they know to contact an admin - the
     system deliberately does not confirm or deny account
     existence.
@@ -1198,8 +1279,9 @@ async def password_reset_request(
         )
     # No-op for unknown users - no DB writes, no background task.
     # Hold both branches to the same floor as login so the DB/audit
-    # work in the known-user branch does not become an account
-    # enumeration timing oracle.
+    # work in the known-user branch has less observable timing contrast. Work
+    # that exceeds the floor can still be visible, so the response-shape rule
+    # remains the primary contract.
     await _hold_minimum_response_time(start, settings.login_min_duration_ms)
     return PasswordResetRequestResponse(accepted=True)
 
@@ -1215,8 +1297,8 @@ async def _send_password_reset_email(
     """Background task: find a project email channel for the user
     and dispatch the reset link.
 
-    Runs AFTER the HTTP response is flushed so the caller can't
-    time the known-user branch vs. unknown-user branch. Opens its
+    Runs after the HTTP response body is sent, keeping the SMTP round trip out
+    of the response path. Opens its
     own DB session because the request's session is closed by
     the time this fires.
     """

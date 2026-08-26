@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
+from z4j_brain import __version__
 from z4j_brain.main import create_app
 from z4j_brain.settings import Settings
 
@@ -179,8 +180,9 @@ class TestS1OpenAPIDefenseLayers:
     async def test_schema_carries_build_watermark(self, public_client) -> None:
         r = await public_client.get("/api/v1/openapi.json")
         assert r.status_code == 200
-        info = r.json()["info"]
-        assert "x-z4j-build" in info, "schema must carry x-z4j-build watermark per 1.6.3 plan S1.5"
+        body = r.json()
+        assert body["info"]["x-z4j-build"] == __version__
+        assert "x-z4j-build" not in body
 
     async def test_schema_carries_etag(self, public_client) -> None:
         r = await public_client.get("/api/v1/openapi.json")

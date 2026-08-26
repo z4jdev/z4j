@@ -1,0 +1,3478 @@
+# Dedicated two-ceremony publisher for the separately tagged 1.8.2 rollback image.
+# Qualification creates only untagged content and manifest-independent evidence.
+# Finalization rereads those original bytes before the sole allowed tag transition.
+
+name: release-rollback-compat
+
+on:
+  workflow_dispatch:
+    inputs:
+      ceremony:
+        description: "Choose qualification (A) or finalization/promotion (B)"
+        required: true
+        type: choice
+        options:
+          - qualification
+          - finalization
+      confirmation:
+        description: "Type the ceremony-specific exact confirmation phrase"
+        required: true
+        type: string
+      qualification_run_id:
+        description: "Successful Ceremony-A run id (required only for finalization)"
+        required: false
+        type: string
+
+concurrency:
+  group: z4j-rollback-compat-publisher
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  attestations: write
+
+env:
+  IMAGE: docker.io/z4jdev/z4j
+  TARGET_TAG: 1.8.2-py3.14.7-rollback-1.9.0
+  HUB_API_REPOSITORY: https://hub.docker.com/v2/namespaces/z4jdev/repositories/z4j
+  Z4J_GITHUB_AUTHORITY_REPOSITORY_ID: "1228454287"
+  Z4J_GITHUB_AUTHORITY_REPOSITORY_NODE_ID: R_kgDOSTi5jw
+  IMMUTABLE_TAG_RULE: '^1\.8\.2-py3\.14\.7-rollback-1\.9\.0$'
+  RECIPE: docker/rollback-1.8.2-py3147
+  SOURCE_DATE_EPOCH: "1787184000"
+
+jobs:
+  finalized-authority-boundary:
+    name: Refuse before any release file, credential, network, or tool
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 1
+    steps:
+      - name: Unconditional finalized-authority refusal
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        run: |
+          printf '%s\n' \
+            '::error::sealed release runtime and finalized material authorities are UNFINALIZED; refusing before checkout, protected environments, credentials, files, network, or release tools'
+          exit 97
+
+  prepare:
+    name: Validate ceremony, branch, and candidate state
+    runs-on: ubuntu-24.04
+    needs: finalized-authority-boundary
+    outputs:
+      ceremony: ${{ steps.authority.outputs.ceremony }}
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      qualification_run_id: ${{ steps.authority.outputs.qualification_run_id }}
+    steps:
+      - name: Require default-branch manual ceremony authority
+        id: authority
+        env:
+          CEREMONY: ${{ inputs.ceremony }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != workflow_dispatch ]; then
+            echo "::error::rollback compatibility publication is manual-only"
+            exit 1
+          fi
+          if [ "${GITHUB_REPOSITORY}" != z4jdev/z4j ]; then
+            echo "::error::publication authority is restricted to z4jdev/z4j"
+            exit 1
+          fi
+          if [ "${GITHUB_REPOSITORY_ID}" != "${Z4J_GITHUB_AUTHORITY_REPOSITORY_ID}" ]; then
+            echo "::error::publication repository numeric identity differs"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event = json.loads(
+              Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")
+          )
+          repository = event.get("repository") or {}
+          expected = {
+              "full_name": "z4jdev/z4j",
+              "id": int(os.environ["Z4J_GITHUB_AUTHORITY_REPOSITORY_ID"]),
+              "node_id": os.environ["Z4J_GITHUB_AUTHORITY_REPOSITORY_NODE_ID"],
+          }
+          for field, value in expected.items():
+              if repository.get(field) != value:
+                  raise SystemExit(
+                      f"publication event repository {field} differs: "
+                      f"{repository.get(field)!r}"
+                  )
+          if repository.get("private") is not False:
+              raise SystemExit("publication repository is not public")
+          if repository.get("visibility") != "public":
+              raise SystemExit("publication repository visibility differs")
+          PY
+          if [ "${GITHUB_REF}" != refs/heads/main ]; then
+            echo "::error::publication must run from refs/heads/main, found ${GITHUB_REF}"
+            exit 1
+          fi
+          case "${CEREMONY}" in
+            qualification)
+              expected=qualify-rollback-compat-1.8.2-py3.14.7-for-1.9.0
+              if [ -n "${QUALIFICATION_RUN_ID}" ]; then
+                echo "::error::qualification_run_id is forbidden during Ceremony A"
+                exit 1
+              fi
+              ;;
+            finalization)
+              expected=finalize-promote-rollback-compat-1.8.2-py3.14.7-for-1.9.0
+              if ! printf '%s' "${QUALIFICATION_RUN_ID}" | grep -Eq '^[1-9][0-9]*$'; then
+                echo "::error::Ceremony B requires a positive qualification_run_id"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unsupported ceremony ${CEREMONY}"
+              exit 1
+              ;;
+          esac
+          if [ "${CONFIRMATION}" != "${expected}" ]; then
+            echo "::error::exact ceremony-specific confirmation is required"
+            exit 1
+          fi
+          printf 'ceremony=%s\n' "${CEREMONY}" >> "${GITHUB_OUTPUT}"
+          printf 'qualification_run_id=%s\n' "${QUALIFICATION_RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout exact dispatched source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Require signed runtime registry authority before every live ceremony
+        run: |
+          set -euo pipefail
+          # This is intentionally unconditional until the reviewed common E0
+          # receipt/bundle, PAT-HMAC verifier, and exact publisher projection land.
+          # No Docker Hub credential, build, push, tag, or evidence mutation may
+          # occur while that authority is unavailable.
+          python3 "${RECIPE}/durable_evidence.py" require-runtime-registry-authority
+
+      - name: Validate lock, recipe, and ceremony state
+        id: identity
+        env:
+          CEREMONY: ${{ inputs.ceremony }}
+        run: |
+          set -euo pipefail
+          python3 "${RECIPE}/verify.py" \
+            --manifest "${RECIPE}/manifest.json" \
+            --static-only
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          recipe = Path(os.environ["RECIPE"])
+          lock = json.loads((recipe / "manifest.json").read_text(encoding="utf-8"))
+          candidate = lock["candidate_image"]
+          dockerfile = (recipe / "Dockerfile").read_text(encoding="utf-8")
+          frontend = "# syntax=" + lock["reproducibility"]["dockerfile_frontend"]
+          if dockerfile.splitlines()[0] != frontend:
+              raise SystemExit("Dockerfile frontend differs from lock")
+          if "apt-get" in dockerfile or "pip install" in dockerfile:
+              raise SystemExit("rollback compatibility Dockerfile performs package resolution")
+          if candidate["qualification_receipt_format"] != (
+              "z4j-rollback-compat-qualification-receipt-v1"
+          ):
+              raise SystemExit("candidate qualification receipt format is not locked")
+          if candidate["release_receipt_semantics"] != (
+              "sha256 of canonical manifest-independent qualification receipt; "
+              "never a receipt that hashes this manifest"
+          ):
+              raise SystemExit("candidate receipt semantics are not locked")
+
+          slots = [
+              candidate["index"]["digest"],
+              candidate["index"]["size"],
+              candidate["release_receipt_sha256"],
+              *[
+                  candidate["platforms"][arch][descriptor][field]
+                  for arch in ("amd64", "arm64")
+                  for descriptor in ("manifest", "config")
+                  for field in ("digest", "size")
+              ],
+          ]
+          ceremony = os.environ["CEREMONY"]
+          if ceremony == "qualification":
+              if candidate["finalized"] is not False:
+                  raise SystemExit("Ceremony A requires candidate finalized=false")
+              if any(value is not None for value in slots):
+                  raise SystemExit("Ceremony A requires every candidate seal slot to be null")
+          elif ceremony == "finalization":
+              if candidate["finalized"] is not True:
+                  raise SystemExit("Ceremony B requires candidate finalized=true")
+              if any(value is None for value in slots):
+                  raise SystemExit("Ceremony B requires every candidate seal slot")
+          else:
+              raise SystemExit("unsupported ceremony")
+          PY
+          printf 'source_sha=%s\n' "${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+
+  qualify-native:
+    name: "Ceremony A: build, verify, and scan native ${{ matrix.arch }}"
+    if: needs.prepare.outputs.ceremony == 'qualification'
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout validated unfinalized source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 1
+
+      - name: Set up Docker Buildx for Ceremony A
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+
+      - name: Login to Docker Hub for digest-only publication
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push untagged native content by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: ${{ env.RECIPE }}
+          file: ${{ env.RECIPE }}/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          sbom: false
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          outputs: |
+            type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
+
+      - name: Fetch exact native bytes and run locked verifier
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "${BUILD_DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::native build returned an invalid digest"
+            exit 1
+          fi
+          evidence="/tmp/rollback-compat-native-${ARCH}"
+          install -d -m 0700 "${evidence}"
+          token_json=$(mktemp)
+          token_file=$(mktemp)
+          trap 'rm -f "${token_json}" "${token_file}"' EXIT
+          curl --silent --show-error --fail-with-body \
+            --get 'https://auth.docker.io/token' \
+            --user "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
+            --data-urlencode 'service=registry.docker.io' \
+            --data-urlencode 'scope=repository:z4jdev/z4j:pull' \
+            --output "${token_json}"
+          python3 - "${token_json}" "${token_file}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          token = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("token")
+          if not isinstance(token, str) or not token:
+              raise SystemExit("registry token response has no token")
+          Path(sys.argv[2]).write_text(token, encoding="utf-8")
+          PY
+          registry_token=$(cat "${token_file}")
+          curl --silent --show-error --fail-with-body \
+            --header "Authorization: Bearer ${registry_token}" \
+            --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            --output "${evidence}/manifest.oci.json" \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${BUILD_DIGEST}"
+          printf '%s  %s\n' \
+            "${BUILD_DIGEST#sha256:}" \
+            "${evidence}/manifest.oci.json" \
+            | sha256sum --check --status
+          python3 - "${evidence}/manifest.oci.json" "${evidence}/config-descriptor.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          raw = Path(sys.argv[1]).read_bytes()
+          manifest = json.loads(raw)
+          if manifest.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
+              raise SystemExit("native object is not an OCI image manifest")
+          config = manifest.get("config")
+          required = {"digest", "size", "mediaType"}
+          if not isinstance(config, dict) or not required.issubset(config):
+              raise SystemExit("native manifest has no complete config descriptor")
+          if config["mediaType"] != "application/vnd.oci.image.config.v1+json":
+              raise SystemExit("native config descriptor has the wrong media type")
+          digest = config["digest"]
+          size = config["size"]
+          if (
+              not isinstance(digest, str)
+              or not digest.startswith("sha256:")
+              or len(digest) != 71
+              or any(character not in "0123456789abcdef" for character in digest[7:])
+          ):
+              raise SystemExit("native config descriptor digest is invalid")
+          if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+              raise SystemExit("native config descriptor size is invalid")
+          Path(sys.argv[2]).write_text(
+              json.dumps(config, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="ascii",
+          )
+          PY
+          config_digest=$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1]))["digest"])' \
+            "${evidence}/config-descriptor.json")
+          curl --silent --show-error --fail-with-body \
+            --header "Authorization: Bearer ${registry_token}" \
+            --output "${evidence}/config.oci.json" \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/blobs/${config_digest}"
+          python3 - "${evidence}/config-descriptor.json" "${evidence}/config.oci.json" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          descriptor = json.loads(Path(sys.argv[1]).read_text(encoding="ascii"))
+          raw = Path(sys.argv[2]).read_bytes()
+          if descriptor["digest"] != "sha256:" + hashlib.sha256(raw).hexdigest():
+              raise SystemExit("native config bytes differ from descriptor digest")
+          if descriptor["size"] != len(raw):
+              raise SystemExit("native config bytes differ from descriptor size")
+          PY
+
+          docker pull --platform "${PLATFORM}" "${IMAGE}@${BUILD_DIGEST}"
+          docker run --rm --platform "${PLATFORM}" \
+            --volume "${PWD}/${RECIPE}/manifest.json:/rollback-lock/manifest.json:ro" \
+            --entrypoint python \
+            "${IMAGE}@${BUILD_DIGEST}" \
+            /usr/local/share/z4j-rollback-compat/verify.py \
+            --manifest /rollback-lock/manifest.json \
+            --expected-arch "${ARCH}" \
+            > "${evidence}/verifier.json"
+
+      - name: Trivy 0.74 HIGH and CRITICAL gate on exact native digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: json
+          output: /tmp/rollback-compat-native-${{ matrix.arch }}/trivy.json
+          version: v0.74.0
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+
+      - name: Install Syft 1.50 for native SBOM
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          syft-version: v1.50.0
+
+      - name: Generate native SBOM from exact digest
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          syft "${IMAGE}@${BUILD_DIGEST}" \
+            --output "spdx-json=/tmp/rollback-compat-native-${ARCH}/sbom.spdx.json"
+
+      - name: Seal native qualification evidence
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          arch = os.environ["ARCH"]
+          platform = os.environ["PLATFORM"]
+          digest = os.environ["BUILD_DIGEST"]
+          root = Path(f"/tmp/rollback-compat-native-{arch}")
+          manifest_raw = (root / "manifest.oci.json").read_bytes()
+          manifest = json.loads(manifest_raw)
+          config_raw = (root / "config.oci.json").read_bytes()
+          verifier_raw = (root / "verifier.json").read_bytes()
+          verifier = json.loads(verifier_raw)
+          if verifier.get("status") != "ok" or verifier.get("architecture") != arch:
+              raise SystemExit("native verifier result is not an exact pass")
+          report_raw = (root / "trivy.json").read_bytes()
+          report = json.loads(report_raw)
+          if report.get("SchemaVersion") != 2 or not isinstance(
+              report.get("Results"), list
+          ):
+              raise SystemExit("Trivy report does not match schema version 2")
+          if digest.encode("ascii") not in report_raw:
+              raise SystemExit("Trivy report does not bind the native digest")
+          counts = {"HIGH": 0, "CRITICAL": 0}
+          for result in report.get("Results") or []:
+              for vulnerability in result.get("Vulnerabilities") or []:
+                  severity = vulnerability.get("Severity")
+                  if severity in counts:
+                      counts[severity] += 1
+          if counts != {"HIGH": 0, "CRITICAL": 0}:
+              raise SystemExit(f"Trivy report is not clean: {counts}")
+          sbom_raw = (root / "sbom.spdx.json").read_bytes()
+          sbom = json.loads(sbom_raw)
+          if sbom.get("spdxVersion") != "SPDX-2.3":
+              raise SystemExit("native SBOM is not SPDX 2.3 JSON")
+          seal = {
+              "format": "z4j-rollback-compat-native-evidence-v1",
+              "arch": arch,
+              "platform": platform,
+              "manifest": {
+                  "digest": digest,
+                  "size": len(manifest_raw),
+              },
+              "config": {
+                  "digest": "sha256:" + hashlib.sha256(config_raw).hexdigest(),
+                  "size": len(config_raw),
+              },
+              "runtime": {
+                  "sha256": hashlib.sha256(verifier_raw).hexdigest(),
+                  "result": verifier,
+              },
+              "scanner": {
+                  "report_sha256": hashlib.sha256(report_raw).hexdigest(),
+                  "counts": counts,
+              },
+              "sbom": {
+                  "sha256": hashlib.sha256(sbom_raw).hexdigest(),
+                  "format": "spdx-json",
+              },
+          }
+          expected_config = manifest["config"]
+          if seal["config"]["digest"] != expected_config["digest"]:
+              raise SystemExit("sealed config digest differs from native manifest")
+          if seal["config"]["size"] != expected_config["size"]:
+              raise SystemExit("sealed config size differs from native manifest")
+          (root / "native-seal.json").write_text(
+              json.dumps(seal, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="ascii",
+          )
+          PY
+
+      - name: Upload native digest proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rollback-compat-native-${{ matrix.arch }}-${{ github.run_id }}
+          path: /tmp/rollback-compat-native-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 90
+
+  qualify-untagged:
+    name: "Ceremony A: qualify an untagged multi-platform digest"
+    if: needs.prepare.outputs.ceremony == 'qualification'
+    needs:
+      - prepare
+      - qualify-native
+    runs-on: ubuntu-24.04
+    outputs:
+      index_digest: ${{ steps.candidate.outputs.index_digest }}
+    steps:
+      - name: Checkout validated unfinalized source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 1
+
+      - name: Download both native evidence artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: rollback-compat-native-*-${{ github.run_id }}
+          path: /tmp/rollback-compat-native-download
+          merge-multiple: false
+
+      - name: Assemble deterministic untagged OCI index
+        id: candidate
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          downloaded = Path("/tmp/rollback-compat-native-download")
+          bundle = Path("/tmp/rollback-compat-qualification")
+          evidence = bundle / "evidence"
+          native_out = evidence / "native"
+          native_out.mkdir(parents=True)
+          seal_paths = sorted(downloaded.glob("*" + "/native-seal.json"))
+          if len(seal_paths) != 2:
+              raise SystemExit(f"expected two native seals, found {len(seal_paths)}")
+          seals = {}
+          for seal_path in seal_paths:
+              raw = seal_path.read_bytes()
+              if raw != (
+                  json.dumps(
+                      json.loads(raw),
+                      sort_keys=True,
+                      separators=(",", ":"),
+                  )
+                  + "\n"
+              ).encode("ascii"):
+                  raise SystemExit(f"native seal is not canonical: {seal_path}")
+              seal = json.loads(raw)
+              if set(seal) != {
+                  "format",
+                  "arch",
+                  "platform",
+                  "manifest",
+                  "config",
+                  "runtime",
+                  "scanner",
+                  "sbom",
+              }:
+                  raise SystemExit(f"native seal keys differ: {seal_path}")
+              if seal.get("format") != "z4j-rollback-compat-native-evidence-v1":
+                  raise SystemExit(f"unknown native seal format: {seal_path}")
+              arch = seal.get("arch")
+              expected_platform = {"amd64": "linux/amd64", "arm64": "linux/arm64"}
+              if arch not in expected_platform or seal.get("platform") != expected_platform[arch]:
+                  raise SystemExit(f"invalid native platform binding: {seal_path}")
+              if arch in seals:
+                  raise SystemExit(f"duplicate native seal for {arch}")
+              source = seal_path.parent
+              required = {
+                  "manifest.oci.json",
+                  "config.oci.json",
+                  "verifier.json",
+                  "trivy.json",
+                  "sbom.spdx.json",
+                  "native-seal.json",
+                  "config-descriptor.json",
+              }
+              actual = {item.name for item in source.iterdir() if item.is_file()}
+              if actual != required:
+                  raise SystemExit(
+                      f"native evidence set differs for {arch}: {sorted(actual)}"
+                  )
+              manifest_raw = (source / "manifest.oci.json").read_bytes()
+              config_raw = (source / "config.oci.json").read_bytes()
+              verifier_raw = (source / "verifier.json").read_bytes()
+              trivy_raw = (source / "trivy.json").read_bytes()
+              sbom_raw = (source / "sbom.spdx.json").read_bytes()
+              checks = {
+                  "manifest digest": (
+                      seal["manifest"]["digest"],
+                      "sha256:" + hashlib.sha256(manifest_raw).hexdigest(),
+                  ),
+                  "manifest size": (seal["manifest"]["size"], len(manifest_raw)),
+                  "config digest": (
+                      seal["config"]["digest"],
+                      "sha256:" + hashlib.sha256(config_raw).hexdigest(),
+                  ),
+                  "config size": (seal["config"]["size"], len(config_raw)),
+                  "verifier digest": (
+                      seal["runtime"]["sha256"],
+                      hashlib.sha256(verifier_raw).hexdigest(),
+                  ),
+                  "scanner digest": (
+                      seal["scanner"]["report_sha256"],
+                      hashlib.sha256(trivy_raw).hexdigest(),
+                  ),
+                  "SBOM digest": (
+                      seal["sbom"]["sha256"],
+                      hashlib.sha256(sbom_raw).hexdigest(),
+                  ),
+              }
+              for label, (actual_value, expected_value) in checks.items():
+                  if actual_value != expected_value:
+                      raise SystemExit(f"{arch} {label} differs from sealed evidence")
+              if seal["runtime"]["result"] != json.loads(verifier_raw):
+                  raise SystemExit(f"{arch} verifier payload differs from seal")
+              if seal["scanner"]["counts"] != {"HIGH": 0, "CRITICAL": 0}:
+                  raise SystemExit(f"{arch} vulnerability counts are not zero")
+              target = native_out / arch
+              shutil.copytree(source, target)
+              seals[arch] = seal
+
+          if set(seals) != {"amd64", "arm64"}:
+              raise SystemExit("native evidence is not exactly amd64 and arm64")
+          index = {
+              "schemaVersion": 2,
+              "mediaType": "application/vnd.oci.image.index.v1+json",
+              "manifests": [
+                  {
+                      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                      "digest": seals[arch]["manifest"]["digest"],
+                      "size": seals[arch]["manifest"]["size"],
+                      "platform": {
+                          "architecture": arch,
+                          "os": "linux",
+                      },
+                  }
+                  for arch in ("amd64", "arm64")
+              ],
+          }
+          raw = json.dumps(index, sort_keys=True, separators=(",", ":")).encode("ascii")
+          index_dir = evidence / "index"
+          index_dir.mkdir()
+          (index_dir / "candidate.index.oci.json").write_bytes(raw)
+          digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"index_digest={digest}\n")
+              stream.write(f"index_size={len(raw)}\n")
+          PY
+
+      - name: Login to Docker Hub for untagged index publication
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push original candidate index by digest only and registry-reread it
+        env:
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+          INDEX_SIZE: ${{ steps.candidate.outputs.index_size }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          index=/tmp/rollback-compat-qualification/evidence/index/candidate.index.oci.json
+          if [ "$(wc -c < "${index}")" -ne "${INDEX_SIZE}" ]; then
+            echo "::error::candidate index size changed before publication"
+            exit 1
+          fi
+          printf '%s  %s\n' "${INDEX_DIGEST#sha256:}" "${index}" \
+            | sha256sum --check --status
+
+          token_json=$(mktemp)
+          token_file=$(mktemp)
+          headers=$(mktemp)
+          reread=$(mktemp)
+          trap 'rm -f "${token_json}" "${token_file}" "${headers}" "${reread}"' EXIT
+          curl --silent --show-error --fail-with-body \
+            --get 'https://auth.docker.io/token' \
+            --user "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
+            --data-urlencode 'service=registry.docker.io' \
+            --data-urlencode 'scope=repository:z4jdev/z4j:pull,push' \
+            --output "${token_json}"
+          python3 - "${token_json}" "${token_file}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          token = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("token")
+          if not isinstance(token, str) or not token:
+              raise SystemExit("registry token response has no token")
+          Path(sys.argv[2]).write_text(token, encoding="utf-8")
+          PY
+          registry_token=$(cat "${token_file}")
+          status=$(curl --silent --show-error \
+            --output /dev/null \
+            --dump-header "${headers}" \
+            --write-out '%{http_code}' \
+            --request PUT \
+            --header "Authorization: Bearer ${registry_token}" \
+            --header 'Content-Type: application/vnd.oci.image.index.v1+json' \
+            --data-binary "@${index}" \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${INDEX_DIGEST}")
+          if [ "${status}" != 201 ]; then
+            echo "::error::digest-only index publication returned HTTP ${status}"
+            exit 1
+          fi
+          published_digest=$(awk -F': *' \
+            'tolower($1) == "docker-content-digest" {gsub(/\r/,"",$2); print $2}' \
+            "${headers}" | tail -n 1)
+          if [ "${published_digest}" != "${INDEX_DIGEST}" ]; then
+            echo "::error::registry acknowledged a different candidate digest"
+            exit 1
+          fi
+          curl --silent --show-error --fail-with-body \
+            --header "Authorization: Bearer ${registry_token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            --output "${reread}" \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${INDEX_DIGEST}"
+          cmp --silent "${index}" "${reread}"
+          install -m 0444 "${reread}" \
+            /tmp/rollback-compat-qualification/evidence/index/registry-reread.index.oci.json
+
+      - name: Install Syft 1.50 for index SBOM
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          syft-version: v1.50.0
+
+      - name: Install Cosign 3.1.3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.1.3
+
+      - name: Reuse exact prior durable qualification evidence when present
+        id: qualification_durable
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+          INDEX_SIZE: ${{ steps.candidate.outputs.index_size }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-qualification
+          durable="${RECIPE}/durable_evidence.py"
+          authority=/tmp/rollback-compat-qualification-replay-authority.json
+          python3 - "${authority}" <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          root = Path("/tmp/rollback-compat-qualification")
+          evidence = root / "evidence"
+          recipe = Path(os.environ["RECIPE"])
+
+          def sha(path: Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          seals = {
+              arch: json.loads(
+                  (evidence / "native" / arch / "native-seal.json").read_bytes()
+              )
+              for arch in ("amd64", "arm64")
+          }
+          authority = {
+              "format": (
+                  "z4j-rollback-compat-qualification-replay-authority-v1"
+              ),
+              "qualification": {
+                  "run_id": int(os.environ["GITHUB_RUN_ID"]),
+                  "repository": os.environ["GITHUB_REPOSITORY"],
+                  "workflow_ref": (
+                      ".github/workflows/release-rollback-compat.yml"
+                      "@refs/heads/main"
+                  ),
+              },
+              "recipe": {
+                  "dockerfile_sha256": sha(recipe / "Dockerfile"),
+                  "verifier_sha256": sha(recipe / "verify.py"),
+                  "workflow_sha256": sha(
+                      Path(".github/workflows/release-rollback-compat.yml")
+                  ),
+              },
+              "candidate_image": {
+                  "repository": os.environ["IMAGE"],
+                  "index": {
+                      "digest": os.environ["INDEX_DIGEST"],
+                      "size": int(os.environ["INDEX_SIZE"]),
+                  },
+                  "platforms": {
+                      arch: {
+                          "manifest": seals[arch]["manifest"],
+                          "config": seals[arch]["config"],
+                      }
+                      for arch in ("amd64", "arm64")
+                  },
+              },
+          }
+          raw = (
+              json.dumps(
+                  authority,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+              )
+              + "\n"
+          ).encode("ascii")
+          Path(sys.argv[1]).write_bytes(raw)
+          PY
+          set +e
+          python3 "${durable}" discover \
+            --manifest "${RECIPE}/manifest.json" \
+            --stage qualification \
+            --subject-digest "${INDEX_DIGEST}" \
+            --subject-size "${INDEX_SIZE}" \
+            --expected-qualification-authority "${authority}" \
+            --output-dir "${root}/durable/qualification" \
+            > "${root}/durable-qualification-replay.json"
+          status=$?
+          set -e
+          case "${status}" in
+            0)
+              rm -rf /tmp/rollback-compat-qualification/evidence
+              python3 "${durable}" materialize-original \
+                --manifest "${RECIPE}/manifest.json" \
+                --directory "${root}/durable/qualification" \
+                --output-dir "${root}" \
+                --skip-existing-exact \
+                > "${root}/durable-qualification-materialization.json"
+              printf 'reused=true\n' >> "${GITHUB_OUTPUT}"
+              ;;
+            3)
+              rm -f "${root}/durable-qualification-replay.json"
+              printf 'reused=false\n' >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              exit "${status}"
+              ;;
+          esac
+          rm -f "${authority}"
+
+      - name: Generate index SBOM before any tag exists
+        if: steps.qualification_durable.outputs.reused != 'true'
+        env:
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+        run: |
+          set -euo pipefail
+          syft "${IMAGE}@${INDEX_DIGEST}" \
+            --output spdx-json=/tmp/rollback-compat-qualification/evidence/index/sbom.spdx.json
+
+      - name: Sign and SBOM-attest only the untagged original digest
+        if: steps.qualification_durable.outputs.reused != 'true'
+        env:
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+        run: |
+          set -euo pipefail
+          reference="${IMAGE}@${INDEX_DIGEST}"
+          cosign sign --yes "${reference}"
+          cosign attest --yes \
+            --type spdxjson \
+            --predicate /tmp/rollback-compat-qualification/evidence/index/sbom.spdx.json \
+            "${reference}"
+
+      - name: Attach GitHub build provenance to original digest
+        if: steps.qualification_durable.outputs.reused != 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.candidate.outputs.index_digest }}
+          push-to-registry: true
+
+      - name: Verify signature, SBOM attestation, and provenance
+        if: steps.qualification_durable.outputs.reused != 'true'
+        env:
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+        run: |
+          set -euo pipefail
+          proof=/tmp/rollback-compat-qualification/evidence/proofs
+          install -d -m 0700 "${proof}"
+          reference="${IMAGE}@${INDEX_DIGEST}"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --output json \
+            "${reference}" > "${proof}/signature-verification.json"
+          cosign verify-attestation \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --type spdxjson \
+            --output json \
+            "${reference}" > "${proof}/sbom-attestation-verification.json"
+          cosign verify-attestation \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --type https://slsa.dev/provenance/v1 \
+            --output json \
+            "${reference}" > "${proof}/provenance-verification.json"
+          test -s "${proof}/signature-verification.json"
+          test -s "${proof}/sbom-attestation-verification.json"
+          test -s "${proof}/provenance-verification.json"
+          python3 - "${proof}" "${INDEX_DIGEST}"             /tmp/rollback-compat-qualification/evidence/index/sbom.spdx.json <<'PY'
+          import base64
+          import json
+          import sys
+          from pathlib import Path
+
+          proof_root = Path(sys.argv[1])
+          expected_digest = sys.argv[2].removeprefix("sha256:")
+          expected_sbom = json.loads(Path(sys.argv[3]).read_bytes())
+
+          def envelopes(path: Path) -> list[dict[str, object]]:
+              raw = path.read_text(encoding="utf-8")
+              decoder = json.JSONDecoder()
+              position = 0
+              values = []
+              while position < len(raw):
+                  while position < len(raw) and raw[position].isspace():
+                      position += 1
+                  if position == len(raw):
+                      break
+                  value, position = decoder.raw_decode(raw, position)
+                  values.extend(value if isinstance(value, list) else [value])
+              if not values or not all(isinstance(value, dict) for value in values):
+                  raise SystemExit(f"no JSON verification envelopes in {path}")
+              return values
+
+          def statements(path: Path) -> list[dict[str, object]]:
+              decoded = []
+              for envelope in envelopes(path):
+                  payload = envelope.get("payload")
+                  if not isinstance(payload, str):
+                      raise SystemExit(f"verification envelope has no payload: {path}")
+                  statement = json.loads(
+                      base64.b64decode(payload, validate=True)
+                  )
+                  if not isinstance(statement, dict):
+                      raise SystemExit(f"attestation payload is not an object: {path}")
+                  decoded.append(statement)
+              return decoded
+
+          def subject_matches(statement: dict[str, object]) -> bool:
+              return any(
+                  isinstance(subject, dict)
+                  and isinstance(subject.get("digest"), dict)
+                  and subject["digest"].get("sha256") == expected_digest
+                  for subject in statement.get("subject") or []
+              )
+
+          sbom_statements = statements(
+              proof_root / "sbom-attestation-verification.json"
+          )
+          if not any(
+              subject_matches(statement)
+              and statement.get("predicate") == expected_sbom
+              for statement in sbom_statements
+          ):
+              raise SystemExit(
+                  "verified SBOM attestation does not bind the exact index SBOM"
+              )
+          provenance_statements = statements(
+              proof_root / "provenance-verification.json"
+          )
+          if not any(
+              subject_matches(statement)
+              and statement.get("predicateType")
+              == "https://slsa.dev/provenance/v1"
+              for statement in provenance_statements
+          ):
+              raise SystemExit(
+                  "verified provenance does not bind the exact original digest"
+              )
+          PY
+
+      - name: Emit manifest-independent canonical qualification receipt
+        if: steps.qualification_durable.outputs.reused != 'true'
+        env:
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+          INDEX_SIZE: ${{ steps.candidate.outputs.index_size }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("/tmp/rollback-compat-qualification")
+          evidence = root / "evidence"
+          recipe = Path(os.environ["RECIPE"])
+
+          def sha(path: Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          seals = {
+              arch: json.loads(
+                  (evidence / "native" / arch / "native-seal.json").read_text(
+                      encoding="ascii"
+                  )
+              )
+              for arch in ("amd64", "arm64")
+          }
+          index = {
+              "digest": os.environ["INDEX_DIGEST"],
+              "size": int(os.environ["INDEX_SIZE"]),
+          }
+          index_raw = (evidence / "index" / "candidate.index.oci.json").read_bytes()
+          reread_raw = (
+              evidence / "index" / "registry-reread.index.oci.json"
+          ).read_bytes()
+          if index["digest"] != "sha256:" + hashlib.sha256(index_raw).hexdigest():
+              raise SystemExit("receipt index digest differs from original bytes")
+          if index["size"] != len(index_raw) or reread_raw != index_raw:
+              raise SystemExit("registry reread differs from original index bytes")
+
+          files = []
+          for path in sorted(evidence.rglob("*")):
+              if path.is_file() and not path.is_symlink():
+                  raw = path.read_bytes()
+                  files.append(
+                      {
+                          "path": path.relative_to(root).as_posix(),
+                          "sha256": hashlib.sha256(raw).hexdigest(),
+                          "size": len(raw),
+                      }
+                  )
+          proof_dir = evidence / "proofs"
+          proof_paths = {
+              "signature": proof_dir / "signature-verification.json",
+              "sbom_attestation": proof_dir / "sbom-attestation-verification.json",
+              "provenance": proof_dir / "provenance-verification.json",
+          }
+          for label, path in proof_paths.items():
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"{label} verification proof is absent")
+
+          receipt = {
+              "format": "z4j-rollback-compat-qualification-receipt-v1",
+              "result": "pass",
+              "qualification": {
+                  "run_id": int(os.environ["GITHUB_RUN_ID"]),
+                  "repository": os.environ["GITHUB_REPOSITORY"],
+                  "workflow_ref": (
+                      ".github/workflows/release-rollback-compat.yml"
+                      "@refs/heads/main"
+                  ),
+              },
+              "recipe": {
+                  "dockerfile_sha256": sha(recipe / "Dockerfile"),
+                  "verifier_sha256": sha(recipe / "verify.py"),
+                  "workflow_sha256": sha(
+                      Path(".github/workflows/release-rollback-compat.yml")
+                  ),
+              },
+              "candidate_image": {
+                  "repository": os.environ["IMAGE"],
+                  "index": index,
+                  "platforms": {
+                      arch: {
+                          "manifest": seals[arch]["manifest"],
+                          "config": seals[arch]["config"],
+                      }
+                      for arch in ("amd64", "arm64")
+                  },
+              },
+              "runtime": {
+                  "python": "3.14.7",
+                  "platforms": {
+                      arch: {
+                          "verification_sha256": seals[arch]["runtime"]["sha256"],
+                          "result": seals[arch]["runtime"]["result"],
+                      }
+                      for arch in ("amd64", "arm64")
+                  },
+              },
+              "scanner": {
+                  "tool": "trivy",
+                  "version": "0.74.0",
+                  "severity": ["HIGH", "CRITICAL"],
+                  "ignore_unfixed": False,
+                  "exit_code": 1,
+                  "platforms": {
+                      arch: {
+                          "report_sha256": seals[arch]["scanner"]["report_sha256"],
+                          "counts": seals[arch]["scanner"]["counts"],
+                      }
+                      for arch in ("amd64", "arm64")
+                  },
+              },
+              "sbom": {
+                  "tool": "syft",
+                  "version": "1.50.0",
+                  "format": "spdx-json",
+                  "platforms": {
+                      arch: {"sha256": seals[arch]["sbom"]["sha256"]}
+                      for arch in ("amd64", "arm64")
+                  },
+                  "index_sha256": sha(evidence / "index" / "sbom.spdx.json"),
+              },
+              "proofs": {
+                  label: {
+                      "verified": True,
+                      "sha256": sha(path),
+                  }
+                  for label, path in proof_paths.items()
+              },
+              "registry_reread": {
+                  "digest": index["digest"],
+                  "size": len(reread_raw),
+                  "sha256": hashlib.sha256(reread_raw).hexdigest(),
+                  "exact_original_bytes": True,
+              },
+              "evidence": {"files": files},
+          }
+          raw = (
+              json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+          ).encode("ascii")
+          receipt_path = root / "rollback-compat-qualification-receipt.json"
+          receipt_path.write_bytes(raw)
+          receipt_sha = hashlib.sha256(raw).hexdigest()
+          (root / "rollback-compat-qualification-receipt.sha256").write_text(
+              f"{receipt_sha}  {receipt_path.name}\n",
+              encoding="ascii",
+          )
+          if b"manifest_sha256" in raw or b"manifest.json" in raw:
+              raise SystemExit("qualification receipt illegally binds the source manifest")
+          print(f"qualification receipt sha256={receipt_sha}")
+          PY
+
+      - name: Keyless-sign and authenticate exact qualification receipt bytes
+        if: steps.qualification_durable.outputs.reused != 'true'
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-qualification
+          subject="${root}/rollback-compat-qualification-receipt.json"
+          bundle="${root}/rollback-compat-qualification-receipt.sigstore.json"
+          verification="${root}/rollback-compat-qualification-receipt-verification.txt"
+          authentication="${root}/rollback-compat-qualification-authentication.json"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign sign-blob --yes --bundle "${bundle}" "${subject}" > /dev/null
+          cosign verify-blob \
+            --bundle "${bundle}" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${subject}" > "${verification}" 2>&1
+          printf 'sigstore blob verification exit=0\n' >> "${verification}"
+          test -s "${bundle}"
+          test -s "${verification}"
+          python3 "${RECIPE}/durable_evidence.py" authentication \
+            --manifest "${RECIPE}/manifest.json" \
+            --stage qualification \
+            --format z4j-rollback-compat-qualification-authentication-v1 \
+            --subject "${subject}" \
+            --bundle "${bundle}" \
+            --verification "${verification}" \
+            --identity "${identity}" \
+            --issuer "${issuer}" \
+            --output "${authentication}"
+
+      - name: Publish and raw-readback durable qualification OCI evidence
+        if: steps.qualification_durable.outputs.reused != 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          INDEX_DIGEST: ${{ steps.candidate.outputs.index_digest }}
+          INDEX_SIZE: ${{ steps.candidate.outputs.index_size }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-qualification
+          python3 "${RECIPE}/durable_evidence.py" publish \
+            --manifest "${RECIPE}/manifest.json" \
+            --stage qualification \
+            --subject-digest "${INDEX_DIGEST}" \
+            --subject-size "${INDEX_SIZE}" \
+            --receipt "${root}/rollback-compat-qualification-receipt.json" \
+            --bundle "${root}/rollback-compat-qualification-receipt.sigstore.json" \
+            --authentication "${root}/rollback-compat-qualification-authentication.json" \
+            --payload-root "${root}" \
+            --output-dir "${root}/durable/qualification"
+
+      - name: Seal exact durable qualification authority for source finalization
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path("/tmp/rollback-compat-qualification")
+          receipt_raw = (
+              root / "rollback-compat-qualification-receipt.json"
+          ).read_bytes()
+          receipt = json.loads(receipt_raw)
+          record_path = root / "durable" / "qualification" / "record.json"
+          record_raw = record_path.read_bytes()
+          record = json.loads(record_raw)
+          if record_raw != (
+              json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+              + "\n"
+          ).encode("ascii"):
+              raise SystemExit("durable qualification record is not canonical")
+          durable = {
+              key: record[key]
+              for key in (
+                  "artifact",
+                  "config",
+                  "receipt",
+                  "bundle",
+                  "authentication",
+                  "payload",
+              )
+          }
+          values = {
+              "format": "z4j-rollback-compat-candidate-finalization-values-v1",
+              "index": receipt["candidate_image"]["index"],
+              "platforms": receipt["candidate_image"]["platforms"],
+              "release_receipt_sha256": hashlib.sha256(receipt_raw).hexdigest(),
+              "qualification_durable_evidence": durable,
+          }
+          (root / "candidate-finalization-values.json").write_bytes(
+              (
+                  json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+                  + "\n"
+              ).encode("ascii")
+          )
+          PY
+
+      - name: Upload manifest-independent qualification receipt and evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rollback-compat-qualification-${{ github.run_id }}
+          path: /tmp/rollback-compat-qualification
+          if-no-files-found: error
+          retention-days: 90
+
+  finalize-promote:
+    name: "Ceremony B: reread original, finalize evidence, then promote"
+    if: needs.prepare.outputs.ceremony == 'finalization'
+    needs:
+      - prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact finalized source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Download original Ceremony-A qualification evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rollback-compat-qualification-${{ needs.prepare.outputs.qualification_run_id }}
+          path: /tmp/rollback-compat-qualification
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.prepare.outputs.qualification_run_id }}
+
+      - name: Authenticate the referenced qualification workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ needs.prepare.outputs.qualification_run_id }}
+        run: |
+          set -euo pipefail
+          gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${QUALIFICATION_RUN_ID}" \
+            > /tmp/rollback-compat-qualification-run.json
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          run = json.loads(
+              Path("/tmp/rollback-compat-qualification-run.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          expected = {
+              "id": int(os.environ["QUALIFICATION_RUN_ID"]),
+              "event": "workflow_dispatch",
+              "head_branch": "main",
+              "status": "completed",
+              "conclusion": "success",
+              "path": ".github/workflows/release-rollback-compat.yml",
+          }
+          for field, value in expected.items():
+              if run.get(field) != value:
+                  raise SystemExit(
+                      f"qualification run {field} differs: {run.get(field)!r}"
+                  )
+          repository = run.get("head_repository") or {}
+          expected_repository = {
+              "full_name": "z4jdev/z4j",
+              "id": int(os.environ["Z4J_GITHUB_AUTHORITY_REPOSITORY_ID"]),
+              "node_id": os.environ["Z4J_GITHUB_AUTHORITY_REPOSITORY_NODE_ID"],
+          }
+          for field, value in expected_repository.items():
+              if repository.get(field) != value:
+                  raise SystemExit(
+                      f"qualification run repository {field} differs: "
+                      f"{repository.get(field)!r}"
+                  )
+          if not re.fullmatch(r"[0-9a-f]{40}", run.get("head_sha", "")):
+              raise SystemExit("qualification run head SHA is invalid")
+          PY
+
+      - name: Verify sealed receipt, evidence inventory, runtime, scanner, and SBOM
+        id: qualification
+        env:
+          QUALIFICATION_RUN_ID: ${{ needs.prepare.outputs.qualification_run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import importlib.util
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path("/tmp/rollback-compat-qualification")
+          evidence = root / "evidence"
+          receipt_path = root / "rollback-compat-qualification-receipt.json"
+          sidecar_path = root / "rollback-compat-qualification-receipt.sha256"
+          recipe = Path(os.environ["RECIPE"])
+          lock = json.loads((recipe / "manifest.json").read_text(encoding="utf-8"))
+          candidate = lock["candidate_image"]
+          run = json.loads(
+              Path("/tmp/rollback-compat-qualification-run.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          def sha(path: Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          raw = receipt_path.read_bytes()
+          receipt = json.loads(raw)
+          canonical = (
+              json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+          ).encode("ascii")
+          if raw != canonical:
+              raise SystemExit("qualification receipt is not canonical newline JSON")
+          receipt_sha = hashlib.sha256(raw).hexdigest()
+          if receipt_sha != candidate["release_receipt_sha256"]:
+              raise SystemExit(
+                  "qualification receipt SHA differs from sealed candidate authority"
+              )
+          expected_sidecar = f"{receipt_sha}  {receipt_path.name}\n"
+          if sidecar_path.read_text(encoding="ascii") != expected_sidecar:
+              raise SystemExit("qualification receipt SHA sidecar differs")
+          expected_bundle_entries = {
+              "evidence",
+              "durable",
+              "candidate-finalization-values.json",
+              "rollback-compat-qualification-authentication.json",
+              "rollback-compat-qualification-receipt.sigstore.json",
+              "rollback-compat-qualification-receipt-verification.txt",
+              "rollback-compat-qualification-receipt.json",
+              "rollback-compat-qualification-receipt.sha256",
+          }
+          if {path.name for path in root.iterdir()} != expected_bundle_entries:
+              raise SystemExit("qualification artifact top-level file set differs")
+          if receipt.get("format") != candidate["qualification_receipt_format"]:
+              raise SystemExit("qualification receipt format differs from manifest")
+          if receipt.get("result") != "pass":
+              raise SystemExit("qualification receipt did not pass")
+          expected_receipt_keys = {
+              "format",
+              "result",
+              "qualification",
+              "recipe",
+              "candidate_image",
+              "runtime",
+              "scanner",
+              "sbom",
+              "proofs",
+              "registry_reread",
+              "evidence",
+          }
+          if set(receipt) != expected_receipt_keys:
+              raise SystemExit("qualification receipt top-level keys differ")
+          if set(receipt["runtime"]) != {"python", "platforms"}:
+              raise SystemExit("qualification runtime keys differ")
+          if receipt["runtime"]["python"] != "3.14.7":
+              raise SystemExit("qualification runtime Python differs")
+          if set(receipt["runtime"]["platforms"]) != {"amd64", "arm64"}:
+              raise SystemExit("qualification runtime platforms differ")
+          if set(receipt["evidence"]) != {"files"}:
+              raise SystemExit("qualification evidence keys differ")
+          if b"manifest_sha256" in raw or b"manifest.json" in raw:
+              raise SystemExit("qualification receipt contains a manifest hash cycle")
+
+          qualification = receipt.get("qualification")
+          expected_qualification = {
+              "run_id": int(os.environ["QUALIFICATION_RUN_ID"]),
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "workflow_ref": (
+                  ".github/workflows/release-rollback-compat.yml"
+                  "@refs/heads/main"
+              ),
+          }
+          if qualification != expected_qualification:
+              raise SystemExit("qualification receipt run authority differs")
+          if run["id"] != qualification["run_id"]:
+              raise SystemExit("downloaded receipt is not from authenticated run")
+
+          current_recipe = {
+              "dockerfile_sha256": sha(recipe / "Dockerfile"),
+              "verifier_sha256": sha(recipe / "verify.py"),
+              "workflow_sha256": sha(
+                  Path(".github/workflows/release-rollback-compat.yml")
+              ),
+          }
+          if receipt.get("recipe") != current_recipe:
+              raise SystemExit("qualified recipe differs from finalized source")
+          expected_candidate = {
+              "repository": candidate["repository"],
+              "index": candidate["index"],
+              "platforms": candidate["platforms"],
+          }
+          if receipt.get("candidate_image") != expected_candidate:
+              raise SystemExit("sealed candidate descriptors differ from qualification")
+
+          record_path = root / "durable" / "qualification" / "record.json"
+          record_raw = record_path.read_bytes()
+          record = json.loads(record_raw)
+          if record_raw != (
+              json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+              + "\n"
+          ).encode("ascii"):
+              raise SystemExit("durable qualification record is not canonical")
+          expected_durable = {
+              key: record[key]
+              for key in (
+                  "artifact",
+                  "config",
+                  "receipt",
+                  "bundle",
+                  "authentication",
+                  "payload",
+              )
+          }
+          if candidate["qualification_durable_evidence"] != expected_durable:
+              raise SystemExit(
+                  "qualification OCI evidence differs from finalized candidate"
+              )
+          values_path = root / "candidate-finalization-values.json"
+          values_raw = values_path.read_bytes()
+          values = json.loads(values_raw)
+          canonical_values = (
+              json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+              + "\n"
+          ).encode("ascii")
+          expected_values = {
+              "format": "z4j-rollback-compat-candidate-finalization-values-v1",
+              "index": candidate["index"],
+              "platforms": candidate["platforms"],
+              "release_receipt_sha256": receipt_sha,
+              "qualification_durable_evidence": expected_durable,
+          }
+          if values_raw != canonical_values or values != expected_values:
+              raise SystemExit("candidate finalization values differ")
+
+          listed = receipt.get("evidence", {}).get("files")
+          if not isinstance(listed, list) or not listed:
+              raise SystemExit("qualification evidence inventory is absent")
+          listed_paths = []
+          for item in listed:
+              if set(item) != {"path", "sha256", "size"}:
+                  raise SystemExit("qualification evidence item has unknown fields")
+              relative = Path(item["path"])
+              if (
+                  relative.is_absolute()
+                  or ".." in relative.parts
+                  or not item["path"].startswith("evidence/")
+              ):
+                  raise SystemExit("qualification evidence path escapes bundle")
+              path = root / relative
+              if not path.is_file() or path.is_symlink():
+                  raise SystemExit(f"qualification evidence is absent: {relative}")
+              payload = path.read_bytes()
+              if len(payload) != item["size"]:
+                  raise SystemExit(f"qualification evidence size differs: {relative}")
+              if hashlib.sha256(payload).hexdigest() != item["sha256"]:
+                  raise SystemExit(f"qualification evidence digest differs: {relative}")
+              listed_paths.append(item["path"])
+          if len(listed_paths) != len(set(listed_paths)):
+              raise SystemExit("qualification evidence inventory has duplicate paths")
+          if any(path.is_symlink() for path in evidence.rglob("*")):
+              raise SystemExit("qualification evidence contains a symlink")
+          actual_paths = sorted(
+              path.relative_to(root).as_posix()
+              for path in evidence.rglob("*")
+              if path.is_file() and not path.is_symlink()
+          )
+          if sorted(listed_paths) != actual_paths:
+              raise SystemExit("qualification evidence file set differs from receipt")
+
+          spec = importlib.util.spec_from_file_location(
+              "rollback_compat_verifier",
+              recipe / "verify.py",
+          )
+          if spec is None or spec.loader is None:
+              raise SystemExit("cannot load locked verifier")
+          verifier_module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(verifier_module)
+          expected_cadence = verifier_module.cadence_payload(lock)
+
+          platform_receipts = {}
+          for arch in ("amd64", "arm64"):
+              native = evidence / "native" / arch
+              seal_raw = (native / "native-seal.json").read_bytes()
+              seal = json.loads(seal_raw)
+              if seal_raw != (
+                  json.dumps(seal, sort_keys=True, separators=(",", ":")) + "\n"
+              ).encode("ascii"):
+                  raise SystemExit(f"{arch} native seal is not canonical")
+              if set(seal) != {
+                  "format",
+                  "arch",
+                  "platform",
+                  "manifest",
+                  "config",
+                  "runtime",
+                  "scanner",
+                  "sbom",
+              }:
+                  raise SystemExit(f"{arch} native seal keys differ")
+              if seal.get("format") != "z4j-rollback-compat-native-evidence-v1":
+                  raise SystemExit(f"{arch} native seal format differs")
+              if seal.get("arch") != arch:
+                  raise SystemExit(f"{arch} native seal architecture differs")
+              if seal.get("platform") != f"linux/{arch}":
+                  raise SystemExit(f"{arch} native seal platform differs")
+              if {
+                  "manifest": seal["manifest"],
+                  "config": seal["config"],
+              } != candidate["platforms"][arch]:
+                  raise SystemExit(f"{arch} descriptors differ from candidate seal")
+
+              manifest_raw = (native / "manifest.oci.json").read_bytes()
+              config_raw = (native / "config.oci.json").read_bytes()
+              if seal["manifest"] != {
+                  "digest": "sha256:" + hashlib.sha256(manifest_raw).hexdigest(),
+                  "size": len(manifest_raw),
+              }:
+                  raise SystemExit(f"{arch} manifest bytes differ from seal")
+              if seal["config"] != {
+                  "digest": "sha256:" + hashlib.sha256(config_raw).hexdigest(),
+                  "size": len(config_raw),
+              }:
+                  raise SystemExit(f"{arch} config bytes differ from seal")
+              manifest = json.loads(manifest_raw)
+              if manifest.get("config", {}).get("digest") != seal["config"]["digest"]:
+                  raise SystemExit(f"{arch} manifest/config binding differs")
+              if manifest.get("config", {}).get("size") != seal["config"]["size"]:
+                  raise SystemExit(f"{arch} manifest/config size binding differs")
+
+              verifier_raw = (native / "verifier.json").read_bytes()
+              runtime = json.loads(verifier_raw)
+              if seal["runtime"] != {
+                  "sha256": hashlib.sha256(verifier_raw).hexdigest(),
+                  "result": runtime,
+              }:
+                  raise SystemExit(f"{arch} runtime evidence differs from native seal")
+              if receipt["runtime"]["platforms"][arch] != {
+                  "verification_sha256": seal["runtime"]["sha256"],
+                  "result": runtime,
+              }:
+                  raise SystemExit(f"{arch} runtime differs from qualification receipt")
+              expected_runtime_keys = {
+                  "status",
+                  "architecture",
+                  "python",
+                  "site_packages",
+                  "application_content",
+                  "stdlib_excluding_site_packages",
+                  "cadence_payload",
+                  "cadence_runtime_fingerprint",
+                  "extension_modules_imported",
+              }
+              if set(runtime) != expected_runtime_keys:
+                  raise SystemExit(f"{arch} runtime verifier keys differ")
+              if runtime.get("status") != "ok":
+                  raise SystemExit(f"{arch} runtime verifier did not pass")
+              if runtime.get("architecture") != arch or runtime.get("python") != "3.14.7":
+                  raise SystemExit(f"{arch} runtime carrier differs")
+              if runtime.get("site_packages") != lock["released_image"]["platforms"][arch][
+                  "site_packages"
+              ]:
+                  raise SystemExit(f"{arch} released site tree differs")
+              expected_app = {
+                  key: lock["runtime_content"]["application_content"][key]
+                  for key in ("sha256", "canonical_bytes", "entries")
+              }
+              if runtime.get("application_content") != expected_app:
+                  raise SystemExit(f"{arch} application content differs")
+              if runtime.get("stdlib_excluding_site_packages") != (
+                  lock["python_carrier"]["platforms"][arch][
+                      "stdlib_excluding_site_packages"
+                  ]
+              ):
+                  raise SystemExit(f"{arch} Python carrier stdlib differs")
+              if runtime.get("cadence_payload") != expected_cadence:
+                  raise SystemExit(f"{arch} cadence payload differs")
+              if runtime.get("cadence_runtime_fingerprint") != lock["cadence"][
+                  "expected_runtime_fingerprint"
+              ]:
+                  raise SystemExit(f"{arch} cadence fingerprint differs")
+
+              trivy_raw = (native / "trivy.json").read_bytes()
+              report = json.loads(trivy_raw)
+              if report.get("SchemaVersion") != 2 or not isinstance(
+                  report.get("Results"), list
+              ):
+                  raise SystemExit(f"{arch} Trivy report schema differs")
+              if seal["manifest"]["digest"].encode("ascii") not in trivy_raw:
+                  raise SystemExit(f"{arch} Trivy report does not bind native digest")
+              counts = {"HIGH": 0, "CRITICAL": 0}
+              for result in report.get("Results") or []:
+                  for vulnerability in result.get("Vulnerabilities") or []:
+                      severity = vulnerability.get("Severity")
+                      if severity in counts:
+                          counts[severity] += 1
+              scanner = {
+                  "report_sha256": hashlib.sha256(trivy_raw).hexdigest(),
+                  "counts": counts,
+              }
+              if scanner != seal["scanner"] or counts != {
+                  "HIGH": 0,
+                  "CRITICAL": 0,
+              }:
+                  raise SystemExit(f"{arch} Trivy report is not an exact clean result")
+              if receipt["scanner"]["platforms"][arch] != scanner:
+                  raise SystemExit(f"{arch} scanner receipt differs")
+
+              sbom_raw = (native / "sbom.spdx.json").read_bytes()
+              if json.loads(sbom_raw).get("spdxVersion") != "SPDX-2.3":
+                  raise SystemExit(f"{arch} SBOM is not SPDX 2.3")
+              sbom = {
+                  "sha256": hashlib.sha256(sbom_raw).hexdigest(),
+                  "format": "spdx-json",
+              }
+              if sbom != seal["sbom"]:
+                  raise SystemExit(f"{arch} native SBOM differs from seal")
+              if receipt["sbom"]["platforms"][arch] != {
+                  "sha256": sbom["sha256"]
+              }:
+                  raise SystemExit(f"{arch} SBOM receipt differs")
+              platform_receipts[arch] = seal
+
+          expected_scanner = {
+              "tool": "trivy",
+              "version": "0.74.0",
+              "severity": ["HIGH", "CRITICAL"],
+              "ignore_unfixed": False,
+              "exit_code": 1,
+              "platforms": {
+                  arch: platform_receipts[arch]["scanner"]
+                  for arch in ("amd64", "arm64")
+              },
+          }
+          if receipt.get("scanner") != expected_scanner:
+              raise SystemExit("qualification scanner policy or reports differ")
+          expected_sbom = {
+              "tool": "syft",
+              "version": "1.50.0",
+              "format": "spdx-json",
+              "platforms": {
+                  arch: {"sha256": platform_receipts[arch]["sbom"]["sha256"]}
+                  for arch in ("amd64", "arm64")
+              },
+              "index_sha256": sha(evidence / "index" / "sbom.spdx.json"),
+          }
+          if receipt.get("sbom") != expected_sbom:
+              raise SystemExit("qualification SBOM authority differs")
+          if json.loads(
+              (evidence / "index" / "sbom.spdx.json").read_bytes()
+          ).get("spdxVersion") != "SPDX-2.3":
+              raise SystemExit("index SBOM is not SPDX 2.3")
+
+          index_raw = (evidence / "index" / "candidate.index.oci.json").read_bytes()
+          index_document = json.loads(index_raw)
+          expected_index_document = {
+              "schemaVersion": 2,
+              "mediaType": "application/vnd.oci.image.index.v1+json",
+              "manifests": [
+                  {
+                      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                      "digest": candidate["platforms"][arch]["manifest"]["digest"],
+                      "size": candidate["platforms"][arch]["manifest"]["size"],
+                      "platform": {
+                          "architecture": arch,
+                          "os": "linux",
+                      },
+                  }
+                  for arch in ("amd64", "arm64")
+              ],
+          }
+          if index_document != expected_index_document:
+              raise SystemExit("original index/platform descriptor matrix differs")
+          reread_raw = (
+              evidence / "index" / "registry-reread.index.oci.json"
+          ).read_bytes()
+          if candidate["index"] != {
+              "digest": "sha256:" + hashlib.sha256(index_raw).hexdigest(),
+              "size": len(index_raw),
+          }:
+              raise SystemExit("original index bytes differ from sealed candidate")
+          if reread_raw != index_raw:
+              raise SystemExit("qualification registry reread differs from original")
+          if receipt.get("registry_reread") != {
+              "digest": candidate["index"]["digest"],
+              "size": len(reread_raw),
+              "sha256": hashlib.sha256(reread_raw).hexdigest(),
+              "exact_original_bytes": True,
+          }:
+              raise SystemExit("qualification registry reread receipt differs")
+
+          proof_names = {
+              "signature": "signature-verification.json",
+              "sbom_attestation": "sbom-attestation-verification.json",
+              "provenance": "provenance-verification.json",
+          }
+          expected_proofs = {}
+          for label, name in proof_names.items():
+              path = evidence / "proofs" / name
+              if path.stat().st_size == 0:
+                  raise SystemExit(f"{label} proof is empty")
+              expected_proofs[label] = {
+                  "verified": True,
+                  "sha256": sha(path),
+              }
+          if receipt.get("proofs") != expected_proofs:
+              raise SystemExit("qualification cryptographic proofs differ")
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"receipt_sha256={receipt_sha}\n")
+              stream.write(f"index_digest={candidate['index']['digest']}\n")
+          PY
+
+      - name: Login to Docker Hub for original-byte reread
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install Cosign 3.1.3 for independent re-verification
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.1.3
+
+      - name: Discover and reverify durable qualification OCI evidence
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          index_digest=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["digest"])')
+          index_size=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["size"])')
+          python3 "${RECIPE}/durable_evidence.py" verify \
+            --manifest "${RECIPE}/manifest.json" \
+            --stage qualification \
+            --subject-digest "${index_digest}" \
+            --subject-size "${index_size}" \
+            --record /tmp/rollback-compat-qualification/durable/qualification/record.json \
+            --output-dir /tmp/rollback-compat-finalization/durable-verification/qualification
+
+      - name: Registry-reread the exact original digest and every native descriptor
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-qualification
+          reread=/tmp/rollback-compat-finalization/registry-reread
+          install -d -m 0700 "${reread}/native/amd64" "${reread}/native/arm64"
+          token_json=$(mktemp)
+          token_file=$(mktemp)
+          trap 'rm -f "${token_json}" "${token_file}"' EXIT
+          curl --silent --show-error --fail-with-body \
+            --get 'https://auth.docker.io/token' \
+            --user "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
+            --data-urlencode 'service=registry.docker.io' \
+            --data-urlencode 'scope=repository:z4jdev/z4j:pull' \
+            --output "${token_json}"
+          python3 - "${token_json}" "${token_file}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          token = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("token")
+          if not isinstance(token, str) or not token:
+              raise SystemExit("registry token response has no token")
+          Path(sys.argv[2]).write_text(token, encoding="utf-8")
+          PY
+          registry_token=$(cat "${token_file}")
+          index_digest=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["digest"])')
+          curl --silent --show-error --fail-with-body \
+            --header "Authorization: Bearer ${registry_token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            --output "${reread}/candidate.index.oci.json" \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${index_digest}"
+          cmp --silent \
+            "${root}/evidence/index/candidate.index.oci.json" \
+            "${reread}/candidate.index.oci.json"
+
+          for arch in amd64 arm64; do
+            manifest_digest=$(python3 - "${RECIPE}/manifest.json" "${arch}" <<'PY'
+          import json
+          import sys
+          print(json.load(open(sys.argv[1]))["candidate_image"]["platforms"][sys.argv[2]]["manifest"]["digest"])
+          PY
+          )
+            config_digest=$(python3 - "${RECIPE}/manifest.json" "${arch}" <<'PY'
+          import json
+          import sys
+          print(json.load(open(sys.argv[1]))["candidate_image"]["platforms"][sys.argv[2]]["config"]["digest"])
+          PY
+          )
+            curl --silent --show-error --fail-with-body \
+              --header "Authorization: Bearer ${registry_token}" \
+              --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+              --output "${reread}/native/${arch}/manifest.oci.json" \
+              "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${manifest_digest}"
+            curl --silent --show-error --fail-with-body \
+              --header "Authorization: Bearer ${registry_token}" \
+              --output "${reread}/native/${arch}/config.oci.json" \
+              "https://registry-1.docker.io/v2/z4jdev/z4j/blobs/${config_digest}"
+            cmp --silent \
+              "${root}/evidence/native/${arch}/manifest.oci.json" \
+              "${reread}/native/${arch}/manifest.oci.json"
+            cmp --silent \
+              "${root}/evidence/native/${arch}/config.oci.json" \
+              "${reread}/native/${arch}/config.oci.json"
+          done
+
+      - name: Independently reverify signature, SBOM attestation, and provenance
+        env:
+          INDEX_DIGEST: ${{ steps.qualification.outputs.index_digest }}
+        run: |
+          set -euo pipefail
+          proof=/tmp/rollback-compat-finalization/proofs
+          install -d -m 0700 "${proof}"
+          reference="${IMAGE}@${INDEX_DIGEST}"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --output json \
+            "${reference}" > "${proof}/signature-verification.json"
+          cosign verify-attestation \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --type spdxjson \
+            --output json \
+            "${reference}" > "${proof}/sbom-attestation-verification.json"
+          cosign verify-attestation \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --type https://slsa.dev/provenance/v1 \
+            --output json \
+            "${reference}" > "${proof}/provenance-verification.json"
+          test -s "${proof}/signature-verification.json"
+          test -s "${proof}/sbom-attestation-verification.json"
+          test -s "${proof}/provenance-verification.json"
+          python3 - "${proof}" "${INDEX_DIGEST}"             /tmp/rollback-compat-qualification/evidence/index/sbom.spdx.json <<'PY'
+          import base64
+          import json
+          import sys
+          from pathlib import Path
+
+          proof_root = Path(sys.argv[1])
+          expected_digest = sys.argv[2].removeprefix("sha256:")
+          expected_sbom = json.loads(Path(sys.argv[3]).read_bytes())
+
+          def envelopes(path: Path) -> list[dict[str, object]]:
+              raw = path.read_text(encoding="utf-8")
+              decoder = json.JSONDecoder()
+              position = 0
+              values = []
+              while position < len(raw):
+                  while position < len(raw) and raw[position].isspace():
+                      position += 1
+                  if position == len(raw):
+                      break
+                  value, position = decoder.raw_decode(raw, position)
+                  values.extend(value if isinstance(value, list) else [value])
+              if not values or not all(isinstance(value, dict) for value in values):
+                  raise SystemExit(f"no JSON verification envelopes in {path}")
+              return values
+
+          def statements(path: Path) -> list[dict[str, object]]:
+              decoded = []
+              for envelope in envelopes(path):
+                  payload = envelope.get("payload")
+                  if not isinstance(payload, str):
+                      raise SystemExit(f"verification envelope has no payload: {path}")
+                  statement = json.loads(
+                      base64.b64decode(payload, validate=True)
+                  )
+                  if not isinstance(statement, dict):
+                      raise SystemExit(f"attestation payload is not an object: {path}")
+                  decoded.append(statement)
+              return decoded
+
+          def subject_matches(statement: dict[str, object]) -> bool:
+              return any(
+                  isinstance(subject, dict)
+                  and isinstance(subject.get("digest"), dict)
+                  and subject["digest"].get("sha256") == expected_digest
+                  for subject in statement.get("subject") or []
+              )
+
+          if not any(
+              subject_matches(statement)
+              and statement.get("predicate") == expected_sbom
+              for statement in statements(
+                  proof_root / "sbom-attestation-verification.json"
+              )
+          ):
+              raise SystemExit(
+                  "reverified SBOM attestation does not bind the exact index SBOM"
+              )
+          if not any(
+              subject_matches(statement)
+              and statement.get("predicateType")
+              == "https://slsa.dev/provenance/v1"
+              for statement in statements(
+                  proof_root / "provenance-verification.json"
+              )
+          ):
+              raise SystemExit(
+                  "reverified provenance does not bind the exact original digest"
+              )
+          PY
+
+      - name: Capture authenticated Docker Hub immutable-tag authority
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-finalization
+          install -d -m 0700 "${root}"
+          hub_auth_request=$(mktemp)
+          hub_token_json=$(mktemp)
+          hub_token_config=$(mktemp)
+          hub_repository_response=$(mktemp)
+          chmod 0600 \
+            "${hub_auth_request}" \
+            "${hub_token_json}" \
+            "${hub_token_config}" \
+            "${hub_repository_response}"
+          trap 'rm -f "${hub_auth_request}" "${hub_token_json}" "${hub_token_config}" "${hub_repository_response}"' EXIT
+          python3 - "${hub_auth_request}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          identifier = os.environ.get("DOCKERHUB_USERNAME")
+          secret = os.environ.get("DOCKERHUB_TOKEN")
+          if not isinstance(identifier, str) or not identifier:
+              raise SystemExit("Docker Hub identifier is absent")
+          if not isinstance(secret, str) or not secret:
+              raise SystemExit("Docker Hub secret is absent")
+          raw = (
+              json.dumps(
+                  {"identifier": identifier, "secret": secret},
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+              )
+              + "\n"
+          ).encode("ascii")
+          path = Path(sys.argv[1])
+          path.write_bytes(raw)
+          path.chmod(0o600)
+          PY
+          if ! hub_auth_status=$(curl --silent --show-error --fail-with-body \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data-binary "@${hub_auth_request}" \
+            --output "${hub_token_json}" \
+            'https://hub.docker.com/v2/auth/token'); then
+            echo "::error::Docker Hub API token transport failed"
+            exit 1
+          fi
+          if [ "${hub_auth_status}" != 200 ]; then
+            echo "::error::Docker Hub API token returned HTTP ${hub_auth_status}"
+            exit 1
+          fi
+          python3 - "${hub_token_json}" "${hub_token_config}" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          def reject_constant(value: str) -> None:
+              raise ValueError(f"non-finite JSON constant: {value}")
+
+          def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON object key: {key}")
+                  result[key] = value
+              return result
+
+          payload = json.loads(
+              Path(sys.argv[1]).read_bytes(),
+              object_pairs_hook=unique_object,
+              parse_constant=reject_constant,
+          )
+          if not isinstance(payload, dict) or set(payload) != {"access_token"}:
+              raise SystemExit("Docker Hub token response keys differ")
+          token = payload["access_token"]
+          if not isinstance(token, str) or not re.fullmatch(
+              r"[A-Za-z0-9._~-]+", token
+          ):
+              raise SystemExit("Docker Hub token response has an invalid access_token")
+          config = Path(sys.argv[2])
+          config.write_text(
+              f'header = "Authorization: Bearer {token}"\n',
+              encoding="ascii",
+          )
+          config.chmod(0o600)
+          PY
+          if ! hub_repository_status=$(curl --silent --show-error --fail-with-body \
+            --write-out '%{http_code}' \
+            --config "${hub_token_config}" \
+            --request GET \
+            --output "${hub_repository_response}" \
+            "${HUB_API_REPOSITORY}"); then
+            echo "::error::Docker Hub repository settings transport failed"
+            exit 1
+          fi
+          if [ "${hub_repository_status}" != 200 ]; then
+            echo "::error::Docker Hub repository settings returned HTTP ${hub_repository_status}"
+            exit 1
+          fi
+          python3 - "${hub_repository_response}" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          def reject_constant(value: str) -> None:
+              raise ValueError(f"non-finite JSON constant: {value}")
+
+          def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON object key: {key}")
+                  result[key] = value
+              return result
+
+          response = json.loads(
+              Path(sys.argv[1]).read_bytes(),
+              object_pairs_hook=unique_object,
+              parse_constant=reject_constant,
+          )
+          if not isinstance(response, dict):
+              raise SystemExit("Docker Hub repository response is not an object")
+          if response.get("namespace") != "z4jdev" or response.get("name") != "z4j":
+              raise SystemExit("Docker Hub repository identity differs")
+          settings = response.get("immutable_tags_settings")
+          expected_settings = {
+              "enabled": True,
+              "rules": [os.environ["IMMUTABLE_TAG_RULE"]],
+          }
+          if (
+              not isinstance(settings, dict)
+              or set(settings) != {"enabled", "rules"}
+              or settings.get("enabled") is not True
+              or settings.get("rules") != expected_settings["rules"]
+          ):
+              raise SystemExit("Docker Hub immutable-tag settings differ")
+          if re.fullmatch(
+              os.environ["IMMUTABLE_TAG_RULE"], os.environ["TARGET_TAG"]
+          ) is None:
+              raise SystemExit("immutable-tag rule does not match the target tag")
+
+          lock = json.loads(
+              (Path(os.environ["RECIPE"]) / "manifest.json").read_bytes()
+          )
+          policy = lock["publication_gate"]["immutable_tag_authority"]
+          expected_policy = {
+              "provider": "docker-hub",
+              "api": os.environ["HUB_API_REPOSITORY"],
+              "repository": "z4jdev/z4j",
+              "target_tag": os.environ["TARGET_TAG"],
+              "enabled": True,
+              "rules": [os.environ["IMMUTABLE_TAG_RULE"]],
+              "required_behavior": (
+                  "matched-tag-cannot-be-overwritten-or-deleted"
+              ),
+              "authority_format": (
+                  "z4j-docker-hub-immutable-tag-authority-v1"
+              ),
+              "authentication_format": (
+                  "z4j-docker-hub-immutable-tag-authority-authentication-v1"
+              ),
+              "require_authenticated_readback": True,
+              "require_prewrite_exact_reread": True,
+              "require_target_absent": True,
+          }
+          if (
+              not isinstance(policy, dict)
+              or policy != expected_policy
+              or policy.get("enabled") is not True
+              or policy.get("require_authenticated_readback") is not True
+              or policy.get("require_prewrite_exact_reread") is not True
+              or policy.get("require_target_absent") is not True
+          ):
+              raise SystemExit("manifest immutable-tag authority policy differs")
+
+          authority = {
+              "format": "z4j-docker-hub-immutable-tag-authority-v1",
+              "result": "pass",
+              "source": {
+                  "api": os.environ["HUB_API_REPOSITORY"],
+                  "operation": "GetRepository",
+                  "authentication": "docker-hub-short-lived-bearer",
+              },
+              "repository": {
+                  "namespace": "z4jdev",
+                  "name": "z4j",
+              },
+              "immutable_tags_settings": expected_settings,
+              "target_tag": os.environ["TARGET_TAG"],
+          }
+          raw = (
+              json.dumps(
+                  authority,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+              )
+              + "\n"
+          ).encode("ascii")
+          (
+              Path("/tmp/rollback-compat-finalization")
+              / "docker-hub-immutable-tag-authority.json"
+          ).write_bytes(raw)
+          PY
+
+      - name: Keyless-sign and reverify exact Docker Hub immutable-tag authority
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-finalization
+          authority="${root}/docker-hub-immutable-tag-authority.json"
+          bundle="${root}/docker-hub-immutable-tag-authority.sigstore.json"
+          verification="${root}/docker-hub-immutable-tag-authority-verification.txt"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign sign-blob \
+            --yes \
+            --bundle "${bundle}" \
+            "${authority}" > /dev/null
+          cosign verify-blob \
+            --bundle "${bundle}" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${authority}" > "${verification}" 2>&1
+          printf 'sigstore blob verification exit=0\n' >> "${verification}"
+          test -s "${authority}"
+          test -s "${bundle}"
+          test -s "${verification}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("/tmp/rollback-compat-finalization")
+          authority = root / "docker-hub-immutable-tag-authority.json"
+          bundle = root / "docker-hub-immutable-tag-authority.sigstore.json"
+          verification = (
+              root / "docker-hub-immutable-tag-authority-verification.txt"
+          )
+          json.loads(bundle.read_bytes())
+
+          def descriptor(path: Path) -> dict[str, object]:
+              raw = path.read_bytes()
+              return {
+                  "path": path.name,
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "size": len(raw),
+              }
+
+          authentication = {
+              "format": (
+                  "z4j-docker-hub-immutable-tag-authority-authentication-v1"
+              ),
+              "result": "pass",
+              "method": "sigstore-keyless-cosign-sign-blob",
+              "cosign_version": "3.1.3",
+              "identity": (
+                  f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/"
+                  ".github/workflows/release-rollback-compat.yml"
+                  "@refs/heads/main"
+              ),
+              "issuer": "https://token.actions.githubusercontent.com",
+              "subject": descriptor(authority),
+              "bundle": descriptor(bundle),
+              "verification": {
+                  **descriptor(verification),
+                  "verified": True,
+              },
+          }
+          raw = (
+              json.dumps(
+                  authentication,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+              )
+              + "\n"
+          ).encode("ascii")
+          (
+              root
+              / "docker-hub-immutable-tag-authority-authentication.json"
+          ).write_bytes(raw)
+          PY
+
+      - name: Emit detached pre-promotion finalization receipt
+        env:
+          QUALIFICATION_RUN_ID: ${{ needs.prepare.outputs.qualification_run_id }}
+          QUALIFICATION_RECEIPT_SHA256: ${{ steps.qualification.outputs.receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          export FINAL_GIT_TREE
+          FINAL_GIT_TREE=$(git rev-parse "${GITHUB_SHA}^{tree}")
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path("/tmp/rollback-compat-finalization")
+          root.mkdir(exist_ok=True)
+          recipe = Path(os.environ["RECIPE"])
+          manifest_path = recipe / "manifest.json"
+          manifest_raw = manifest_path.read_bytes()
+          lock = json.loads(manifest_raw)
+          candidate = lock["candidate_image"]
+          authority_policy_lock = lock["publication_gate"][
+              "immutable_tag_authority"
+          ]
+          qualification_raw = Path(
+              "/tmp/rollback-compat-qualification/"
+              "rollback-compat-qualification-receipt.json"
+          ).read_bytes()
+          run = json.loads(
+              Path("/tmp/rollback-compat-qualification-run.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          def sha(path: Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          def descriptor(path: Path) -> dict[str, object]:
+              raw = path.read_bytes()
+              return {
+                  "path": path.name,
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "size": len(raw),
+              }
+
+          git_sha = os.environ["GITHUB_SHA"]
+          git_tree = os.environ["FINAL_GIT_TREE"]
+          if not re.fullmatch(r"[0-9a-f]{40}", git_sha):
+              raise SystemExit("final source commit is invalid")
+          if not re.fullmatch(r"[0-9a-f]{40}", git_tree):
+              raise SystemExit("final source tree is invalid")
+          qualification_sha = hashlib.sha256(qualification_raw).hexdigest()
+          if qualification_sha != os.environ["QUALIFICATION_RECEIPT_SHA256"]:
+              raise SystemExit("qualification receipt changed before finalization")
+
+          authority_path = root / "docker-hub-immutable-tag-authority.json"
+          authority_bundle_path = (
+              root / "docker-hub-immutable-tag-authority.sigstore.json"
+          )
+          authority_verification_path = (
+              root / "docker-hub-immutable-tag-authority-verification.txt"
+          )
+          authority_authentication_path = (
+              root
+              / "docker-hub-immutable-tag-authority-authentication.json"
+          )
+          authority_raw = authority_path.read_bytes()
+          authority = json.loads(authority_raw)
+          canonical_authority = (
+              json.dumps(
+                  authority,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+              )
+              + "\n"
+          ).encode("ascii")
+          if authority_raw != canonical_authority:
+              raise SystemExit("immutable-tag authority is not canonical newline JSON")
+          expected_settings = {
+              "enabled": True,
+              "rules": [os.environ["IMMUTABLE_TAG_RULE"]],
+          }
+          expected_authority = {
+              "format": "z4j-docker-hub-immutable-tag-authority-v1",
+              "result": "pass",
+              "source": {
+                  "api": os.environ["HUB_API_REPOSITORY"],
+                  "operation": "GetRepository",
+                  "authentication": "docker-hub-short-lived-bearer",
+              },
+              "repository": {
+                  "namespace": "z4jdev",
+                  "name": "z4j",
+              },
+              "immutable_tags_settings": expected_settings,
+              "target_tag": os.environ["TARGET_TAG"],
+          }
+          if authority != expected_authority:
+              raise SystemExit("signed immutable-tag authority differs")
+
+          authority_authentication_raw = (
+              authority_authentication_path.read_bytes()
+          )
+          authority_authentication = json.loads(
+              authority_authentication_raw
+          )
+          canonical_authority_authentication = (
+              json.dumps(
+                  authority_authentication,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+              )
+              + "\n"
+          ).encode("ascii")
+          if (
+              authority_authentication_raw
+              != canonical_authority_authentication
+          ):
+              raise SystemExit(
+                  "immutable-tag authority authentication is not canonical"
+              )
+          json.loads(authority_bundle_path.read_bytes())
+          identity = (
+              f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/"
+              ".github/workflows/release-rollback-compat.yml"
+              "@refs/heads/main"
+          )
+          expected_authority_authentication = {
+              "format": (
+                  "z4j-docker-hub-immutable-tag-authority-authentication-v1"
+              ),
+              "result": "pass",
+              "method": "sigstore-keyless-cosign-sign-blob",
+              "cosign_version": "3.1.3",
+              "identity": identity,
+              "issuer": "https://token.actions.githubusercontent.com",
+              "subject": descriptor(authority_path),
+              "bundle": descriptor(authority_bundle_path),
+              "verification": {
+                  **descriptor(authority_verification_path),
+                  "verified": True,
+              },
+          }
+          if authority_authentication != expected_authority_authentication:
+              raise SystemExit(
+                  "immutable-tag authority authentication differs"
+              )
+
+          receipt_policy_keys = (
+              "provider",
+              "api",
+              "repository",
+              "target_tag",
+              "enabled",
+              "rules",
+              "required_behavior",
+          )
+          authority_receipt_policy = {
+              key: authority_policy_lock[key]
+              for key in receipt_policy_keys
+          }
+          if authority_receipt_policy != {
+              "provider": "docker-hub",
+              "api": os.environ["HUB_API_REPOSITORY"],
+              "repository": "z4jdev/z4j",
+              "target_tag": os.environ["TARGET_TAG"],
+              "enabled": True,
+              "rules": [os.environ["IMMUTABLE_TAG_RULE"]],
+              "required_behavior": (
+                  "matched-tag-cannot-be-overwritten-or-deleted"
+              ),
+          }:
+              raise SystemExit("finalization immutable-tag receipt policy differs")
+
+          reread_root = root / "registry-reread"
+          index_path = reread_root / "candidate.index.oci.json"
+          index_raw = index_path.read_bytes()
+          platform_rereads = {}
+          for arch in ("amd64", "arm64"):
+              descriptors = {}
+              for descriptor, filename in (
+                  ("manifest", "manifest.oci.json"),
+                  ("config", "config.oci.json"),
+              ):
+                  path = reread_root / "native" / arch / filename
+                  raw = path.read_bytes()
+                  sealed = candidate["platforms"][arch][descriptor]
+                  actual = {
+                      "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                      "size": len(raw),
+                      "sha256": hashlib.sha256(raw).hexdigest(),
+                  }
+                  if actual["digest"] != sealed["digest"] or actual["size"] != sealed["size"]:
+                      raise SystemExit(f"{arch} {descriptor} reread differs from seal")
+                  descriptors[descriptor] = actual
+              platform_rereads[arch] = descriptors
+
+          proof_root = root / "proofs"
+          proofs = {}
+          for label, filename in (
+              ("signature", "signature-verification.json"),
+              ("sbom_attestation", "sbom-attestation-verification.json"),
+              ("provenance", "provenance-verification.json"),
+          ):
+              path = proof_root / filename
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"{label} reread proof is absent")
+              proofs[label] = {
+                  "verified": True,
+                  "sha256": sha(path),
+              }
+          proofs["final_tag_exact"] = {
+              "status": "pending",
+              "expected_digest": candidate["index"]["digest"],
+              "enforcement": (
+                  "docker-hub-immutable-create-only-after-receipt"
+              ),
+          }
+          receipt = {
+              "format": "z4j-rollback-compat-finalization-receipt-v1",
+              "result": "pass",
+              "source": {
+                  "git_sha": git_sha,
+                  "git_tree": git_tree,
+              },
+              "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+              "qualification_receipt_sha256": qualification_sha,
+              "qualification_run_id": int(os.environ["QUALIFICATION_RUN_ID"]),
+              "qualification_source": {
+                  "git_sha": run["head_sha"],
+                  "repository": run["head_repository"]["full_name"],
+                  "workflow_path": run["path"],
+              },
+              "candidate_image": {
+                  "repository": candidate["repository"],
+                  "public_tag": candidate["public_tag"],
+                  "index": candidate["index"],
+                  "platforms": candidate["platforms"],
+              },
+              "public_reference": (
+                  f"{candidate['repository']}:{candidate['public_tag']}"
+              ),
+              "registry_reread": {
+                  "original_reference": (
+                      f"{candidate['repository']}@{candidate['index']['digest']}"
+                  ),
+                  "index": {
+                      "digest": "sha256:" + hashlib.sha256(index_raw).hexdigest(),
+                      "size": len(index_raw),
+                      "sha256": hashlib.sha256(index_raw).hexdigest(),
+                  },
+                  "platforms": platform_rereads,
+                  "exact_original_bytes": True,
+              },
+              "immutable_tag_authority": {
+                  "policy": authority_receipt_policy,
+                  "capture": descriptor(authority_path),
+                  "authentication": authority_authentication,
+              },
+              "proofs": proofs,
+              "authorization": {
+                  "tag_transition": (
+                      "create-only-under-preconfigured-docker-hub-immutable-rule"
+                  ),
+                  "receipt_uploaded_before_tag_mutation": True,
+                  "source_candidate_finalized": True,
+                  "target_tag_required_absent": True,
+                  "immutable_tag_authority_authenticated": True,
+              },
+              "receipt_authentication": {
+                  "method": "sigstore-keyless-cosign-sign-blob",
+                  "identity": (
+                      f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/"
+                      ".github/workflows/release-rollback-compat.yml"
+                      "@refs/heads/main"
+                  ),
+                  "issuer": "https://token.actions.githubusercontent.com",
+                  "bundle_file": (
+                      "rollback-compat-finalization-receipt.sigstore.json"
+                  ),
+                  "verification_file": (
+                      "rollback-compat-finalization-receipt-verification.txt"
+                  ),
+              },
+          }
+          if receipt["registry_reread"]["index"]["digest"] != candidate["index"]["digest"]:
+              raise SystemExit("final reread index digest differs from candidate")
+          if receipt["registry_reread"]["index"]["size"] != candidate["index"]["size"]:
+              raise SystemExit("final reread index size differs from candidate")
+          raw = (
+              json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+          ).encode("ascii")
+          path = root / "rollback-compat-finalization-receipt.json"
+          path.write_bytes(raw)
+          digest = hashlib.sha256(raw).hexdigest()
+          (root / "rollback-compat-finalization-receipt.sha256").write_text(
+              f"{digest}  {path.name}\n",
+              encoding="ascii",
+          )
+          print(f"finalization receipt sha256={digest}")
+          PY
+
+      - name: Reuse exact prior durable finalization evidence when present
+        id: finalization_durable
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-finalization
+          durable="${RECIPE}/durable_evidence.py"
+          index_digest=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["digest"])')
+          index_size=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["size"])')
+          set +e
+          python3 "${durable}" discover \
+            --manifest "${RECIPE}/manifest.json" \
+            --stage finalization \
+            --subject-digest "${index_digest}" \
+            --subject-size "${index_size}" \
+            --predecessor-record /tmp/rollback-compat-qualification/durable/qualification/record.json \
+            --output-dir "${root}/durable/finalization" \
+            > "${root}/durable-finalization-replay.json"
+          status=$?
+          set -e
+          case "${status}" in
+            0)
+              python3 - \
+                "${root}/rollback-compat-finalization-receipt.json" \
+                "${root}/durable/finalization/readback/receipt.json" <<'PY'
+          import copy
+          import json
+          import sys
+          from pathlib import Path
+
+          current = json.loads(Path(sys.argv[1]).read_bytes())
+          replayed = json.loads(Path(sys.argv[2]).read_bytes())
+
+          def stable_receipt(value: object) -> dict[str, object]:
+              if not isinstance(value, dict):
+                  raise SystemExit("finalization replay receipt is not an object")
+              result = copy.deepcopy(value)
+              authority = result.get("immutable_tag_authority")
+              if not isinstance(authority, dict) or set(authority) != {
+                  "policy",
+                  "capture",
+                  "authentication",
+              }:
+                  raise SystemExit(
+                      "finalization replay immutable authority keys differ"
+                  )
+              authentication = authority.pop("authentication")
+              if not isinstance(authentication, dict):
+                  raise SystemExit(
+                      "finalization replay authority authentication is absent"
+                  )
+              return result
+
+          if stable_receipt(replayed) != stable_receipt(current):
+              raise SystemExit(
+                  "durable finalization replay differs in stable source or evidence"
+              )
+          PY
+              rm -f \
+                "${root}/rollback-compat-finalization-receipt.json" \
+                "${root}/rollback-compat-finalization-receipt.sha256" \
+                "${root}/docker-hub-immutable-tag-authority.sigstore.json" \
+                "${root}/docker-hub-immutable-tag-authority-verification.txt" \
+                "${root}/docker-hub-immutable-tag-authority-authentication.json"
+              # Replace only regenerated nondeterministic Sigstore-linked files;
+              # every stable current reread/proof/capture must compare byte-exact.
+              python3 "${durable}" materialize-original \
+                --manifest "${RECIPE}/manifest.json" \
+                --directory "${root}/durable/finalization" \
+                --predecessor-record /tmp/rollback-compat-qualification/durable/qualification/record.json \
+                --output-dir "${root}" \
+                --skip-existing-exact \
+                > "${root}/durable-finalization-materialization.json"
+              printf 'reused=true\n' >> "${GITHUB_OUTPUT}"
+              ;;
+            3)
+              rm -f "${root}/durable-finalization-replay.json"
+              printf 'reused=false\n' >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              exit "${status}"
+              ;;
+          esac
+
+      - name: Keyless-sign and reverify exact finalization receipt bytes
+        if: steps.finalization_durable.outputs.reused != 'true'
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-finalization
+          receipt="${root}/rollback-compat-finalization-receipt.json"
+          bundle="${root}/rollback-compat-finalization-receipt.sigstore.json"
+          verification="${root}/rollback-compat-finalization-receipt-verification.txt"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign sign-blob \
+            --yes \
+            --bundle "${bundle}" \
+            "${receipt}" > /dev/null
+          cosign verify-blob \
+            --bundle "${bundle}" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${receipt}" > "${verification}" 2>&1
+          printf 'sigstore blob verification exit=0\n' >> "${verification}"
+          test -s "${bundle}"
+          test -s "${verification}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("/tmp/rollback-compat-finalization")
+          receipt = root / "rollback-compat-finalization-receipt.json"
+          bundle = root / "rollback-compat-finalization-receipt.sigstore.json"
+          verification = (
+              root / "rollback-compat-finalization-receipt-verification.txt"
+          )
+          authority = root / "docker-hub-immutable-tag-authority.json"
+          authority_authentication_path = (
+              root
+              / "docker-hub-immutable-tag-authority-authentication.json"
+          )
+          receipt_value = json.loads(receipt.read_bytes())
+          authority_authentication = json.loads(
+              authority_authentication_path.read_bytes()
+          )
+          json.loads(bundle.read_bytes())
+
+          def descriptor(path: Path) -> dict[str, object]:
+              raw = path.read_bytes()
+              return {
+                  "path": path.name,
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "size": len(raw),
+              }
+
+          receipt_authority = receipt_value.get("immutable_tag_authority")
+          if not isinstance(receipt_authority, dict):
+              raise SystemExit("finalization receipt immutable authority is absent")
+          if receipt_authority.get("capture") != descriptor(authority):
+              raise SystemExit("finalization receipt authority capture differs")
+          if receipt_authority.get("authentication") != authority_authentication:
+              raise SystemExit(
+                  "finalization receipt authority authentication differs"
+              )
+
+          authentication = {
+              "format": "z4j-rollback-compat-finalization-authentication-v1",
+              "result": "pass",
+              "method": "sigstore-keyless-cosign-sign-blob",
+              "cosign_version": "3.1.3",
+              "identity": (
+                  f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/"
+                  ".github/workflows/release-rollback-compat.yml"
+                  "@refs/heads/main"
+              ),
+              "issuer": "https://token.actions.githubusercontent.com",
+              "subject": descriptor(receipt),
+              "bundle": descriptor(bundle),
+              "verification": {
+                  **descriptor(verification),
+                  "verified": True,
+              },
+              "immutable_tag_authority": {
+                  "capture": descriptor(authority),
+                  "authentication": descriptor(
+                      authority_authentication_path
+                  ),
+              },
+          }
+          raw = (
+              json.dumps(authentication, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+              + "\n"
+          ).encode("ascii")
+          (root / "rollback-compat-finalization-authentication.json").write_bytes(
+              raw
+          )
+          PY
+
+      - name: Publish and raw-readback durable finalization OCI evidence
+        if: steps.finalization_durable.outputs.reused != 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-finalization
+          index_digest=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["digest"])')
+          index_size=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["size"])')
+          python3 "${RECIPE}/durable_evidence.py" publish \
+            --manifest "${RECIPE}/manifest.json" \
+            --stage finalization \
+            --subject-digest "${index_digest}" \
+            --subject-size "${index_size}" \
+            --receipt "${root}/rollback-compat-finalization-receipt.json" \
+            --bundle "${root}/rollback-compat-finalization-receipt.sigstore.json" \
+            --authentication "${root}/rollback-compat-finalization-authentication.json" \
+            --payload-root "${root}" \
+            --predecessor-record /tmp/rollback-compat-qualification/durable/qualification/record.json \
+            --output-dir "${root}/durable/finalization"
+
+      - name: Upload detached finalization receipt before tag mutation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rollback-compat-finalization-${{ github.run_id }}
+          path: /tmp/rollback-compat-finalization
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Promote original bytes under verified immutable-tag policy
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          finalization=/tmp/rollback-compat-finalization
+          index="${finalization}/registry-reread/candidate.index.oci.json"
+          authority="${finalization}/docker-hub-immutable-tag-authority.json"
+          authority_bundle="${finalization}/docker-hub-immutable-tag-authority.sigstore.json"
+          promotion=/tmp/rollback-compat-promotion
+          install -d -m 0700 "${promotion}"
+          authority_promotion_verification="${promotion}/docker-hub-immutable-tag-authority-promotion-verification.txt"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign verify-blob \
+            --bundle "${authority_bundle}" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${authority}" > "${authority_promotion_verification}" 2>&1
+          printf 'sigstore blob verification exit=0\n' \
+            >> "${authority_promotion_verification}"
+          test -s "${authority}"
+          test -s "${authority_bundle}"
+          test -s "${authority_promotion_verification}"
+
+          index_digest=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["digest"])')
+          printf '%s  %s\n' "${index_digest#sha256:}" "${index}" \
+            | sha256sum --check --status
+
+          hub_auth_request=$(mktemp)
+          hub_token_json=$(mktemp)
+          hub_token_config=$(mktemp)
+          hub_repository_response=$(mktemp)
+          registry_token_json=$(mktemp)
+          registry_token_file=$(mktemp)
+          tag_headers=$(mktemp)
+          prewrite_headers=$(mktemp)
+          write_headers=$(mktemp)
+          final_headers=$(mktemp)
+          chmod 0600 \
+            "${hub_auth_request}" \
+            "${hub_token_json}" \
+            "${hub_token_config}" \
+            "${hub_repository_response}" \
+            "${registry_token_json}" \
+            "${registry_token_file}"
+          trap 'rm -f "${hub_auth_request}" "${hub_token_json}" "${hub_token_config}" "${hub_repository_response}" "${registry_token_json}" "${registry_token_file}" "${tag_headers}" "${prewrite_headers}" "${write_headers}" "${final_headers}"' EXIT
+
+          python3 - "${hub_auth_request}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          identifier = os.environ.get("DOCKERHUB_USERNAME")
+          secret = os.environ.get("DOCKERHUB_TOKEN")
+          if not isinstance(identifier, str) or not identifier:
+              raise SystemExit("Docker Hub identifier is absent")
+          if not isinstance(secret, str) or not secret:
+              raise SystemExit("Docker Hub secret is absent")
+          raw = (
+              json.dumps(
+                  {"identifier": identifier, "secret": secret},
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+              )
+              + "\n"
+          ).encode("ascii")
+          path = Path(sys.argv[1])
+          path.write_bytes(raw)
+          path.chmod(0o600)
+          PY
+          if ! hub_auth_status=$(curl --silent --show-error --fail-with-body \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data-binary "@${hub_auth_request}" \
+            --output "${hub_token_json}" \
+            'https://hub.docker.com/v2/auth/token'); then
+            echo "::error::Docker Hub API token transport failed"
+            exit 1
+          fi
+          if [ "${hub_auth_status}" != 200 ]; then
+            echo "::error::Docker Hub API token returned HTTP ${hub_auth_status}"
+            exit 1
+          fi
+          python3 - "${hub_token_json}" "${hub_token_config}" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          def reject_constant(value: str) -> None:
+              raise ValueError(f"non-finite JSON constant: {value}")
+
+          def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON object key: {key}")
+                  result[key] = value
+              return result
+
+          payload = json.loads(
+              Path(sys.argv[1]).read_bytes(),
+              object_pairs_hook=unique_object,
+              parse_constant=reject_constant,
+          )
+          if not isinstance(payload, dict) or set(payload) != {"access_token"}:
+              raise SystemExit("Docker Hub token response keys differ")
+          token = payload["access_token"]
+          if not isinstance(token, str) or not re.fullmatch(
+              r"[A-Za-z0-9._~-]+", token
+          ):
+              raise SystemExit("Docker Hub token response has an invalid access_token")
+          config = Path(sys.argv[2])
+          config.write_text(
+              f'header = "Authorization: Bearer {token}"\n',
+              encoding="ascii",
+          )
+          config.chmod(0o600)
+          PY
+
+          curl --silent --show-error --fail-with-body \
+            --get 'https://auth.docker.io/token' \
+            --user "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
+            --data-urlencode 'service=registry.docker.io' \
+            --data-urlencode 'scope=repository:z4jdev/z4j:pull,push' \
+            --output "${registry_token_json}"
+          python3 - "${registry_token_json}" "${registry_token_file}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          payload = json.loads(Path(sys.argv[1]).read_bytes())
+          if not isinstance(payload, dict):
+              raise SystemExit("registry token response is not an object")
+          token = payload.get("token")
+          if not isinstance(token, str) or not token:
+              raise SystemExit("registry token response has no token")
+          path = Path(sys.argv[2])
+          path.write_text(token, encoding="utf-8")
+          path.chmod(0o600)
+          PY
+          registry_token=$(cat "${registry_token_file}")
+
+          if ! tag_status=$(curl --silent --show-error \
+            --output /dev/null \
+            --dump-header "${tag_headers}" \
+            --write-out '%{http_code}' \
+            --request HEAD \
+            --header "Authorization: Bearer ${registry_token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${TARGET_TAG}"); then
+            echo "::error::transport failed during target-tag lookup"
+            exit 1
+          fi
+          case "${tag_status}" in
+            404)
+              ;;
+            200)
+              echo "::error::sole public tag already exists; create-only promotion refused"
+              exit 1
+              ;;
+            *)
+              echo "::error::target-tag lookup returned HTTP ${tag_status}"
+              exit 1
+              ;;
+          esac
+
+          if ! prewrite_status=$(curl --silent --show-error \
+            --output /dev/null \
+            --dump-header "${prewrite_headers}" \
+            --write-out '%{http_code}' \
+            --request HEAD \
+            --header "Authorization: Bearer ${registry_token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${TARGET_TAG}"); then
+            echo "::error::transport failed during prewrite target-tag lookup"
+            exit 1
+          fi
+          case "${prewrite_status}" in
+            404)
+              ;;
+            200)
+              echo "::error::sole public tag appeared before create; promotion refused"
+              exit 1
+              ;;
+            *)
+              echo "::error::prewrite target-tag lookup returned HTTP ${prewrite_status}"
+              exit 1
+              ;;
+          esac
+
+          if ! hub_repository_status=$(curl --silent --show-error --fail-with-body \
+            --write-out '%{http_code}' \
+            --config "${hub_token_config}" \
+            --request GET \
+            --output "${hub_repository_response}" \
+            "${HUB_API_REPOSITORY}"); then
+            echo "::error::Docker Hub repository settings transport failed"
+            exit 1
+          fi
+          if [ "${hub_repository_status}" != 200 ]; then
+            echo "::error::Docker Hub repository settings returned HTTP ${hub_repository_status}"
+            exit 1
+          fi
+          python3 - "${hub_repository_response}" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          def reject_constant(value: str) -> None:
+              raise ValueError(f"non-finite JSON constant: {value}")
+
+          def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON object key: {key}")
+                  result[key] = value
+              return result
+
+          response = json.loads(
+              Path(sys.argv[1]).read_bytes(),
+              object_pairs_hook=unique_object,
+              parse_constant=reject_constant,
+          )
+          if not isinstance(response, dict):
+              raise SystemExit("Docker Hub repository response is not an object")
+          if response.get("namespace") != "z4jdev" or response.get("name") != "z4j":
+              raise SystemExit("Docker Hub repository identity differs")
+          settings = response.get("immutable_tags_settings")
+          expected_settings = {
+              "enabled": True,
+              "rules": [os.environ["IMMUTABLE_TAG_RULE"]],
+          }
+          if (
+              not isinstance(settings, dict)
+              or set(settings) != {"enabled", "rules"}
+              or settings.get("enabled") is not True
+              or settings.get("rules") != expected_settings["rules"]
+          ):
+              raise SystemExit("Docker Hub immutable-tag settings drifted")
+          if re.fullmatch(
+              os.environ["IMMUTABLE_TAG_RULE"], os.environ["TARGET_TAG"]
+          ) is None:
+              raise SystemExit("immutable-tag rule does not match the target tag")
+
+          lock = json.loads(
+              (Path(os.environ["RECIPE"]) / "manifest.json").read_bytes()
+          )
+          policy = lock["publication_gate"]["immutable_tag_authority"]
+          expected_policy = {
+              "provider": "docker-hub",
+              "api": os.environ["HUB_API_REPOSITORY"],
+              "repository": "z4jdev/z4j",
+              "target_tag": os.environ["TARGET_TAG"],
+              "enabled": True,
+              "rules": [os.environ["IMMUTABLE_TAG_RULE"]],
+              "required_behavior": (
+                  "matched-tag-cannot-be-overwritten-or-deleted"
+              ),
+              "authority_format": (
+                  "z4j-docker-hub-immutable-tag-authority-v1"
+              ),
+              "authentication_format": (
+                  "z4j-docker-hub-immutable-tag-authority-authentication-v1"
+              ),
+              "require_authenticated_readback": True,
+              "require_prewrite_exact_reread": True,
+              "require_target_absent": True,
+          }
+          if (
+              not isinstance(policy, dict)
+              or policy != expected_policy
+              or policy.get("enabled") is not True
+              or policy.get("require_authenticated_readback") is not True
+              or policy.get("require_prewrite_exact_reread") is not True
+              or policy.get("require_target_absent") is not True
+          ):
+              raise SystemExit("manifest immutable-tag authority policy differs")
+
+          authority = {
+              "format": "z4j-docker-hub-immutable-tag-authority-v1",
+              "result": "pass",
+              "source": {
+                  "api": os.environ["HUB_API_REPOSITORY"],
+                  "operation": "GetRepository",
+                  "authentication": "docker-hub-short-lived-bearer",
+              },
+              "repository": {
+                  "namespace": "z4jdev",
+                  "name": "z4j",
+              },
+              "immutable_tags_settings": expected_settings,
+              "target_tag": os.environ["TARGET_TAG"],
+          }
+          raw = (
+              json.dumps(
+                  authority,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+              )
+              + "\n"
+          ).encode("ascii")
+          (
+              Path("/tmp/rollback-compat-promotion")
+              / "docker-hub-immutable-tag-authority-prewrite.json"
+          ).write_bytes(raw)
+          PY
+          prewrite_authority="${promotion}/docker-hub-immutable-tag-authority-prewrite.json"
+          if ! cmp --silent "${authority}" "${prewrite_authority}"; then
+            echo "::error::Docker Hub immutable-tag authority drifted before create"
+            exit 1
+          fi
+
+          if ! write_status=$(curl --silent --show-error \
+            --output /dev/null \
+            --dump-header "${write_headers}" \
+            --write-out '%{http_code}' \
+            --request PUT \
+            --header "Authorization: Bearer ${registry_token}" \
+            --header 'Content-Type: application/vnd.oci.image.index.v1+json' \
+            --data-binary "@${index}" \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${TARGET_TAG}"); then
+            echo "::error::transport failed during immutable-tag-protected create"
+            exit 1
+          fi
+          if [ "${write_status}" != 201 ]; then
+            echo "::error::immutable-tag-protected sole-tag create returned HTTP ${write_status}"
+            exit 1
+          fi
+
+          if ! final_status=$(curl --silent --show-error \
+            --output /dev/null \
+            --dump-header "${final_headers}" \
+            --write-out '%{http_code}' \
+            --request HEAD \
+            --header "Authorization: Bearer ${registry_token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://registry-1.docker.io/v2/z4jdev/z4j/manifests/${TARGET_TAG}"); then
+            echo "::error::transport failed during final target-tag reread"
+            exit 1
+          fi
+          if [ "${final_status}" != 200 ]; then
+            echo "::error::final target-tag reread returned HTTP ${final_status}"
+            exit 1
+          fi
+          observed_digest=$(awk -F': *' \
+            'tolower($1) == "docker-content-digest" {gsub(/\r/,"",$2); print $2}' \
+            "${final_headers}" | tail -n 1)
+          if [ "${observed_digest}" != "${index_digest}" ]; then
+            echo "::error::final public tag differs from original digest"
+            exit 1
+          fi
+          printf '%s\n' 'created-under-immutable-rule' \
+            > "${promotion}/transition"
+          printf '%s\n' "${observed_digest}" \
+            > "${promotion}/observed-digest"
+
+      - name: Emit canonical exact-tag promotion evidence
+        env:
+          QUALIFICATION_RUN_ID: ${{ needs.prepare.outputs.qualification_run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          finalization_root = Path("/tmp/rollback-compat-finalization")
+          promotion_root = Path("/tmp/rollback-compat-promotion")
+          finalization_receipt_path = (
+              finalization_root / "rollback-compat-finalization-receipt.json"
+          )
+          finalization_raw = finalization_receipt_path.read_bytes()
+          finalization_receipt = json.loads(finalization_raw)
+          finalization_authentication_raw = (
+              finalization_root
+              / "rollback-compat-finalization-authentication.json"
+          ).read_bytes()
+          finalization_authentication = json.loads(
+              finalization_authentication_raw
+          )
+
+          def descriptor(path: Path) -> dict[str, object]:
+              raw = path.read_bytes()
+              return {
+                  "path": path.name,
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "size": len(raw),
+              }
+
+          authority_path = (
+              finalization_root
+              / "docker-hub-immutable-tag-authority.json"
+          )
+          authority_authentication_path = (
+              finalization_root
+              / "docker-hub-immutable-tag-authority-authentication.json"
+          )
+          prewrite_authority_path = (
+              promotion_root
+              / "docker-hub-immutable-tag-authority-prewrite.json"
+          )
+          bundle_reverification_path = (
+              promotion_root
+              / "docker-hub-immutable-tag-authority-promotion-verification.txt"
+          )
+          authority_raw = authority_path.read_bytes()
+          prewrite_authority_raw = prewrite_authority_path.read_bytes()
+          if authority_raw != prewrite_authority_raw:
+              raise SystemExit(
+                  "prewrite immutable-tag authority differs from signed capture"
+              )
+          authority_authentication = json.loads(
+              authority_authentication_path.read_bytes()
+          )
+          receipt_authority = finalization_receipt.get(
+              "immutable_tag_authority"
+          )
+          if not isinstance(receipt_authority, dict) or set(
+              receipt_authority
+          ) != {"policy", "capture", "authentication"}:
+              raise SystemExit(
+                  "finalization receipt immutable-tag authority keys differ"
+              )
+          if receipt_authority["capture"] != descriptor(authority_path):
+              raise SystemExit(
+                  "finalization receipt immutable-tag capture differs"
+              )
+          if (
+              receipt_authority["authentication"]
+              != authority_authentication
+          ):
+              raise SystemExit(
+                  "finalization receipt immutable-tag authentication differs"
+              )
+          expected_authentication_binding = {
+              "capture": descriptor(authority_path),
+              "authentication": descriptor(
+                  authority_authentication_path
+              ),
+          }
+          if finalization_authentication.get(
+              "immutable_tag_authority"
+          ) != expected_authentication_binding:
+              raise SystemExit(
+                  "finalization authentication immutable authority differs"
+              )
+          if bundle_reverification_path.stat().st_size == 0:
+              raise SystemExit(
+                  "promotion immutable-authority bundle reverification is empty"
+              )
+          if finalization_authentication.get("result") != "pass":
+              raise SystemExit("finalization receipt authentication did not pass")
+          if finalization_authentication.get("subject", {}).get("sha256") != (
+              hashlib.sha256(finalization_raw).hexdigest()
+          ):
+              raise SystemExit("finalization authentication subject differs")
+          lock = json.loads(
+              (Path(os.environ["RECIPE"]) / "manifest.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          candidate = lock["candidate_image"]
+          observed = (promotion_root / "observed-digest").read_text(
+              encoding="ascii"
+          ).strip()
+          transition = (promotion_root / "transition").read_text(
+              encoding="ascii"
+          ).strip()
+          if observed != candidate["index"]["digest"]:
+              raise SystemExit("promotion evidence observed the wrong digest")
+          if transition != "created-under-immutable-rule":
+              raise SystemExit("promotion transition is invalid")
+          run_id = int(os.environ["GITHUB_RUN_ID"])
+          qualification_run_id = int(os.environ["QUALIFICATION_RUN_ID"])
+          repository = os.environ["GITHUB_REPOSITORY"]
+          ref = os.environ["GITHUB_REF"]
+          head_sha = os.environ["GITHUB_SHA"]
+          workflow_path = ".github/workflows/release-rollback-compat.yml"
+          head_tree = subprocess.run(
+              ["git", "rev-parse", f"{head_sha}^{{tree}}"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.strip()
+          if run_id <= 0 or qualification_run_id <= 0:
+              raise SystemExit("promotion run authority is invalid")
+          if repository != "z4jdev/z4j" or ref != "refs/heads/main":
+              raise SystemExit("promotion repository or ref authority differs")
+          if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+              raise SystemExit("promotion source SHA is invalid")
+          if re.fullmatch(r"[0-9a-f]{40}", head_tree) is None:
+              raise SystemExit("promotion source tree is invalid")
+          source = finalization_receipt.get("source")
+          if source != {"git_sha": head_sha, "git_tree": head_tree}:
+              raise SystemExit("promotion source differs from finalization authority")
+          if finalization_receipt.get("qualification_run_id") != qualification_run_id:
+              raise SystemExit("promotion qualification run differs from finalization")
+          qualification_source = finalization_receipt.get("qualification_source")
+          if (
+              not isinstance(qualification_source, dict)
+              or qualification_source.get("repository") != repository
+              or qualification_source.get("workflow_path") != workflow_path
+          ):
+              raise SystemExit("promotion qualification source authority differs")
+          promotion_authority = {
+              "run_id": run_id,
+              "repository": repository,
+              "workflow_path": workflow_path,
+              "ref": ref,
+              "head_sha": head_sha,
+              "head_tree": head_tree,
+              "qualification_run_id": qualification_run_id,
+          }
+          evidence = {
+              "format": "z4j-rollback-compat-promotion-evidence-v1",
+              "result": "pass",
+              "promotion_authority": promotion_authority,
+              "finalization_receipt_sha256": hashlib.sha256(
+                  finalization_raw
+              ).hexdigest(),
+              "qualification_run_id": int(os.environ["QUALIFICATION_RUN_ID"]),
+              "public_reference": (
+                  f"{candidate['repository']}:{candidate['public_tag']}"
+              ),
+              "expected_digest": candidate["index"]["digest"],
+              "observed_digest": observed,
+              "status": "exact",
+              "transition": transition,
+              "immutable_tag_authority": {
+                  "policy": receipt_authority["policy"],
+                  "finalization_capture": receipt_authority["capture"],
+                  "prewrite_reread": descriptor(prewrite_authority_path),
+                  "bundle_reverification": {
+                      **descriptor(bundle_reverification_path),
+                      "verified": True,
+                  },
+                  "exact_match": True,
+              },
+              "finalization_authentication": finalization_authentication,
+          }
+          raw = (
+              json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+          ).encode("ascii")
+          path = promotion_root / "rollback-compat-promotion-evidence.json"
+          path.write_bytes(raw)
+          digest = hashlib.sha256(raw).hexdigest()
+          (promotion_root / "rollback-compat-promotion-evidence.sha256").write_text(
+              f"{digest}  {path.name}\n",
+              encoding="ascii",
+          )
+          PY
+
+      - name: Keyless-sign and reverify exact promotion evidence bytes
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-promotion
+          subject="${root}/rollback-compat-promotion-evidence.json"
+          bundle="${root}/rollback-compat-promotion-evidence.sigstore.json"
+          verification="${root}/rollback-compat-promotion-evidence-verification.txt"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          cosign sign-blob \
+            --yes \
+            --bundle "${bundle}" \
+            "${subject}" > /dev/null
+          cosign verify-blob \
+            --bundle "${bundle}" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${subject}" > "${verification}" 2>&1
+          printf 'sigstore blob verification exit=0\n' >> "${verification}"
+          test -s "${bundle}"
+          test -s "${verification}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("/tmp/rollback-compat-promotion")
+          subject = root / "rollback-compat-promotion-evidence.json"
+          bundle = root / "rollback-compat-promotion-evidence.sigstore.json"
+          verification = (
+              root / "rollback-compat-promotion-evidence-verification.txt"
+          )
+          json.loads(bundle.read_bytes())
+
+          def descriptor(path: Path) -> dict[str, object]:
+              raw = path.read_bytes()
+              return {
+                  "path": path.name,
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "size": len(raw),
+              }
+
+          authentication = {
+              "format": "z4j-rollback-compat-promotion-authentication-v1",
+              "result": "pass",
+              "method": "sigstore-keyless-cosign-sign-blob",
+              "cosign_version": "3.1.3",
+              "identity": (
+                  f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/"
+                  ".github/workflows/release-rollback-compat.yml"
+                  "@refs/heads/main"
+              ),
+              "issuer": "https://token.actions.githubusercontent.com",
+              "subject": descriptor(subject),
+              "bundle": descriptor(bundle),
+              "verification": {
+                  **descriptor(verification),
+                  "verified": True,
+              },
+          }
+          raw = (
+              json.dumps(authentication, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+              + "\n"
+          ).encode("ascii")
+          (root / "rollback-compat-promotion-authentication.json").write_bytes(
+              raw
+          )
+          PY
+
+      - name: Publish and raw-readback durable promotion OCI evidence
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-promotion
+          index_digest=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["digest"])')
+          index_size=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["size"])')
+          python3 "${RECIPE}/durable_evidence.py" publish \
+            --manifest "${RECIPE}/manifest.json" \
+            --stage promotion \
+            --subject-digest "${index_digest}" \
+            --subject-size "${index_size}" \
+            --receipt "${root}/rollback-compat-promotion-evidence.json" \
+            --bundle "${root}/rollback-compat-promotion-evidence.sigstore.json" \
+            --authentication "${root}/rollback-compat-promotion-authentication.json" \
+            --payload-root "${root}" \
+            --predecessor-record /tmp/rollback-compat-finalization/durable/finalization/record.json \
+            --output-dir "${root}/durable/promotion"
+
+      - name: Emit, keyless-sign, and authenticate release evidence index
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-promotion
+          subject="${root}/rollback-compat-release-evidence-index.json"
+          bundle="${root}/rollback-compat-release-evidence-index.sigstore.json"
+          verification="${root}/rollback-compat-release-evidence-index-verification.txt"
+          authentication="${root}/rollback-compat-release-evidence-index-authentication.json"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback-compat.yml@refs/heads/main"
+          issuer=https://token.actions.githubusercontent.com
+          python3 "${RECIPE}/durable_evidence.py" make-index \
+            --manifest "${RECIPE}/manifest.json" \
+            --record /tmp/rollback-compat-qualification/durable/qualification/record.json \
+            --record /tmp/rollback-compat-finalization/durable/finalization/record.json \
+            --record "${root}/durable/promotion/record.json" \
+            --output "${subject}"
+          cosign sign-blob --yes --bundle "${bundle}" "${subject}" > /dev/null
+          cosign verify-blob \
+            --bundle "${bundle}" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${subject}" > "${verification}" 2>&1
+          printf 'sigstore blob verification exit=0\n' >> "${verification}"
+          test -s "${bundle}"
+          test -s "${verification}"
+          python3 "${RECIPE}/durable_evidence.py" authentication \
+            --manifest "${RECIPE}/manifest.json" \
+            --stage release-index \
+            --format z4j-rollback-compat-release-evidence-index-authentication-v1 \
+            --subject "${subject}" \
+            --bundle "${bundle}" \
+            --verification "${verification}" \
+            --identity "${identity}" \
+            --issuer "${issuer}" \
+            --output "${authentication}"
+
+      - name: Publish and raw-readback durable release evidence index
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          root=/tmp/rollback-compat-promotion
+          index_digest=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["digest"])')
+          index_size=$(python3 -c \
+            'import json; print(json.load(open("'"${RECIPE}"'/manifest.json"))["candidate_image"]["index"]["size"])')
+          python3 "${RECIPE}/durable_evidence.py" publish \
+            --manifest "${RECIPE}/manifest.json" \
+            --stage release-index \
+            --subject-digest "${index_digest}" \
+            --subject-size "${index_size}" \
+            --receipt "${root}/rollback-compat-release-evidence-index.json" \
+            --bundle "${root}/rollback-compat-release-evidence-index.sigstore.json" \
+            --authentication "${root}/rollback-compat-release-evidence-index-authentication.json" \
+            --payload-root "${root}" \
+            --predecessor-record "${root}/durable/promotion/record.json" \
+            --output-dir "${root}/durable/release-index"
+
+      - name: Upload exact-tag promotion evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rollback-compat-promotion-${{ github.run_id }}
+          path: /tmp/rollback-compat-promotion
+          if-no-files-found: error
+          retention-days: 90

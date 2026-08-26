@@ -1,8 +1,8 @@
 # z4j
 
-[![PyPI version](https://img.shields.io/pypi/v/z4j.svg?v=1.8.2)](https://pypi.org/project/z4j/)
-[![Python](https://img.shields.io/pypi/pyversions/z4j.svg?v=1.8.2)](https://pypi.org/project/z4j/)
-[![License](https://img.shields.io/pypi/l/z4j.svg?v=1.8.2)](https://github.com/z4jdev/z4j/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/z4j.svg)](https://pypi.org/project/z4j/)
+[![Python](https://img.shields.io/pypi/pyversions/z4j.svg)](https://pypi.org/project/z4j/)
+[![License](https://img.shields.io/pypi/l/z4j.svg)](https://github.com/z4jdev/z4j/blob/main/LICENSE)
 
 The all-in-one z4j umbrella package. Open-source control plane for
 Python task queues.
@@ -16,7 +16,8 @@ release line, so the floors stay in sync without manual pinning.
 
 ## Compatibility
 
-Brain: Python 3.11+, PostgreSQL 17+ (recommended) or bundled SQLite.
+Brain: Python 3.11+, PostgreSQL 18.3+ recommended (minimum 17), or
+bundled SQLite.
 
 Every adapter pulled through the `[django,celery]` / `[fastapi,arq]` / etc. extras carries its own framework / engine version floor. Full per-adapter matrix at <https://z4j.dev/reference/compatibility/>.
 
@@ -29,18 +30,23 @@ together for you.
 
 The architecture is straightforward:
 
-- **One brain process per environment.** Dashboard, API, audit
-  log. Persistent storage in SQLite or Postgres.
+- **One brain deployment per environment.** Dashboard, API, audit
+  log. SQLite runs one worker process; PostgreSQL deployments can use
+  multiple workers or replicas against shared state.
 - **One agent per worker / app process.** A thin pip package that
   imports inside your Django / Flask / FastAPI app or your Celery /
-  RQ / Dramatiq worker, opens an authenticated WebSocket to the
-  brain, and streams every task / worker / queue / schedule event.
-- **Operator actions flow back the same channel.** Retry, cancel,
-  bulk retry, purge, restart, schedule CRUD, manual trigger.
+  RQ / Dramatiq worker, connects over an authenticated WebSocket (or
+  the configured HTTPS long-poll transport), and streams task / worker /
+  queue / schedule events.
+- **Operator worker actions flow back through the agent transport.** Retry,
+  cancel, bulk retry, purge, and restart use the agent command channel.
+  Schedule changes are stored and audited by the brain; the scheduler
+  consumes them through its separate gRPC protocol.
 
-z4j is AGPL v3 and isolated in its own process. The agent
-packages your application imports are Apache-2.0 each, so your
-application code is never AGPL-tainted.
+The `z4j` server distribution is AGPL v3 and runs as its own process. The
+agent packages imported by applications are Apache-2.0 and can be installed
+independently of the server distribution; consult the license terms for the
+obligations that apply to your deployment.
 
 ## What's in the box
 
@@ -100,8 +106,10 @@ pip install 'z4j[fastapi,arq]'           # FastAPI + arq + arq-cron
 pip install 'z4j[flask,rq]'              # Flask + RQ + rq-scheduler
 ```
 
-Each extra pulls the matching engine adapter and its schedule
-companion (e.g. `[celery]` pulls `z4j-celery` + `z4j-celerybeat`).
+Where a dedicated schedule companion exists, the engine extra pulls it too
+(for example, `[celery]` pulls `z4j-celery` + `z4j-celerybeat`). The
+`[dramatiq]` extra installs only `z4j-dramatiq`; `[apscheduler]` is available
+separately for applications that use APScheduler.
 The engine-agnostic dynamic scheduler is its own service and its
 own package, install it alongside the brain when you want it:
 
@@ -109,33 +117,47 @@ own package, install it alongside the brain when you want it:
 pip install z4j-scheduler
 ```
 
+That same-environment install supplies the brain's optional gRPC runtime. If
+the scheduler runs in a separate environment, install `z4j[scheduler-grpc]`
+on the brain as well and configure its mTLS scheduler listener.
+
 Then start z4j:
 
 ```bash
 z4j serve
 ```
 
-First boot mints HMAC secrets, runs Alembic migrations, creates a
-SQLite database at `~/.z4j/z4j.db`, and prints a one-time setup URL
-to stderr that creates the first admin user. Set
-`Z4J_DATABASE_URL=postgresql+asyncpg://...` to use Postgres.
+The packaged SQLite path persists independent HMAC, session, audit-chain, and
+metrics secrets on first boot, runs Alembic migrations, creates
+`~/.z4j/z4j.db`, and prints a one-time setup URL to stderr that creates the
+first admin user. PostgreSQL does not auto-mint those secrets. Install its
+drivers with `pip install 'z4j[postgres]'`, set
+`Z4J_DATABASE_URL=postgresql+asyncpg://...`, and explicitly configure
+`Z4J_SECRET`, `Z4J_SESSION_SECRET`, and the independent
+`Z4J_AUDIT_CHAIN_SECRET`, plus the production URL and allowed hosts described
+in the install guide.
 
 ## Why use z4j
 
-z4j exists because every Python task queue ships its own
-viewer-grade tool (Flower for Celery, rq-dashboard for RQ, Dramatiq
-has none) and they all stop at viewer-grade. None of them give you:
+z4j is designed to replace separate, engine-specific operational surfaces
+with one control plane. It provides:
 
 - One dashboard across mixed engines (Celery + RQ + arq side by
   side, common operator workflow).
-- An action surface (retry, cancel, bulk retry, purge, restart)
-  that's safe to put in front of operations and compliance teams.
-- A real audit log that an auditor can walk linearly.
-- Live schedule editing across engines without per-daemon
-  restarts.
-- Self-hosted with no telemetry. z4j phones home only when
-  an admin clicks *Check for updates* in Settings, and that URL is
-  configurable.
+- An RBAC-governed action surface for retry, cancel, bulk retry, purge, and
+  restart.
+- An HMAC-chained audit log for changes made through z4j. It detects paths that
+  skip the audit authority, but does not defend against a database role that
+  can rewrite both the log and its chain state; the security threat model
+  documents that boundary.
+- Live editing, without per-daemon restarts, for schedules owned by the
+  engine-agnostic z4j scheduler.
+- Self-hosted with no unsolicited vendor telemetry or automatic version
+  polling. Optional Sentry and OpenTelemetry exporters send data only when an
+  operator installs and configures them. The brain contacts its configurable
+  version URL only when an admin clicks *Check for updates* in Settings; the
+  separate `z4j upgrade` command contacts PyPI only when an operator invokes
+  it.
 
 z4j is the boring, self-hosted, audit-friendly choice. Built for
 homelab operators who want one place to look, and for
@@ -150,10 +172,11 @@ covers all three paths (pip-SQLite, Docker-SQLite, Docker-Postgres).
 
 ## License
 
-AGPL-3.0-or-later, see [LICENSE](LICENSE). Note: only z4j is
-AGPL. Every agent package your application imports is Apache-2.0,
-so your application code is never AGPL-tainted. Commercial licenses
-available; contact licensing@z4j.com.
+AGPL-3.0-or-later, see [LICENSE](LICENSE). The `z4j` server distribution and
+frozen `z4j-brain` compatibility shim are AGPL. The independently installable
+shared core, agent packages, and scheduler are Apache-2.0; consult the license
+terms for the obligations that apply to your deployment.
+Commercial licenses available; contact licensing@z4j.com.
 
 ## Links
 

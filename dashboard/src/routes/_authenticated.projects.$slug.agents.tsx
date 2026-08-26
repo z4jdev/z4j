@@ -112,8 +112,9 @@ function AgentsPage() {
       title: "Revoke agent token",
       description: (
         <>
-          Revoke <code>{name}</code>? In-flight commands will fail and the
-          worker will need a new token to come back online.
+          Revoke <code>{name}</code>? Commands not yet delivered will be
+          refused; a physical send already in progress may complete. The worker
+          will need a new token to come back online.
         </>
       ),
       confirmLabel: "Revoke",

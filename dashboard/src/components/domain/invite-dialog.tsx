@@ -6,7 +6,7 @@
  * After the admin closes the dialog the plaintext is gone - the
  * server does not expose it again.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
@@ -36,37 +36,57 @@ export function InviteDialog({ slug }: { slug: string }) {
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("viewer");
-  const [mintedToken, setMintedToken] = useState<string | null>(null);
   const [acceptUrl, setAcceptUrl] = useState<string | null>(null);
+  const dialogEpoch = useRef(0);
 
   const mutation = useMintInvitation(slug);
 
-  // Reset every time the dialog closes so the plaintext token never
-  // leaks into a subsequent open.
-  useEffect(() => {
-    if (!open) {
-      setMintedToken(null);
-      setAcceptUrl(null);
-      setEmail("");
-      setRole("viewer");
-    }
-  }, [open]);
+  const clearDialogState = useCallback(() => {
+    dialogEpoch.current += 1;
+    setAcceptUrl(null);
+    setEmail("");
+    setRole("viewer");
+  }, []);
+
+  // Clear the one-time URL synchronously with close rather than waiting for
+  // an effect after paint. The custom mint hook retains no response or input
+  // in React Query, so this releases the final in-app copy of the token.
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (!nextOpen) clearDialogState();
+      setOpen(nextOpen);
+    },
+    [clearDialogState],
+  );
+
+  useEffect(
+    () => () => {
+      // Invalidate an in-flight handler before unmount so a late mint response
+      // is discarded instead of attempting to restore its one-time URL.
+      dialogEpoch.current += 1;
+    },
+    [],
+  );
 
   const handleMint = async (e: React.FormEvent) => {
     e.preventDefault();
+    const epoch = dialogEpoch.current;
     try {
       const res = await mutation.mutateAsync({ email, role });
-      setMintedToken(res.token);
+      if (epoch !== dialogEpoch.current) return;
       // Prefer the dashboard's origin; fall back to the server-
       // supplied relative path if window isn't available (SSR).
-      const origin = typeof window !== "undefined" ? window.location.origin : "";
+      const origin =
+        typeof window !== "undefined" ? window.location.origin : "";
       setAcceptUrl(`${origin}${res.accept_url_path}`);
     } catch (err) {
-      const msg = err instanceof ApiError
-        ? err.message
-        : err instanceof Error
+      if (epoch !== dialogEpoch.current) return;
+      const msg =
+        err instanceof ApiError
           ? err.message
-          : "Failed to mint invitation";
+          : err instanceof Error
+            ? err.message
+            : "Failed to mint invitation";
       toast.error(msg);
     }
   };
@@ -82,7 +102,7 @@ export function InviteDialog({ slug }: { slug: string }) {
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <Button size="sm">
           <UserPlus className="size-4" />
@@ -90,7 +110,7 @@ export function InviteDialog({ slug }: { slug: string }) {
         </Button>
       </DialogTrigger>
       <DialogContent>
-        {mintedToken && acceptUrl ? (
+        {acceptUrl ? (
           <>
             <DialogHeader>
               <DialogTitle>Invitation link ready</DialogTitle>
@@ -120,13 +140,13 @@ export function InviteDialog({ slug }: { slug: string }) {
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                Valid for 7 days. Role: <strong>{role}</strong>.
-                You can revoke this invitation before it's accepted from the
-                Pending invitations table below.
+                Valid for 7 days. Role: <strong>{role}</strong>. You can revoke
+                this invitation before it's accepted from the Pending
+                invitations table below.
               </p>
             </div>
             <DialogFooter>
-              <Button onClick={() => setOpen(false)}>Done</Button>
+              <Button onClick={() => handleOpenChange(false)}>Done</Button>
             </DialogFooter>
           </>
         ) : (
@@ -172,7 +192,7 @@ export function InviteDialog({ slug }: { slug: string }) {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setOpen(false)}
+                onClick={() => handleOpenChange(false)}
               >
                 Cancel
               </Button>

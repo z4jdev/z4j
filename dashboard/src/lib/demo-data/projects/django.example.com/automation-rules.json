@@ -24,7 +24,7 @@
       "is_enabled": true,
       "dry_run": false,
       "trigger": "task.failed",
-      "conditions": { "task_name": "billing.generate_invoice" },
+      "conditions": { "task_name": "billing.run_daily_invoices" },
       "actions": [{ "type": "retry" }],
       "max_executions_per_window": 20,
       "window_seconds": 3600,

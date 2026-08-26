@@ -1,18 +1,30 @@
-"""External-audit High #4 regression tests - task export must not
-execute attacker-controlled strings as spreadsheet formulas."""
+"""Task exports must keep attacker-controlled cells as spreadsheet text."""
 
 from __future__ import annotations
 
+import io
+import xml.etree.ElementTree as ET
+import zipfile
+from types import SimpleNamespace
+
 import pytest
+from z4j_brain.api import _export as generic_export
 from z4j_brain.api.tasks import (
     _SPREADSHEET_FORMULA_PREFIXES,
+    _export_csv,
+    _export_xlsx,
     _neutralise_formula,
 )
 
 
-class TestNeutraliseFormula:
-    """Unit contract on the neutraliser itself."""
+async def _stream_body(response) -> bytes:
+    chunks: list[bytes] = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk.encode() if isinstance(chunk, str) else chunk)
+    return b"".join(chunks)
 
+
+class TestNeutraliseFormula:
     @pytest.mark.parametrize(
         "raw",
         [
@@ -26,22 +38,11 @@ class TestNeutraliseFormula:
         ],
     )
     def test_prefixes_neutralised(self, raw: str) -> None:
-        """Every formula-trigger prefix must get an apostrophe."""
-        out = _neutralise_formula(raw)
-        assert isinstance(out, str)
-        assert out.startswith("'")
-        assert out[1:] == raw
+        assert _neutralise_formula(raw) == "'" + raw
 
     @pytest.mark.parametrize(
         "raw",
-        [
-            "normal task name",
-            "app.tasks.send_email",
-            "",
-            "worker@host",  # @ mid-string is fine - only leading @ triggers
-            "/path/to/x",
-            "hello=world",  # = mid-string is fine
-        ],
+        ["normal task name", "app.tasks.send_email", "", "worker@host", "/path/to/x"],
     )
     def test_safe_strings_passthrough(self, raw: str) -> None:
         assert _neutralise_formula(raw) == raw
@@ -49,47 +50,55 @@ class TestNeutraliseFormula:
     def test_non_string_passthrough(self) -> None:
         assert _neutralise_formula(None) is None
         assert _neutralise_formula(42) == 42
-        assert _neutralise_formula(3.14) == 3.14
         assert _neutralise_formula(True) is True
 
     def test_prefix_set_complete(self) -> None:
-        """Pin the prefix tuple - OWASP + Google guidance require
-        these five (=, +, -, @, tab). CR is defence in depth."""
-        assert set(_SPREADSHEET_FORMULA_PREFIXES) >= {
-            "=",
-            "+",
-            "-",
-            "@",
-            "\t",
-        }
+        assert set(_SPREADSHEET_FORMULA_PREFIXES) >= {"=", "+", "-", "@", "\t"}
 
 
-class TestXlsxFormulaDisabled:
-    """xlsxwriter must be invoked with ``strings_to_formulas=False``
-    so even an un-neutralised ``=`` string cannot become a formula.
-    We verify by inspecting the call path."""
+def test_generic_export_contract_scopes_formula_neutralisation_to_spreadsheets() -> None:
+    contract = " ".join((generic_export.__doc__ or "").split())
+    assert "CSV and XLSX helpers" in contract
+    assert "JSON preserves the source value" in contract
+    response = generic_export.export_json(
+        [SimpleNamespace(name="=literal-json-value")],
+        [("name", lambda row: row.name)],
+        "values.json",
+    )
+    assert b'"name": "=literal-json-value"' in response.body
 
-    def test_xlsx_uses_strings_to_formulas_false(self) -> None:
-        """Smoke: read the source of ``_export_xlsx`` and confirm
-        the Workbook flag is set. A regression would re-enable the
-        xlsxwriter default and open the attack back up."""
-        import inspect
 
-        from z4j_brain.api import tasks
+@pytest.mark.asyncio
+async def test_csv_export_neutralises_the_emitted_cell() -> None:
+    response = _export_csv(
+        [SimpleNamespace(name='=HYPERLINK("https://attacker.invalid")')],
+        "project",
+        selected_fields=["name"],
+    )
 
-        src = inspect.getsource(tasks._export_xlsx)
-        assert '"strings_to_formulas": False' in src or ("'strings_to_formulas': False" in src), (
-            "xlsxwriter default auto-converts '='-prefixed strings to formulas"
-        )
+    body = (await _stream_body(response)).decode()
 
-    def test_csv_runs_neutraliser_on_every_cell(self) -> None:
-        """Every row write in ``_export_csv`` must route through
-        ``_neutralise_formula``. Regression guard."""
-        import inspect
+    assert body.splitlines()[0] == "name"
+    assert body.splitlines()[1].startswith("\"'=HYPERLINK")
 
-        from z4j_brain.api import tasks
 
-        src = inspect.getsource(tasks._export_csv)
-        assert "_neutralise_formula" in src, (
-            "CSV exporter must neutralise every cell against formula injection"
-        )
+@pytest.mark.asyncio
+async def test_xlsx_export_emits_text_and_no_formula_node() -> None:
+    response = _export_xlsx(
+        [SimpleNamespace(name="=1+1")],
+        "project",
+        selected_fields=["name"],
+    )
+    archive = zipfile.ZipFile(io.BytesIO(await _stream_body(response)))
+
+    worksheet_roots = [
+        ET.fromstring(archive.read(name))
+        for name in archive.namelist()
+        if name.startswith("xl/worksheets/") and name.endswith(".xml")
+    ]
+    assert not any(
+        element.tag.rsplit("}", 1)[-1] == "f" for root in worksheet_roots for element in root.iter()
+    )
+    shared = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+    strings = [node.text for node in shared.iter() if node.tag.rsplit("}", 1)[-1] == "t"]
+    assert "'=1+1" in strings

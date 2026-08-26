@@ -90,18 +90,20 @@ async def _seed(brain_app, settings: Settings):
     default_id = uuid.uuid4()
 
     async with db.session() as s:
+        project = Project(id=project_id, slug="fragai", name="FragAI")
+        user = User(
+            id=user_id,
+            email=f"u-{uuid.uuid4().hex[:8]}@example.com",
+            password_hash=hasher.hash(
+                "correct horse battery staple 9",
+            ),
+            is_admin=True,
+            is_active=True,
+        )
+        s.add_all([project, user])
+        await s.flush()
         s.add_all(
             [
-                Project(id=project_id, slug="fragai", name="FragAI"),
-                User(
-                    id=user_id,
-                    email=f"u-{uuid.uuid4().hex[:8]}@example.com",
-                    password_hash=hasher.hash(
-                        "correct horse battery staple 9",
-                    ),
-                    is_admin=True,
-                    is_active=True,
-                ),
                 Session(
                     id=session_id,
                     user_id=user_id,
@@ -269,6 +271,7 @@ class TestUpdateDefaultSubscription:
         other_channel_id = uuid.uuid4()
         async with brain_app.state.db.session() as s:
             s.add(Project(id=other_project_id, slug="other", name="Other"))
+            await s.flush()
             s.add(
                 NotificationChannel(
                     id=other_channel_id,
@@ -318,6 +321,7 @@ class TestUpdateDefaultSubscription:
         other_default_id = uuid.uuid4()
         async with brain_app.state.db.session() as s:
             s.add(Project(id=other_project_id, slug="other", name="Other"))
+            await s.flush()
             s.add(
                 ProjectDefaultSubscription(
                     id=other_default_id,

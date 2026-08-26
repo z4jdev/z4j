@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain.persistence.models.api_key import ApiKey
@@ -107,21 +107,36 @@ class ApiKeyRepository(BaseRepository[ApiKey]):
         key_id: UUID,
         ip: str | None = None,
         when: datetime | None = None,
-    ) -> None:
-        """Bump ``last_used_at`` and optionally ``last_used_ip``.
+    ) -> bool:
+        """Advance ``last_used_at`` (and optionally ``last_used_ip``), MONOTONICALLY.
 
-        Called on every successful authentication with this key.
-        ``when`` lets the caller pass the time they already
-        computed; defaults to ``datetime.now(UTC)``.
+        Called on every successful authentication with this key. ``when`` is
+        the moment the key AUTHENTICATED, which is not the moment this runs:
+        the write is deferred until the request's own connection is back in
+        the pool, so two overlapping requests arrive here in whatever order
+        they finish rather than the order they started.
+
+        The write is therefore refused unless it moves the stamp FORWARD.
+        Unconditionally, a request that authenticated at 12:00 and finished
+        at 12:05 overwrote the 12:04 stamp left by a request that started
+        four minutes after it, and dragged ``last_used_ip`` back to the
+        earlier caller's address with it. This pair is what an operator reads
+        when deciding whether a key has been used since it leaked, so a value
+        that belongs to an earlier use is not untidy, it is misleading.
+
+        Returns True if the row moved.
         """
-        values: dict[str, object] = {
-            "last_used_at": when or datetime.now(UTC),
-        }
+        stamp = when or datetime.now(UTC)
+        values: dict[str, object] = {"last_used_at": stamp}
         if ip is not None:
             values["last_used_ip"] = ip
-        await self.session.execute(
-            update(ApiKey).where(ApiKey.id == key_id).values(**values),
+        result = await self.session.execute(
+            update(ApiKey)
+            .where(ApiKey.id == key_id)
+            .where(or_(ApiKey.last_used_at.is_(None), ApiKey.last_used_at < stamp))
+            .values(**values),
         )
+        return bool(result.rowcount)
 
 
 __all__ = ["ApiKeyRepository"]

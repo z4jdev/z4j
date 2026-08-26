@@ -28,12 +28,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
 
       - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # immutable ref; audited 2026-08-20
         with:
-          python-version: "3.14"
+          python-version: "3.14.7"
 
       - name: Install pip-audit
         run: pip install --quiet "pip-audit==2.10.1"
@@ -67,11 +67,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
 
       - name: Scan candidate filesystem
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # immutable ref; audited 2026-08-20
         with:
+          version: v0.74.0
           scan-type: fs
           scan-ref: "."
           format: sarif
@@ -82,17 +83,33 @@ jobs:
 
       - name: Upload filesystem SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@b6a472f63d85b9c78a3ac5e89422239fc15e9b3c # v3.28.1
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # immutable ref; audited 2026-08-20
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
       - name: Build candidate image from this commit
-        run: docker build --tag "z4j-security-candidate:${GITHUB_SHA}" .
+        run: |
+          # The image needs to know its own version so it can resolve the
+          # companion scheduler from the matching minor line. The release
+          # workflow takes that from the git tag, but this job runs on a
+          # branch, where there is no tag to read. Take it from the package
+          # metadata instead, which is the same value the tag would carry.
+          VERSION="$(
+            grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2
+          )"
+          if [ -z "${VERSION}" ]; then
+            echo "::error::could not read version from pyproject.toml"
+            exit 1
+          fi
+          docker build \
+            --build-arg "Z4J_VERSION=${VERSION}" \
+            --tag "z4j-security-candidate:${GITHUB_SHA}" .
 
       - name: Scan candidate image
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # immutable ref; audited 2026-08-20
         with:
+          version: v0.74.0
           image-ref: z4j-security-candidate:${{ github.sha }}
           format: sarif
           output: trivy-image.sarif
@@ -102,7 +119,7 @@ jobs:
 
       - name: Upload image SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@b6a472f63d85b9c78a3ac5e89422239fc15e9b3c # v3.28.1
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # immutable ref; audited 2026-08-20
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image

@@ -27,14 +27,21 @@ from z4j_core.transport import RETRY_BY_REFERENCE_CAPABILITY
 #: not pass through the REST validators.
 RETRY_COMMAND_ENGINES: frozenset[str] = frozenset({"celery", "rq", "dramatiq"})
 
-#: Engines whose adapters implement ``retry_task`` natively / by reference.
-#: A retry of one of these is safe regardless of the agent runtime's age.
+#: Engines whose current adapters implement ``retry_task`` natively / by
+#: reference. This answers only whether argument reconstruction is safe. It
+#: does not authorize delivery: the exact connected adapter session must also
+#: advertise :data:`RETRY_BY_REFERENCE_CAPABILITY` through the versioned
+#: session contract below.
 NATIVE_RETRY_ENGINES: frozenset[str] = frozenset({"celery", "rq", "dramatiq"})
 
 
 def engine_is_native_retry(engine: Any) -> bool:
-    """True iff ``engine`` retries by reference (broker-held), so a retry needs
-    no operator overrides to be safe."""
+    """Whether the current adapter retries by reference (broker-held).
+
+    A true result means operator argument overrides are unnecessary. It says
+    nothing about a connected session's authority to receive the retry; every
+    delivery path separately checks that session's advertised v1 contract.
+    """
     return isinstance(engine, str) and engine in NATIVE_RETRY_ENGINES
 
 

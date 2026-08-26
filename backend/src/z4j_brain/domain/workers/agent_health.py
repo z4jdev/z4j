@@ -87,9 +87,10 @@ _MAX_OFFLINE_ALERTS_PER_SWEEP = 100
 #: an unchanged ONGOING outage is kept regardless of age, so an agent
 #: down for months still alerts exactly once, never again on claim
 #: expiry. Ended-episode claims age out after this window, keeping the
-#: ledger bounded. (Matches the misfire detector's retention window; the
-#: AgentHygieneWorker usually prunes the agent row itself -- and its
-#: claims, via FK cascade -- before this fires.)
+#: ledger bounded. (Matches the misfire detector's retention window. The
+#: AgentHygieneWorker now soft-revokes the agent row; that ends the live outage
+#: predicate, so this retention sweep can remove the old claim without erasing
+#: the agent's historical identity.)
 _ALERT_RETENTION_DAYS = 30
 
 

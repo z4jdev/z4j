@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
@@ -9,6 +10,7 @@ import os
 import stat
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -649,73 +651,373 @@ def validate_activation_manifest(
         )
 
 
-def write_activation_manifest(path: Path, manifest: Mapping[str, Any]) -> None:
-    """Create one owner-private fsynced manifest without following links."""
+_POSIX_STABLE_FILE_FIELDS = (
+    "st_dev",
+    "st_ino",
+    "st_mode",
+    "st_uid",
+    "st_gid",
+    "st_nlink",
+    "st_size",
+    "st_mtime_ns",
+    "st_ctime_ns",
+)
+
+_POSIX_STABLE_PARENT_FIELDS = (
+    "st_dev",
+    "st_ino",
+    "st_mode",
+    "st_uid",
+    "st_gid",
+    "st_nlink",
+    "st_mtime_ns",
+    "st_ctime_ns",
+)
+
+
+def _posix_file_identity(observed: os.stat_result) -> tuple[int, int]:
+    return observed.st_dev, observed.st_ino
+
+
+def _posix_stable_file_identity(observed: os.stat_result) -> tuple[int, ...]:
+    return tuple(getattr(observed, field) for field in _POSIX_STABLE_FILE_FIELDS)
+
+
+def _posix_stable_parent_identity(observed: os.stat_result) -> tuple[int, ...]:
+    return tuple(getattr(observed, field) for field in _POSIX_STABLE_PARENT_FIELDS)
+
+
+def _close_activation_fds(*file_descriptors: int) -> None:
+    """Close every owned descriptor, surfacing the first close failure."""
+    first_error: OSError | None = None
+    for file_descriptor in file_descriptors:
+        if file_descriptor < 0:
+            continue
+        try:
+            os.close(file_descriptor)
+        except OSError as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+def _require_activation_identity(
+    expected: tuple[int, int],
+    *observations: os.stat_result,
+    message: str,
+) -> None:
+    if any(expected != _posix_file_identity(observed) for observed in observations):
+        raise AuditChainIntegrityError(message)
+
+
+def _require_activation_parent_stable(
+    expected: tuple[int, ...],
+    *observations: os.stat_result,
+    message: str,
+) -> None:
+    if any(_posix_stable_parent_identity(observed) != expected for observed in observations):
+        raise AuditChainIntegrityError(message)
+
+
+def _require_private_activation_parent(observed: os.stat_result) -> None:
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid != os.getuid()
+        or observed.st_mode & 0o077
+    ):
+        raise AuditChainIntegrityError(
+            "activation manifest parent must be an owner-private real directory",
+        )
+
+
+def _open_activation_parent_walk(parent: Path) -> int:
+    """Open every lexical parent component without following links."""
+    absolute_parent = parent if parent.is_absolute() else Path.cwd() / parent
+    components = absolute_parent.parts[1:]
+    if any(component in {os.curdir, os.pardir} for component in components):
+        raise AuditChainIntegrityError(
+            "activation manifest parent path must contain only real directories",
+        )
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    descriptors = [os.open(os.sep, flags)]
+    try:
+        for component in components:
+            try:
+                descriptors.append(
+                    os.open(component, flags, dir_fd=descriptors[-1]),
+                )
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise AuditChainIntegrityError(
+                        "activation manifest parent path must contain only real directories",
+                    ) from exc
+                raise
+        directory_fd = descriptors.pop()
+        ancestor_fds = tuple(reversed(descriptors))
+        descriptors.clear()
+        try:
+            _close_activation_fds(*ancestor_fds)
+        except BaseException:
+            with suppress(OSError):
+                _close_activation_fds(directory_fd)
+            raise
+        return directory_fd
+    except BaseException:
+        with suppress(OSError):
+            _close_activation_fds(*reversed(descriptors))
+        raise
+
+
+def _open_private_activation_parent(parent: Path) -> tuple[int, tuple[int, ...]]:
+    directory_fd = _open_activation_parent_walk(parent)
+    try:
+        opened = os.fstat(directory_fd)
+        _require_private_activation_parent(opened)
+        expected = _posix_stable_parent_identity(opened)
+        try:
+            verification_fd = _open_activation_parent_walk(parent)
+        except (AuditChainIntegrityError, OSError) as exc:
+            raise AuditChainIntegrityError(
+                "activation manifest parent changed while its descriptor was acquired",
+            ) from exc
+        try:
+            after = os.fstat(verification_fd)
+        finally:
+            _close_activation_fds(verification_fd)
+        _require_activation_parent_stable(
+            expected,
+            after,
+            message="activation manifest parent changed while its descriptor was acquired",
+        )
+        _require_private_activation_parent(after)
+        return directory_fd, expected
+    except BaseException:
+        with suppress(OSError):
+            _close_activation_fds(directory_fd)
+        raise
+
+
+def _require_activation_parent_path(
+    parent: Path,
+    expected: tuple[int, ...],
+    *,
+    operation: str,
+) -> None:
+    try:
+        verification_fd = _open_activation_parent_walk(parent)
+    except (AuditChainIntegrityError, OSError) as exc:
+        raise AuditChainIntegrityError(
+            f"activation manifest parent changed while it was {operation}",
+        ) from exc
+    try:
+        observed = os.fstat(verification_fd)
+    finally:
+        _close_activation_fds(verification_fd)
+    if expected != _posix_stable_parent_identity(observed):
+        raise AuditChainIntegrityError(
+            f"activation manifest parent changed while it was {operation}",
+        )
+    _require_private_activation_parent(observed)
+
+
+def _require_private_activation_file(
+    observed: os.stat_result,
+    *,
+    require_empty: bool,
+) -> None:
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != os.getuid()
+        or stat.S_IMODE(observed.st_mode) != 0o600
+        or observed.st_nlink != 1
+        or (require_empty and observed.st_size != 0)
+    ):
+        state = "new" if require_empty else "single-link"
+        raise AuditChainIntegrityError(
+            f"activation manifest must be an owner-private {state} file (chmod 600)",
+        )
+
+
+def _require_activation_file_stable(
+    *observations: os.stat_result,
+    expected_size: int | None = None,
+    message: str,
+) -> None:
+    for observed in observations:
+        _require_private_activation_file(observed, require_empty=False)
+    identities = {_posix_stable_file_identity(observed) for observed in observations}
+    if len(identities) != 1 or (
+        expected_size is not None and observations[0].st_size != expected_size
+    ):
+        raise AuditChainIntegrityError(message)
+
+
+def _write_activation_manifest_windows(path: Path, payload: bytes) -> None:
+    from z4j_brain._windows_secure_io import (
+        close_handle,
+        create_relative_file,
+        directory_path_identity,
+        handle_identity,
+        open_directory,
+        relative_file_identity,
+    )
 
     parent = path.parent
-    payload = canonical_json(dict(manifest)) + b"\n"
-    if os.name == "nt":
-        from z4j_brain._windows_secure_io import (
-            close_handle,
-            create_relative_file,
-            directory_path_identity,
-            handle_identity,
-            open_directory,
-            relative_file_identity,
-        )
-
-        before = directory_path_identity(parent, require_private=True)
-        directory_handle, opened = open_directory(parent, require_private=True)
-        manifest_handle = 0
-        try:
-            after_open = directory_path_identity(parent, require_private=True)
-            if before != opened or opened != after_open:
-                raise AuditChainIntegrityError(
-                    "activation manifest parent changed while its handle was acquired",
-                )
-            manifest_handle = create_relative_file(
-                directory_handle,
-                path.name,
-                payload,
+    before = directory_path_identity(parent, require_private=True)
+    directory_handle, opened = open_directory(parent, require_private=True)
+    manifest_handle = 0
+    try:
+        after_open = directory_path_identity(parent, require_private=True)
+        if before != opened or opened != after_open:
+            raise AuditChainIntegrityError(
+                "activation manifest parent changed while its handle was acquired",
             )
-            manifest_identity = handle_identity(manifest_handle)
-            if (
-                relative_file_identity(directory_handle, path.name) != manifest_identity
-                or directory_path_identity(parent, require_private=True) != opened
-            ):
-                raise AuditChainIntegrityError(
-                    "activation manifest pathname changed while it was finalized",
-                )
-        finally:
+        manifest_handle = create_relative_file(directory_handle, path.name, payload)
+        manifest_identity = handle_identity(manifest_handle)
+        if (
+            relative_file_identity(directory_handle, path.name) != manifest_identity
+            or directory_path_identity(parent, require_private=True) != opened
+        ):
+            raise AuditChainIntegrityError(
+                "activation manifest pathname changed while it was finalized",
+            )
+    finally:
+        try:
             if manifest_handle:
                 close_handle(manifest_handle)
+        finally:
             close_handle(directory_handle)
-        return
 
-    parent_st = parent.lstat()
-    if stat.S_ISLNK(parent_st.st_mode) or not stat.S_ISDIR(parent_st.st_mode):
-        raise AuditChainIntegrityError("activation manifest parent must be a real directory")
-    if parent_st.st_uid != os.getuid() or parent_st.st_mode & 0o077:
-        raise AuditChainIntegrityError(
-            "activation manifest parent must be owner-private (chmod 700)",
-        )
+
+def _create_activation_file_at(
+    directory_fd: int,
+    name: str,
+) -> tuple[int, tuple[int, int]]:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
+    file_fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
     try:
-        offset = 0
-        while offset < len(payload):
-            offset += os.write(fd, payload[offset:])
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    directory_fd = os.open(parent, os.O_RDONLY)
+        opened_file = os.fstat(file_fd)
+        created_identity = _posix_file_identity(opened_file)
+        _require_private_activation_file(opened_file, require_empty=True)
+        opened_entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        _require_activation_identity(
+            created_identity,
+            opened_entry,
+            message="activation manifest pathname changed while it was created",
+        )
+        return file_fd, created_identity
+    except BaseException:
+        with suppress(OSError):
+            _close_activation_fds(file_fd)
+        raise
+
+
+def _write_activation_payload_at(
+    directory_fd: int,
+    name: str,
+    file_fd: int,
+    created_identity: tuple[int, int],
+    payload: bytes,
+) -> os.stat_result:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(file_fd, payload[offset:])
+        if written <= 0:
+            raise AuditChainIntegrityError("activation manifest write made no progress")
+        offset += written
+    os.fsync(file_fd)
+    closed_file = os.fstat(file_fd)
+    closed_entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    _require_activation_identity(
+        created_identity,
+        closed_file,
+        closed_entry,
+        message="activation manifest changed while it was finalized",
+    )
+    _require_activation_file_stable(
+        closed_file,
+        closed_entry,
+        expected_size=len(payload),
+        message="activation manifest changed while it was finalized",
+    )
+    return closed_file
+
+
+def _write_activation_manifest_posix(path: Path, payload: bytes) -> None:
+    directory_fd, _opened_parent_identity = _open_private_activation_parent(path.parent)
+    file_fd = -1
     try:
-        with __import__("contextlib").suppress(OSError):
-            os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+        file_fd, created_identity = _create_activation_file_at(directory_fd, path.name)
+        parent_identity = _posix_stable_parent_identity(os.fstat(directory_fd))
+        _require_activation_parent_path(path.parent, parent_identity, operation="created")
+        finalized_file = _write_activation_payload_at(
+            directory_fd,
+            path.name,
+            file_fd,
+            created_identity,
+            payload,
+        )
+        _require_activation_parent_path(path.parent, parent_identity, operation="finalized")
+        os.fsync(directory_fd)
+        durable_entry = os.stat(
+            path.name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        _require_activation_file_stable(
+            finalized_file,
+            durable_entry,
+            expected_size=len(payload),
+            message="activation manifest changed while it was durably finalized",
+        )
+        _require_activation_parent_path(
+            path.parent,
+            parent_identity,
+            operation="durably finalized",
+        )
+    except BaseException:
+        if file_fd >= 0:
+            # Invalidate only the inode we created, through its still-owned FD.
+            # Pathname cleanup cannot be made identity-conditional on POSIX and
+            # could delete an attacker-swapped replacement.  Truncation makes
+            # a failed publication unreadable while retaining the O_EXCL fence.
+            with suppress(OSError):
+                os.ftruncate(file_fd, 0)
+                os.fsync(file_fd)
+            closing_fd = file_fd
+            file_fd = -1
+            with suppress(OSError):
+                _close_activation_fds(closing_fd)
+        # Deliberately retain the exclusively-created entry on failure. POSIX
+        # has no portable atomic "unlink this name iff it still identifies this
+        # inode" operation: a stat-then-unlink cleanup can delete an attacker-
+        # swapped replacement. Retention is fail closed (a retry hits O_EXCL)
+        # and leaves the exact failure artifact for operator inspection.
+        with suppress(OSError):
+            _close_activation_fds(directory_fd)
+        raise
+    else:
+        closing_fd = file_fd
+        file_fd = -1
+        try:
+            _close_activation_fds(closing_fd)
+        finally:
+            _close_activation_fds(directory_fd)
+
+
+def write_activation_manifest(path: Path, manifest: Mapping[str, Any]) -> None:
+    """Create one owner-private fsynced manifest without following links."""
+
+    payload = canonical_json(dict(manifest)) + b"\n"
+    if os.name == "nt":
+        _write_activation_manifest_windows(path, payload)
+    else:
+        _write_activation_manifest_posix(path, payload)
 
 
 def _read_activation_manifest_windows(path: Path) -> bytes:
@@ -758,43 +1060,60 @@ def _read_activation_manifest_windows(path: Path) -> bytes:
 
 
 def _read_activation_manifest_posix(path: Path) -> bytes:
-    parent_st = path.parent.lstat()
-    if (
-        stat.S_ISLNK(parent_st.st_mode)
-        or not stat.S_ISDIR(parent_st.st_mode)
-        or parent_st.st_uid != os.getuid()
-        or parent_st.st_mode & 0o077
-    ):
-        raise AuditChainIntegrityError(
-            "activation manifest parent must be an owner-private real directory",
-        )
-    before_path = path.lstat()
-    if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
-        raise AuditChainIntegrityError("activation manifest must be a regular file")
-    if before_path.st_uid != os.getuid() or before_path.st_mode & 0o077:
-        raise AuditChainIntegrityError(
-            "activation manifest must be owner-private (chmod 600)",
-        )
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags)
+    directory_fd, parent_identity = _open_private_activation_parent(path.parent)
+    fd = -1
     try:
+        before_path = os.stat(
+            path.name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        _require_private_activation_file(before_path, require_empty=False)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        flags |= os.O_NONBLOCK
+        fd = os.open(path.name, flags, dir_fd=directory_fd)
         before = os.fstat(fd)
-        raw = os.read(fd, MAX_ACTIVATION_MANIFEST_BYTES + 1)
+        _require_activation_identity(
+            _posix_file_identity(before_path),
+            before,
+            message="activation manifest changed while its descriptor was acquired",
+        )
+        _require_private_activation_file(before, require_empty=False)
+        chunks: list[bytes] = []
+        remaining = MAX_ACTIVATION_MANIFEST_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
         after = os.fstat(fd)
-    finally:
-        os.close(fd)
-    if (before.st_dev, before.st_ino, before.st_size) != (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-    ):
-        raise AuditChainIntegrityError("activation manifest changed while read")
-    after_path = path.lstat()
-    if (before.st_dev, before.st_ino) != (after_path.st_dev, after_path.st_ino):
-        raise AuditChainIntegrityError("activation manifest pathname changed")
-    return raw
+        after_path = os.stat(
+            path.name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        _require_activation_file_stable(
+            before,
+            after,
+            message="activation manifest changed while read",
+        )
+        _require_activation_file_stable(
+            after,
+            after_path,
+            message="activation manifest pathname changed",
+        )
+        _require_activation_parent_path(path.parent, parent_identity, operation="read")
+    except BaseException:
+        with suppress(OSError):
+            _close_activation_fds(fd, directory_fd)
+        raise
+    else:
+        _close_activation_fds(fd, directory_fd)
+        return raw
 
 
 def read_activation_manifest(path: Path) -> dict[str, Any]:

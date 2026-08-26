@@ -594,10 +594,10 @@ def _delivery_payload(
 
     Resolution order for ``channel_name`` / ``channel_type``:
 
-    1. **Snapshot columns** on the delivery row itself (audit L-2,
-       added v1.0.14). This is the authoritative source for the
-       audit log: snapshotted at write time, so a later channel
-       rename / delete cannot rewrite history.
+    1. **Snapshot columns** on the delivery row itself (added
+       v1.0.14). This is the authoritative source for the audit
+       log: snapshotted at write time, so a later channel rename
+       or delete cannot rewrite which destination the send went to.
     2. **Live join via ``channel_lookup``** as a fallback for
        pre-1.0.14 rows that don't have the snapshot.
     3. None when neither is available (channel was deleted before
@@ -1342,9 +1342,9 @@ async def test_saved_channel(
 
     Uses the channel's stored config (including secrets the admin
     entered at create / update time), not anything the caller sends
-    in the body. The delivery is NOT logged to
-    ``notification_deliveries`` - same preflight semantics as the
-    unsaved variant.
+    in the body. The dispatch is logged to ``notification_deliveries``
+    with ``trigger="test.dispatch"`` and the saved channel identity,
+    matching the unsaved-config test's audit semantics.
 
     Admin-only.
     """
@@ -1828,11 +1828,14 @@ async def clear_deliveries(
     data-loss risk. Operators who need long-term retention should
     forward via webhooks to an external log store.
 
-    Every clear writes one row to the brain audit_log so a rogue
-    admin cannot silently delete delivery history to cover the
-    trail of a sensitive test dispatch. The audit row carries
-    the actor, the row count, and the optional ``before``
-    timestamp.
+    Every clear writes one row to the brain audit_log, so an admin
+    cannot use this endpoint to wipe the trail of a sensitive test
+    dispatch without leaving a record naming them. The audit row
+    carries the actor, the row count, and the optional ``before``
+    timestamp. That record is worth exactly what the audit log is
+    worth against the actor in question: it holds against anyone
+    working through the application, not against a role that can
+    write the audit tables directly.
     """
     from z4j_brain.api.deps import get_settings
     from z4j_brain.domain.audit_service import AuditService

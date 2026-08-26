@@ -47,7 +47,7 @@ def cli_settings(
     monkeypatch.setenv("Z4J_SECRET", secret)
     monkeypatch.setenv("Z4J_SESSION_SECRET", session_secret)
     monkeypatch.setenv("Z4J_ENVIRONMENT", "dev")
-    monkeypatch.delenv("Z4J_SECRETS_PREVIOUS", raising=False)
+    monkeypatch.delenv("Z4J_PREVIOUS_SECRETS", raising=False)
     monkeypatch.setenv("Z4J_ALLOWED_HOSTS", '["localhost","127.0.0.1"]')
     private_home = tmp_path / "z4j-home"
     private_home.mkdir(mode=0o700)

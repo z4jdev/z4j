@@ -133,9 +133,11 @@ def _leader_gated_tick(db: DatabaseManager, worker_name: str, raw_tick: Any) -> 
     starts the worker supervisor, so an ungated tick runs once PER
     PROCESS per interval. For workers whose tick has cross-process
     side effects (dispatching commands, DDL, audit rows) only the
-    replica that wins ``pg_try_advisory_xact_lock`` may run; the
-    others no-op until the next interval. SQLite deployments no-op
-    the lock (single-writer DB - see ``_leader_lock``).
+    replica that wins the advisory lock may run; the others no-op
+    until the next interval. The lock is held for the whole tick,
+    however long the tick takes, and released on the way out
+    including when it raises. SQLite deployments no-op the lock
+    (single-writer DB - see ``_leader_lock``).
 
     Module-level (rather than a closure inside ``create_app``) so the
     gating behavior is unit-testable without booting the app.
@@ -260,9 +262,12 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         command_id: UUID,
         ws: WebSocket,
     ) -> bool:
-        from z4j_brain.persistence.repositories import CommandRepository
+        from z4j_brain.persistence.repositories import (
+            AgentRepository,
+            CommandRepository,
+        )
 
-        async with db.session() as session:
+        async with db.session(write=True) as session:
             commands = CommandRepository(session)
             command = await commands.get_for_dispatch(command_id)
             if command is None:
@@ -278,6 +283,16 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                 None,
             )
             selected_agent_id = getattr(ws, "_z4j_agent_id", None)
+            if selected_agent_id is None or command.agent_id != selected_agent_id:
+                return False
+            # Cheap pre-claim rejection only. Do not row-lock Agent here: the
+            # current-cadence claim takes schedule/command locks, and the
+            # reverse Agent→Schedule order can deadlock replay's
+            # Schedule→Agent order on PostgreSQL. The physical-send helper
+            # below is the exact locked revocation boundary.
+            live = await AgentRepository(session).get_live(selected_agent_id)
+            if live is None or live.project_id != command.project_id:
+                return False
             if (
                 registry_owner_id is not None
                 and session_generation is not None
@@ -319,11 +334,22 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                 await session.commit()
 
         try:
-            await ws_gateway.deliver_command_frame(
+            # Claim commit and physical send are deliberately two authority
+            # edges. Revoke may win between them; the shared sender performs a
+            # fresh live-row lock and holds it through its bounded socket wait.
+            if not await ws_gateway.deliver_command_frame_with_authority(
+                db=db,
                 websocket=ws,
                 settings=settings,
                 command=command,
-            )
+            ):
+                # Route a definitely-unsent revoked target through the same
+                # cleanup as a socket failure. Redeliverable generic commands
+                # revert to PENDING; non-redeliverable/current claims retain
+                # the conservative ambiguous disposition.
+                raise RuntimeError(  # noqa: TRY301  enter the shared claim-cleanup path
+                    "agent revoked before physical command delivery"
+                )
         except Exception:
             if command.schedule_protocol_marker is not None:
                 logger.warning(
@@ -647,6 +673,36 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         ),
     )
 
+    # Scheduled audit-chain verification (opt-in, leader-only). Verification
+    # has always been available on demand, which means it runs when someone
+    # already suspects a problem. Running it on a schedule is what turns
+    # "the chain verified when somebody last looked" into a continuous
+    # record. Leader-gated because N replicas each locking and walking the
+    # same table costs N times as much for exactly one answer.
+    #
+    # Registered ungated here on purpose: unlike the workers above, this one
+    # takes the leader lock itself. Its interval reaches a week, so it needs
+    # to tell "another replica did the walk" (wait out the interval) apart
+    # from "could not find out" (retry soon), and it already owns the
+    # bounded retry that second case wants. A wrapper here could do neither.
+    #
+    # Bound whether or not verification is enabled, so the lifespan can seed
+    # the worker below without repeating the enablement test.
+    _audit_chain_verifier: Any = None
+    if settings.audit_chain_verify_enabled:
+        from z4j_brain.domain.workers.audit_verifier import (
+            AuditChainVerifierWorker,
+        )
+
+        _audit_chain_verifier = AuditChainVerifierWorker(db=db, settings=settings)
+        _workers.append(
+            PeriodicWorker(
+                name=AuditChainVerifierWorker.LEADER_LOCK_NAME,
+                tick=_audit_chain_verifier.tick,
+                interval_seconds=float(settings.audit_chain_verify_interval_seconds),
+            ),
+        )
+
     if settings.scheduler_grpc_enabled:
         # Wrap each scheduler-grpc worker tick in a per-worker
         # Postgres advisory lock so multi-replica brain
@@ -654,9 +710,10 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         # Otherwise every replica would run every tick →
         # duplicate work, duplicate audit rows, duplicate
         # dispatcher calls. The lock id is a stable hash of the
-        # worker name; the lock is xact-scoped (auto-released
-        # on tick end or crash). SQLite no-ops the lock since
-        # it's a single-writer DB so no contention possible.
+        # worker name; it is held for the whole tick and released
+        # on the way out, and a crashed process releases it too.
+        # SQLite no-ops the lock since it's a single-writer DB so
+        # no contention possible.
         from z4j_brain.domain.workers._leader_lock import (
             acquire_per_worker_lock,
         )
@@ -809,6 +866,12 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
             active_rows=report.verified_active_rows,
             frozen_rows=report.verified_frozen_rows,
         )
+        if _audit_chain_verifier is not None:
+            # The chain was just walked, above. The supervisor ticks every
+            # worker once before its first sleep, so without this each
+            # enabled process walks the whole chain twice back to back,
+            # both times under the lock every audit write waits on.
+            _audit_chain_verifier.note_already_verified()
 
         # Schema version check: verify the database was not migrated
         # by a newer version of z4j-brain. If it was, refuse to start
@@ -1063,12 +1126,19 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                     exc_info=True,
                     environment=settings.environment,
                 )
-                if settings.environment == "production":
+                # The comment above says the soft-fail is for dev, and that is
+                # the intent, but the test was for the exact string
+                # "production", so every other label got the soft-fail too. A
+                # deployment tagged "staging" therefore ran with production
+                # cookies, production host validation and production startup
+                # invariants, and a silently dead scheduler channel.
+                if not settings.is_dev:
                     raise RuntimeError(
-                        "scheduler_grpc failed to start in production "
-                        f"(environment={settings.environment!r}); "
-                        "refusing to bind brain HTTP. Original error: "
-                        f"{exc!r}",
+                        "scheduler_grpc failed to start "
+                        f"(environment={settings.environment!r}, which is not "
+                        "'dev' and so runs with production expectations); "
+                        "refusing to bind brain HTTP. Set Z4J_ENVIRONMENT=dev "
+                        f"to keep the soft-fail. Original error: {exc!r}",
                     ) from exc
 
         # Embedded scheduler sidecar - spawn AFTER the gRPC server
@@ -1425,9 +1495,11 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
 
     register_openapi_routes(app, settings)
 
-    # /metrics is mounted at the root for Prometheus scrapers.
-    app.include_router(metrics_api.router)
+    # Mount /metrics only when enabled. Authentication controls who may
+    # scrape an enabled endpoint; it must not silently override the separate
+    # route-presence switch.
     if settings.metrics_enabled:
+        app.include_router(metrics_api.router)
         log = structlog.get_logger("z4j.brain")
         if settings.metrics_public:
             # Operator explicitly opted into unauthenticated /metrics
@@ -1448,16 +1520,16 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         elif settings.metrics_auth_token is None:
             # Fail-secure branch: no token AND no public opt-in.
             # /metrics will return 401 until the operator resolves this.
-            # Normally unreachable on a CLI-launched brain (auto-mint
-            # runs at boot), but custom bootstrappers may land here.
+            # Fresh packaged SQLite bootstraps auto-mint a token, but an
+            # explicitly configured PostgreSQL deployment or a custom
+            # bootstrapper can legitimately land here.
             log.warning(
                 "metrics_no_auth_configured",
                 message=(
                     "/metrics will return 401 - neither "
                     "Z4J_METRICS_AUTH_TOKEN nor Z4J_METRICS_PUBLIC is "
-                    "set. Run `z4j metrics-token` to print an auto-minted "
-                    "token, or set Z4J_METRICS_PUBLIC=1 for closed "
-                    "networks."
+                    "set. Configure a token, or set Z4J_METRICS_PUBLIC=1 "
+                    "for closed networks."
                 ),
             )
         else:

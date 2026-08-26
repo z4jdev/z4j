@@ -1,26 +1,27 @@
 """Login orchestration with timing normalisation, lockout, sessions.
 
-The single entry point is :meth:`AuthService.login`. It runs the
-constant-time path:
+The single entry point is :meth:`AuthService.login`. It runs a
+timing-normalised path:
 
 1. Canonicalise the email.
 2. Look up the user (one indexed query).
 3. Pick the verify target: real hash if user exists, dummy hash
-   otherwise. Both branches go through ``hasher.verify`` so the
-   wall-clock time is comparable.
+   otherwise. Both branches go through ``hasher.verify`` so they
+   perform comparable Argon2 work.
 4. Compute the boolean ``ok`` from password match + active +
    not-locked.
-5. Hold the response time to at least ``login_min_duration_ms``
-   to mask DB-query and argon2 variance.
-6. On failure: increment lockout counter (if user exists), apply
-   exponential backoff sleep, write audit row, raise
+5. Wait until at least ``login_min_duration_ms`` has elapsed before
+   account-dependent bookkeeping. This reduces short-path timing
+   variance; it is not a cryptographic constant-time guarantee.
+6. On failure: increment lockout counter (if user exists), write audit row, raise
    :class:`AuthenticationError` with the SAME code regardless of
    reason.
 7. On success: reset lockout counter, rehash if needed, mint a
    session row, write audit row, return the session.
 
-Every branch is audited. Every branch returns the same shape on
-failure. Every branch waits the same minimum time.
+Every branch is audited. Every failure returns the same response shape, and
+all branches perform Argon2 verification and reach the configured floor
+before the remaining database work.
 """
 
 from __future__ import annotations
@@ -244,8 +245,9 @@ class AuthService:
         user = await users.get_by_email(email) if email else None
         target_hash = user.password_hash if user else self._hasher.dummy_hash
 
-        # Constant-time path. ``verify`` is the expensive bit; we
-        # always run it, even when we know the user is missing.
+        # Comparable expensive-work path. ``verify`` is the expensive bit; we
+        # always run it, even when we know the user is missing. This is not a
+        # cryptographic constant-time guarantee for the whole request.
         password_ok = self._hasher.verify(target_hash, password_raw)
 
         is_locked = (
@@ -255,8 +257,10 @@ class AuthService:
         )
         ok = password_ok and user is not None and user.is_active and not is_locked
 
-        # Hold the response duration before any branching. Mask DB
-        # variance, argon2 variance, cache hit/miss.
+        # Apply the minimum floor before account-dependent bookkeeping. This
+        # reduces short-path variance; database work after the floor can still
+        # make a branch slower, so callers must not describe it as constant
+        # time.
         await self._hold_minimum_response_time(start)
 
         if not ok:
@@ -343,8 +347,8 @@ class AuthService:
     ) -> None:
         """Lockout bookkeeping + audit row for a failed login.
 
-        Runs after ``_hold_minimum_response_time`` has equalized the
-        response duration. It performs NO account-existence-dependent
+        Runs after ``_hold_minimum_response_time`` has applied the configured
+        floor. It performs no account-existence-dependent
         delay that would reintroduce a timing oracle: the per-account
         exponential backoff sleep was removed (it leaked whether the
         account existed). The remaining lockout write happens only on
@@ -375,7 +379,7 @@ class AuthService:
             # an existing account slept ~1s+ while a non-existent email
             # returned at the response-hold floor. That observable delta is a
             # username-enumeration timing oracle that defeats the dummy-hash +
-            # ``_hold_minimum_response_time`` constant-time login above (audit
+            # uniform-floor mitigation above (audit
             # 1.7 round-1, auth-session LOW). Online brute force stays bounded
             # by the account lockout applied inside ``record_failed_login`` and
             # by the per-IP login rate limiter; neither depends on, nor leaks,
@@ -428,8 +432,11 @@ class AuthService:
         """Look up a session by id and validate every revocation rule.
 
         Returns ``(session_row, user)`` if the session is live and
-        usable; ``None`` otherwise. ``last_seen_at`` is bumped on
-        success - single indexed UPDATE per request.
+        usable; ``None`` otherwise. The transport persists
+        ``last_seen_at`` only after this validation succeeds. Keeping
+        that write outside this method lets REST use an independent
+        post-request transaction rather than accidentally committing
+        the handler's transaction.
         """
         from z4j_brain.auth.sessions import is_session_live
 
@@ -454,6 +461,14 @@ class AuthService:
             (aware_utc(session_row.expires_at) - aware_utc(session_row.issued_at)).total_seconds(),
         )
         remember_me_seconds = self._settings.session_remember_me_lifetime_seconds
+        # The 1.x schema has no explicit remember-me marker. Preserve its
+        # duration-threshold inference for existing rows: PostgreSQL fills
+        # ``issued_at`` from transaction-start ``now()`` while ``expires_at``
+        # is computed from the application wall clock, so exact duration
+        # equality is not portable. Operators must keep the remembered
+        # lifetime comfortably above the normal lifetime; changing either
+        # value while sessions are live can change how those legacy rows are
+        # classified (see the setting's description).
         is_remembered = lifetime_seconds >= remember_me_seconds
         effective_idle = (
             lifetime_seconds + 1 if is_remembered else self._settings.session_idle_timeout_seconds
@@ -465,7 +480,6 @@ class AuthService:
             user_password_changed_at=user.password_changed_at,
         ):
             return None
-        await sessions.touch(session_row.id)
         return session_row, user
 
     async def logout(

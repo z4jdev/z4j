@@ -88,16 +88,18 @@ async def _seed(brain_app, settings: Settings):
     }
 
     async with db.session() as s:
+        project = Project(id=project_id, slug="fragai", name="FragAI")
+        user = User(
+            id=user_id,
+            email=f"u-{uuid.uuid4().hex[:8]}@example.com",
+            password_hash=hasher.hash("correct horse battery staple 9"),
+            is_admin=True,
+            is_active=True,
+        )
+        s.add_all([project, user])
+        await s.flush()
         s.add_all(
             [
-                Project(id=project_id, slug="fragai", name="FragAI"),
-                User(
-                    id=user_id,
-                    email=f"u-{uuid.uuid4().hex[:8]}@example.com",
-                    password_hash=hasher.hash("correct horse battery staple 9"),
-                    is_admin=True,
-                    is_active=True,
-                ),
                 Session(
                     id=session_id,
                     user_id=user_id,

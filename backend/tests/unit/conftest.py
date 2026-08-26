@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
+import sqlite3
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -131,3 +134,112 @@ async def client(brain_app) -> AsyncIterator[AsyncClient]:
         base_url="http://testserver",
     ) as ac:
         yield ac
+
+
+# ---------------------------------------------------------------------------
+# Migrated schema
+#
+# Unit tests historically built their schema with ``Base.metadata.create_all``,
+# which creates tables and nothing else. Every Boundary-D and Boundary-F guard
+# lives inside a migration, so those tests ran with the guards absent: the
+# database under test refused nothing, while an operator's database refuses a
+# great deal. A feature could therefore pass its whole test file and raise on
+# first use in production, which is exactly what happened to schedule pause.
+#
+# Building the schema the way a real database was built is the only way a test
+# can see that. It is affordable: the chain runs once per session (about 1.5s)
+# and each test copies the resulting file (about 1ms).
+# ---------------------------------------------------------------------------
+
+
+#: The audit-chain key the migrated template is activated with. Boundary F
+#: binds the activated state to the key that signed it, so an app opened
+#: against a copy of the template must present this same key or every audit
+#: write fails. Fixed rather than random so the two cannot drift apart.
+MIGRATED_AUDIT_CHAIN_SECRET = "z4j-test-audit-chain-key-do-not-use-in-production"
+
+#: The migrations directory, resolved from this file so it does not depend on
+#: where pytest was started.
+_MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "src" / "z4j_brain" / "migrations"
+
+
+@pytest.fixture
+def migrated_audit_chain_secret() -> str:
+    """The chain key that matches :func:`migrated_db_url`."""
+    return MIGRATED_AUDIT_CHAIN_SECRET
+
+
+@pytest.fixture(scope="session")
+def migrated_sqlite_template(tmp_path_factory) -> Path:
+    """One SQLite database at the release head, built once per session.
+
+    Runs from an isolated working directory on purpose. Alembic's env hook
+    captures configuration from the current directory, and a repository ``.env``
+    whose permissions z4j refuses would otherwise fail the build on a developer
+    machine while passing in CI.
+    """
+    from alembic import command
+    from alembic.config import Config
+    from z4j_brain.cli import _find_alembic_config_path
+
+    root = tmp_path_factory.mktemp("migrated-template")
+    home = root / "home"
+    home.mkdir(mode=0o700)
+    template = root / "template.db"
+
+    config_path = str(_find_alembic_config_path())
+    saved_env = {k: v for k, v in os.environ.items() if k.startswith("Z4J_")}
+    saved_cwd = Path.cwd()
+    try:
+        for key in tuple(os.environ):
+            if key.startswith("Z4J_"):
+                del os.environ[key]
+        os.environ.update(
+            {
+                "Z4J_DATABASE_URL": f"sqlite+aiosqlite:///{template}",
+                "Z4J_HOME": str(home),
+                "Z4J_ENVIRONMENT": "dev",
+                "Z4J_SECRET": secrets.token_hex(32),
+                "Z4J_SESSION_SECRET": secrets.token_hex(32),
+                "Z4J_AUDIT_CHAIN_SECRET": MIGRATED_AUDIT_CHAIN_SECRET,
+            },
+        )
+        os.chdir(root)
+        config = Config(config_path)
+        # Pin script_location absolutely. Two alembic.ini files exist and one
+        # of them declares a RELATIVE script_location, which resolves against
+        # the current directory. This fixture deliberately runs from a scratch
+        # directory (so alembic's configuration capture cannot read a
+        # repository .env whose permissions z4j refuses), so a relative
+        # location silently pointed at nothing whenever pytest was started from
+        # packages/z4j/backend, which has its own pytest.ini and is a perfectly
+        # ordinary place to run from. Every migrated test then errored in
+        # setup, while the same suite passed from the repository root.
+        config.set_main_option("script_location", str(_MIGRATIONS_DIR))
+        command.upgrade(config, "head")
+    finally:
+        os.chdir(saved_cwd)
+        for key in tuple(os.environ):
+            if key.startswith("Z4J_"):
+                del os.environ[key]
+        os.environ.update(saved_env)
+
+    # A template without live guards would silently restore the old blind
+    # spot, so refuse to hand one out.
+    with sqlite3.connect(template) as probe:
+        guard_version = probe.execute(
+            "SELECT guard_version FROM schedule_revision_state",
+        ).fetchone()
+    if not guard_version or guard_version[0] != 1:
+        msg = f"migrated template has no live Boundary-D guard: {guard_version!r}"
+        raise RuntimeError(msg)
+
+    return template
+
+
+@pytest.fixture
+def migrated_db_url(migrated_sqlite_template: Path, tmp_path: Path) -> str:
+    """A private copy of the migrated template, as a database URL."""
+    database = tmp_path / "z4j.db"
+    shutil.copyfile(migrated_sqlite_template, database)
+    return f"sqlite+aiosqlite:///{database}"

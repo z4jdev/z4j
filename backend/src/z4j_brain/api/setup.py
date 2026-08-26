@@ -2,10 +2,11 @@
 
 Three routes:
 
-- ``GET  /api/v1/setup/status``  → ``{first_boot: bool}``. No auth.
+- ``GET  /api/v1/setup/status``  → ``{first_boot: bool}``. Anonymous
+  during first boot; authenticated after provisioning.
 - ``GET  /setup``                → tiny inline HTML form. Only
-  served while first-boot mode is active. Strict CSP, no JS,
-  no external assets.
+  served while first-boot mode is active. Strict nonce-based CSP,
+  inline JS, and no external assets.
 - ``POST /api/v1/setup/complete`` → consume the token, create the
   bootstrap admin + default project, set the session cookie.
 
@@ -23,7 +24,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -164,6 +165,7 @@ async def status_endpoint(
 )
 async def complete(
     request_body: CompleteRequest,
+    request: Request,
     response: Response,
     settings: Settings = Depends(get_settings),
     setup_service: SetupService = Depends(get_setup_service),
@@ -187,7 +189,7 @@ async def complete(
         display_name=request_body.display_name,
         password=request_body.password,
         ip=ip,
-        user_agent=None,
+        user_agent=request.headers.get("user-agent"),
     )
 
     # DATA-03: mint the session row BEFORE the single commit so the
@@ -205,7 +207,7 @@ async def complete(
         csrf_token=csrf,
         expires_at=expires_at,
         ip_at_issue=ip,
-        user_agent_at_issue=None,
+        user_agent_at_issue=request.headers.get("user-agent"),
     )
     await db_session.commit()
 

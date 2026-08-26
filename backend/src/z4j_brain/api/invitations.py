@@ -6,14 +6,15 @@ Endpoints:
 - ``POST   /projects/{slug}/invitations``            (admin) mint
 - ``GET    /projects/{slug}/invitations``            (admin) list pending
 - ``DELETE /projects/{slug}/invitations/{id}``       (admin) revoke
-- ``GET    /invitations/preview``                    (public) validate token
+- ``POST   /invitations/preview``                    (public) validate token
 - ``POST   /invitations/accept``                     (public) accept + signup
 
 Security mirrors ``first_boot_tokens`` + audit H5 (TOCTOU-safe
 accept) and audit H4 (atomic counter on auth paths):
 
 - Plaintext token shown once at mint, never persisted.
-- Token comparison uses ``hmac.compare_digest``.
+- The submitted token is HMAC-SHA256 digested before an indexed database
+  equality lookup. Plaintext tokens never reach the query or storage layer.
 - Accept re-checks "email not already in use" inside the same
   transaction as the user insert + membership grant.
 - Revoked / expired / already-accepted invitations all return a
@@ -31,7 +32,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from z4j_brain.api.deps import (
@@ -126,8 +127,9 @@ class InvitationMintPublic(BaseModel):
     token: str = Field(
         description=(
             "Plaintext invitation token. Shown ONCE - never again. "
-            "Send this as part of the invite-accept URL "
-            "(e.g. https://z4j.example.com/invite?token=<value>)."
+            "Put it in the fragment of the browser invite URL so it is "
+            "not sent in the initial HTTP request or Referer header "
+            "(e.g. https://z4j.example.com/invite#token=<value>)."
         ),
     )
     accept_url_path: str = Field(
@@ -158,6 +160,24 @@ class InvitationPreviewPublic(BaseModel):
     project_slug: str
     project_name: str
     expires_at: datetime
+
+
+class InvitationPreviewRequest(BaseModel):
+    """Bearer token submitted in a JSON body, never in the request URL.
+
+    The field deliberately has no Pydantic length constraint.  Every string,
+    including a malformed token, reaches the same HMAC lookup and generic
+    ``invalid_or_expired`` response instead of a validation branch that could
+    distinguish token states.  The global validation handler already redacts
+    non-string inputs from error responses.
+    """
+
+    token: str = Field(
+        description=(
+            "Plaintext invitation bearer token. Send only in this JSON "
+            "request body; never place it in a URL, log field, or cache key."
+        ),
+    )
 
 
 class InvitationAcceptRequest(BaseModel):
@@ -510,11 +530,19 @@ async def revoke_invitation(
             "invitation not found",
             details={"invitation_id": str(invitation_id)},
         )
-    if row.accepted_at is not None:
+    if not _is_pending(row):
         raise ConflictError(
-            "invitation has already been accepted; cannot revoke",
+            "invitation is no longer pending; cannot revoke",
         )
-    await invitations.revoke(invitation_id)
+    revoked = await invitations.revoke(invitation_id)
+    if revoked is None:
+        # The pre-read above is for a useful operator error only. The guarded
+        # UPDATE is authoritative: an accept/revoke/expiry race can invalidate
+        # the row between those two statements and must not be audited as a
+        # successful revocation.
+        raise ConflictError(
+            "invitation is no longer pending; cannot revoke",
+        )
     await audit.record(
         audit_log,
         action="invitation.revoke",
@@ -533,19 +561,23 @@ async def revoke_invitation(
 # ---------------------------------------------------------------------------
 
 
-@public_router.get(
+@public_router.post(
     "/preview",
     response_model=InvitationPreviewPublic,
     dependencies=[Depends(require_invitation_throttle)],
 )
 async def preview_invitation(
-    token: str = Query(min_length=10, max_length=256),
+    body: InvitationPreviewRequest,
+    response: Response,
     invitations: InvitationRepository = Depends(get_invitation_repo),
     projects: ProjectRepository = Depends(get_project_repo),
     settings: Settings = Depends(get_settings),
 ) -> InvitationPreviewPublic:
-    """Anonymous endpoint - lets the accept page render "invited to X"."""
-    token_hash = _hash_token(token, settings)
+    """Anonymous body-only preview for the fragment-bearing accept page."""
+    # POST responses are not normally cached, but make the secret-bearing
+    # exchange's policy explicit for browsers, proxies, and future clients.
+    response.headers["Cache-Control"] = "no-store"
+    token_hash = _hash_token(body.token, settings)
     row = await invitations.get_by_hash(token_hash)
     if row is None or not _is_pending(row):
         raise NotFoundError("invalid_or_expired")
@@ -609,6 +641,7 @@ async def accept_invitation(
     # writes a non-enum value, accept must refuse rather than grant.
     if row.role not in {r.value for r in ProjectRole}:
         raise NotFoundError("invalid_or_expired")
+    accepted_role = ProjectRole(row.role)
 
     email_canonical = canonicalize_email(row.email)
 
@@ -646,12 +679,18 @@ async def accept_invitation(
     await memberships.grant(
         user_id=new_user.id,
         project_id=project.id,
-        role=row.role,
+        role=accepted_role,
     )
-    await invitations.accept(
+    accepted = await invitations.accept(
         row.id,
         accepted_by_user_id=new_user.id,
     )
+    if accepted is None:
+        # Revocation, expiry, or another acceptance won after the initial
+        # token lookup. Raising before commit rolls back the tentative user,
+        # membership, and defaults; expose the same generic token error as
+        # every other unusable invitation state.
+        raise NotFoundError("invalid_or_expired")
 
     # Materialize the project's default subscriptions so the new
     # member starts getting bell notifications immediately - same
@@ -679,7 +718,7 @@ async def accept_invitation(
     return InvitationAcceptPublic(
         user_id=new_user.id,
         project_slug=project.slug,
-        role=row.role,
+        role=accepted_role.value,
     )
 
 

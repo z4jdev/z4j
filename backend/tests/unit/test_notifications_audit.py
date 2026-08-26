@@ -1,8 +1,8 @@
 """Regression tests for the notification-routes audit gap.
 
-Audit found that 8 of 9 mutating routes in
-``z4j_brain.api.notifications`` had NO audit log entries despite
-handling privileged operations:
+The router currently exposes ten mutating routes.  The inventory test derives
+that set from FastAPI's route table, so adding an eleventh mutator without
+accounting for it fails instead of silently escaping a hand-maintained list.
 
 - ``create_channel`` / ``update_channel`` / ``delete_channel`` -
   manage destinations carrying webhook URLs, bot tokens, SMTP
@@ -12,8 +12,9 @@ handling privileged operations:
 - ``test_channel_config`` / ``test_saved_channel`` - dispatches a
   test message; classic data-exfil vector via attacker-controlled
   webhook URL.
-- ``create_default`` / ``delete_default`` - templates that
+- ``create_default`` / ``update_default`` / ``delete_default`` - templates that
   auto-materialise into every new member's preferences.
+- ``clear_deliveries`` - destructive removal of delivery history.
 
 Invariant: every command execution must write to the audit log, with
 no silent allows. These tests pin the fix.
@@ -37,7 +38,9 @@ from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import (
     AuditLog,
     NotificationChannel,
+    NotificationDelivery,
     Project,
+    ProjectDefaultSubscription,
     Session,
     User,
 )
@@ -94,6 +97,11 @@ async def _seed(brain_app, settings: Settings) -> dict:
                     is_admin=True,
                     is_active=True,
                 ),
+            ],
+        )
+        await s.flush()
+        s.add_all(
+            [
                 Session(
                     id=session_id,
                     user_id=user_id,
@@ -331,97 +339,231 @@ class TestDefaultDeleteAudits:
         assert rows[0].audit_metadata["trigger"] == "task.failed"
 
 
+class TestDefaultUpdateAudits:
+    @pytest.mark.asyncio
+    async def test_update_audit_records_runtime_changes(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _seed(brain_app, settings)
+        default_id = uuid.uuid4()
+        async with brain_app.state.db.session() as session:
+            session.add(
+                ProjectDefaultSubscription(
+                    id=default_id,
+                    project_id=seed["project_id"],
+                    trigger="task.failed",
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[],
+                    cooldown_seconds=0,
+                ),
+            )
+            await session.commit()
+
+        async with _client(brain_app, settings, seed) as client:
+            response = await client.patch(
+                f"/api/v1/projects/audit/notifications/defaults/{default_id}",
+                json={"cooldown_seconds": 90},
+            )
+
+        assert response.status_code == 200, response.text
+        rows = await _audit_rows_for(brain_app, "notifications.default.update")
+        assert len(rows) == 1
+        assert rows[0].audit_metadata["changed"] == {
+            "cooldown_seconds": {"from": 0, "to": 90},
+        }
+
+
+class TestClearDeliveriesAudits:
+    @pytest.mark.asyncio
+    async def test_clear_audit_records_deleted_count(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _seed(brain_app, settings)
+        async with brain_app.state.db.session() as session:
+            session.add(
+                NotificationDelivery(
+                    project_id=seed["project_id"],
+                    trigger="task.failed",
+                    status="failed",
+                    error="transport unavailable",
+                ),
+            )
+            await session.commit()
+
+        async with _client(brain_app, settings, seed) as client:
+            response = await client.delete(
+                "/api/v1/projects/audit/notifications/deliveries",
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"deleted": 1}
+        rows = await _audit_rows_for(brain_app, "notifications.deliveries.clear")
+        assert len(rows) == 1
+        assert rows[0].audit_metadata["deleted_count"] == 1
+
+
 # =====================================================================
-# Source-code pin: every mutating route now imports + calls audit
+# Complete route inventory, plus ordering guards for outbound side effects
 # =====================================================================
 
 
-class TestEveryWriteRouteImportsAudit:
-    """Forensic check that future refactors don't drop the audit calls.
-
-    Reads the source of api/notifications.py and asserts that every
-    mutating handler references ``audit.record(``. A future
-    refactor that accidentally drops one will fail this test.
-    """
-
-    def test_all_eight_routes_call_audit(self) -> None:
-        import inspect
-
+class TestEveryWriteRouteIsAccountedFor:
+    def test_fastapi_mutator_inventory_is_complete(self) -> None:
         from z4j_brain.api import notifications
 
-        # Every mutating route handler should appear in the source
-        # AND audit.record should appear in the source. Stronger:
-        # for each handler, scan its specific function body.
-        handlers = (
-            notifications.create_channel,
-            notifications.import_channel_from_user,
-            notifications.update_channel,
-            notifications.delete_channel,
-            notifications.test_channel_config,
-            notifications.test_saved_channel,
-            notifications.create_default,
-            notifications.delete_default,
+        expected_actions = {
+            "create_channel": "notifications.channel.create",
+            "import_channel_from_user": "notifications.channel.import",
+            "update_channel": "notifications.channel.update",
+            "delete_channel": "notifications.channel.delete",
+            "test_channel_config": "notifications.channel.test",
+            "test_saved_channel": "notifications.channel.test",
+            "create_default": "notifications.default.create",
+            "update_default": "notifications.default.update",
+            "delete_default": "notifications.default.delete",
+            "clear_deliveries": "notifications.deliveries.clear",
+        }
+        actual = {
+            route.endpoint.__name__
+            for route in notifications.router.routes
+            if route.methods & {"POST", "PATCH", "PUT", "DELETE"}
+        }
+
+        assert actual == expected_actions.keys()
+
+    def test_saved_channel_contract_discloses_delivery_log_persistence(self) -> None:
+        from z4j_brain.api import notifications
+
+        contract = " ".join((notifications.test_saved_channel.__doc__ or "").split())
+        assert "logged to ``notification_deliveries``" in contract
+        assert '``trigger="test.dispatch"``' in contract
+        assert "NOT logged" not in contract
+
+    @pytest.mark.asyncio
+    async def test_project_channel_preflight_commits_intent_before_dispatch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from starlette.requests import Request
+        from z4j_brain.api import notifications
+
+        project_id = uuid.uuid4()
+        audit = SimpleNamespace(record=AsyncMock())
+        session = SimpleNamespace(commit=AsyncMock())
+
+        async def dispatch(*_args, **_kwargs):
+            assert session.commit.await_count == 1
+            assert [call.kwargs["action"] for call in audit.record.await_args_list] == [
+                "notifications.channel.test_requested",
+            ]
+            return notifications.ChannelTestResult(success=True, status_code=200)
+
+        monkeypatch.setattr(
+            notifications,
+            "_resolve_member_project",
+            AsyncMock(return_value=project_id),
         )
-        for handler in handlers:
-            handler_src = inspect.getsource(handler)
-            assert "audit.record(" in handler_src, (
-                f"{handler.__name__} does not call audit.record - audit-Phase4-1 regression"
-            )
-
-    def test_outbound_tests_commit_signed_intent_before_dispatch(self) -> None:
-        """Every test transport observes durable intent before outbound I/O."""
-        import inspect
-
-        from z4j_brain.api import notifications, user_notifications
-
-        cases = (
-            (
-                notifications.test_channel_config,
-                'action="notifications.channel.test_requested"',
-                "result = await _dispatch_test(",
-                'action="notifications.channel.test"',
-            ),
-            (
-                notifications.test_saved_channel,
-                'action="notifications.channel.test_requested"',
-                "result = await _dispatch_test(",
-                'action="notifications.channel.test"',
-            ),
-            (
-                user_notifications.test_user_channel_config,
-                'action="user_notifications.channel.test_requested"',
-                "result = await _dispatch_user_test(",
-                'action="user_notifications.channel.test"',
-            ),
-            (
-                user_notifications.test_saved_user_channel,
-                'action="user_notifications.channel.test_requested"',
-                "result = await _dispatch_user_test(",
-                'action="user_notifications.channel.test"',
-            ),
+        monkeypatch.setattr(notifications, "_dispatch_test", dispatch)
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/v1/projects/audit/notifications/channels/test",
+                "headers": [],
+                "client": ("127.0.0.1", 1234),
+            },
         )
-        for handler, intent, dispatch, result in cases:
-            source = inspect.getsource(handler)
-            intent_at = source.index(intent)
-            commit_at = source.index("await db_session.commit()", intent_at)
-            dispatch_at = source.index(dispatch)
-            result_at = source.index(result, dispatch_at)
-            assert intent_at < commit_at < dispatch_at < result_at, (
-                f"{handler.__name__} must commit signed intent before dispatch "
-                "and record the result afterward"
-            )
 
-    def test_invitation_email_commits_signed_intent_before_send(self) -> None:
-        import inspect
+        result = await notifications.test_channel_config(
+            slug="audit",
+            body=notifications.ChannelTestRequest(
+                type="telegram",
+                config={"bot_token": "123:token", "chat_id": "123"},
+            ),
+            request=request,
+            user=SimpleNamespace(id=uuid.uuid4()),
+            memberships=object(),
+            projects=object(),
+            audit_log=object(),
+            audit=audit,
+            db_session=session,
+        )
+
+        assert result.success is True
+        assert [call.kwargs["action"] for call in audit.record.await_args_list] == [
+            "notifications.channel.test_requested",
+            "notifications.channel.test",
+        ]
+        assert session.commit.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_invitation_email_commits_intent_before_send(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        brain_settings,
+    ) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
 
         from z4j_brain.api import invitations
 
-        source = inspect.getsource(invitations.mint_invitation)
-        intent_at = source.index('action="invitation.email_delivery_requested"')
-        commit_at = source.index("await db_session.commit()", intent_at)
-        dispatch_at = source.index("email_sent = await _try_send_invitation_email(")
-        result_at = source.index(
-            'action="invitation.email_delivery_result"',
-            dispatch_at,
+        project = SimpleNamespace(id=uuid.uuid4(), slug="audit", name="Audit", is_active=True)
+        user = SimpleNamespace(id=uuid.uuid4(), is_admin=True)
+        now = datetime.now(UTC)
+        invitation = SimpleNamespace(
+            id=uuid.uuid4(),
+            project_id=project.id,
+            email="invitee@example.com",
+            role="viewer",
+            invited_by=user.id,
+            expires_at=now + timedelta(days=7),
+            accepted_at=None,
+            revoked_at=None,
+            created_at=now,
         )
-        assert intent_at < commit_at < dispatch_at < result_at
+        repository = SimpleNamespace(create=AsyncMock(return_value=invitation))
+        audit = SimpleNamespace(record=AsyncMock())
+        session = SimpleNamespace(commit=AsyncMock())
+
+        async def send(**_kwargs) -> bool:
+            assert session.commit.await_count == 1
+            assert [call.kwargs["action"] for call in audit.record.await_args_list] == [
+                "invitation.mint",
+                "invitation.email_delivery_requested",
+            ]
+            return True
+
+        monkeypatch.setattr(invitations, "_try_send_invitation_email", send)
+        result = await invitations.mint_invitation(
+            slug="audit",
+            body=invitations.InvitationCreateRequest(
+                email="invitee@example.com",
+                role="viewer",
+            ),
+            user=user,
+            memberships=object(),
+            projects=SimpleNamespace(get_by_slug=AsyncMock(return_value=project)),
+            invitations=repository,
+            users=SimpleNamespace(get_by_email=AsyncMock(return_value=None)),
+            settings=brain_settings,
+            audit=audit,
+            audit_log=object(),
+            db_session=session,
+            ip="127.0.0.1",
+        )
+
+        assert result.email_sent is True
+        assert [call.kwargs["action"] for call in audit.record.await_args_list] == [
+            "invitation.mint",
+            "invitation.email_delivery_requested",
+            "invitation.email_delivery_result",
+        ]
+        assert session.commit.await_count == 2

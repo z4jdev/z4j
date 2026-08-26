@@ -144,16 +144,20 @@ async def test_duplicate_snapshot_does_not_reconcile_and_delete(
     assert names == {"A", "B"}
 
 
-async def test_reconcile_failure_does_not_drop_the_event(
+async def test_transient_reconcile_failure_rolls_back_event_and_withholds_ack(
     session: AsyncSession,
     project: Project,
     agent: Agent,
     ingestor: EventIngestor,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """H3: a TRANSIENT failure inside the best-effort reconcile is caught and
-    rolled back to its OWN savepoint, so the per-event insert still commits
-    (the event is not lost) and ingest reports it as new/durable."""
+    """A transient projection failure rolls back the event and requests replay.
+
+    The raw event and its schedule projection are one durability unit: keeping
+    the event while losing the projection would make its replay dedupe and skip
+    the only remaining chance to reconcile. The batch therefore remains
+    unacknowledged until both writes land together.
+    """
     from z4j_brain.persistence.repositories import ScheduleRepository
 
     original = ScheduleRepository.reconcile_snapshot
@@ -173,11 +177,14 @@ async def test_reconcile_failure_does_not_drop_the_event(
     result = await _ingest(ingestor, session, project, agent, _snapshot_event([_schedule("A")]))
     await session.commit()
 
-    # The event itself was inserted despite the reconcile blowing up ...
-    assert len(result.new_events) == 1
+    assert result.fully_durable is False
+    assert result.transient_skips == 1
+    assert result.inserted_count == 0
+    assert result.new_events == []
+    # The event and failed projection are both rolled back, so replay can retry
+    # them as one atomic unit rather than deduping past the missing projection.
     event_count = (await session.execute(select(func.count()).select_from(Event))).scalar_one()
-    assert event_count == 1
-    # ... and the failed reconcile left no half-written schedule rows.
+    assert event_count == 0
     sched_count = (await session.execute(select(func.count()).select_from(Schedule))).scalar_one()
     assert sched_count == 0
 
@@ -194,6 +201,14 @@ async def test_reserved_outer_owner_never_reaches_schedule_projection(
     result = await _ingest(ingestor, session, project, agent, event)
     await session.commit()
 
-    assert len(result.new_events) == 1
+    # Reserved-owner forgery is deterministic bad content: retry cannot make it
+    # valid, so it is dropped-and-confirmed without retaining a misleading raw
+    # event that claims internal scheduler authority.
+    assert result.fully_durable is True
+    assert result.transient_skips == 0
+    assert result.inserted_count == 0
+    assert result.new_events == []
+    event_count = (await session.execute(select(func.count()).select_from(Event))).scalar_one()
+    assert event_count == 0
     sched_count = (await session.execute(select(func.count()).select_from(Schedule))).scalar_one()
     assert sched_count == 0

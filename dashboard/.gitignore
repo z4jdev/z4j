@@ -7,8 +7,6 @@ dist
 .env
 .env.local
 .env.*.local
-src/routeTree.gen.ts
-
 # Playwright run artifacts (never shipped)
 test-results/
 playwright-report/

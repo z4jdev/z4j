@@ -12,8 +12,10 @@ Persists the worker-first protocol's per-worker state:
 - ``list_for_project`` / ``list_for_agent`` - dashboard reads.
 
 The composite key is ``(agent_id, worker_id)``. Legacy 1.1.x
-clients (worker_id=None) get exactly one row per agent_id;
-worker-aware clients (1.2.0+) get one row per worker_id.
+clients (``worker_id=None``) get exactly one row per ``agent_id`` via a
+separate partial UNIQUE index; ordinary composite uniqueness cannot enforce
+that because both PostgreSQL and SQLite treat NULL values as distinct.
+Worker-aware clients (1.2.0+) get one row per non-NULL ``worker_id``.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from z4j_brain.persistence.models import AgentWorker
+from z4j_brain.persistence.models import Agent, AgentWorker
 from z4j_brain.persistence.repositories._base import BaseRepository
 
 
@@ -86,26 +88,37 @@ class AgentWorkerRepository(BaseRepository[AgentWorker]):
         }
 
         if dialect == "postgresql":
-            stmt = pg_insert(AgentWorker).values(**values)
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_agent_workers_agent_worker",
-                set_=update_values,
-            )
-            await self.session.execute(stmt)
+            pg_stmt = pg_insert(AgentWorker).values(**values)
+            if worker_id is None:
+                # The ordinary (agent_id, worker_id) UNIQUE constraint cannot
+                # arbitrate NULL worker ids: NULL is distinct on PostgreSQL and
+                # SQLite. Infer the dedicated partial UNIQUE index instead so
+                # concurrent legacy reconnects collapse into one durable slot.
+                pg_stmt = pg_stmt.on_conflict_do_update(
+                    index_elements=["agent_id"],
+                    index_where=AgentWorker.worker_id.is_(None),
+                    set_=update_values,
+                )
+            else:
+                pg_stmt = pg_stmt.on_conflict_do_update(
+                    constraint="uq_agent_workers_agent_worker",
+                    set_=update_values,
+                )
+            await self.session.execute(pg_stmt)
         else:
-            # SQLite path: ON CONFLICT(agent_id, worker_id) DO UPDATE.
-            # Note SQLite UPSERT semantics treat NULL worker_id as
-            # distinct (each NULL is its own row), so the legacy slot
-            # may insert a duplicate row on reconnect. Mitigation:
-            # the in-memory registry only allows one NULL slot per
-            # agent_id at a time, so the worst case is one extra
-            # offline row that the GC sweep will reap.
-            stmt = sqlite_insert(AgentWorker).values(**values)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["agent_id", "worker_id"],
-                set_=update_values,
-            )
-            await self.session.execute(stmt)
+            sqlite_stmt = sqlite_insert(AgentWorker).values(**values)
+            if worker_id is None:
+                sqlite_stmt = sqlite_stmt.on_conflict_do_update(
+                    index_elements=["agent_id"],
+                    index_where=AgentWorker.worker_id.is_(None),
+                    set_=update_values,
+                )
+            else:
+                sqlite_stmt = sqlite_stmt.on_conflict_do_update(
+                    index_elements=["agent_id", "worker_id"],
+                    set_=update_values,
+                )
+            await self.session.execute(sqlite_stmt)
 
     async def touch_heartbeat(
         self,
@@ -176,11 +189,22 @@ class AgentWorkerRepository(BaseRepository[AgentWorker]):
     ) -> Sequence[AgentWorker]:
         """List workers in a project, newest-active first.
 
-        ``state`` and ``role`` are optional filters. Default limit
-        of 200 covers any realistic small/medium deployment;
-        operators with thousands of workers paginate via offset.
+        ``state`` and ``role`` are optional filters. The method returns at most
+        ``limit`` rows (200 by default); it does not currently expose offset or
+        cursor pagination, so callers needing a complete larger inventory must
+        add that at the API/repository boundary rather than assuming another
+        page is available here.
+        Workers belonging to a revoked agent are historical records and are
+        hidden from this live fleet inventory.
         """
-        stmt = select(AgentWorker).where(AgentWorker.project_id == project_id)
+        stmt = (
+            select(AgentWorker)
+            .join(Agent, Agent.id == AgentWorker.agent_id)
+            .where(
+                AgentWorker.project_id == project_id,
+                Agent.revoked_at.is_(None),
+            )
+        )
         if state is not None:
             stmt = stmt.where(AgentWorker.state == state)
         if role is not None:
@@ -196,10 +220,14 @@ class AgentWorkerRepository(BaseRepository[AgentWorker]):
         self,
         agent_id: UUID,
     ) -> Sequence[AgentWorker]:
-        """All workers under one agent. Used on the agent detail page."""
+        """Workers under one live agent, for the agent detail page."""
         stmt = (
             select(AgentWorker)
-            .where(AgentWorker.agent_id == agent_id)
+            .join(Agent, Agent.id == AgentWorker.agent_id)
+            .where(
+                AgentWorker.agent_id == agent_id,
+                Agent.revoked_at.is_(None),
+            )
             .order_by(
                 AgentWorker.state.desc(),
                 AgentWorker.last_seen_at.desc().nullslast(),

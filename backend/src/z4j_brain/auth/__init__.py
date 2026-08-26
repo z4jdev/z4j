@@ -8,13 +8,13 @@ Submodules:
 - :mod:`z4j_brain.auth.csrf` - double-submit CSRF tokens.
 - :mod:`z4j_brain.auth.ip` - real client IP resolution behind
   trusted reverse proxies.
-- :mod:`z4j_brain.auth.deps` - FastAPI ``Depends`` adapters.
+- :mod:`z4j_brain.api.deps` - FastAPI ``Depends`` adapters.
 
-The submodules are deliberately framework-free below the
-``deps.py`` layer - they take settings and return data, never
-:class:`fastapi.Request`. The thin :mod:`deps` module is the only
-place that knows about FastAPI. This makes the auth layer trivially
-testable without spinning up an HTTP server.
+The cryptographic, scope, session-codec, and IP-resolution primitives are
+framework-free. Most FastAPI-bound adapters live in ``z4j_brain.api.deps``;
+the deliberate exception inside this package is
+``z4j_brain.auth.trusted_device``, whose cookie set/clear helpers accept a
+:class:`fastapi.Response`.
 """
 
 from __future__ import annotations

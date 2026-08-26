@@ -50,6 +50,12 @@ compat = {
     "downgrade_to": None,
 }
 
+#: Declares to ``env.py`` that this revision will not be undone, so a whole
+#: downgrade run planned through it is refused before its first step executes.
+#: Without that, a destructive step stacked above here commits, and is lost,
+#: while the operator is being told the rollback was refused.
+DOWNGRADE_REFUSED = "refusing downgrade below Boundary D while schedule authority exists"
+
 _STATE_ID = "schedule-revision"
 _PROTOCOL_VERSION = 1
 _SNAPSHOT_FIELDS = (
@@ -257,6 +263,29 @@ def _allocate_revision(
     return int(new_revision)
 
 
+
+def _existing_schedule_columns(bind: sa.engine.Connection) -> list[sa.Column]:
+    """ORM columns for ``schedules`` that actually exist in the database.
+
+    Two failure modes have to be avoided at once here.
+
+    ``select(Schedule.__table__)`` emits every column the LIVE ORM model has
+    today, so a later release adding a column breaks THIS revision: the
+    upgrade reaches it before the column exists and dies on "no such column"
+    in a migration unrelated to the new feature.
+
+    Reflecting the table instead fixes that and breaks binding, because
+    reflection returns generic SQL types and loses the type decorators that
+    convert a Python ``UUID`` on the way in. The parameter then fails with
+    "type 'UUID' is not supported".
+
+    So: keep the ORM columns, which carry the types, and filter them to the
+    ones the database actually has at this point in the chain.
+    """
+    present = {column["name"] for column in sa.inspect(bind).get_columns("schedules")}
+    return [column for column in Schedule.__table__.c if column.name in present]
+
+
 def _repair_values(
     row: Mapping[str, Any],
 ) -> tuple[datetime, datetime | None] | None:
@@ -350,7 +379,7 @@ def upgrade() -> None:
     schedule_table = Schedule.__table__
     rows = (
         bind.execute(
-            sa.select(schedule_table)
+            sa.select(*_existing_schedule_columns(bind))
             .where(
                 schedule_table.c.scheduler == "z4j-scheduler",
                 schedule_table.c.last_run_at.is_not(None),
@@ -438,6 +467,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise CommandError(
-        "refusing downgrade below Boundary D while schedule authority exists",
-    )
+    raise CommandError(DOWNGRADE_REFUSED)

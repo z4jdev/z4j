@@ -1,16 +1,15 @@
 """Per-RPC handler implementations for the brain-side ``SchedulerService``.
 
-The brain implements every brain-side RPC declared in
-``packages/z4j-scheduler/proto/scheduler.proto``:
+The brain implements every RPC declared in
+``packages/z4j-scheduler/proto/scheduler.proto`` except the legacy reverse
+:rpc:`TriggerSchedule` RPC. The current protocol adds exact negotiation, a
+validated snapshot, revisioned change replay, per-schedule recovery,
+quarantine and cursor-transition RPCs to the legacy list/watch/fire/receipt
+surface.
 
-- :rpc:`ListSchedules` - server-streaming initial sync
-- :rpc:`WatchSchedules` - server-streaming live diffs
-- :rpc:`FireSchedule` - unary; creates a Command via ``CommandDispatcher``
-- :rpc:`AcknowledgeFireResult` - unary; updates ``schedules.last_run_at``
-- :rpc:`Ping` - unary liveness
-
-The reverse :rpc:`TriggerSchedule` RPC lives on the scheduler side; Brain is
-the gRPC client for that one.
+The scheduler-side :rpc:`TriggerSchedule` server is retained for a Brain that
+predates durable schedule control. A current Brain dispatches operator manual
+fires directly and does not use that reverse RPC.
 
 Per ``docs/SCHEDULER.md §13.2``, every state-changing RPC writes an
 audit row through the existing HMAC-chained ``audit_log``. Pure read
@@ -18,14 +17,13 @@ RPCs (List/Watch/Ping) skip the audit because the scheduler reads
 the same data on every reconnect; auditing each one would balloon
 the log without operator value.
 
-Phase 1 implementation notes:
+Implementation notes:
 
-- :rpc:`WatchSchedules` polls ``schedules.updated_at`` every
-  ``Z4J_SCHEDULER_GRPC_WATCH_POLL_SECONDS`` (default 2s) and emits
-  diff events. A future enhancement bolts on Postgres ``LISTEN`` for
-  push semantics, but polling at 2s is well within the 100ms-target
-  cache freshness budget when amortized against the scheduler's own
-  tick cadence (250ms).
+- Legacy :rpc:`WatchSchedules` uses PostgreSQL ``LISTEN/NOTIFY`` when
+  available and polls at ``Z4J_SCHEDULER_GRPC_WATCH_POLL_SECONDS`` on
+  SQLite. Revisioned :rpc:`WatchSchedulesV2` polls the durable change log at
+  that configured interval on both backends. Neither stream promises a fixed
+  delivery latency.
 - :rpc:`FireSchedule` re-uses ``_pick_scheduler_agent`` from the REST
   handler so brain stays single-source-of-truth on agent selection.
 """
@@ -43,11 +41,15 @@ from uuid import UUID
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
+from sqlalchemy.engine import make_url
 
+from z4j_brain.postgres_tls import asyncpg_tls_connect_args
 from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
 from z4j_brain.scheduler_grpc.proto import scheduler_pb2_grpc as pb_grpc
 
 if TYPE_CHECKING:  # pragma: no cover
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.domain.command_dispatcher import CommandDispatcher
     from z4j_brain.persistence.database import DatabaseManager
@@ -130,6 +132,25 @@ _MAX_LIST_PAGE_SIZE = 1000
 # step on each other.
 _SCHEDULER_NAME = "z4j-scheduler"
 
+# What a FireSchedule request has to be to be a cadence acceptance: an id
+# derived from the slot it settles (uuid5), and no operator attribution. An
+# extra fire on top of the cadence is neither, and this Brain does not take one
+# from a scheduler in any protocol generation -- it performs an operator
+# trigger itself, because it is the only side that can see a hold.
+#
+# Naming that refusal apart from "your scheduler is out of date" is the whole
+# point of these two constants. The scheduler used to receive the upgrade code
+# for an operator's click and rewrite it before an operator ever saw it, which
+# left the Brain's own logs, audit rows and any other client holding a
+# diagnosis that sends someone to redeploy a component that was never the
+# problem. Said once, at the source, so both fire branches say the same thing.
+_MANUAL_TRIGGER_REFUSED_CODE = "manual_trigger_not_accepted"
+_MANUAL_TRIGGER_REFUSED_MESSAGE = (
+    "this Brain does not accept operator triggers through the scheduler; "
+    "it fires them itself, so unset scheduler_trigger_url and trigger from "
+    "the Brain"
+)
+
 
 #: Per-process bound on
 #: in-flight FireSchedule handlers. Each holds a DB session across
@@ -152,6 +173,53 @@ def _get_fire_schedule_semaphore() -> asyncio.Semaphore:
     if _fire_schedule_sem is None:
         _fire_schedule_sem = asyncio.Semaphore(_FIRE_SCHEDULE_BOUND)
     return _fire_schedule_sem
+
+
+async def _advance_legacy_schedule_after_success(
+    session: AsyncSession,
+    *,
+    schedule_id: UUID,
+    fire_id: UUID,
+    scheduled_for: datetime,
+    is_manual: bool,
+    observed_at: datetime,
+) -> None:
+    """Atomically count one successful legacy fire and advance its cursor."""
+
+    from sqlalchemy import case, or_, update
+
+    from z4j_brain.persistence.models import Schedule
+
+    values: dict[str, Any] = {
+        "total_runs": Schedule.total_runs + 1,
+        "updated_at": case(
+            (
+                or_(Schedule.updated_at.is_(None), Schedule.updated_at < observed_at),
+                observed_at,
+            ),
+            else_=Schedule.updated_at,
+        ),
+    }
+    if not is_manual:
+        values.update(
+            last_run_at=case(
+                (
+                    or_(
+                        Schedule.last_run_at.is_(None),
+                        Schedule.last_run_at < scheduled_for,
+                    ),
+                    scheduled_for,
+                ),
+                else_=Schedule.last_run_at,
+            ),
+            last_fire_id=case(
+                (Schedule.last_fire_id == fire_id, None),
+                else_=Schedule.last_fire_id,
+            ),
+        )
+    await session.execute(
+        update(Schedule).where(Schedule.id == schedule_id).values(**values),
+    )
 
 
 # =====================================================================
@@ -328,12 +396,11 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
 
         - **Postgres**: dedicated asyncpg connection LISTENing on
           ``z4j_schedules_changed`` (set up by migration
-          ``2026_04_27_0007_sched_notify``). Sub-100ms cache
-          freshness, near-zero idle CPU. Phase 3 default.
+          ``2026_04_27_0007_sched_notify``). Changes wake the stream
+          through LISTEN/NOTIFY rather than a fixed polling interval.
         - **SQLite**: polls ``schedules.updated_at`` every
           ``Z4J_SCHEDULER_GRPC_WATCH_POLL_SECONDS`` and emits diffs
-          (Phase 1/2 path; SQLite has no LISTEN/NOTIFY). Used by the
-          test fixtures + single-tenant evaluation deployments.
+          because SQLite has no LISTEN/NOTIFY.
 
         The ``resume_token`` is the ISO timestamp of the latest
         ``updated_at`` the scheduler has seen; on reconnect the
@@ -592,16 +659,21 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             for event in catchup_events:
                 yield event
 
-        # Open a dedicated asyncpg connection on the same DSN as the
-        # SQLAlchemy engine. Audit fix L-1 (Apr 2026): pass connection
+        # Open a dedicated asyncpg connection using the same address and TLS
+        # policy as the SQLAlchemy engine. Audit fix L-1 (Apr 2026): pass connection
         # parameters as kwargs (host/port/user/password/database)
         # instead of materializing a plain-text URL string with the
         # password in it. The string-based path leaves the password
         # in heap until GC and would surface in any future log line
         # / core dump / exception traceback inside this function.
         # ``URL.translate_connect_args`` is the canonical SQLAlchemy
-        # accessor for the libpq-style connection dict.
-        connect_kwargs = self._db.engine.url.translate_connect_args(
+        # accessor for the libpq-style connection dict. Translate the captured
+        # settings' libpq TLS keys separately and pass the resulting explicit
+        # asyncpg ``ssl`` argument.
+        tls_connect_args = asyncpg_tls_connect_args(
+            self._settings.database_url,
+        )
+        connect_kwargs = make_url(self._settings.database_url).translate_connect_args(
             username="user",
         )
         conn = await asyncpg.connect(
@@ -611,6 +683,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             password=connect_kwargs.get("password"),
             database=connect_kwargs.get("database"),
             server_settings={"application_name": "z4j-brain-watch-stream"},
+            **tls_connect_args,
         )
         notification_queue: asyncio.Queue = asyncio.Queue()
 
@@ -1009,7 +1082,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             filter_project_ids_by_binding,
         )
         from z4j_brain.scheduler_grpc.protocol import CURRENT_REVISION_WATCH_VERSION
-        from z4j_brain.scheduler_grpc.wire import schedule_to_pb
+        from z4j_brain.scheduler_grpc.wire import ScheduleWireError, schedule_to_pb
 
         if request.watch_format_version != CURRENT_REVISION_WATCH_VERSION:
             await context.abort(
@@ -1108,11 +1181,39 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                             "schedule change log contains a malformed snapshot",
                         )
                         return
+                    try:
+                        projected = schedule_to_pb(source)
+                    except ScheduleWireError as wire_error:
+                        # An envelope that cannot say whether the schedule may
+                        # run is as unusable as one with no schedule in it,
+                        # and the stream has to stop rather than let the
+                        # scheduler act on the half of it that did decode.
+                        #
+                        # In practice the likeliest cause is not corruption but
+                        # version skew: a brain replica from an earlier release
+                        # is still live against a migrated database and writes
+                        # envelopes without the fields this release reads. The
+                        # message says so, because "malformed snapshot" sends an
+                        # operator looking for a damaged database when what they
+                        # have is a half-finished rollout. The scheduler
+                        # recovers on its own by reconnecting and re-syncing
+                        # from live rows, but it refuses to fire while it does,
+                        # and an older replica cannot honour a pause at all.
+                        await context.abort(
+                            grpc.StatusCode.DATA_LOSS,
+                            "schedule change log contains a snapshot this "
+                            f"release cannot project ({wire_error}). If a brain "
+                            "replica from an earlier release is still running "
+                            "against this database, finish the rollout: mixed "
+                            "brain versions cannot agree on whether a schedule "
+                            "is held.",
+                        )
+                        return
                     envelope = pb.ScheduleChange(
                         kind=pb.ScheduleChange.Kind.UPSERT,
                         revision=revision,
                         project_id=str(change.project_id),
-                        schedule=schedule_to_pb(source),
+                        schedule=projected,
                     )
                 elif change.change_kind == "delete" and change.snapshot is None:
                     envelope = pb.ScheduleChange(
@@ -1611,12 +1712,16 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 # during operational events (e.g. a schedule
                 # mass-delete + scheduler still ticking the
                 # in-flight slots).
-                if cert_cn:
-                    await self._rate_limiter.refund(cert_cn=cert_cn)
-                return pb.FireScheduleResponse(
+                response = pb.FireScheduleResponse(
                     error_code="schedule_not_found",
                     error_message=(f"schedule {schedule_id} not in brain"),
                 )
+                if cert_cn:
+                    await self._rate_limiter.refund(
+                        cert_cn=cert_cn,
+                        session=session,
+                    )
+                return response
             # Per-cert project binding.
             # Bound CNs cannot fire schedules for projects outside
             # their binding list - even if the row exists. Run the
@@ -1667,12 +1772,38 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 # Scheduler should have skipped this on its side, but
                 # defend against a race between disable + tick.
                 # Refund the token.
-                if cert_cn:
-                    await self._rate_limiter.refund(cert_cn=cert_cn)
-                return pb.FireScheduleResponse(
+                response = pb.FireScheduleResponse(
                     error_code="schedule_disabled",
                     error_message="schedule is disabled",
                 )
+                if cert_cn:
+                    await self._rate_limiter.refund(
+                        cert_cn=cert_cn,
+                        session=session,
+                    )
+                return response
+
+            if schedule.paused_at is not None:
+                # Paused is not disabled. Disabling retires a schedule;
+                # pausing holds it during an incident and keeps the
+                # timestamp that says how long the hold has run. They are
+                # refused the same way here but reported distinctly, so an
+                # operator reading the scheduler's logs can tell whether
+                # someone retired this schedule or is holding it.
+                #
+                # Same race defence as above: the scheduler is expected to
+                # skip a paused schedule on its side, and this is the
+                # authority that makes it true even if it does not.
+                response = pb.FireScheduleResponse(
+                    error_code="schedule_paused",
+                    error_message=(f"schedule is paused (since {schedule.paused_at.isoformat()})"),
+                )
+                if cert_cn:
+                    await self._rate_limiter.refund(
+                        cert_cn=cert_cn,
+                        session=session,
+                    )
+                return response
 
             agent = await _pick_scheduler_agent_for_fire(
                 session=session,
@@ -1898,11 +2029,17 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             enforce_cn_project_binding,
         )
 
-        if (
-            fire_id.version != 5
-            or request.triggered_by_user_id
-            or not request.HasField("scheduled_for")
-        ):
+        # The disposition stays FIRE_LEGACY_UPGRADE_REQUIRED: it is the wire's
+        # only terminal "this channel cannot carry it" value, an N-1 peer has
+        # to keep decoding it, and a refusal reported as anything retryable
+        # would put an operator's click into a retry loop that cannot succeed.
+        if fire_id.version != 5 or request.triggered_by_user_id:
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_LEGACY_UPGRADE_REQUIRED),
+                error_code=_MANUAL_TRIGGER_REFUSED_CODE,
+                error_message=_MANUAL_TRIGGER_REFUSED_MESSAGE,
+            )
+        if not request.HasField("scheduled_for"):
             return pb.FireScheduleResponse(
                 disposition=(pb.FireDisposition.FIRE_LEGACY_UPGRADE_REQUIRED),
                 error_code="scheduler_upgrade_required",
@@ -1941,13 +2078,17 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 )
                 schedule = schedule_result.scalar_one_or_none()
                 if schedule is None:
-                    if cert_cn:
-                        await self._rate_limiter.refund(cert_cn=cert_cn)
-                    return pb.FireScheduleResponse(
+                    response = pb.FireScheduleResponse(
                         disposition=(pb.FireDisposition.FIRE_STALE_CONTROL_REFRESH),
                         error_code="schedule_not_found",
                         error_message=f"schedule {schedule_id} not in brain",
                     )
+                    if cert_cn:
+                        await self._rate_limiter.refund(
+                            cert_cn=cert_cn,
+                            session=session,
+                        )
+                    return response
                 await enforce_cn_project_binding(
                     context=context,
                     project_id=schedule.project_id,
@@ -2004,10 +2145,29 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                             schedule.schedule_revision or 0,
                         ),
                     )
-                if transition.disposition == "schedule_disabled":
+                if transition.disposition == "schedule_paused":
+                    # Held, not retired. Reported distinctly so an operator
+                    # reading the scheduler's logs can tell which one is in
+                    # force, and refused the same way either way.
+                    response = pb.FireScheduleResponse(
+                        disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
+                        error_code="schedule_paused",
+                        error_message="schedule is paused",
+                        live_control_token=str(
+                            schedule.control_token or "",
+                        ),
+                        live_revision=int(
+                            schedule.schedule_revision or 0,
+                        ),
+                    )
                     if cert_cn:
-                        await self._rate_limiter.refund(cert_cn=cert_cn)
-                    return pb.FireScheduleResponse(
+                        await self._rate_limiter.refund(
+                            cert_cn=cert_cn,
+                            session=session,
+                        )
+                    return response
+                if transition.disposition == "schedule_disabled":
+                    response = pb.FireScheduleResponse(
                         disposition=(pb.FireDisposition.FIRE_RETRYABLE_OR_AMBIGUOUS),
                         error_code="schedule_disabled",
                         error_message="schedule is disabled",
@@ -2018,6 +2178,12 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                             schedule.schedule_revision or 0,
                         ),
                     )
+                    if cert_cn:
+                        await self._rate_limiter.refund(
+                            cert_cn=cert_cn,
+                            session=session,
+                        )
+                    return response
                 if transition.disposition == "legacy_upgrade_required":
                     return pb.FireScheduleResponse(
                         disposition=(pb.FireDisposition.FIRE_LEGACY_UPGRADE_REQUIRED),
@@ -2270,11 +2436,14 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
 
         from datetime import timedelta
 
+        from sqlalchemy import select
+
         from z4j_brain.domain.schedule_cadence import (
             CADENCE_SEMANTICS_VERSION,
             cadence_runtime_fingerprint,
         )
         from z4j_brain.persistence.enums import CommandStatus
+        from z4j_brain.persistence.models import Schedule
         from z4j_brain.persistence.repositories import (
             AuditLogRepository,
             CommandRepository,
@@ -2301,10 +2470,19 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 error_code="cadence_semantics_mismatch",
                 error_message="scheduler cadence/protocol tuple does not match Brain",
             )
+        # Refusing an operator trigger before the authority checks, and with
+        # its own code, so the two causes are never confused: an extra fire is
+        # turned away for what it is, not for a missing field it was never
+        # going to carry, and the terminal disposition keeps it out of the
+        # retry path that "ambiguous" invites.
+        if fire_id.version != 5 or request.triggered_by_user_id:
+            return pb.FireScheduleResponse(
+                disposition=(pb.FireDisposition.FIRE_LEGACY_UPGRADE_REQUIRED),
+                error_code=_MANUAL_TRIGGER_REFUSED_CODE,
+                error_message=_MANUAL_TRIGGER_REFUSED_MESSAGE,
+            )
         if (
-            fire_id.version != 5
-            or request.triggered_by_user_id
-            or not request.HasField("scheduled_for")
+            not request.HasField("scheduled_for")
             or not request.HasField("expected_next_run_at")
             or request.expected_schedule_revision <= 0
             or not request.definition_digest
@@ -2347,9 +2525,50 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         sem = _get_fire_schedule_semaphore()
         try:
             async with sem, self._db.session(write=True) as session:
+                # Resolve the target, then authorise it, then act on it -- the
+                # order every other scheduler RPC uses.  The cadence acceptance
+                # below allocates a revision, appends the change-log envelope
+                # and moves the cursor, and several of the refusals it raises on
+                # the way (slot identity, clock-skew bound, missing D identity)
+                # never reach a project column at all.  Authorising afterwards
+                # therefore both answers a peer this Brain has already decided
+                # is not entitled to the project and leaves containment of the
+                # attempted mutation to transaction rollback, which is a
+                # backstop and not an authorisation decision.
+                #
+                # The row is locked here and the acceptance re-reads it under
+                # the same lock in the same transaction, so nothing can move
+                # between the check and the write.
+                owner_result = await session.execute(
+                    select(Schedule)
+                    .where(
+                        Schedule.id == schedule_id,
+                        Schedule.scheduler == _SCHEDULER_NAME,
+                    )
+                    .with_for_update(),
+                )
+                owner = owner_result.scalar_one_or_none()
+                if owner is None:
+                    response = pb.FireScheduleResponse(
+                        disposition=(pb.FireDisposition.FIRE_STALE_CONTROL_REFRESH),
+                        error_code="schedule_not_found",
+                        error_message="schedule does not exist",
+                    )
+                    if cert_cn:
+                        await self._rate_limiter.refund(
+                            cert_cn=cert_cn,
+                            session=session,
+                        )
+                    return response
+                await enforce_cn_project_binding(
+                    context=context,
+                    project_id=owner.project_id,
+                    bindings=self._settings.scheduler_grpc_cn_project_bindings,
+                    db=self._db,
+                )
                 control = ScheduleControlRepository(session)
                 transition = await control.accept_current_fire_progress(
-                    project_id=None,
+                    project_id=owner.project_id,
                     schedule_id=schedule_id,
                     fire_id=fire_id,
                     scheduled_for=scheduled_for,
@@ -2365,19 +2584,11 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 )
                 schedule = transition.schedule
                 if schedule is None:
-                    if cert_cn:
-                        await self._rate_limiter.refund(cert_cn=cert_cn)
-                    return pb.FireScheduleResponse(
-                        disposition=(pb.FireDisposition.FIRE_STALE_CONTROL_REFRESH),
-                        error_code="schedule_not_found",
-                        error_message="schedule does not exist",
+                    # The row was located and locked above, so the acceptance
+                    # cannot legitimately fail to find it.
+                    raise ScheduleControlStateUnavailableError(  # noqa: TRY301
+                        "locked cadence row vanished during acceptance",
                     )
-                await enforce_cn_project_binding(
-                    context=context,
-                    project_id=schedule.project_id,
-                    bindings=self._settings.scheduler_grpc_cn_project_bindings,
-                    db=self._db,
-                )
                 refresh = _current_fire_refresh_response(transition)
                 if refresh is not None:
                     return refresh
@@ -2900,7 +3111,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             )
         return True
 
-    async def AcknowledgeFireResult(  # noqa: N802, PLR0915  gRPC method name; ack dispatch
+    async def AcknowledgeFireResult(  # noqa: N802, PLR0911, PLR0915  gRPC method
         self,
         request: pb.AcknowledgeFireResultRequest,
         context: grpc.aio.ServicerContext,
@@ -2928,13 +3139,12 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         ):
             return pb.AcknowledgeFireResultResponse()
 
-        from sqlalchemy import case, or_, select, update
+        from sqlalchemy import select
 
         from z4j_brain.persistence.models import Schedule, ScheduleFire
 
         async with self._db.session(write=True) as session:
-            # Authoritative correlation by
-            # ``schedule_fires.fire_id`` (which is UNIQUE) instead
+            # Authoritative correlation by ``schedule_fires.fire_id`` instead
             # of ``Schedule.last_fire_id`` (which is a moving
             # target overwritten on every fire). Without this,
             # two back-to-back fires in flight could race: the
@@ -2945,21 +3155,42 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             # schedule's last_run_at + total_runs. Joining via
             # schedule_fires makes the lookup unambiguous and
             # idempotent across concurrent fires.
-            result = await session.execute(
-                select(Schedule)
-                .join(
-                    ScheduleFire,
-                    ScheduleFire.schedule_id == Schedule.id,
+            # PostgreSQL partitions this table by scheduled_for, so its schema
+            # cannot enforce bare fire_id uniqueness across partitions.  A
+            # pre-fence database can therefore contain two legacy rows for one
+            # fire_id.  Inspect at most two deterministic identities and fail
+            # closed instead of leaking SQLAlchemy MultipleResultsFound or
+            # crediting an arbitrary schedule.
+            fire_result = await session.execute(
+                select(ScheduleFire)
+                .where(ScheduleFire.fire_id == fire_id)
+                .order_by(
+                    ScheduleFire.scheduled_for.asc(),
+                    ScheduleFire.id.asc(),
                 )
-                .where(ScheduleFire.fire_id == fire_id),
+                .limit(2),
             )
-            schedule = result.scalar_one_or_none()
-            if schedule is None:
+            fire_rows = list(fire_result.scalars())
+            if len(fire_rows) > 1:
+                await context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "legacy fire identity is ambiguous",
+                )
+                return pb.AcknowledgeFireResultResponse()
+            if not fire_rows:
                 logger.info(
                     "z4j.brain.scheduler_grpc: ack for unknown fire_id %s "
                     "(no schedule_fires row; either pre-restart fire "
                     "or different brain instance)",
                     fire_id,
+                )
+                return pb.AcknowledgeFireResultResponse()
+            schedule = await session.get(Schedule, fire_rows[0].schedule_id)
+            if schedule is None:
+                logger.warning(
+                    "z4j.brain.scheduler_grpc: ack fire_id %s refers to missing schedule_id %s",
+                    fire_id,
+                    fire_rows[0].schedule_id,
                 )
                 return pb.AcknowledgeFireResultResponse()
 
@@ -3066,79 +3297,19 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
                 _row.fire_id.version != 5 or _row.triggered_by_user_id is not None
             )
             if request.status == "success" and became_success and _row is not None:
-                if is_manual:
-                    # A manual trigger IS a real run -- count it -- but
-                    # must NOT advance the cadence anchor (last_run_at), or a
-                    # manually-triggered FUTURE one_shot/clocked would look
-                    # already-fired. No last_fire_id clear (a later cadence fire
-                    # overwrites it; the ack correlates via fire_id).
-                    await session.execute(
-                        update(Schedule)
-                        .where(Schedule.id == schedule.id)
-                        .values(
-                            total_runs=Schedule.total_runs + 1,
-                            # Monotonic updated_at. Concurrent acks that
-                            # commit in reverse timestamp order must not regress
-                            # updated_at, or a WatchSchedules consumer keyed on it
-                            # could miss this counter-only change.
-                            updated_at=case(
-                                (
-                                    or_(
-                                        Schedule.updated_at.is_(None),
-                                        Schedule.updated_at < now,
-                                    ),
-                                    now,
-                                ),
-                                else_=Schedule.updated_at,
-                            ),
-                        ),
-                    )
-                else:
-                    # Cadence success.: last_run_at is MONOTONIC via CASE,
-                    # so a late ack of an EARLIER slot cannot regress the anchor
-                    # (and the interval cadence with it), while total_runs still
-                    # counts every distinct success.
-                    await session.execute(
-                        update(Schedule)
-                        .where(Schedule.id == schedule.id)
-                        .values(
-                            last_run_at=case(
-                                (
-                                    or_(
-                                        Schedule.last_run_at.is_(None),
-                                        Schedule.last_run_at < _row.scheduled_for,
-                                    ),
-                                    _row.scheduled_for,
-                                ),
-                                else_=Schedule.last_run_at,
-                            ),
-                            total_runs=Schedule.total_runs + 1,
-                            # Monotonic updated_at (see the manual branch).
-                            updated_at=case(
-                                (
-                                    or_(
-                                        Schedule.updated_at.is_(None),
-                                        Schedule.updated_at < now,
-                                    ),
-                                    now,
-                                ),
-                                else_=Schedule.updated_at,
-                            ),
-                            # Release last_fire_id in THIS same guarded
-                            # UPDATE (only if it still points at OUR fire; a
-                            # concurrent later fire keeps its pointer), instead of a
-                            # second statement. The old second UPDATE set only
-                            # last_fire_id, so SQLAlchemy's onupdate=func.now()
-                            # injected an UNGUARDED updated_at -- under Postgres
-                            # (tx-start now()) a concurrent reverse-commit ack could
-                            # regress updated_at and hide the change from a
-                            # WatchSchedules consumer keyed on it.
-                            last_fire_id=case(
-                                (Schedule.last_fire_id == fire_id, None),
-                                else_=Schedule.last_fire_id,
-                            ),
-                        ),
-                    )
+                # Manual runs count without consuming a cadence slot; cadence
+                # runs also advance the monotonic anchor and conditionally clear
+                # their own last_fire_id. The helper emits one SQL UPDATE whose
+                # ``total_runs = total_runs + 1`` expression cannot lose a
+                # concurrent successful ack.
+                await _advance_legacy_schedule_after_success(
+                    session,
+                    schedule_id=schedule.id,
+                    fire_id=fire_id,
+                    scheduled_for=_row.scheduled_for,
+                    is_manual=is_manual,
+                    observed_at=now,
+                )
 
             # Write an audit row for every ack. Without this,
             # the AcknowledgeFireResult handler would mutate
@@ -3495,8 +3666,15 @@ async def _pick_scheduler_agent_for_fire(
         schedule.project_id,
     )
     for agent in agents:
-        if schedule.engine in (agent.engine_adapters or ()):
-            return agent
+        if schedule.engine not in (agent.engine_adapters or ()):
+            continue
+        # Selection is only a routing hint.  Re-lock the durable live row
+        # immediately before the cadence transaction creates its command so a
+        # concurrent revoke either waits behind this accepted fire or wins and
+        # makes the caller take the existing buffered fallback.
+        live = await AgentRepository(session).get_live(agent.id, lock=True)
+        if live is not None:
+            return live
     return None
 
 

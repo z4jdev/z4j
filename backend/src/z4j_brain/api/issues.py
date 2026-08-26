@@ -14,7 +14,7 @@ optional engine / status / time-window filters."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -38,10 +38,12 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/projects/{slug}/issues", tags=["issues"])
 
+IssueStatus = Literal["ongoing", "recovered"]
+
 
 class IssuePublic(BaseModel):
     fingerprint: str
-    status: str  # "ongoing" | "recovered"
+    status: IssueStatus
     occurrences: int
     open_count: int
     recovered_count: int
@@ -62,7 +64,7 @@ class IssueListResponse(BaseModel):
 async def list_issues(
     slug: str,
     engine: str | None = Query(default=None),
-    status: str | None = Query(default=None, description="ongoing | recovered"),
+    status: IssueStatus | None = Query(default=None, description="ongoing | recovered"),
     hours: int | None = Query(default=None, ge=1, le=8760, description="time window"),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -83,14 +85,13 @@ async def list_issues(
         min_role=ProjectRole.VIEWER,
     )
 
-    status_filter = status if status in ("ongoing", "recovered") else None
     since = datetime.now(UTC) - timedelta(hours=hours) if hours is not None else None
 
     rows, next_cursor = await IssuesRepository(db_session).list_issues(
         project_id=project.id,
         engine=engine,
         since=since,
-        status=status_filter,
+        status=status,
         cursor=cursor,
         limit=limit,
     )

@@ -19,7 +19,9 @@ docker logs -f z4j
 
 The container:
 
-- Auto-generates `Z4J_SECRET` + `Z4J_SESSION_SECRET` on first boot and persists them to `/data/secret.env` (survives restarts).
+- Generates any missing packaged SQLite secrets on first boot and persists
+  application signing, session signing, audit-chain signing, and metrics bearer
+  credentials to `/data/secret.env` (survives restarts).
 - Runs Alembic migrations to head.
 - Prints a one-time setup URL in the logs: `http://localhost:7700/setup?token=...`
 
@@ -30,16 +32,31 @@ Open that URL, create the admin, and you land on the dashboard.
 For multi-admin, high-throughput, or compliance-grade deployments, use PostgreSQL. The same image switches mode based on `Z4J_DATABASE_URL`:
 
 ```bash
+export Z4J_IMAGE="${Z4J_IMAGE:?set Z4J_IMAGE to z4jdev/z4j@sha256:<published-digest>}"
+umask 077
+Z4J_ENV_FILE="$(mktemp)"
+trap 'rm -f "$Z4J_ENV_FILE"' EXIT
+cat >"$Z4J_ENV_FILE" <<EOF
+Z4J_DATABASE_URL=postgresql+asyncpg://user:pass@postgres-host:5432/z4j?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.pem
+Z4J_SECRET=$(openssl rand -hex 48)
+Z4J_SESSION_SECRET=$(openssl rand -hex 48)
+Z4J_AUDIT_CHAIN_SECRET=$(openssl rand -hex 48)
+Z4J_PUBLIC_URL=https://z4j.example.com
+Z4J_ALLOWED_HOSTS=["z4j.example.com"]
+Z4J_ENVIRONMENT=production
+EOF
 docker run -d --name z4j \
   -p 7700:7700 \
   -v z4j-data:/data \
-  -e Z4J_DATABASE_URL=postgresql+asyncpg://user:pass@postgres-host:5432/z4j \
-  -e Z4J_SECRET=$(openssl rand -hex 48) \
-  -e Z4J_SESSION_SECRET=$(openssl rand -hex 48) \
-  -e Z4J_PUBLIC_URL=https://z4j.example.com \
-  -e Z4J_ALLOWED_HOSTS='["z4j.example.com"]' \
-  z4jdev/z4j:1.4.0
+  -v /secure/path/postgres-ca.pem:/run/secrets/postgres-ca.pem:ro \
+  --env-file "$Z4J_ENV_FILE" \
+  "$Z4J_IMAGE"
 ```
+
+Replace the example database credentials and CA path. `verify-full` encrypts
+the connection and validates the PostgreSQL server certificate and hostname.
+Use an immutable digest from the published multi-architecture manifest for
+`Z4J_IMAGE` so a later tag move cannot change a production rollout.
 
 PostgreSQL unlocks horizontal scale-out (`LISTEN/NOTIFY`-based registry fan-out), range-partitioned events, and `tsvector` full-text search.
 
@@ -68,6 +85,7 @@ docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
 | `Z4J_DATABASE_URL` | (unset = bundled SQLite) | `postgresql+asyncpg://...` for Postgres mode |
 | `Z4J_SECRET` | auto-generated | HMAC signing key (>= 32 bytes) |
 | `Z4J_SESSION_SECRET` | auto-generated | Session cookie signing key (>= 32 bytes) |
+| `Z4J_AUDIT_CHAIN_SECRET` | required in production | Independent audit-chain signing key (>= 32 bytes) |
 | `Z4J_BIND_PORT` | `7700` | ASGI port |
 | `Z4J_PUBLIC_URL` | `http://localhost:7700` | Used to build setup + password-reset links |
 | `Z4J_ENVIRONMENT` | `production` | Set to `dev` to relax host-header + HTTPS checks |
@@ -92,15 +110,14 @@ Full reference (30+ additional tunables for rate limits, Argon2 cost, CORS, sess
 - **Migrations**: Alembic, auto-applied on first boot, bundled inside the image
 - **Database**: SQLite (via `aiosqlite`) bundled by default; PostgreSQL 18 supported via `Z4J_DATABASE_URL`
 
-Image size: **~234 MB uncompressed / ~52 MB compressed on-wire**.
-
 ## Platform support
 
 Native multi-arch: `linux/amd64` + `linux/arm64`. The same image manifest serves both, built on native GitHub runners (no QEMU emulation).
 
 ## Tags
 
-- `z4jdev/z4j:1.4.0` - version-pinned, recommended for production
+- `z4jdev/z4j:<version>` - version-pinned release
+- `z4jdev/z4j@sha256:<digest>` - immutable, recommended for production
 - `z4jdev/z4j:latest` - always-current, convenient for evaluation
 
 ## License

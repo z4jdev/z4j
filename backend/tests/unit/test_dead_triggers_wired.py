@@ -15,6 +15,11 @@ Two triggers gained their real emit sites and two were trimmed:
   subscribable / selectable surface (they never had an emit site).
   Stored rows carrying the removed strings must fail closed on the
   read path without crashing.
+
+These run against a MIGRATED database rather than a create_all() one. The
+offline episode is proven by an ``audit_log`` row, and every Boundary-F
+guard on that table lives in a migration: a create_all() schema accepts an
+unauthenticated audit row that an operator's database refuses outright.
 """
 
 from __future__ import annotations
@@ -26,12 +31,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import StaticPool
 from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.domain.command_dispatcher import CommandDispatcher
 from z4j_brain.domain.workers.agent_health import AgentHealthWorker
 from z4j_brain.persistence import models  # noqa: F401
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.enums import AgentState, ProjectRole, TaskState
 from z4j_brain.persistence.models import (
@@ -58,25 +61,23 @@ NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(migrated_db_url: str, migrated_audit_chain_secret: str) -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_db_url,
         secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
         session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        # A migrated database has Boundary F activated, so it refuses an audit
+        # row that carries no chain authentication. Production always has this
+        # configured; a test that omits it is not testing production.
+        audit_chain_secret=migrated_audit_chain_secret,  # type: ignore[arg-type]
         environment="dev",
         log_json=False,
     )
 
 
 @pytest.fixture
-async def engine():
-    eng = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+async def engine(settings: Settings):
+    eng = create_async_engine(settings.database_url)
     yield eng
     await eng.dispose()
 
@@ -123,6 +124,7 @@ async def _seed_agent(
                     automation_enabled=automation_enabled,
                 ),
             )
+            await s.flush()
         s.add(
             Agent(
                 id=agent_id,
@@ -546,10 +548,9 @@ class TestOfflineClaimRetention:
             state=AgentState.OFFLINE,
             last_seen_at=NOW - timedelta(days=1),
         )
-        # Deleted: the agent row is gone but the ledger row survived.
-        # (Unit SQLite runs without FK enforcement, so the orphan is
-        # real here; on Postgres the FK cascade usually removes it first
-        # and the NOT EXISTS arm is a harmless no-op.)
+        # Deleted: production FK enforcement cascades the ledger row before
+        # prune runs, while the NOT EXISTS arm remains a harmless fallback for
+        # historical databases that already contain an orphan.
         _, deleted_id = await _seed_agent(
             db,
             state=AgentState.OFFLINE,
@@ -580,7 +581,7 @@ class TestOfflineClaimRetention:
             )
             await s.commit()
 
-        assert pruned == 3
+        assert pruned == 2
         remaining = await _claim_rows(db)
         assert [c.agent_id for c in remaining] == [ongoing_id]
 
@@ -760,10 +761,16 @@ async def _reconcile_result(
     engine_state: str,
 ) -> None:
     """Insert a ``reconcile_task`` command and hand its result to the
-    dispatcher, exactly as the frame router does."""
+    dispatcher, exactly as the frame router does.
+
+    The result is applied in its own ``write=True`` session because that is
+    what ``FrameRouter._run_control_persist`` opens. On SQLite that session
+    begins with BEGIN IMMEDIATE, which the audit chain requires before its
+    first read; the older single-plain-session shape here only worked because
+    a create_all() database had no chain to satisfy.
+    """
     async with db.session() as s:
-        commands = CommandRepository(s)
-        cmd, _ = await commands.insert(
+        cmd, _ = await CommandRepository(s).insert(
             project_id=project_id,
             agent_id=agent_id,
             issued_by=None,
@@ -776,10 +783,13 @@ async def _reconcile_result(
             source_ip=None,
         )
         await s.commit()
+        command_id = cmd.id
+
+    async with db.session(write=True) as s:
         await dispatcher.handle_result(
-            commands=commands,
+            commands=CommandRepository(s),
             audit_log=AuditLogRepository(s),
-            command_id=cmd.id,
+            command_id=command_id,
             status="success",
             result_payload={
                 "engine_state": engine_state,
@@ -1015,6 +1025,7 @@ class TestTrimmedTriggersFailClosed:
         project_id = uuid.uuid4()
         async with db.session() as s:
             s.add(Project(id=project_id, slug="legacy", name="Legacy"))
+            await s.flush()
             s.add(
                 AutomationRule(
                     project_id=project_id,

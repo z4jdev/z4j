@@ -110,6 +110,30 @@ class Agent(PKMixin, TimestampsMixin, Base):
         default=dict,
         server_default="{}",
     )
+    #: When an operator revoked this agent's token, or NULL if live.
+    #:
+    #: Revocation is a soft delete, and the schema has always assumed so:
+    #: ``events.agent_id`` is non-null with ``ON DELETE RESTRICT`` precisely
+    #: so history survives an agent being retired. The endpoint nevertheless
+    #: hard-deleted, which meant revoking an agent that had ever emitted an
+    #: event failed outright on PostgreSQL, and on SQLite (which does not
+    #: enforce foreign keys without a pragma z4j never sets) silently
+    #: succeeded, leaving every one of that agent's events pointing at a row
+    #: that no longer existed. Either way the documented leaked-token
+    #: procedure did not work on the normal case.
+    #:
+    #: PHYSICALLY LAST ON PURPOSE. ``op.add_column`` appends, so an upgraded
+    #: database carries this column at the end of ``agents``. The inherited
+    #: primary-key and timestamp columns are otherwise collected after fields
+    #: declared on this class, regardless of source position. ``sort_order``
+    #: therefore has to place this field after those mixin columns so a table
+    #: created straight from the metadata has the same column order as a real
+    #: upgrade.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        sort_order=1000,
+    )
 
     __table_args__ = (
         Index("ix_agents_project_state", "project_id", "state"),

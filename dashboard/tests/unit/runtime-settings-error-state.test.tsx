@@ -29,7 +29,10 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   createFileRoute: () => (opts: unknown) => opts,
 }));
 
-import { RuntimeSettingsPage } from "@/routes/_authenticated.settings.runtime";
+import {
+  RuntimeSettingsPage,
+  buildDotenvBlock,
+} from "@/routes/_authenticated.settings.runtime";
 
 function renderPage() {
   const qc = new QueryClient({
@@ -83,9 +86,7 @@ describe("Runtime config page", () => {
     await waitFor(() => {
       expect(screen.getByText("brain unreachable")).toBeInTheDocument();
     });
-    expect(
-      screen.getByRole("button", { name: /retry/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
   it("renders an error state rather than a blank pane when data is absent", async () => {
@@ -116,5 +117,48 @@ describe("Runtime config page", () => {
     expect(
       screen.queryByRole("button", { name: /retry/i }),
     ).not.toBeInTheDocument();
+    const sourceNotice =
+      screen.getByText((_content, element) =>
+        Boolean(
+          element?.tagName === "P" &&
+          element.textContent?.includes("Sources, in resolution order"),
+        ),
+      ).textContent ?? "";
+    expect(sourceNotice.indexOf(".env")).toBeLessThan(
+      sourceNotice.indexOf("config.env"),
+    );
+    expect(sourceNotice.indexOf("config.env")).toBeLessThan(
+      sourceNotice.indexOf("secret.env"),
+    );
+    expect(screen.queryByText(/kill -HUP/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Send SIGTERM, wait for exit/)).toBeInTheDocument();
+  });
+
+  it("copies composite settings as startup-compatible JSON", () => {
+    const block = buildDotenvBlock(
+      [
+        {
+          name: "allowed_hosts",
+          value: '["z4j.example.com"]',
+          source: "config.env",
+          is_secret: false,
+          description: "Allowed Host headers.",
+        },
+        {
+          name: "embedded_scheduler_argv",
+          value: '["serve","--label=a # b","O\'Brien","${HOME}"]',
+          source: "config.env",
+          is_secret: false,
+          description: "Embedded scheduler arguments.",
+        },
+      ],
+      "/var/lib/z4j",
+    );
+
+    expect(block).toContain("Z4J_ALLOWED_HOSTS='[\"z4j.example.com\"]'");
+    expect(block).toContain(
+      'Z4J_EMBEDDED_SCHEDULER_ARGV=\'["serve","--label=a # b","O\\\'Brien","${HOME}"]\'',
+    );
+    expect(block).not.toContain("['z4j.example.com']");
   });
 });

@@ -7,7 +7,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     delete,
@@ -69,6 +69,13 @@ from z4j_brain.persistence.schedule_guard import (
     assert_revision_allocation_consumed,
 )
 
+if TYPE_CHECKING:
+    from z4j_brain.persistence.repositories.schedule_runtime_rollback import (
+        RuntimeRollbackPlan,
+        RuntimeRollbackPreparation,
+    )
+
+
 _MANAGEMENT_FIELDS = frozenset(
     {
         "name",
@@ -81,6 +88,80 @@ _CADENCE_FIELDS = frozenset({"kind", "expression", "timezone", "catch_up"})
 _ALLOWED_UPDATE_FIELDS = frozenset(CONTROL_FIELDS) | _MANAGEMENT_FIELDS
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 _MAX_CURSOR_FUTURE_SKEW = timedelta(minutes=5)
+
+
+def schedule_is_quarantined(row: Schedule) -> bool:
+    """Is this row's own definition under an unresolved quarantine?
+
+    The control token is required to be present because a legacy row carries
+    neither token, and two absent tokens are not a quarantine.
+    """
+    return row.control_token is not None and row.quarantine_control_token == row.control_token
+
+
+def operator_hold_in_force(row: Schedule) -> bool:
+    """Is a stop in force that only an operator can lift?
+
+    - quarantine token matching the control token: the definition is under
+      quarantine and must not run until an operator repairs it.
+    - ``paused_at`` set: held during an incident, and resumable only while
+      this brain owns the cadence.
+
+    One predicate rather than two lists, because a hold has to be honoured by
+    every path that decides whether this schedule may run *and* by every path
+    that hands it to somebody else. Keeping those enumerated separately is how
+    a hold came to be refused at fire time and silently released by an
+    ownership cutover.
+
+    ``is_enabled`` is deliberately not one of them. A retired schedule is a
+    definition an adapter is meant to carry across, not an unresolved state an
+    operator has to clear first.
+    """
+    return schedule_is_quarantined(row) or row.paused_at is not None
+
+
+def _effectively_enabled(row: Schedule) -> bool:
+    """May this schedule fire or advance its cursor right now?
+
+    Retirement and the operator holds are refused identically so a new fire
+    path cannot check one and forget the other. That is exactly what happened
+    to ``paused_at``: every acceptance site checked ``is_enabled`` and
+    quarantine, a hold was recorded and reported to the operator, and the
+    schedule kept firing on every path.
+    """
+    return row.is_enabled and not operator_hold_in_force(row)
+
+
+def _not_enabled_reason(row: Schedule) -> str:
+    """Say WHICH of the three stops is in force, for the refusal message.
+
+    The current protocol refuses a hold by raising
+    ``ScheduleControlConflictError``, and the gRPC handler turns any of those
+    into ``error_code="fire_conflict"`` carrying this text. The schedule row is
+    not in scope in that handler, so a reason not carried in the message is not
+    carried at all: an operator whose paused schedule stopped running was told
+    only that acceptance "requires an effectively enabled schedule", which is
+    true of all three states and useful for none.
+
+    A previous attempt at this added the three states to the current path's
+    refusal mapper. That mapper's only caller receives its transition from
+    ``accept_current_fire_progress``, which never returns them, so the entries
+    were unreachable. This is where the distinction is actually available.
+    """
+    if row.paused_at is not None:
+        return (
+            "fire acceptance requires an effectively enabled schedule: "
+            "the schedule is paused; resume it to let it fire"
+        )
+    if row.quarantine_control_token is not None and (
+        row.quarantine_control_token == row.control_token
+    ):
+        return (
+            "fire acceptance requires an effectively enabled schedule: "
+            "the schedule is quarantined; an operator must repair the "
+            "definition before it can fire"
+        )
+    return "fire acceptance requires an effectively enabled schedule: the schedule is disabled"
 
 
 class ScheduleControlStateUnavailableError(RuntimeError):
@@ -100,6 +181,20 @@ class CursorTransition:
 
 @dataclass(frozen=True, slots=True)
 class QuarantineTransition:
+    outcome: str
+    schedule: Schedule | None
+
+
+@dataclass(frozen=True, slots=True)
+class PauseTransition:
+    """Outcome of a pause or resume.
+
+    ``outcome`` is one of ``applied``, ``already_applied``, ``not_found``, or
+    ``foreign_owner``. The last one exists because a hold is only meaningful
+    for a schedule this brain fires: see :meth:`ScheduleControlRepository.
+    set_paused`.
+    """
+
     outcome: str
     schedule: Schedule | None
 
@@ -275,6 +370,35 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _pending_value(schedule: Schedule, name: str) -> Any:
+    """Read one column as it will be persisted, not as the row holds it now.
+
+    A create builds its envelope from a row that has not been flushed yet, so
+    a column it leaves to the model default still reads as ``None``. Logging
+    that would put a NULL in the immutable evidence for a row the database
+    then stores with its default: an envelope that disagrees with the row it
+    claims to describe. Only scalar defaults are substituted, and every column
+    that has one is NOT NULL, so this can never overwrite a real NULL.
+    """
+
+    value = getattr(schedule, name)
+    if value is not None:
+        return value
+    default = Schedule.__table__.c[name].default
+    return default.arg if default is not None and default.is_scalar else None
+
+
+#: Every mapped column, taken from the model rather than restated here. The
+#: envelope is the whole of what a watching scheduler learns about the row, so
+#: a column this list forgets is a column the scheduler decides without. That
+#: is what happened to ``paused_at``: the hold reached the row, never reached
+#: the envelope, and every scheduler that learns state by watching kept
+#: ticking a held schedule.
+_SNAPSHOT_FIELDS: tuple[str, ...] = tuple(
+    attribute.key for attribute in sa_inspect(Schedule).mapper.column_attrs
+)
+
+
 def schedule_snapshot(
     schedule: Schedule,
     *,
@@ -285,56 +409,50 @@ def schedule_snapshot(
     override = overrides or {}
 
     def read(name: str) -> Any:
-        return override[name] if name in override else getattr(schedule, name)
+        return override[name] if name in override else _pending_value(schedule, name)
 
-    fields = (
-        "id",
-        "project_id",
-        "engine",
-        "scheduler",
-        "name",
-        "task_name",
+    return {
+        "format": "z4j-schedule-snapshot-v1",
+        "schedule": {field: _json_value(read(field)) for field in _SNAPSHOT_FIELDS},
+    }
+
+
+def _planner_anchor_transition_descriptor(
+    schedule: Schedule,
+    *,
+    revision: int,
+    overrides: dict[str, Any],
+    anchor_reason: str,
+) -> dict[str, Any]:
+    """Bind a cadence-planning anchor to its complete Boundary-D snapshot."""
+
+    before = schedule_snapshot(schedule)["schedule"]
+    after = schedule_snapshot(schedule, overrides=overrides)["schedule"]
+    if anchor_reason == "create":
+        changed_fields = sorted(after)
+    else:
+        changed_fields = sorted(name for name, value in after.items() if before.get(name) != value)
+    cadence_fields = (
         "kind",
         "expression",
         "timezone",
-        "queue",
-        "priority",
-        "args",
-        "kwargs",
+        "catch_up",
         "is_enabled",
         "last_run_at",
         "next_run_at",
-        "total_runs",
-        "external_id",
-        "catch_up",
-        "source",
-        "source_hash",
-        "last_fire_id",
-        "control_token",
-        "legacy_fire_control_token",
-        "schedule_revision",
-        "definition_digest",
         "cadence_semantics_version",
         "cadence_runtime_fingerprint",
-        "quarantine_control_token",
-        "quarantine_code",
-        "quarantine_detail",
-        "quarantined_at",
-        "last_cadence_acceptance_control_token",
-        "last_cadence_acceptance_fire_id",
-        "last_cadence_acceptance_scheduled_for",
-        "last_cadence_acceptance_revision",
-        "external_stream_id",
-        "external_epoch_uuid",
-        "external_epoch_number",
-        "external_source_key",
-        "external_source_sequence",
-        "created_at",
-        "updated_at",
+        "definition_digest",
     )
     return {
-        "format": "z4j-schedule-snapshot-v1",
-        "schedule": {field: _json_value(read(field)) for field in fields},
+        "kind": "planner_anchor",
+        "planner_anchor": True,
+        "anchor_reason": anchor_reason,
+        "changed_fields": changed_fields,
+        "schedule_id": str(schedule.id),
+        "revision": revision,
+        "definition_digest": after["definition_digest"],
+        "cadence_definition": {name: after[name] for name in cadence_fields},
     }
 
 
@@ -650,6 +768,51 @@ class ScheduleControlRepository:
                 )
         return StableScheduleSnapshot(watermark=watermark, rows=rows)
 
+    async def plan_runtime_rollback(
+        self,
+        *,
+        lock_rows: bool = False,
+    ) -> RuntimeRollbackPlan:
+        """Preflight the sealed 1.8.2 compatibility target without writes."""
+
+        from z4j_brain.persistence.repositories.schedule_runtime_rollback import (
+            plan_runtime_rollback,
+        )
+
+        return await plan_runtime_rollback(self, lock_rows=lock_rows)
+
+    async def prepare_runtime_rollback(
+        self,
+        *,
+        target_release: str,
+        target_image: str,
+        operation_id: uuid.UUID,
+        expected_row_set_digest: str,
+        quiescence_challenge_sha256: str,
+        target_durable_evidence_sha256: str,
+        target_release_evidence_index: dict[str, Any],
+        target_evidence_terminal_stage: str,
+        occurred_at: datetime,
+    ) -> RuntimeRollbackPreparation:
+        """Normalize all reserved rows through ordinary Boundary-D revisions."""
+
+        from z4j_brain.persistence.repositories.schedule_runtime_rollback import (
+            prepare_runtime_rollback,
+        )
+
+        return await prepare_runtime_rollback(
+            self,
+            target_release=target_release,
+            target_image=target_image,
+            operation_id=operation_id,
+            expected_row_set_digest=expected_row_set_digest,
+            quiescence_challenge_sha256=quiescence_challenge_sha256,
+            target_durable_evidence_sha256=target_durable_evidence_sha256,
+            target_release_evidence_index=target_release_evidence_index,
+            target_evidence_terminal_stage=target_evidence_terminal_stage,
+            occurred_at=occurred_at,
+        )
+
     async def prune_change_log(
         self,
         *,
@@ -878,6 +1041,12 @@ class ScheduleControlRepository:
             revision=revision,
             overrides={},
             occurred_at=planned_at,
+            transition=_planner_anchor_transition_descriptor(
+                row,
+                revision=revision,
+                overrides={},
+                anchor_reason="create",
+            ),
         )
         self.session.add(row)
         await self.session.flush()
@@ -978,11 +1147,25 @@ class ScheduleControlRepository:
 
         revision = await self._allocate_revision()
         overrides["schedule_revision"] = revision
+        planner_anchor_reason = (
+            "reenable" if changes.get("is_enabled") is True else "cadence_change"
+        )
+        transition = (
+            _planner_anchor_transition_descriptor(
+                row,
+                revision=revision,
+                overrides=overrides,
+                anchor_reason=planner_anchor_reason,
+            )
+            if cadence_changed or changes.get("is_enabled") is True
+            else None
+        )
         await self._append_upsert(
             row,
             revision=revision,
             overrides=overrides,
             occurred_at=now,
+            transition=transition,
         )
         for field, value in overrides.items():
             setattr(row, field, value)
@@ -1376,6 +1559,75 @@ class ScheduleControlRepository:
             setattr(row, field, value)
         await self.session.flush()
         return QuarantineTransition("applied", row)
+
+    async def set_paused(
+        self,
+        *,
+        project_id: uuid.UUID,
+        schedule_id: uuid.UUID,
+        paused: bool,
+        occurred_at: datetime,
+    ) -> PauseTransition:
+        """Hold or release one schedule, as an authenticated D transition.
+
+        Pausing is not disabling. Disabling retires a schedule and is
+        propagated to the owning adapter; pausing holds it during an incident
+        and keeps the timestamp saying how long the hold has run. Both are
+        refused at fire time, and reported distinctly so an operator can tell
+        which one is in force.
+
+        The hold is only offered for schedules this brain fires. A schedule
+        owned by celery-beat or any other external scheduler keeps its own
+        cadence, and this brain has no channel to tell it to stop, so a hold
+        recorded here would be a promise nothing keeps. Those return
+        ``foreign_owner`` rather than a timestamp that means nothing.
+
+        Every field written here goes through the same revision allocation and
+        change-log envelope as any other schedule transition, because Boundary
+        D refuses a direct write. ``control_token`` is deliberately not
+        rotated: a hold does not change the definition, and the guard permits a
+        same-token transition for exactly the fields that do not.
+        """
+
+        result = await self.session.execute(
+            select(Schedule)
+            .where(
+                Schedule.project_id == project_id,
+                Schedule.id == schedule_id,
+            )
+            .with_for_update(),
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return PauseTransition("not_found", None)
+        if row.scheduler != "z4j-scheduler":
+            return PauseTransition("foreign_owner", row)
+
+        now = _utc(occurred_at)
+        # Idempotent in both directions, so a retry never needs a guard, and a
+        # second click during an incident does not erase how long the hold has
+        # run.
+        if paused and row.paused_at is not None:
+            return PauseTransition("already_applied", row)
+        if not paused and row.paused_at is None:
+            return PauseTransition("already_applied", row)
+
+        revision = await self._allocate_revision()
+        overrides: dict[str, Any] = {
+            "paused_at": now if paused else None,
+            "schedule_revision": revision,
+            "updated_at": now,
+        }
+        await self._append_upsert(
+            row,
+            revision=revision,
+            overrides=overrides,
+            occurred_at=now,
+        )
+        for field, value in overrides.items():
+            setattr(row, field, value)
+        await self.session.flush()
+        return PauseTransition("applied", row)
 
     async def set_legacy_fire_grant(
         self,
@@ -2302,7 +2554,7 @@ class ScheduleControlRepository:
             or cadence_fingerprint != cadence_runtime_fingerprint()
         ):
             return CursorTransition("cadence_semantics_mismatch", row)
-        if not row.is_enabled or row.quarantine_control_token == row.control_token:
+        if not _effectively_enabled(row):
             raise ScheduleControlConflictError(
                 "cursor transition requires an effectively enabled schedule",
             )
@@ -2413,6 +2665,18 @@ class ScheduleControlRepository:
         Command/fire/pending evidence is inserted by the caller in this same
         transaction.  If any later persistence step fails, the schedule update,
         revision allocation, and envelope roll back with it.
+
+        This method answers whether a slot may be committed, never whether the
+        peer asking is entitled to the schedule; it has no view of the caller
+        at all.  Its first act is to allocate a revision and append an
+        envelope, and several of the refusals it raises on the way (slot
+        identity, the clock-skew bound, a row without D identity) are decided
+        before the project column is ever read, so a caller that authorises
+        afterwards has both written and answered on behalf of a peer it had
+        not yet checked.  Resolve the schedule, authorise the peer for its
+        project, then call this with that project.  ``project_id=None`` skips
+        the project predicate on the CAS and is for callers that are
+        themselves the authority, such as the migration-era and test seams.
         """
 
         predicates = [
@@ -2511,10 +2775,8 @@ class ScheduleControlRepository:
             if row.last_run_at is not None and _utc(row.last_run_at) >= slot:
                 return FireProgressTransition("slot_resolved_refresh", row)
             return FireProgressTransition("stale_control_refresh", row)
-        if not row.is_enabled or row.quarantine_control_token == row.control_token:
-            raise ScheduleControlConflictError(
-                "fire acceptance requires an effectively enabled schedule",
-            )
+        if not _effectively_enabled(row):
+            raise ScheduleControlConflictError(_not_enabled_reason(row))
         if slot < expected_next:
             raise ScheduleControlConflictError(
                 "fire slot cannot precede the authoritative next cursor",
@@ -2616,9 +2878,20 @@ class ScheduleControlRepository:
             token is None
             or not row.schedule_revision
             or row.definition_digest is None
-            or row.cadence_semantics_version != CADENCE_SEMANTICS_VERSION
-            or row.cadence_runtime_fingerprint != cadence_runtime_fingerprint()
+            or not row.cadence_semantics_version
+            or not row.cadence_runtime_fingerprint
         ):
+            # COMPLETENESS, not equality, which is what the message below says
+            # and what the equivalent check in stable_snapshot already does.
+            #
+            # This compared the row's stored cadence identity against what the
+            # Brain computes NOW. Nothing re-stamps that column, so the test
+            # was really "was this row created by a Brain running the exact
+            # same cadence dependencies and Python version" -- and it fails for
+            # every pre-existing row the moment any of those move, which is a
+            # staleness check wearing a completeness error message. Agreement
+            # between the two processes is checked where it belongs, on the
+            # submitted values, in the current fire and cursor paths.
             raise ScheduleControlStateUnavailableError(
                 "reserved schedule lacks complete D identity",
             )
@@ -2683,6 +2956,10 @@ class ScheduleControlRepository:
             )
         if not row.is_enabled or row.quarantine_control_token == token:
             return FireProgressTransition("schedule_disabled", row)
+        if row.paused_at is not None:
+            # Reported distinctly from disabled so an operator reading a
+            # scheduler's logs can tell a hold from a retirement.
+            return FireProgressTransition("schedule_paused", row)
         if row.legacy_fire_control_token != token:
             return FireProgressTransition("legacy_upgrade_required", row)
 
@@ -3693,5 +3970,7 @@ __all__ = [
     "ScheduleDeleteTransition",
     "StableScheduleSnapshot",
     "TerminalFireTransition",
+    "operator_hold_in_force",
+    "schedule_is_quarantined",
     "schedule_snapshot",
 ]

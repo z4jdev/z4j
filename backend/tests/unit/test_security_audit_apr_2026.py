@@ -112,34 +112,57 @@ class TestH1EmptyAllowListWarning:
 
 
 class TestL1DsnHandling:
-    def test_handlers_module_does_not_render_password_into_string(
+    @pytest.mark.asyncio
+    async def test_watch_connects_with_separate_password_kwarg(
         self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Audit fix: pre-fix the WatchSchedules NOTIFY path
-        rendered the SQLAlchemy URL with ``hide_password=False``
-        into a plain string. The fix uses
-        ``translate_connect_args`` instead.
+        """Run the LISTEN connection path and observe asyncpg's arguments."""
 
-        We assert at the source level rather than dynamically
-        because the fix is a contract: future contributors should
-        NOT re-introduce the string rendering.
-        """
-        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
 
-        source = (
-            Path(__file__).resolve().parents[2]
-            / "src"
-            / "z4j_brain"
-            / "scheduler_grpc"
-            / "handlers.py"
-        ).read_text()
-        assert "hide_password=False" not in source, (
-            "Found `hide_password=False` in handlers.py - the "
-            "audit fix L-1 forbids materializing the DB password "
-            "into a heap string. Use translate_connect_args() "
-            "kwargs instead."
+        import asyncpg
+        from sqlalchemy.engine import make_url
+        from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
+
+        connection = SimpleNamespace(
+            add_listener=AsyncMock(),
+            remove_listener=AsyncMock(),
+            close=AsyncMock(),
         )
-        assert "translate_connect_args" in source
+        connect = AsyncMock(return_value=connection)
+        monkeypatch.setattr(asyncpg, "connect", connect)
+        service = object.__new__(SchedulerServiceImpl)
+        service._db = SimpleNamespace(
+            engine=SimpleNamespace(
+                url=make_url(
+                    "postgresql+asyncpg://watcher:p%40ssword@db.example.test:6543/z4j",
+                ),
+            ),
+        )
+        service._settings = SimpleNamespace(
+            database_url=("postgresql+asyncpg://watcher:p%40ssword@db.example.test:6543/z4j"),
+        )
+        context = SimpleNamespace(cancelled=lambda: True)
+
+        stream = service._watch_via_listen(
+            project_filter=None,
+            resume_token="",
+            context=context,
+        )
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+
+        connect.assert_awaited_once_with(
+            host="db.example.test",
+            port=6543,
+            user="watcher",
+            password="p@ssword",
+            database="z4j",
+            server_settings={"application_name": "z4j-brain-watch-stream"},
+        )
+        assert connect.await_args.args == ()
 
 
 # =====================================================================
@@ -890,21 +913,21 @@ class TestFireScheduleRateLimiter:
 
         rl = SchedulerRateLimiter(
             db=_rate_db,
-            settings=_rate_settings(capacity=2.0, rate=1.0),
+            settings=_rate_settings(capacity=2.0, rate=0.01),
         )
         # Drain.
         assert await rl.consume(cert_cn="sched-1") is True
         assert await rl.consume(cert_cn="sched-1") is True
         assert await rl.consume(cert_cn="sched-1") is False
 
-        # Backdate last_refill 10 seconds. With rate=1.0 that's 10
+        # Backdate last_refill 300 seconds. With rate=0.01 that's 3
         # tokens of refill; capped at capacity=2.
         async with _rate_db.session() as s:
             await s.execute(
                 update(SchedulerRateBucket)
                 .where(SchedulerRateBucket.cert_cn == "sched-1")
                 .values(
-                    last_refill=datetime.now(UTC) - timedelta(seconds=10),
+                    last_refill=datetime.now(UTC) - timedelta(seconds=300),
                 ),
             )
             await s.commit()

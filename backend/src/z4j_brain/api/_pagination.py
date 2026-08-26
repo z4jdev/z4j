@@ -1,8 +1,9 @@
 """Cursor-based pagination helper.
 
 We deliberately avoid OFFSET pagination - it gets slower the deeper
-you page and is unsafe under concurrent inserts (rows shift). Cursor
-pagination is O(1) per page and stable under writes.
+you page and is unsafe under concurrent inserts (rows shift). Keyset
+pagination keeps query work independent of page depth and stable under
+writes when the caller's query uses the matching ordered index.
 
 The cursor is a base64url-encoded payload of
 ``{primary_sort_value, tiebreaker_id}``. For event-style tables that
@@ -65,7 +66,11 @@ def decode_cursor(cursor: str | None) -> tuple[Any, uuid.UUID] | None:
         if not isinstance(payload, list) or len(payload) != 2:
             return None
         sort_repr, tiebreaker_str = payload
-        if not isinstance(sort_repr, list) or len(sort_repr) != 2:
+        if (
+            not isinstance(sort_repr, list)
+            or len(sort_repr) != 2
+            or not isinstance(tiebreaker_str, str)
+        ):
             return None
         kind, value = sort_repr
         if kind == "dt" and isinstance(value, str):

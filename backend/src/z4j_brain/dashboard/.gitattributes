@@ -1,0 +1,10 @@
+# The canonical production dashboard is generated/minified output. Preserve
+# every byte exactly on every platform; the three fixed metadata carriers are
+# explicitly LF text so their one-line contracts remain reviewable.
+dist/** -text
+# Minified/generated assets can contain intentional whitespace-only template
+# literal lines. They are byte-verified by the dashboard output digest.
+dist/assets/** -whitespace
+dist/.build-context text eol=lf
+dist/.build-inputs.sha256 text eol=lf
+dist/.build-output.sha256 text eol=lf

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -109,6 +110,35 @@ class TestGetProject:
         projects = ProjectRepository(session)
         with pytest.raises(NotFoundError):
             await policy.get_project_or_404(projects, "nope")
+
+    @pytest.mark.parametrize(
+        "slug",
+        [
+            "aa",  # public project creation requires at least three characters
+            "a" * 51,
+            "Uppercase",
+            "under_score",
+            "abc\n",
+            "-abc",
+            "abc-",
+        ],
+    )
+    async def test_noncanonical_slug_is_rejected_without_querying(self, slug: str) -> None:
+        projects = AsyncMock(spec=ProjectRepository)
+
+        with pytest.raises(NotFoundError):
+            await PolicyEngine().get_project_or_404(projects, slug)
+
+        projects.get_by_slug.assert_not_awaited()
+
+    async def test_three_character_slug_reaches_the_repository(self) -> None:
+        projects = AsyncMock(spec=ProjectRepository)
+        projects.get_by_slug.return_value = None
+
+        with pytest.raises(NotFoundError):
+            await PolicyEngine().get_project_or_404(projects, "a-b")
+
+        projects.get_by_slug.assert_awaited_once_with("a-b")
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import AutomationRule, Project
 from z4j_brain.persistence.repositories.automation_rule import (
     AutomationRuleRepository,
+    dispatch_candidate,
 )
 
 
@@ -61,6 +62,9 @@ async def test_switch_on_returns_rules(session: AsyncSession) -> None:
         trigger="task.failed",
     )
     assert [r.id for r in rows] == [rule.id]
+    candidate = dispatch_candidate(rows[0])
+    assert candidate.rule_revision == rule.config_revision == 1
+    assert candidate.project_revision == project.automation_revision == 1
 
 
 @pytest.mark.asyncio
@@ -146,14 +150,13 @@ async def test_disable_rules_created_by_targets_only_that_user(
         )
 
     # alice: two enabled + one already disabled; bob: one enabled.
-    session.add_all(
-        [
-            _rule(alice, enabled=True),
-            _rule(alice, enabled=True),
-            _rule(alice, enabled=False),
-            _rule(bob, enabled=True),
-        ],
-    )
+    seeded = [
+        _rule(alice, enabled=True),
+        _rule(alice, enabled=True),
+        _rule(alice, enabled=False),
+        _rule(bob, enabled=True),
+    ]
+    session.add_all(seeded)
     await session.flush()
 
     repo = AutomationRuleRepository(session)
@@ -162,6 +165,9 @@ async def test_disable_rules_created_by_targets_only_that_user(
 
     # Only alice's two ENABLED rules were disabled.
     assert n == 2
+    for rule in seeded:
+        await session.refresh(rule)
+    assert [rule.config_revision for rule in seeded] == [2, 2, 1, 1]
     # Bob's rule still fires.
     remaining = await repo.list_enabled_for_trigger(
         project_id=project.id,
@@ -194,14 +200,13 @@ async def test_disable_all_rules_created_by_user_spans_projects(
             created_by=created_by,
         )
 
-    session.add_all(
-        [
-            _rule(p1.id, alice, enabled=True),  # disabled
-            _rule(p2.id, alice, enabled=True),  # disabled (different project)
-            _rule(p1.id, alice, enabled=False),  # already off, untouched
-            _rule(p1.id, bob, enabled=True),  # other user, untouched
-        ],
-    )
+    seeded = [
+        _rule(p1.id, alice, enabled=True),  # disabled
+        _rule(p2.id, alice, enabled=True),  # disabled (different project)
+        _rule(p1.id, alice, enabled=False),  # already off, untouched
+        _rule(p1.id, bob, enabled=True),  # other user, untouched
+    ]
+    session.add_all(seeded)
     await session.flush()
 
     repo = AutomationRuleRepository(session)
@@ -210,6 +215,9 @@ async def test_disable_all_rules_created_by_user_spans_projects(
 
     # Alice's two enabled rules across BOTH projects were disabled.
     assert n == 2
+    for rule in seeded:
+        await session.refresh(rule)
+    assert [rule.config_revision for rule in seeded] == [2, 2, 1, 1]
     assert (await repo.list_enabled_for_trigger(project_id=p1.id, trigger="task.failed"))[
         0
     ].created_by == bob

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -12,6 +13,44 @@ from z4j_brain.middleware.host_validation import HostValidationMiddleware
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.settings import Settings
+
+
+class TestPersistedAllowedHosts:
+    def test_read_preserves_first_spelling_and_deduplicates_case_insensitively(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from z4j_brain import allowed_hosts
+
+        path = tmp_path / "allowed-hosts"
+        path.write_text("Example.COM\nexample.com\nOther.example\n", encoding="utf-8")
+        monkeypatch.setattr(allowed_hosts, "get_path", lambda: path)
+
+        assert allowed_hosts.read_persisted() == ["Example.COM", "Other.example"]
+
+    def test_failed_replace_preserves_existing_allow_list(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from z4j_brain import allowed_hosts
+
+        path = tmp_path / "allowed-hosts"
+        original = "# retained\nexisting.example\n"
+        path.write_text(original, encoding="utf-8")
+        monkeypatch.setattr(allowed_hosts, "get_path", lambda: path)
+
+        def refuse_replace(_source: Path, _destination: Path) -> Path:
+            raise OSError("simulated sharing violation")
+
+        monkeypatch.setattr(Path, "replace", refuse_replace)
+
+        with pytest.raises(OSError, match="sharing violation"):
+            allowed_hosts.write_persisted(["new.example"])
+
+        assert path.read_text(encoding="utf-8") == original
+        assert not path.with_suffix(path.suffix + ".tmp").exists()
 
 
 class TestStripPort:

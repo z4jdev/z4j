@@ -147,6 +147,32 @@ class TestUpgradeCheck:
         payload = json.loads(buf.getvalue())
         assert len(payload["rows"]) == 1
 
+    def test_release_catalogue_covers_scheduler_adapters(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The CLI derives the package set instead of omitting new adapters."""
+        _patch_installed(monkeypatch, {"z4j-apscheduler": "1.9.0"})
+        _patch_pypi(
+            monkeypatch,
+            {
+                "/pypi/z4j-apscheduler/json": {
+                    "info": {"version": "1.9.0"},
+                },
+            },
+        )
+
+        from z4j_brain.cli import main
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(["upgrade", "--json"])
+        assert rc == 0
+        payload = json.loads(buf.getvalue())
+        assert [row["package"] for row in payload["rows"]] == [
+            "z4j-apscheduler",
+        ]
+
     def test_pypi_404_marked_unpublished(
         self,
         monkeypatch: pytest.MonkeyPatch,

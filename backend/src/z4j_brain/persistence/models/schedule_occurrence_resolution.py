@@ -22,10 +22,16 @@ from z4j_brain.persistence.types import big_integer
 
 
 class ScheduleOccurrenceResolution(Base):
-    """One immutable operator/deletion exit for cadence evidence without a hold.
+    """One operator/deletion exit for cadence evidence without a hold.
 
     The row intentionally has no foreign keys.  It is historical authority that
     must survive command, schedule, project, and retained-fire cleanup.
+
+    A trigger refuses UPDATE and DELETE, so nothing reachable from the
+    application revises this evidence after the fact, including a cleanup
+    path that should have left it alone.  That guard runs inside the
+    database and authorizes nothing about the caller, so a role with direct
+    write access to the table is not covered by it.
     """
 
     __tablename__ = "schedule_occurrence_resolutions"

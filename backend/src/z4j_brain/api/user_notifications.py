@@ -84,12 +84,16 @@ _SENSITIVE_KEYS = (
     "password",
     "integration_key",
 )
+_MASKED_CONFIG_KEYS = (*_SENSITIVE_KEYS, "url", "webhook_url")
 _MASK = "••••••••"
 
 
 def _mask(config: dict[str, Any]) -> dict[str, Any]:
     safe = dict(config)
-    for k in _SENSITIVE_KEYS:
+    # Webhook URLs are bearer credentials: Slack, Discord, and Teams put
+    # the secret in the URL path. They must be redacted just like explicit
+    # password/token fields in every response payload.
+    for k in _MASKED_CONFIG_KEYS:
         if safe.get(k):
             safe[k] = _MASK
     return safe
@@ -123,7 +127,7 @@ def _safe_merge_config(
     merged = dict(existing or {})
     scrubbed: dict[str, Any] = {}
     for k, v in (incoming or {}).items():
-        if k in _SENSITIVE_KEYS and v == mask:
+        if k in _MASKED_CONFIG_KEYS and v == mask:
             # Preserve existing secret - client just echoed the mask.
             continue
         scrubbed[k] = v
@@ -330,10 +334,12 @@ class UserSubscriptionCreate(BaseModel):
 class UserSubscriptionUpdate(BaseModel):
     """Body for ``PATCH /user/subscriptions/{sub_id}``.
 
-    Every field is optional; only keys actually present mutate the
-    row. v1.0.18 added ``trigger`` for parity with the project
-    default-subscription update endpoint - lets users rename a
-    subscription without delete-and-recreate.
+    Every field is optional. Non-null values mutate the row;
+    ``muted_until`` additionally treats an explicit JSON ``null`` as
+    "clear the mute", while omitting it preserves the existing value.
+    v1.0.18 added ``trigger`` for parity with the project default-
+    subscription update endpoint - lets users rename a subscription
+    without delete-and-recreate.
     """
 
     trigger: str | None = Field(default=None, pattern=_TRIGGER_PATTERN)
@@ -1174,7 +1180,7 @@ async def update_user_subscription(  # noqa: PLR0912  subscription field update 
         sub.user_channel_ids = body.user_channel_ids
     if body.cooldown_seconds is not None:
         sub.cooldown_seconds = body.cooldown_seconds
-    if body.muted_until is not None:
+    if "muted_until" in body.model_fields_set:
         sub.muted_until = body.muted_until
     if body.is_active is not None:
         sub.is_active = body.is_active
@@ -1236,9 +1242,10 @@ async def list_user_deliveries(
 
     Mirror of the project-scoped ``/projects/{slug}/notifications/
     deliveries`` endpoint, scoped to the calling user. Returns
-    every notification that fired into one of the caller's
-    personal subscriptions, regardless of which project it came
-    from. Optional ``project_slug`` filter narrows the view.
+    every notification delivered to the caller's personal subscriptions,
+    regardless of which project it came from. Delivery-time ownership is
+    snapshotted, so deleting a subscription cannot remove its rows from this
+    history. Optional ``project_slug`` filter narrows the view.
 
     Includes deliveries from projects the user is no longer a
     member of - the dashboard renders those rows with a "you

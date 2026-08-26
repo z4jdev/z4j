@@ -8,9 +8,9 @@ Two layers:
    The envelope payload is just ``{"sid": "<session uuid>"}`` -
    the actual session state lives in the database.
 
-2. :class:`SessionPayload` - the resolved session, ready to be
-   attached to ``request.state.session`` after every authenticated
-   middleware pass.
+2. :class:`SessionPayload` - a framework-free value shape for resolved
+   session data. The current FastAPI dependencies return the ORM session
+   row directly; this type does not imply middleware attachment.
 
 The DB-side bookkeeping (create, lookup-by-id, touch, revoke,
 revoke-all-for-user) lives in :class:`SessionRepository`. This
@@ -55,8 +55,8 @@ def cookie_name(*, environment: str) -> str:
 class SessionPayload:
     """The fully-resolved session attached to a request.
 
-    Built by :class:`SessionResolver` after the cookie has been
-    decoded, the DB row fetched, and all expiry checks have passed.
+    Represents the result after the cookie has been decoded, the DB row
+    fetched, and all expiry checks have passed.
     The CSRF token is the per-session value the dashboard echoes in
     the ``X-CSRF-Token`` header on every state-changing request.
     """
@@ -229,10 +229,11 @@ def is_session_live(
         # "older" on SQLite (microsecond 0 <= microsecond N) and
         # gets rejected - breaking every session that the setup
         # flow and password-change flow mint immediately after
-        # writing the user row. The grace is safe: no attacker can
-        # exploit a 1-second window here (a compromised session
-        # needs a valid cookie signature, which requires the
-        # current secret, which changes when the operator rotates).
+        # writing the user row. This grace is not the revocation
+        # boundary: every password-change/reset path explicitly
+        # revokes existing session rows in the same transaction.
+        # The timestamp comparison is defense in depth outside this
+        # SQLite precision edge.
         and _aware_utc(row.issued_at) < _aware_utc(user_password_changed_at) - timedelta(seconds=1)
     )
 

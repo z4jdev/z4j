@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain.persistence.models.invitation import Invitation
 from z4j_brain.persistence.repositories._base import BaseRepository
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
 
 
 class InvitationRepository(BaseRepository[Invitation]):
@@ -74,28 +78,71 @@ class InvitationRepository(BaseRepository[Invitation]):
         *,
         accepted_by_user_id: uuid.UUID,
     ) -> Invitation | None:
-        """Stamp ``accepted_at`` + ``accepted_by_user_id`` atomically.
+        """Conditionally claim a pending invitation for acceptance.
 
         Caller is responsible for running this inside the same
         transaction as the ``users`` insert + ``memberships`` grant
-        so the three side-effects succeed or fail together.
+        so the three side-effects succeed or fail together. The guarded
+        single-statement update is the final lifecycle arbiter: concurrent
+        accept/revoke callers cannot both win, and expiry is rechecked at the
+        mutation rather than trusted from an earlier preview/read.
         """
-        row = await self.get(invitation_id)
-        if row is None:
+        now = datetime.now(UTC)
+        result = cast(
+            "CursorResult[Any]",
+            await self.session.execute(
+                update(Invitation)
+                .where(
+                    Invitation.id == invitation_id,
+                    Invitation.accepted_at.is_(None),
+                    Invitation.revoked_at.is_(None),
+                    Invitation.expires_at > now,
+                )
+                .values(
+                    accepted_at=now,
+                    accepted_by_user_id=accepted_by_user_id,
+                ),
+            ),
+        )
+        if int(result.rowcount or 0) != 1:
             return None
-        row.accepted_at = datetime.now(UTC)
-        row.accepted_by_user_id = accepted_by_user_id
         await self.session.flush()
-        return row
+        return await self.session.get(
+            Invitation,
+            invitation_id,
+            populate_existing=True,
+        )
 
     async def revoke(self, invitation_id: uuid.UUID) -> Invitation | None:
-        """Set revoked_at on an invitation. Returns the updated row."""
-        row = await self.get(invitation_id)
-        if row is None:
+        """Conditionally revoke a pending invitation.
+
+        The same pending-state predicate used by :meth:`accept` makes the two
+        terminal transitions atomically mutually exclusive on every supported
+        database. Returns ``None`` when the invitation is missing, expired, or
+        another transaction already accepted/revoked it.
+        """
+        now = datetime.now(UTC)
+        result = cast(
+            "CursorResult[Any]",
+            await self.session.execute(
+                update(Invitation)
+                .where(
+                    Invitation.id == invitation_id,
+                    Invitation.accepted_at.is_(None),
+                    Invitation.revoked_at.is_(None),
+                    Invitation.expires_at > now,
+                )
+                .values(revoked_at=now),
+            ),
+        )
+        if int(result.rowcount or 0) != 1:
             return None
-        row.revoked_at = datetime.now(UTC)
         await self.session.flush()
-        return row
+        return await self.session.get(
+            Invitation,
+            invitation_id,
+            populate_existing=True,
+        )
 
 
 __all__ = ["InvitationRepository"]

@@ -4,19 +4,23 @@ Provides:
 
 - ``GET    /``                - list schedules in the project
 - ``GET    /{schedule_id}``    - schedule detail
+- ``POST   /``                 - create a z4j-owned schedule
+- ``PATCH  /{schedule_id}``    - update a schedule
+- ``DELETE /{schedule_id}``    - delete a schedule
 - ``POST   /{schedule_id}/enable``  - enable (issues schedule.enable command)
 - ``POST   /{schedule_id}/disable`` - disable
 - ``POST   /{schedule_id}/trigger`` - fire-now (issues schedule.trigger_now)
 
-Schedules CRUD (create / update / delete via the brain) lands in
-B6 alongside the registry-delta sync - for now schedules are
-created in the user's own celery-beat / APScheduler and the brain
-mirrors them via the agent's signal hooks.
+Externally owned schedules remain projections of their scheduler's
+configuration. On an activated database, create/update/delete authority
+belongs to z4j-owned schedules; external definitions are changed at their
+source scheduler and reported back through its adapter.
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -33,7 +37,6 @@ from z4j_brain.api.deps import (
     get_membership_repo,
     get_project_repo,
     get_session,
-    get_settings,
     require_csrf,
     resolve_api_key_id,
 )
@@ -52,7 +55,6 @@ if TYPE_CHECKING:
         MembershipRepository,
         ProjectRepository,
     )
-    from z4j_brain.settings import Settings
 
 
 router = APIRouter(prefix="/projects/{slug}/schedules", tags=["schedules"])
@@ -88,6 +90,27 @@ class SchedulePublic(BaseModel):
     # exporter. ``source`` lets the dashboard render a "managed by"
     # badge; ``catch_up`` shows the missed-fire policy.
     catch_up: str = "skip"
+    #: When this schedule was paused, or None if it is running. Distinct
+    #: from ``is_enabled``: disabling retires a schedule, pausing holds it
+    #: and keeps the timestamp saying how long the hold has run.
+    paused_at: datetime | None = None
+    #: What a due fire will do while the previous run is still in flight,
+    #: once that is implemented. **Today this is always ``"allow"``.**
+    #:
+    #: Read-only, and not merely by convention: no request schema accepts it
+    #: (neither ``ScheduleCreateIn`` nor ``ScheduleUpdateIn`` declares it), no
+    #: declarative decorator exposes it, no adapter writes it, and it is absent
+    #: from the scheduler wire protocol entirely. The column exists because the
+    #: schema and the vocabulary landed ahead of the enforcement, deliberately,
+    #: so that the brain and the wire could not drift apart later.
+    #:
+    #: An earlier version of this comment said it "reports the configured
+    #: intent rather than a guarantee", which invented a capability: there is
+    #: no way to configure an intent, so the sentence implied a caller could
+    #: express one and be quietly ignored. That is the exact failure the
+    #: refusal in ``z4j_core.models.schedule`` exists to prevent, restated as
+    #: documentation.
+    overlap_policy: str = "allow"
     source: str = "dashboard"
     source_hash: str | None = None
     control_token: uuid.UUID | None = None
@@ -136,6 +159,8 @@ def _payload(schedule: Schedule) -> SchedulePublic:
         args=schedule.args,
         kwargs=schedule.kwargs,
         is_enabled=schedule.is_enabled,
+        paused_at=schedule.paused_at,
+        overlap_policy=schedule.overlap_policy,
         last_run_at=schedule.last_run_at,
         next_run_at=schedule.next_run_at,
         total_runs=schedule.total_runs,
@@ -652,9 +677,30 @@ def _validate_iana_timezone(value: str) -> str:
     operators see a created-but-never-firing schedule and no
     API-side error.
 
-    Validates by attempting :class:`zoneinfo.ZoneInfo`
-    construction. Empty string and ``"UTC"`` always pass.
-    Returns the trimmed value.
+    Validates against the release-pinned ``tzdata`` wheel via
+    :func:`packaged_zoneinfo` -- the same source
+    :func:`canonical_next_run_at` computes with -- and NOT via bare
+    ``ZoneInfo``, which searches the host's ``/usr/share/zoneinfo``
+    first.
+
+    Validating against a different tzdb than the engine ticks with
+    reopens the very failure this function exists to close. The
+    reachable case is ``"localtime"``: on any Linux host
+    ``/etc/localtime`` exists, so ``ZoneInfo("localtime")`` succeeds
+    and the API accepted it, while the packaged wheel has no such
+    entry and the first tick raised -- a created-but-never-firing
+    schedule with no API-side error. Reproduced in
+    python:3.14-slim-trixie.
+
+    Measured in that image the host offers 599 zones and the wheel 598,
+    and the single difference IS ``localtime`` -- so the two sets agree
+    on every real zone and bare ``ZoneInfo`` was right by coincidence
+    rather than by construction. Any future drift between the host tzdb
+    and the pin would have reopened the gap silently. (An earlier
+    revision of this paragraph said "599 each", which is true on neither
+    platform: Windows reports 598/598 because TZPATH is empty there.)
+
+    Empty string and ``"UTC"`` always pass. Returns the trimmed value.
     """
     if value is None:
         return value
@@ -662,9 +708,11 @@ def _validate_iana_timezone(value: str) -> str:
     if stripped == "":
         return "UTC"
     try:
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        from zoneinfo import ZoneInfoNotFoundError
 
-        ZoneInfo(stripped)
+        from z4j_brain.domain.schedule_runtime import packaged_zoneinfo
+
+        packaged_zoneinfo(stripped)
     except ZoneInfoNotFoundError as exc:
         raise ValueError(
             f"timezone {stripped!r} is not a valid IANA timezone "
@@ -730,8 +778,51 @@ def _validate_args_kwargs_size(value: Any, field_name: str) -> Any:
     return value
 
 
+def _refuse_unenforced_overlap_policy(value: object) -> object:
+    """Refuse a policy the release cannot honour, at the REST boundary.
+
+    Every request schema here inherits pydantic's default ``extra="ignore"``,
+    so a POST, PATCH or bulk-import body carrying ``overlap_policy: "skip"``
+    was accepted, silently dropped before the write, and answered 200 with
+    ``"allow"``. The caller asked for collision prevention, was told it was
+    applied, and got concurrent runs -- through an ORDINARY request, not a
+    deliberate validation bypass.
+
+    Declaring the field is what closes that. ``extra="forbid"`` would close it
+    too and more besides, but it would start rejecting every unknown key these
+    endpoints have always accepted, which is a breaking change for clients
+    that send more than they need. Refuse the one field that lies, and leave
+    the rest of the contract alone.
+
+    ``None`` is "not supplied" and passes; so does ``allow``, which is what
+    every schedule already gets.
+    """
+    if value is None:
+        return value
+    raw = getattr(value, "value", value)
+    if raw != "allow":
+        msg = (
+            f"overlap_policy={raw!r} is not implemented in this release and "
+            f"would be silently ignored, so it is refused rather than "
+            f"accepted. Only 'allow' is honoured; take a lock inside the task "
+            f"if you need overlap protection today."
+        )
+        raise ValueError(msg)
+    return value
+
+
 class ScheduleCreateIn(BaseModel):
     """Body for ``POST /schedules`` - operator-defined schedule."""
+
+    #: Refused rather than dropped. Not stored: nothing reads it yet, so the
+    #: only honest answers are "allow" or an error. See
+    #: :func:`_refuse_unenforced_overlap_policy`.
+    overlap_policy: str | None = None
+
+    @field_validator("overlap_policy")
+    @classmethod
+    def _refuse_overlap_policy(cls, v: object) -> object:
+        return _refuse_unenforced_overlap_policy(v)
 
     name: str = Field(
         ...,
@@ -833,6 +924,16 @@ class ScheduleUpdateIn(BaseModel):
     ``update_schedule`` handler MUST call
     ``_validate_scheduler_in_allowlist`` before persisting it.
     """
+
+    #: Refused rather than dropped. Not stored: nothing reads it yet, so the
+    #: only honest answers are "allow" or an error. See
+    #: :func:`_refuse_unenforced_overlap_policy`.
+    overlap_policy: str | None = None
+
+    @field_validator("overlap_policy")
+    @classmethod
+    def _refuse_overlap_policy(cls, v: object) -> object:
+        return _refuse_unenforced_overlap_policy(v)
 
     engine: str | None = Field(default=None, min_length=1, max_length=40)
     kind: str | None = Field(default=None, min_length=1, max_length=20)
@@ -1006,7 +1107,23 @@ async def create_schedule(
     repo = ScheduleRepository(db_session)
     try:
         control = ScheduleControlRepository(db_session)
-        if create_data["scheduler"] == "z4j-scheduler" and await control.control_is_active():
+        control_active = await control.control_is_active()
+        owner = create_data["scheduler"]
+        if owner != "z4j-scheduler" and control_active:
+            # An externally owned schedule is DEFINED in the scheduler that
+            # owns it and projected here from what its adapter reports; the
+            # brain is not its author. Creating one here used to fall through
+            # to the legacy writer, which an activated database refuses, so the
+            # operator got a 422 carrying internal wording and no idea what to
+            # do. Say what is actually true instead.
+            raise ConflictError(
+                f"schedules owned by {owner!r} are defined in that scheduler, "
+                f"not here. Add it to that scheduler's configuration and its "
+                f"z4j adapter will report it, or create the schedule with "
+                f"scheduler 'z4j-scheduler' to have z4j own it.",
+                details={"scheduler": owner},
+            )
+        if owner == "z4j-scheduler" and control_active:
             row = await control.create_current(
                 project_id=project.id,
                 data=create_data,
@@ -1091,12 +1208,19 @@ async def update_schedule(
             project_id=project.id,
             schedule_id=schedule_id,
         )
+        if existing is None:
+            # Before choosing a writer, the way delete_schedule does it. When
+            # this was folded into the writer condition, a missing or
+            # cross-project id fell through to the legacy writer, which an
+            # activated database refuses; the refusal is a ValueError, so the
+            # handler below turned it into a 422 carrying internal text and the
+            # 404 underneath became unreachable.
+            raise NotFoundError(
+                "schedule not found",
+                details={"schedule_id": str(schedule_id)},
+            )
         control = ScheduleControlRepository(db_session)
-        if (
-            existing is not None
-            and existing.scheduler == "z4j-scheduler"
-            and await control.control_is_active()
-        ):
+        if existing.scheduler == "z4j-scheduler" and await control.control_is_active():
             row = await control.update_current(
                 project_id=project.id,
                 schedule_id=schedule_id,
@@ -1660,6 +1784,171 @@ async def _pick_scheduler_agent(
     )
 
 
+async def _pick_engine_agent(
+    *,
+    db_session: AsyncSession,
+    project_id: uuid.UUID,
+    engine: str,
+    schedule_id: uuid.UUID,
+) -> Agent:
+    """Pick an online agent that can RUN the schedule's task.
+
+    Filters on ``engine_adapters``, not ``scheduler_adapters``, and that
+    difference is the whole reason this exists. A schedule this brain fires is
+    not managed by any scheduler the agent installs, so no agent ever
+    advertises it: ``celery-beat`` and ``apscheduler`` are adapter names an
+    agent registers, ``z4j-scheduler`` is a service beside the brain. Asking
+    for an agent that advertises it is asking for something that cannot exist,
+    which is why the fire path has always chosen on the engine instead.
+
+    Raises :class:`NotFoundError` with the actionable reason rather than
+    buffering the way the cadence fire does. Nobody is watching a cadence fire,
+    so holding it until an agent returns is the kind thing to do; an operator
+    is watching this one and would rather be told to start the agent.
+    """
+    from z4j_brain.persistence.repositories import AgentRepository
+
+    agents = await AgentRepository(db_session).list_online_for_project(
+        project_id,
+    )
+    for agent in agents:
+        if engine in (agent.engine_adapters or ()):
+            return agent
+
+    if not agents:
+        raise NotFoundError(
+            "no online agent for this project; start the agent and retry",
+            details={
+                "schedule_id": str(schedule_id),
+                "engine": engine,
+                "reason": "no_online_agent",
+            },
+        )
+    raise NotFoundError(
+        f"no online agent runs the {engine!r} engine; install the matching "
+        f"engine adapter on an agent and restart it",
+        details={
+            "schedule_id": str(schedule_id),
+            "engine": engine,
+            "reason": "engine_not_installed",
+        },
+    )
+
+
+def _manual_fire_refusal(schedule: Schedule) -> tuple[str, str] | None:
+    """Name the operator hold that stops this fire, or ``None`` if none does.
+
+    The gate is ``operator_hold_in_force``, deliberately NOT the cadence's own
+    fire authority, and the difference between the two is the whole point.
+
+    A hold and a quarantine are unresolved states somebody has to clear: a held
+    schedule must not run until the incident that produced the hold is over,
+    and a quarantined one cannot be run at all, because the definition that
+    would be fired is not the one anybody accepted, so there is nothing safe
+    here to fire. Retirement is neither of those. ``is_enabled=False`` retires
+    the CADENCE, and "off the timer, I will run it by hand when I need it" is a
+    workflow rather than a state waiting to be cleared. The disable IS the
+    operator's answer, and this button is how they act on it.
+
+    So a retired schedule fires from here and a held one does not, and that is
+    not an inconsistency between the two. Cadence authority answers "is it this
+    schedule's turn", and nobody is asking that here: an operator is asking for
+    one run, right now, attributed to them, on top of whatever the cadence is
+    or is not doing.
+
+    The way out of a hold and the way out of a quarantine are different
+    actions, which is why the reason is named and not merely refused. The
+    fallthrough refuses as well, so a hold this function has not learned to
+    name yet still stops the fire, just dully.
+    """
+    from z4j_brain.persistence.repositories.schedule_control import (
+        operator_hold_in_force,
+        schedule_is_quarantined,
+    )
+
+    if not operator_hold_in_force(schedule):
+        return None
+    if schedule.paused_at is not None:
+        return (
+            "schedule_paused",
+            f"this schedule is held (paused at {schedule.paused_at.isoformat()}); "
+            f"resume it to fire it",
+        )
+    if schedule_is_quarantined(schedule):
+        return (
+            "schedule_quarantined",
+            "this schedule's definition is quarantined; resolve the quarantine before firing it",
+        )
+    return (
+        "schedule_not_runnable",
+        "this schedule is not in a state that may fire",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ManualFire:
+    """How one operator-initiated fire is addressed to an agent.
+
+    ``by_engine`` picks the agent selector as well as the verb, because the two
+    are the same decision: who owns the schedule. Splitting them into two tests
+    of the same condition is how one of them ends up updated and the other not.
+    """
+
+    action: str
+    payload: dict[str, Any]
+    by_engine: bool
+
+
+def _manual_fire_command(schedule: Schedule) -> _ManualFire:
+    """Build the command that fires this schedule once, now.
+
+    Two owners, two shapes:
+
+    A schedule this brain fires exists in no scheduler an agent installs, so
+    there is no adapter to ask and nothing for the agent to look a name up in.
+    The agent is chosen by the engine that will run the task and handed the
+    resolved task itself. The verb is the plain enqueue primitive rather than
+    ``schedule.fire``: both lower to the same adapter call, so the effect on
+    the queue is identical, but a ``schedule.fire`` command is receipt-bound by
+    an activated database, which requires the acceptance revision and receipt
+    token of a real cadence transition. A button press has no such transition
+    and must not manufacture one, because that would move the cursor and
+    swallow the next scheduled occurrence.
+
+    A schedule owned by celery-beat or APScheduler lives in that scheduler, on
+    the agent, so its adapter is the only thing that can fire it, addressed by
+    the name that scheduler knows it by.
+    """
+    if schedule.scheduler != "z4j-scheduler":
+        return _ManualFire(
+            action="schedule.trigger_now",
+            payload={
+                "schedule_id": schedule.name,
+                "schedule_name": schedule.name,
+                "external_id": schedule.external_id,
+            },
+            by_engine=False,
+        )
+    return _ManualFire(
+        action="submit_task",
+        payload={
+            "name": schedule.task_name,
+            "args": schedule.args,
+            "kwargs": schedule.kwargs,
+            "queue": schedule.queue,
+            # The agent binds its adapter from ``target["engine"]``, which the
+            # wire builder lifts out of this key. Without it a host running
+            # more than one engine has to guess.
+            "filter": {"engine": schedule.engine},
+            # Carried for the command record an operator reads back, not for
+            # the agent, which needs only the task.
+            "schedule_id": str(schedule.id),
+            "schedule_name": schedule.name,
+        },
+        by_engine=True,
+    )
+
+
 async def _enable_or_disable(  # noqa: PLR0915 - reserved/external/legacy authority split
     *,
     slug: str,
@@ -2006,16 +2295,58 @@ async def trigger_schedule_now(
     audit_log: AuditLogRepository = Depends(get_audit_log_repo),
     audit: AuditService = Depends(get_audit_service),
     dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
-    settings: Settings = Depends(get_settings),
     db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
 ) -> SchedulePublic:
-    """Issue a one-shot ``schedule.trigger_now`` command.
+    """Fire one schedule once, now, because an operator asked.
 
-    The schedule itself is unchanged - its normal cadence is
-    untouched. The agent fires the underlying task once.
+    This is an extra fire on top of the cadence and never one of its slots, so
+    nothing here moves the schedule's cursor: the next scheduled occurrence
+    still happens at its own time.
+
+    An operator hold stops it, and retirement does not, because the two say
+    different things. A pause holds the cadence during an incident and a
+    quarantine says the stored definition is not the accepted one, so both are
+    unresolved states that have to be cleared before this schedule may run at
+    all. Disabling retires the cadence and makes no claim about a run an
+    operator asks for by hand. "Off the timer, run it manually when I need it"
+    is a real workflow, it is what the Run button offers on every row including
+    the disabled ones, and it is what the public API promises, so a fire that
+    refused it would take a capability away rather than close a hole. A fire
+    from here never revives the cadence it was retired from, in the same way it
+    never advances the cadence of a live one.
+
+    A button that walked past a hold, though, would make pause mean "held until
+    somebody clicks", which is not a hold at all, and the operator who placed
+    it during an incident would have no way to see it had been overridden.
+    There is no channel here for overriding one on purpose either: the request
+    carries no body and no flag, so allowing it would be a silent override
+    rather than a deliberate one, and the second operator clicking Run may
+    never have seen the hold at all. The explicit override is resume, one
+    click, attributed, with a row naming who lifted it, which is why the
+    refusal says so.
+
+    The fire is dispatched from here in every configuration. Sending an
+    operator trigger out to z4j-scheduler and back was the earlier design and a
+    scheduler cannot carry it: it holds no hold state, and the fire it sends
+    back carries no cadence authority, so the brain refuses it. Firing it here
+    is also the only shape that is true, because the brain is what resolved
+    this schedule and what knows it may run.
+
+    The row is read under a lock that is held until the command is committed,
+    so "may this fire" and "this fire is enqueued" are one indivisible step
+    against a concurrent hold. Read without one, the two are separated by an
+    agent lookup, an audit write and an insert, and a hold committing anywhere
+    in that window is honoured by the check and then overtaken by the command:
+    the operator sees a hold in force and a fire dispatched under it, which is
+    the outcome the hold exists to prevent. The lock is the same one
+    ``set_paused`` takes, and in the same order, so whichever click gets there
+    first decides and the other one sees its result.
     """
+    from sqlalchemy import select
+
     from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.models import Schedule
     from z4j_brain.persistence.repositories import (
         CommandRepository,
         ScheduleRepository,
@@ -2031,129 +2362,106 @@ async def trigger_schedule_now(
     )
 
     schedules_repo = ScheduleRepository(db_session)
-    schedule = await schedules_repo.get_for_project(
-        project_id=project.id,
-        schedule_id=schedule_id,
+    # Scoped to the project in the same statement that takes the lock, so a
+    # guessed id from another project is still a 404 and never locks a row the
+    # caller has no business touching.
+    #
+    # ``populate_existing`` because a plain SELECT returns the identity-mapped
+    # instance with whatever it was loaded with: the row would be locked and
+    # the attributes this handler decides on would be the pre-lock ones, which
+    # is the unlocked read wearing a lock.
+    locked = await db_session.execute(
+        select(Schedule)
+        .where(
+            Schedule.project_id == project.id,
+            Schedule.id == schedule_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True),
     )
+    schedule = locked.scalar_one_or_none()
     if schedule is None:
         raise NotFoundError(
             "schedule not found",
             details={"schedule_id": str(schedule_id)},
         )
 
-    # Phase 2: when the schedule is owned by z4j-scheduler AND the
-    # operator has wired the trigger client, route the trigger
-    # through the scheduler so its local cache last_fire_at gets
-    # the update (preventing the next tick from double-firing).
-    # Falls through to the v1 direct-dispatch path for any
-    # combination that doesn't match.
-    # Phase 2: when the schedule is owned by z4j-scheduler AND the
-    # operator has wired the trigger client, route through the
-    # scheduler so its local cache last_fire_at gets the update
-    # (preventing the next tick from double-firing).
-    use_scheduler_grpc = schedule.scheduler == "z4j-scheduler" and bool(
-        settings.scheduler_trigger_url
-    )
-    if use_scheduler_grpc:
-        client = await _get_or_build_trigger_client(request, settings)
-        response = await client.trigger(
-            schedule_id=schedule_id,
-            user_id=user.id,
-            idempotency_key=f"trigger:{schedule_id}:{user.id}",
-        )
-        if response.error_code:
-            # Record the failed trigger attempt BEFORE raising.
-            # Otherwise the brain would have no record an
-            # operator attempted a trigger that the scheduler
-            # refused, and an attacker probing for valid
-            # schedule_ids could brute-force without leaving a
-            # forensic trail.
-            try:
-                await audit.record(
-                    audit_log,
-                    action="schedule.trigger_now.via_scheduler",
-                    target_type="schedule",
-                    target_id=str(schedule_id),
-                    result="failure",
-                    outcome="deny",
-                    user_id=user.id,
-                    project_id=project.id,
-                    api_key_id=resolve_api_key_id(request),
-                    source_ip=ip,
-                    metadata={
-                        "error_code": response.error_code,
-                        "error_message": response.error_message,
-                        "scheduler_url": settings.scheduler_trigger_url,
-                    },
-                )
-                await db_session.commit()
-            except Exception:
-                # Audit failure should not mask the original
-                # scheduler error from the operator. Log + continue
-                # to the raise.
-                import logging
-
-                logging.getLogger("z4j.brain.schedules").exception(
-                    "trigger audit (failure) write crashed",
-                )
-            raise NotFoundError(
-                f"scheduler rejected trigger: {response.error_code}",
-                details={
-                    "error_code": response.error_code,
-                    "error_message": response.error_message,
-                },
-            )
-        # Audit the trigger on the brain side (the scheduler audits
-        # its dispatch separately). One row per click is the
-        # operator-facing record.
+    refusal = _manual_fire_refusal(schedule)
+    if refusal is not None:
+        reason, message = refusal
+        # Recorded before the raise. A refused trigger during an incident is
+        # exactly the event someone reconstructs afterwards, and a conflict
+        # leaves no other trace: the denial-audit middleware classifies
+        # 401 / 403 / 404 / 422 and lets a 409 through unrecorded.
         await audit.record(
             audit_log,
-            action="schedule.trigger_now.via_scheduler",
+            action="schedule.trigger_now",
             target_type="schedule",
             target_id=str(schedule_id),
-            result="success",
-            outcome="allow",
+            result="failure",
+            outcome="deny",
             user_id=user.id,
             project_id=project.id,
             api_key_id=resolve_api_key_id(request),
             source_ip=ip,
-            metadata={
-                "scheduler_command_id": response.command_id,
-                "scheduler_url": settings.scheduler_trigger_url,
-            },
+            metadata={"reason": reason},
         )
         await db_session.commit()
-        refreshed = await schedules_repo.get_for_project(
+        raise ConflictError(
+            message,
+            details={"schedule_id": str(schedule_id), "reason": reason},
+        )
+
+    fire = _manual_fire_command(schedule)
+    target_agent = (
+        await _pick_engine_agent(
+            db_session=db_session,
             project_id=project.id,
+            engine=schedule.engine,
             schedule_id=schedule_id,
         )
-        assert refreshed is not None
-        return _payload(refreshed)
-
-    # v1 direct-dispatch path: pick a matching agent and issue the
-    # schedule.trigger_now command. Used when no scheduler is
-    # attached, or when the schedule is owned by celery-beat /
-    # apscheduler / etc. on the agent side.
-    target_agent = await _pick_scheduler_agent(
-        db_session=db_session,
-        project_id=project.id,
-        scheduler_name=schedule.scheduler,
-        schedule_id=schedule_id,
+        if fire.by_engine
+        else await _pick_scheduler_agent(
+            db_session=db_session,
+            project_id=project.id,
+            scheduler_name=schedule.scheduler,
+            schedule_id=schedule_id,
+        )
     )
 
+    # One row per click, whichever verb carried it, so the audit answers "who
+    # fired this schedule" without the reader having to know which dispatch
+    # shape the schedule's owner implies.
+    #
+    # Written before the dispatch, in the same write unit, so it shares the
+    # command row's fate exactly: both or neither. Writing it afterwards would
+    # be a second write unit, because issuing commits, and a row claiming a
+    # click that no command came from is worse than no row.
+    await audit.record(
+        audit_log,
+        action="schedule.trigger_now",
+        target_type="schedule",
+        target_id=str(schedule_id),
+        result="success",
+        outcome="allow",
+        user_id=user.id,
+        project_id=project.id,
+        api_key_id=resolve_api_key_id(request),
+        source_ip=ip,
+        metadata={
+            "dispatched_action": fire.action,
+            "agent_id": str(target_agent.id),
+        },
+    )
     await dispatcher.issue(
         commands=CommandRepository(db_session),
         audit_log=audit_log,
         project_id=project.id,
         agent_id=target_agent.id,
-        action="schedule.trigger_now",
+        action=fire.action,
         target_type="schedule",
         target_id=str(schedule_id),
-        payload={
-            "schedule_id": schedule.name,
-            "schedule_name": schedule.name,
-            "external_id": schedule.external_id,
-        },
+        payload=fire.payload,
         issued_by=user.id,
         ip=ip,
         user_agent=None,
@@ -2168,40 +2476,6 @@ async def trigger_schedule_now(
     )
     assert refreshed is not None
     return _payload(refreshed)
-
-
-# ---------------------------------------------------------------------------
-# Trigger-client singleton helper
-# ---------------------------------------------------------------------------
-
-
-async def _get_or_build_trigger_client(
-    request: Request,
-    settings: Settings,
-):
-    """Return a process-wide :class:`TriggerScheduleClient` singleton.
-
-    First call lazily constructs the client + opens the gRPC channel
-    and caches it on ``app.state.scheduler_trigger_client``. Every
-    subsequent trigger reuses the same channel - which means one TLS
-    handshake per brain process, not one per click. The previous
-    per-call construction was an audit-Phase2 finding (TLS cost on
-    every trigger button push).
-
-    The brain shutdown path closes the client in
-    ``z4j_brain.main._lifespan`` finally-block.
-    """
-    cached = getattr(request.app.state, "scheduler_trigger_client", None)
-    if cached is not None:
-        return cached
-    from z4j_brain.scheduler_grpc.trigger_client import (
-        TriggerScheduleClient,
-    )
-
-    client = TriggerScheduleClient(settings=settings)
-    await client.connect()
-    request.app.state.scheduler_trigger_client = client
-    return client
 
 
 # ---------------------------------------------------------------------------
@@ -2224,6 +2498,16 @@ class ImportedScheduleIn(BaseModel):
 
     Field caps mirror :class:`ScheduleCreateIn` (audit fix Apr 2026).
     """
+
+    #: Refused rather than dropped. Not stored: nothing reads it yet, so the
+    #: only honest answers are "allow" or an error. See
+    #: :func:`_refuse_unenforced_overlap_policy`.
+    overlap_policy: str | None = None
+
+    @field_validator("overlap_policy")
+    @classmethod
+    def _refuse_overlap_policy(cls, v: object) -> object:
+        return _refuse_unenforced_overlap_policy(v)
 
     name: str = Field(
         ...,
@@ -2459,6 +2743,38 @@ class ImportSchedulesResponse(BaseModel):
     errors: dict[int, str] = {}
 
 
+async def _acquire_replace_for_source_lock(
+    db_session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    source_label: str,
+) -> bool:
+    """Acquire the PostgreSQL transaction lock for one reconcile scope.
+
+    Returns whether a lock was taken. SQLite is already single-writer and
+    deliberately takes no advisory lock.
+    """
+
+    if db_session.bind is None or db_session.bind.dialect.name != "postgresql":
+        return False
+
+    from hashlib import sha256
+
+    from sqlalchemy import text
+
+    project_key = int.from_bytes(project_id.bytes[:4], "big", signed=True)
+    source_key = int.from_bytes(
+        sha256(source_label.encode()).digest()[:4],
+        "big",
+        signed=True,
+    )
+    await db_session.execute(
+        text("SELECT pg_advisory_xact_lock(:p, :s)"),
+        {"p": project_key, "s": source_key},
+    )
+    return True
+
+
 @router.post(
     ":import",
     response_model=ImportSchedulesResponse,
@@ -2565,28 +2881,12 @@ async def import_schedules(  # noqa: PLR0912, PLR0915  import diff + apply branc
     # source-specific lock inside (it's finer-grained
     # reconcile-vs-reconcile serialization, only meaningful for
     # ``replace_for_source``).
-    if body.mode == "replace_for_source" and (
-        db_session.bind.dialect.name == "postgresql" if db_session.bind is not None else False
-    ):
-        from hashlib import sha256
-
-        from sqlalchemy import text
-
+    if body.mode == "replace_for_source":
         scope_key = body.source_filter or (body.schedules[0].source if body.schedules else "") or ""
-        # Two-int form so we can fit both project_id and source-label
-        # hash in the 64-bit advisory-lock key space without collision.
-        # Source-specific lock for replace_for_source serializes
-        # concurrent reconciles for the SAME source label. (Audit
-        # fix M-3, predates 1.2.2.)
-        proj_int = int.from_bytes(project.id.bytes[:4], "big", signed=True)
-        source_int = int.from_bytes(
-            sha256(scope_key.encode()).digest()[:4],
-            "big",
-            signed=True,
-        )
-        await db_session.execute(
-            text("SELECT pg_advisory_xact_lock(:p, :s)"),
-            {"p": proj_int, "s": source_int},
+        await _acquire_replace_for_source_lock(
+            db_session,
+            project_id=project.id,
+            source_label=scope_key,
         )
 
     summary = ImportSchedulesResponse(
@@ -3234,6 +3534,200 @@ async def resync_schedules(
     return ResyncSchedulesResponse(
         agents_dispatched=len(eligible),
         schedulers_observed=sorted(schedulers_seen),
+    )
+
+
+async def _pause_or_resume(
+    *,
+    request: Request,
+    slug: str,
+    schedule_id: uuid.UUID,
+    pause: bool,
+    user: User,
+    memberships: MembershipRepository,
+    projects: ProjectRepository,
+    audit_log: AuditLogRepository,
+    audit: AuditService,
+    db_session: AsyncSession,
+    ip: str,
+) -> SchedulePublic:
+    """Hold a schedule, or let it run again.
+
+    Pausing is deliberately NOT disabling. Disabling retires a schedule and
+    is propagated to the owning scheduler adapter; pausing is a brain-side
+    hold for an incident, enforced by the fire authority, which refuses a
+    fire for a paused schedule however it arrives.
+
+    The hold is offered only for schedules this brain fires. A schedule owned
+    by celery-beat, APScheduler, or any other external scheduler keeps its own
+    cadence and there is no channel to tell it to stop, so a hold recorded here
+    would be a promise nothing keeps. Those are refused with 409 rather than
+    given a timestamp that means nothing.
+
+    Idempotent in both directions. Pausing an already-paused schedule keeps
+    the ORIGINAL timestamp: the useful question during an incident is how
+    long this has been held, and refreshing it on every click would erase
+    the answer.
+    """
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.repositories.schedule_control import (
+        ScheduleControlRepository,
+    )
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.OPERATOR,
+    )
+    # Through the control repository, never by assigning to the row. Boundary
+    # D refuses any schedule write that does not carry a fresh revision and a
+    # matching change-log envelope, so a direct assignment here raises at
+    # commit on every activated database.
+    control = ScheduleControlRepository(db_session)
+    transition = await control.set_paused(
+        project_id=project.id,
+        schedule_id=schedule_id,
+        paused=pause,
+        occurred_at=datetime.now(UTC),
+    )
+    action = "schedule.pause" if pause else "schedule.resume"
+
+    # Refusals leave a trail too. The resync path a few hundred lines up
+    # already audits its denial, with the reasoning that an operator clicking
+    # a button repeatedly should be visible; these two were the paths that
+    # did not, so a rejected hold on someone else's schedule left nothing
+    # behind at all. Recorded before raising, because the raise ends the
+    # request.
+    async def _record_refusal(reason: str) -> None:
+        await audit.record(
+            audit_log,
+            action=action,
+            target_type="schedule",
+            target_id=str(schedule_id),
+            result="failure",
+            outcome="deny",
+            user_id=user.id,
+            project_id=project.id,
+            api_key_id=resolve_api_key_id(request),
+            source_ip=ip,
+            metadata={"reason": reason},
+        )
+        await db_session.commit()
+
+    if transition.outcome == "not_found":
+        await _record_refusal("schedule_not_found")
+        raise NotFoundError("schedule not found")
+    if transition.outcome == "foreign_owner":
+        owner = transition.schedule.scheduler if transition.schedule else "another scheduler"
+        await _record_refusal("foreign_owner")
+        raise ConflictError(
+            f"this schedule is owned by {owner}, which keeps its own cadence. "
+            "Disable it, or hold it in that scheduler.",
+        )
+    schedule = transition.schedule
+    if schedule is None:  # pragma: no cover - defensive
+        await _record_refusal("schedule_not_found")
+        raise NotFoundError("schedule not found")
+
+    # ``already_applied`` means the requested state was already in force, and
+    # that is true of pause and resume alike. Negating it on the resume branch
+    # recorded every no-op resume as a change and every real one as a no-op:
+    # exactly backwards, in the log that exists to be evidence.
+    already = transition.outcome == "already_applied"
+
+    await audit.record(
+        audit_log,
+        action=action,
+        target_type="schedule",
+        target_id=str(schedule_id),
+        result="success",
+        outcome="allow",
+        user_id=user.id,
+        project_id=project.id,
+        api_key_id=resolve_api_key_id(request),
+        source_ip=ip,
+        metadata={
+            "already_in_state": already,
+            "paused_at": (schedule.paused_at.isoformat() if schedule.paused_at else None),
+        },
+    )
+    await db_session.commit()
+    await db_session.refresh(schedule)
+    return _payload(schedule)
+
+
+@router.post(
+    "/{schedule_id}/pause",
+    response_model=SchedulePublic,
+    dependencies=[
+        Depends(begin_sqlite_immediate_write_unit),
+        Depends(require_csrf),
+    ],
+)
+async def pause_schedule(
+    request: Request,
+    slug: str,
+    schedule_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
+    ip: str = Depends(get_client_ip),
+) -> SchedulePublic:
+    """Hold this schedule without retiring it."""
+    return await _pause_or_resume(
+        request=request,
+        slug=slug,
+        schedule_id=schedule_id,
+        pause=True,
+        user=user,
+        memberships=memberships,
+        projects=projects,
+        audit_log=audit_log,
+        audit=audit,
+        db_session=db_session,
+        ip=ip,
+    )
+
+
+@router.post(
+    "/{schedule_id}/resume",
+    response_model=SchedulePublic,
+    dependencies=[
+        Depends(begin_sqlite_immediate_write_unit),
+        Depends(require_csrf),
+    ],
+)
+async def resume_schedule(
+    request: Request,
+    slug: str,
+    schedule_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    db_session: AsyncSession = Depends(get_session),
+    ip: str = Depends(get_client_ip),
+) -> SchedulePublic:
+    """Release a hold placed by pause."""
+    return await _pause_or_resume(
+        request=request,
+        slug=slug,
+        schedule_id=schedule_id,
+        pause=False,
+        user=user,
+        memberships=memberships,
+        projects=projects,
+        audit_log=audit_log,
+        audit=audit,
+        db_session=db_session,
+        ip=ip,
     )
 
 

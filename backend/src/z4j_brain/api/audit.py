@@ -1,13 +1,22 @@
 """``/api/v1/projects/{slug}/audit`` REST router.
 
-Read-only access to the append-only audit log. Filterable by
-action prefix, outcome, user, and time range. Cursor-paginated by
-``occurred_at`` so deep paging stays O(1).
+Read-only access to the audit log. Filterable by action prefix,
+outcome, user, and time range. Keyset-paginated by ``occurred_at``
+so query work does not grow with page depth.
 
-The audit log is append-only at the database level (B2 trigger
-+ row HMAC), so this router cannot mutate. Operators inspect
-events here; the verifier CLI (``z4j audit verify``)
-re-checks the row HMAC chain offline.
+This router exposes no write path at all. Within the application trust
+boundary, the database mutation trigger and per-row HMAC chain detect a
+write outside :class:`AuditService`: an allowed mutation that does not
+also reproduce the authenticated chain leaves retained rows disagreeing
+with the head, and ``z4j audit verify`` names the row.
+
+That evidence stops at the database boundary. A role that can write
+both ``audit_log`` and ``audit_chain_state`` can delete recent rows
+and restore an earlier copy of the state row, which still
+authenticates because the brain signed it when it was current, and
+verification then reports the shortened history as clean. Evidence
+that has to survive a hostile database role belongs outside the
+database (see ``docs/SECURITY.md`` section 10.2).
 """
 
 from __future__ import annotations
@@ -21,6 +30,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 
 from z4j_brain.api._export import (
+    XLSX_ROW_CAP,
     FieldDef,
     export_csv,
     export_json,
@@ -99,12 +109,17 @@ def _payload(row: AuditLog) -> AuditLogPublic:
 # Export
 # ---------------------------------------------------------------------------
 
-#: Maximum rows returned by the export path. Above this we ask
-#: the operator to narrow the filter - dumping a multi-million-row
-#: audit log in one shot is rarely what they actually want, and
-#: the memory cost is real (every row carries a JSONB metadata
-#: blob). Matches the tasks export ceiling.
+#: Maximum rows returned by the CSV and JSON export paths. XLSX uses the
+#: lower :data:`XLSX_ROW_CAP` because xlsxwriter assembles its workbook in
+#: memory. Above either format-specific ceiling the operator must narrow
+#: the filter; every audit row may carry a JSONB metadata blob.
 _EXPORT_ROW_CAP = 50_000
+
+
+def _export_row_cap(export_format: str) -> int:
+    """Return the safe row ceiling for an audit export format."""
+    return XLSX_ROW_CAP if export_format == "xlsx" else _EXPORT_ROW_CAP
+
 
 #: Every exportable audit column + its value extractor. Order is
 #: preserved in the output. ``metadata`` is a JSON blob; we
@@ -161,8 +176,10 @@ async def list_audit(
         pattern="^(csv|json|xlsx)$",
         description=(
             "Optional export format. When set, pagination is "
-            "ignored and the full filter result (capped at "
-            "50 000 rows) is returned as a file download."
+            "ignored and the filtered result is returned as a file "
+            "download. CSV and JSON are capped at 50 000 rows; XLSX "
+            "is capped at 25 000 rows because the workbook is built "
+            "in memory."
         ),
     ),
     fields: str | None = Query(
@@ -186,10 +203,11 @@ async def list_audit(
     privileged because they can reveal who did what when, which
     is itself sensitive.
 
-    When ``format`` is ``csv`` / ``json`` / ``xlsx`` the response
-    is a file download containing up to ``_EXPORT_ROW_CAP`` rows
-    that match the filter. Cursor + limit are ignored on the
-    export path - operators narrow via the filter params instead.
+    When ``format`` is ``csv`` / ``json`` the response is a file
+    download containing up to 50 000 matching rows; ``xlsx`` is
+    capped at 25 000 because its workbook is built in memory.
+    Cursor + limit are ignored on the export path - operators
+    narrow via the filter params instead.
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
 
@@ -220,16 +238,17 @@ async def list_audit(
 
     # Export path: no pagination, full result (capped).
     if format is not None:
+        export_cap = _export_row_cap(format)
         stmt = stmt.order_by(
             AuditLog.occurred_at.desc(),
             AuditLog.id.desc(),
-        ).limit(_EXPORT_ROW_CAP + 1)
+        ).limit(export_cap + 1)
         rows = list((await db_session.execute(stmt)).scalars().all())
-        if len(rows) > _EXPORT_ROW_CAP:
+        if len(rows) > export_cap:
             raise ValidationError(
-                f"audit export is capped at {_EXPORT_ROW_CAP} rows; "
+                f"{format} audit export is capped at {export_cap} rows; "
                 "narrow the filter (action, outcome, since)",
-                details={"cap": _EXPORT_ROW_CAP},
+                details={"cap": export_cap, "format": format},
             )
         selected = [f.strip() for f in fields.split(",") if f.strip()] if fields else None
         field_defs = _resolve_fields(selected)
