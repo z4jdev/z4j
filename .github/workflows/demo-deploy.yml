@@ -24,8 +24,10 @@ name: demo-deploy
 #     page on dash.cloudflare.com, or via `wrangler whoami`.
 #
 # Until both secrets are set the deploy step will fail with a wrangler
-# auth error; the build step still runs so PR-time UI breakage is
-# caught regardless.
+# auth error; the build step still runs, so a broken dashboard build fails
+# this workflow rather than deploying. Note there is no pull_request
+# trigger below, so that check happens after a change lands on main, not
+# before it merges.
 
 on:
   push:

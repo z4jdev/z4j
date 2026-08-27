@@ -806,3 +806,52 @@ class TestCommandsRouter:
         assert body["status"] in ("pending", "dispatched")
         assert body["payload"]["eta_seconds"] == 60
         assert eta_before <= body["payload"]["eta"] <= eta_after
+
+
+class TestRequeueDeadLetter:
+    """The dead-letter requeue must be reachable, and only by an operator.
+
+    Every layer below this endpoint already existed: z4j-rq implements
+    ``requeue_dead_letter``, z4j-core puts the policy Action in the operator
+    tier, the agent dispatcher handles it, and the wire helper anticipates it.
+    What was missing was a route that mints the command, so none of it could be
+    triggered by a user.
+    """
+
+    async def test_cross_project_agent_is_refused(self, client, seeded):
+        """The cross-project agent guard applies here as to its siblings."""
+        r = await client.post(
+            "/api/v1/projects/default/commands/requeue-dead-letter",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={
+                "agent_id": str(uuid.uuid4()),
+                "engine": "rq",
+                "task_id": "dead-letter-1",
+            },
+        )
+        assert r.status_code == 404
+
+    async def test_csrf_is_required(self, client, seeded):
+        """A state-changing command endpoint is not exempt from CSRF."""
+        r = await client.post(
+            "/api/v1/projects/default/commands/requeue-dead-letter",
+            json={
+                "agent_id": str(uuid.uuid4()),
+                "engine": "rq",
+                "task_id": "dead-letter-2",
+            },
+        )
+        assert r.status_code == 403
+
+    async def test_engine_is_validated(self, client, seeded):
+        """The engine is dispatched on, so an unroutable value is refused."""
+        r = await client.post(
+            "/api/v1/projects/default/commands/requeue-dead-letter",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={
+                "agent_id": str(uuid.uuid4()),
+                "engine": "not a real engine",
+                "task_id": "dead-letter-3",
+            },
+        )
+        assert r.status_code == 422

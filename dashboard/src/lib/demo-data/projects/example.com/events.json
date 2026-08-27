@@ -1,1 +1,1619 @@
-{"items": [], "next_cursor": null}
+{
+  "items": [
+    {
+      "id": "75d054df-f805-5ada-b5ac-f733d677a436",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0987cda0-1675-5fb5-ba87-1df9048245da",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -10
+    },
+    {
+      "id": "654f8e86-77c1-5025-a8ce-c6ab5379ae75",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "38c5a4e3-4dc0-55d5-9e6a-a4169a2d3bd6",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -55
+    },
+    {
+      "id": "5d148650-074f-5124-b8f8-010eacaa60bd",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "38c5a4e3-4dc0-55d5-9e6a-a4169a2d3bd6",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 1
+      },
+      "occurred_at_offset_s": -58
+    },
+    {
+      "id": "eeefa23a-2ff3-5219-9180-b99410346304",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "38c5a4e3-4dc0-55d5-9e6a-a4169a2d3bd6",
+      "kind": "task.received",
+      "payload": {
+        "queue": "search",
+        "name": "search.reindex_documents"
+      },
+      "occurred_at_offset_s": -60
+    },
+    {
+      "id": "3c2821c3-5de0-5753-b110-1c0b3e66b091",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "14e959bd-4e61-50f7-a145-154a93ff5e2a",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -88
+    },
+    {
+      "id": "80c1d2db-80df-556b-b832-b05c5e9e5f09",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "14e959bd-4e61-50f7-a145-154a93ff5e2a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -90
+    },
+    {
+      "id": "ea8c7115-2c18-5a2e-a4e5-04a56be8e5d1",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "046548eb-d942-5dbf-948f-d1af60772e7e",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 3120
+      },
+      "occurred_at_offset_s": -176
+    },
+    {
+      "id": "35e8dfc8-a3ac-54bb-8554-9ddefdddacce",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "046548eb-d942-5dbf-948f-d1af60772e7e",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -179
+    },
+    {
+      "id": "7b004dce-566b-50c6-b290-2e112a5ca138",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "046548eb-d942-5dbf-948f-d1af60772e7e",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -180
+    },
+    {
+      "id": "524a70cf-55b0-53fb-9e23-4d34c055ca8a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "4c103ae5-9bdb-5e5d-9827-8c980004278e",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1820
+      },
+      "occurred_at_offset_s": -417
+    },
+    {
+      "id": "f4e809a3-09e5-5122-a320-8eb0c95e2038",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "4c103ae5-9bdb-5e5d-9827-8c980004278e",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -419
+    },
+    {
+      "id": "05c41ba9-269f-5544-88c1-08241962dd7a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "4c103ae5-9bdb-5e5d-9827-8c980004278e",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -420
+    },
+    {
+      "id": "1a1d7f9c-b1cf-589b-b771-c157688c2f02",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "05e9b9c9-7bcf-5dc2-9aa1-52ebe88bcd24",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 770
+      },
+      "occurred_at_offset_s": -509
+    },
+    {
+      "id": "2143e37c-0248-5ca0-8bbe-be7888290c2a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "05e9b9c9-7bcf-5dc2-9aa1-52ebe88bcd24",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -510
+    },
+    {
+      "id": "63d310e9-d539-5751-b0c0-fa3a93ba61bb",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "05e9b9c9-7bcf-5dc2-9aa1-52ebe88bcd24",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -511
+    },
+    {
+      "id": "65f837a7-7f14-5a72-a46a-6315ee319450",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "45ef0b39-d31d-56ff-bcde-86f2fb5b77d4",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -841
+    },
+    {
+      "id": "66c1b3f8-29d8-5012-964e-ee0047048739",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "45ef0b39-d31d-56ff-bcde-86f2fb5b77d4",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -842
+    },
+    {
+      "id": "0e17b7c8-6993-5483-b742-cbb51d2d05db",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "8de8cb81-44a9-5fa8-8480-fbe9e38aff81",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1640
+      },
+      "occurred_at_offset_s": -927
+    },
+    {
+      "id": "c0503568-a1bc-5c85-adaf-e55dfb9213cb",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "8de8cb81-44a9-5fa8-8480-fbe9e38aff81",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -929
+    },
+    {
+      "id": "403bb18b-e2c2-5543-a64e-8b76529dafcb",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "8de8cb81-44a9-5fa8-8480-fbe9e38aff81",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -930
+    },
+    {
+      "id": "da5c6333-3f32-527f-831c-385da56e3cb8",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "7fc6a7c3-8615-58a4-a44b-1852046c3f0a",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError",
+        "retry_count": 1
+      },
+      "occurred_at_offset_s": -1171
+    },
+    {
+      "id": "8c7a767d-bb9f-5a99-9ca2-3a9e831fd168",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "7fc6a7c3-8615-58a4-a44b-1852046c3f0a",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -1172
+    },
+    {
+      "id": "ac60d3a2-3cc2-55d6-bbc1-837a1571cff3",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "7fc6a7c3-8615-58a4-a44b-1852046c3f0a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -1173
+    },
+    {
+      "id": "b73ed77b-d88f-5c52-b43f-4540f7b0126a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "72adfce0-f6b9-5c0e-9333-86da0d99e2d3",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 2
+      },
+      "occurred_at_offset_s": -1502
+    },
+    {
+      "id": "f61a5861-e1c3-5648-8e3a-f124ca98c512",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "72adfce0-f6b9-5c0e-9333-86da0d99e2d3",
+      "kind": "task.received",
+      "payload": {
+        "queue": "exports",
+        "name": "exports.generate_csv"
+      },
+      "occurred_at_offset_s": -1504
+    },
+    {
+      "id": "ba829880-8ed2-5275-99a8-dc40f935b39f",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "ab9e7d86-4810-598e-bc6a-bce7ac410acc",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -1835
+    },
+    {
+      "id": "9ab3e04b-2710-573b-9a1e-cf6ad8e191b7",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b13f2bef-27c4-595b-9df0-d4a7f8c87d3c",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 955
+      },
+      "occurred_at_offset_s": -2164
+    },
+    {
+      "id": "7d10bc1b-0342-5d02-affb-e90cceda8511",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b13f2bef-27c4-595b-9df0-d4a7f8c87d3c",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -2165
+    },
+    {
+      "id": "c84a6e91-8f2d-5e29-8632-6e2ae0b11b3d",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b13f2bef-27c4-595b-9df0-d4a7f8c87d3c",
+      "kind": "task.received",
+      "payload": {
+        "queue": "search",
+        "name": "search.reindex_documents"
+      },
+      "occurred_at_offset_s": -2166
+    },
+    {
+      "id": "1744e91d-68b3-554f-bde7-e520668b8e02",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "de9866d6-61ab-51ea-848c-10d306785b17",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -2496
+    },
+    {
+      "id": "ecb4aebf-fa66-5716-97ab-258f75274e75",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "de9866d6-61ab-51ea-848c-10d306785b17",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -2497
+    },
+    {
+      "id": "fdfe1fd4-7d1b-52ff-aaa5-9593834de142",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "28a57b26-89cd-5b60-b111-e1fee7a693b2",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError",
+        "retry_count": 3
+      },
+      "occurred_at_offset_s": -2826
+    },
+    {
+      "id": "55650c3c-7581-5237-b935-02af8279f2ff",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "28a57b26-89cd-5b60-b111-e1fee7a693b2",
+      "kind": "task.started",
+      "payload": {
+        "worker": null
+      },
+      "occurred_at_offset_s": -2827
+    },
+    {
+      "id": "606bea72-c49a-5a73-b9ae-c5ba4a7eb36a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "28a57b26-89cd-5b60-b111-e1fee7a693b2",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -2828
+    },
+    {
+      "id": "52e48765-b876-520f-864a-cdf671d48097",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "171a909e-10e3-57f6-9db3-16dfbea4d90a",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 1
+      },
+      "occurred_at_offset_s": -3157
+    },
+    {
+      "id": "88aaee54-7957-5a95-a708-e32c54e35ecc",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "171a909e-10e3-57f6-9db3-16dfbea4d90a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -3159
+    },
+    {
+      "id": "fc13e057-e2c1-577b-8b0b-cad507d7cff3",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "af1bfc1e-0c88-5733-9759-a45828412d7a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -3490
+    },
+    {
+      "id": "5c4966ab-c5c1-5991-96e7-36d489c644e4",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9a07c1ce-8960-5404-a2c4-af2bbdff3710",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError: query exceeded statement_timeout (30s)",
+        "retry_count": 2
+      },
+      "occurred_at_offset_s": -3569
+    },
+    {
+      "id": "2f0f0622-bd75-547b-90e9-fefbbad18719",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9a07c1ce-8960-5404-a2c4-af2bbdff3710",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -3599
+    },
+    {
+      "id": "b7e983f5-2271-512a-a71e-c9e4780066a9",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9a07c1ce-8960-5404-a2c4-af2bbdff3710",
+      "kind": "task.received",
+      "payload": {
+        "queue": "exports",
+        "name": "exports.generate_csv"
+      },
+      "occurred_at_offset_s": -3600
+    },
+    {
+      "id": "e7679430-a129-5433-bab0-e9d84243f675",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "c10ffe45-3f9d-5dae-8ee4-124d3f3b6389",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 8120
+      },
+      "occurred_at_offset_s": -3680
+    },
+    {
+      "id": "2a661c7d-4acb-5396-98fb-5d6caece555b",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "c10ffe45-3f9d-5dae-8ee4-124d3f3b6389",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -3688
+    },
+    {
+      "id": "06eb3bb0-f216-5957-988d-2bc7edc084c4",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "c10ffe45-3f9d-5dae-8ee4-124d3f3b6389",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -3690
+    },
+    {
+      "id": "e3e17060-2721-502e-8d96-4ae7e464f132",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0f485841-6215-51e1-82b3-6501bac51994",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1140
+      },
+      "occurred_at_offset_s": -3819
+    },
+    {
+      "id": "2c093aeb-067a-5da0-a8ea-f78f729741a5",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0f485841-6215-51e1-82b3-6501bac51994",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -3820
+    },
+    {
+      "id": "6ed37e0f-76d3-5ce9-9685-8c530e90df2c",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0f485841-6215-51e1-82b3-6501bac51994",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -3821
+    },
+    {
+      "id": "03de033d-8c85-51d0-8687-5f4e2ca319e7",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "4d3d140f-22b4-51d8-8f9f-4662866f8f7a",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -4151
+    },
+    {
+      "id": "7b464e12-87d5-5ceb-98c1-a4f1c3b6aae3",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "4d3d140f-22b4-51d8-8f9f-4662866f8f7a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -4152
+    },
+    {
+      "id": "9d51f4d0-aee7-58a7-8eae-51af24148a5d",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "60b6fd9e-489c-520d-be75-4476c76b057a",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError",
+        "retry_count": 2
+      },
+      "occurred_at_offset_s": -4481
+    },
+    {
+      "id": "47d59964-0358-5ca7-9a10-5c8b095bec44",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "60b6fd9e-489c-520d-be75-4476c76b057a",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -4482
+    },
+    {
+      "id": "bf213bf5-cc56-5e1e-8159-a677f7a2015e",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "60b6fd9e-489c-520d-be75-4476c76b057a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -4483
+    },
+    {
+      "id": "863b3be4-6d58-5fc6-a7a2-19183da49002",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9b30da13-50b5-51c2-919f-2688ed90163f",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 2
+      },
+      "occurred_at_offset_s": -4812
+    },
+    {
+      "id": "e4126f80-ed95-5840-9787-6daa028ce804",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9b30da13-50b5-51c2-919f-2688ed90163f",
+      "kind": "task.received",
+      "payload": {
+        "queue": "exports",
+        "name": "exports.generate_csv"
+      },
+      "occurred_at_offset_s": -4814
+    },
+    {
+      "id": "4824a312-a760-5302-92ce-1a70494a0859",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "3e5850fd-19ff-5eca-8d3a-f91ce0662012",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -5145
+    },
+    {
+      "id": "d151fc1b-0d10-5615-b3e6-3df10f839f8a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b4202ac2-ea4d-51a2-be93-3f161119e806",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1325
+      },
+      "occurred_at_offset_s": -5474
+    },
+    {
+      "id": "9f8ecffb-106e-53a1-8de3-06a7478b37cd",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b4202ac2-ea4d-51a2-be93-3f161119e806",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -5475
+    },
+    {
+      "id": "d8885722-d7cf-509c-8051-75289da8f509",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b4202ac2-ea4d-51a2-be93-3f161119e806",
+      "kind": "task.received",
+      "payload": {
+        "queue": "search",
+        "name": "search.reindex_documents"
+      },
+      "occurred_at_offset_s": -5476
+    },
+    {
+      "id": "2fc79721-198a-5a1f-a2fd-2c3d16444a34",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "35b8b5e0-0ab5-529f-8b8e-8e6da8ba7fad",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -5806
+    },
+    {
+      "id": "6b6a2220-ced7-588c-bf26-5593a71bfce7",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "35b8b5e0-0ab5-529f-8b8e-8e6da8ba7fad",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -5807
+    },
+    {
+      "id": "f53d965e-1d86-5fca-8509-b23e9986ace4",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "fc3b995b-7f80-5c18-932d-80e46d85060b",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError",
+        "retry_count": 1
+      },
+      "occurred_at_offset_s": -6136
+    },
+    {
+      "id": "b1813756-d291-53cc-8c1b-a570fa18cc03",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "fc3b995b-7f80-5c18-932d-80e46d85060b",
+      "kind": "task.started",
+      "payload": {
+        "worker": null
+      },
+      "occurred_at_offset_s": -6137
+    },
+    {
+      "id": "a23a81ab-898c-526b-ae33-8f0713884a3e",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "fc3b995b-7f80-5c18-932d-80e46d85060b",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -6138
+    },
+    {
+      "id": "b75f84e2-db3c-5d67-b025-2c204039b720",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d619e511-cc78-53d3-937a-06a32ecf761d",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 1
+      },
+      "occurred_at_offset_s": -6467
+    },
+    {
+      "id": "78b346bd-ea88-5ddb-b14d-06dfe276b6b9",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d619e511-cc78-53d3-937a-06a32ecf761d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -6469
+    },
+    {
+      "id": "dd6cad40-2964-5256-a465-b2abbf75e2d6",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "ee821e4d-9820-57e2-b7df-7bf040272a69",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -6800
+    },
+    {
+      "id": "dd0362d0-b847-57c5-8a87-d20d8cf997f3",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "69f96d9c-6d6d-5a4f-baa7-c06d4c56f682",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1510
+      },
+      "occurred_at_offset_s": -7129
+    },
+    {
+      "id": "927f7b59-4cda-5f42-b3a5-cc09b11bf422",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "69f96d9c-6d6d-5a4f-baa7-c06d4c56f682",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -7130
+    },
+    {
+      "id": "877efc6a-cda2-5271-b6bd-01dc489b8948",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "69f96d9c-6d6d-5a4f-baa7-c06d4c56f682",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -7131
+    },
+    {
+      "id": "c9e1a662-41df-5542-bc40-576ff28c251d",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "1b11af57-d36a-57bd-8d39-635601f5c861",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 4210
+      },
+      "occurred_at_offset_s": -7195
+    },
+    {
+      "id": "280eaca8-2c76-5a44-a0ba-1a3a42339996",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "1b11af57-d36a-57bd-8d39-635601f5c861",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -7199
+    },
+    {
+      "id": "47212d10-96f1-595f-b166-55518a169394",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "1b11af57-d36a-57bd-8d39-635601f5c861",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -7200
+    },
+    {
+      "id": "3c974b7d-465b-5314-ba83-163edcf02989",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "4cf68804-12c6-5f0e-aa24-effa2692a798",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -7461
+    },
+    {
+      "id": "6ad72a33-2621-5cbf-b130-052a4e625514",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "4cf68804-12c6-5f0e-aa24-effa2692a798",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -7462
+    },
+    {
+      "id": "b7d92baa-db2b-53e1-97da-9b65885a9a13",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "634af3af-f12c-5deb-84ba-97c366e2169d",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError",
+        "retry_count": 3
+      },
+      "occurred_at_offset_s": -7791
+    },
+    {
+      "id": "01c4090a-f170-5838-8eee-ecf60a7fb9de",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "634af3af-f12c-5deb-84ba-97c366e2169d",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -7792
+    },
+    {
+      "id": "2784faaa-9fd5-50f3-b778-fc90cc22ae42",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "634af3af-f12c-5deb-84ba-97c366e2169d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -7793
+    },
+    {
+      "id": "e75d3968-fa10-5e2e-8dd3-80108709dac6",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "e0f9255d-7db8-5d41-b5b1-b74f2c3c041b",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 2
+      },
+      "occurred_at_offset_s": -8122
+    },
+    {
+      "id": "16d43f10-5197-5f89-8fca-8f88bd010e0d",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "e0f9255d-7db8-5d41-b5b1-b74f2c3c041b",
+      "kind": "task.received",
+      "payload": {
+        "queue": "exports",
+        "name": "exports.generate_csv"
+      },
+      "occurred_at_offset_s": -8124
+    },
+    {
+      "id": "3f5308b2-cd9e-5562-90fb-e06a107f13ca",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "5d57e575-652e-5925-aff6-a70f5f223f2c",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -8455
+    },
+    {
+      "id": "caaaeaac-1d13-5e3f-9896-6c021597802f",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9b6cd119-2586-5bcc-9cb2-b6ac83af7d7a",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1695
+      },
+      "occurred_at_offset_s": -8784
+    },
+    {
+      "id": "46084c78-d88b-5e96-b5c6-6874a3497dd1",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9b6cd119-2586-5bcc-9cb2-b6ac83af7d7a",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -8785
+    },
+    {
+      "id": "b955af0d-2fd1-5156-a9b8-dfe7ea6cec21",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9b6cd119-2586-5bcc-9cb2-b6ac83af7d7a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "search",
+        "name": "search.reindex_documents"
+      },
+      "occurred_at_offset_s": -8786
+    },
+    {
+      "id": "d295374d-d429-5dfb-921d-c336b35bd363",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b4d1e07b-dd53-57b8-ad60-0b2cab04a631",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -9116
+    },
+    {
+      "id": "298bcef3-1b98-5fe6-a05c-a28e72a520c0",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b4d1e07b-dd53-57b8-ad60-0b2cab04a631",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -9117
+    },
+    {
+      "id": "ccac93fa-0bcd-5b85-bdb5-59954934617e",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0be7e294-001c-5617-9a2e-8b81e2d66d45",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError",
+        "retry_count": 2
+      },
+      "occurred_at_offset_s": -9446
+    },
+    {
+      "id": "6cca54bb-8cd0-56b8-a3b5-4eb0be18041a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0be7e294-001c-5617-9a2e-8b81e2d66d45",
+      "kind": "task.started",
+      "payload": {
+        "worker": null
+      },
+      "occurred_at_offset_s": -9447
+    },
+    {
+      "id": "bcecfb5e-dc4b-5628-9474-0fb26497e6a2",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0be7e294-001c-5617-9a2e-8b81e2d66d45",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -9448
+    },
+    {
+      "id": "e38829b3-786d-59b8-8db4-732a058e2376",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d45360e3-a468-50ef-be0b-fab7d851a23b",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 1
+      },
+      "occurred_at_offset_s": -9777
+    },
+    {
+      "id": "da06cc30-e890-568a-9429-730316102a10",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d45360e3-a468-50ef-be0b-fab7d851a23b",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -9779
+    },
+    {
+      "id": "0f3cd338-ec38-5883-9bc1-6092696493e3",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "52237cfb-860e-5a77-bab9-b5e15eb870f2",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -10110
+    },
+    {
+      "id": "25659ec1-4f96-55cc-bcad-214c3cf1f82a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "ff9372cf-3cea-535b-b2ef-433778f4193e",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1880
+      },
+      "occurred_at_offset_s": -10439
+    },
+    {
+      "id": "ea95ee06-de6b-5c86-b5b9-9b6bd2cfc28d",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "ff9372cf-3cea-535b-b2ef-433778f4193e",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -10440
+    },
+    {
+      "id": "8224d6af-f115-51c5-8d2f-4294887c2a92",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "ff9372cf-3cea-535b-b2ef-433778f4193e",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -10441
+    },
+    {
+      "id": "b15cd4cb-ef98-5590-9d14-7439b9926c92",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "21f6581e-337a-51a2-82ad-042030b52cce",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -10771
+    },
+    {
+      "id": "fa2d2ba2-6b6f-5874-8720-fdfcaa2ae78c",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "21f6581e-337a-51a2-82ad-042030b52cce",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -10772
+    },
+    {
+      "id": "bd8d4cfc-cd63-55c2-856f-911bdb1cb555",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0893386d-d563-5a0e-b715-fe2de621cd28",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 3950
+      },
+      "occurred_at_offset_s": -10795
+    },
+    {
+      "id": "fa26093e-1504-5381-80b8-cf1e11822fe3",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0893386d-d563-5a0e-b715-fe2de621cd28",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -10799
+    },
+    {
+      "id": "9d50ed4a-d0aa-596c-b72b-39c33f73f32a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0893386d-d563-5a0e-b715-fe2de621cd28",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -10800
+    },
+    {
+      "id": "dc6a3d20-54fc-5e87-9f34-84aeec4cc1d8",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0dc1d618-c594-506c-bb3f-1cdd5546bae3",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError",
+        "retry_count": 1
+      },
+      "occurred_at_offset_s": -11101
+    },
+    {
+      "id": "8efb6f7f-9eef-5004-816b-208d23b894fe",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0dc1d618-c594-506c-bb3f-1cdd5546bae3",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -11102
+    },
+    {
+      "id": "e49961a0-0dcd-5aea-bff9-39a7d485a578",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0dc1d618-c594-506c-bb3f-1cdd5546bae3",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -11103
+    },
+    {
+      "id": "b332faa0-d3ac-5900-b478-036eacc1dfc0",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "4e215b44-ba00-527d-8ddb-438b2474be95",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 2
+      },
+      "occurred_at_offset_s": -11432
+    },
+    {
+      "id": "5f151463-222a-5b99-901a-e2a14987ff7a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "4e215b44-ba00-527d-8ddb-438b2474be95",
+      "kind": "task.received",
+      "payload": {
+        "queue": "exports",
+        "name": "exports.generate_csv"
+      },
+      "occurred_at_offset_s": -11434
+    },
+    {
+      "id": "436bb5e0-2b81-5bb1-8d93-a912f220ed17",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "65c48fe6-ba5b-5da2-b73a-d657ad54f5b0",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -11765
+    },
+    {
+      "id": "88f5dd9e-9393-5fba-92d4-b56863afd1ab",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "c5eec026-0ee7-5035-92a5-21a3b5176aeb",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 2065
+      },
+      "occurred_at_offset_s": -12093
+    },
+    {
+      "id": "e547424e-0199-524a-9f45-ff743f77eaec",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "c5eec026-0ee7-5035-92a5-21a3b5176aeb",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -12095
+    },
+    {
+      "id": "f4ea43f4-ca01-5521-a475-bae0cd0d9598",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "c5eec026-0ee7-5035-92a5-21a3b5176aeb",
+      "kind": "task.received",
+      "payload": {
+        "queue": "search",
+        "name": "search.reindex_documents"
+      },
+      "occurred_at_offset_s": -12096
+    },
+    {
+      "id": "b8233e78-af38-5eca-949c-c2c36cdab8d6",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "1b0e350d-9ca9-538c-bdb9-f1c33d078232",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -12426
+    },
+    {
+      "id": "42833539-3180-5213-92fe-306b705ee941",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "1b0e350d-9ca9-538c-bdb9-f1c33d078232",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -12427
+    },
+    {
+      "id": "c3e203b5-0b3a-500e-ab25-5d01e94b6c1e",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "30efc82b-8260-5b7a-b48d-412a0107e6c5",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError",
+        "retry_count": 3
+      },
+      "occurred_at_offset_s": -12755
+    },
+    {
+      "id": "8c2abed3-eb76-5661-9b1e-b3d185c07d96",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "30efc82b-8260-5b7a-b48d-412a0107e6c5",
+      "kind": "task.started",
+      "payload": {
+        "worker": null
+      },
+      "occurred_at_offset_s": -12757
+    },
+    {
+      "id": "8fdd7e76-9ce7-5422-8c73-37788eb39e17",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "30efc82b-8260-5b7a-b48d-412a0107e6c5",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -12758
+    },
+    {
+      "id": "034c3d2a-3e21-536d-80d8-48a403afdd04",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "25418d6c-afa3-55eb-bc36-a64d442471c9",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 1
+      },
+      "occurred_at_offset_s": -13087
+    },
+    {
+      "id": "623c1cb7-d6e9-5681-83d1-ceb5391adbec",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "25418d6c-afa3-55eb-bc36-a64d442471c9",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -13089
+    },
+    {
+      "id": "b11849f8-2b8a-5d7d-93af-9da5decc197f",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0c65be92-d14e-54e0-ad23-c43a0a665a04",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -13420
+    },
+    {
+      "id": "3fe7737d-0cc8-5591-a173-b63ebeca15c2",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "6c8a8a99-aa7d-5f27-8d23-bc6102be6821",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 2250
+      },
+      "occurred_at_offset_s": -13748
+    },
+    {
+      "id": "56ae5fa7-a702-5482-a652-d0d82f49844e",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "6c8a8a99-aa7d-5f27-8d23-bc6102be6821",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -13750
+    },
+    {
+      "id": "b39a8506-ac31-5064-9bb3-8b97a0581bf6",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "6c8a8a99-aa7d-5f27-8d23-bc6102be6821",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "billing.send_invoice_email"
+      },
+      "occurred_at_offset_s": -13751
+    },
+    {
+      "id": "7f32419f-a001-5cfa-bb8c-36ec4e14f579",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "c2216913-3d03-5702-b206-54b41f47b6ae",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -14081
+    },
+    {
+      "id": "3b636250-ef1c-5270-9b62-35e56839a9f5",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "c2216913-3d03-5702-b206-54b41f47b6ae",
+      "kind": "task.received",
+      "payload": {
+        "queue": "analytics",
+        "name": "analytics.aggregate_pageviews"
+      },
+      "occurred_at_offset_s": -14082
+    },
+    {
+      "id": "aade8442-ac48-55e9-b226-b46edadf946a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "738ab20b-27f2-5d82-872b-6f22dc674315",
+      "kind": "task.failed",
+      "payload": {
+        "exception": "TimeoutError",
+        "retry_count": 2
+      },
+      "occurred_at_offset_s": -14410
+    },
+    {
+      "id": "59f2631a-c279-5335-bd3b-e80f0bdca899",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "738ab20b-27f2-5d82-872b-6f22dc674315",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -14412
+    },
+    {
+      "id": "9f3409bf-f8ac-57e9-b279-f317a0cd232d",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "738ab20b-27f2-5d82-872b-6f22dc674315",
+      "kind": "task.received",
+      "payload": {
+        "queue": "default",
+        "name": "users.send_welcome_email"
+      },
+      "occurred_at_offset_s": -14413
+    },
+    {
+      "id": "7e961952-e5aa-5dff-87a7-a457251369b6",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d168c3c1-36af-5482-8925-57d3e1a84017",
+      "kind": "task.retried",
+      "payload": {
+        "retry_count": 2
+      },
+      "occurred_at_offset_s": -14742
+    },
+    {
+      "id": "6e08ea82-9481-5d00-86d6-be2a113370d1",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d168c3c1-36af-5482-8925-57d3e1a84017",
+      "kind": "task.received",
+      "payload": {
+        "queue": "exports",
+        "name": "exports.generate_csv"
+      },
+      "occurred_at_offset_s": -14744
+    },
+    {
+      "id": "7e3df57f-43c8-5ffe-84ad-88bac609cde4",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "a1902207-2cbb-5bf2-a954-0e1a7a01993c",
+      "kind": "task.received",
+      "payload": {
+        "queue": "billing",
+        "name": "billing.charge_subscription"
+      },
+      "occurred_at_offset_s": -15075
+    },
+    {
+      "id": "c8e755e8-9b0b-5495-89aa-b6d5c7990bf4",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "584d54ff-fa90-54ed-b0ca-d1df02b9b1ac",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 2435
+      },
+      "occurred_at_offset_s": -15403
+    },
+    {
+      "id": "e3cdbd60-7d4b-5d51-94dc-f0333144a48d",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "584d54ff-fa90-54ed-b0ca-d1df02b9b1ac",
+      "kind": "task.started",
+      "payload": {
+        "worker": "worker-1"
+      },
+      "occurred_at_offset_s": -15405
+    },
+    {
+      "id": "7f592d6d-b612-50c8-a759-1a18536b3d94",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "agent_id": "10000000-0000-4000-a000-000000000001",
+      "engine": "celery",
+      "task_id": "584d54ff-fa90-54ed-b0ca-d1df02b9b1ac",
+      "kind": "task.received",
+      "payload": {
+        "queue": "search",
+        "name": "search.reindex_documents"
+      },
+      "occurred_at_offset_s": -15406
+    }
+  ],
+  "next_cursor": null
+}

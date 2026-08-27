@@ -4582,6 +4582,47 @@
         "title": "RegenerateResponse",
         "type": "object"
       },
+      "RequeueDeadLetterRequest": {
+        "properties": {
+          "agent_id": {
+            "format": "uuid",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "engine": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Engine",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "task_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "engine",
+          "task_id"
+        ],
+        "title": "RequeueDeadLetterRequest",
+        "type": "object"
+      },
       "ResolveLegacyEvidenceIn": {
         "properties": {
           "enabled_after_resolution": {
@@ -8603,7 +8644,7 @@
   },
   "info": {
     "title": "z4j",
-    "version": "1.9.0"
+    "version": "1.9.1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -11749,6 +11790,59 @@
           }
         },
         "summary": "Issue Rate Limit",
+        "tags": [
+          "commands"
+        ]
+      }
+    },
+    "/api/v1/projects/{slug}/commands/requeue-dead-letter": {
+      "post": {
+        "description": "Move one dead-lettered task back onto its queue.\n\nDeliberately not gated on engine support, and the reason is safety rather\nthan convenience. Whether a requeue is safe is a property of the engine's\nown dead-letter primitive, which only the adapter knows. RQ has one:\n``FailedJobRegistry`` IS its dead-letter concept and ``registry.requeue``\nconsumes the entry and preserves its original routing. Celery does not, and\nits adapter's implementation was removed as a breaking safety correction\nafter it was found to publish a plain retry without consuming the broker\nentry, which could duplicate work; it now refuses without touching the\nbroker at all.\n\nSo an unsupported engine returns a FAILED command naming the reason, which\nis honest. An engine allowlist here would encode today's adapter set into\nthe brain, and would go stale in both directions: it would block an adapter\nthat gains a safe primitive, and it would keep advertising one whose\nimplementation was withdrawn.",
+        "operationId": "issue_requeue_dead_letter_api_v1_projects__slug__commands_requeue_dead_letter_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequeueDeadLetterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Issue Requeue Dead Letter",
         "tags": [
           "commands"
         ]

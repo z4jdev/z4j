@@ -62,9 +62,20 @@ the z4j schema as equivalent to control of these integrity guarantees:
   `z4j audit verify --known-head`.
 
 The built-in audit webhook is best-effort and is not such an append-only sink.
-The database-boundary redesign is deferred to 2.0; its acceptance criterion is
-that a role holding only table privileges cannot alter a schedule or shorten
-the audit log without verification reporting it.
+Closing this needs authorization the database role cannot manufacture, which
+is a design change rather than a hardening pass. Two things have to be true
+before this entry comes off the list, and both are required, because a fix
+that closes the instance while leaving the class open would satisfy the
+first alone:
+
+1. A role with full write access to every z4j table cannot alter or remove a
+   schedule, or shorten the audit log, without verification reporting it.
+2. The adversarial harness runs as a **non-superuser role holding only table
+   privileges** and attempts the replay path specifically, not just naive
+   edits. A harness that only tries edits the current design already catches
+   proves nothing.
+
+This entry comes off the list when both hold, and not before.
 
 ## Security-critical surface
 

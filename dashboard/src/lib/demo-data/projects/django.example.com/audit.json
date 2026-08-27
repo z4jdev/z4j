@@ -146,6 +146,888 @@
       "source_ip": "203.0.113.42",
       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
       "occurred_at_offset_s": -25920000
+    },
+    {
+      "id": "13eff53d-cb6f-5d3f-a571-9ddc778bad86",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "agent.offline_detected",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000007",
+      "result": "failed",
+      "outcome": "error",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-emails-1",
+        "framework_adapter": "django",
+        "engine_adapters": [
+          "celery"
+        ],
+        "last_seen_at_offset_s": -480
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -497
+    },
+    {
+      "id": "b1760ccb-ca74-55bc-99a8-5e6cb8cffb34",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "agent.token.minted",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-default-2"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -934
+    },
+    {
+      "id": "c3203c86-1a85-5d20-8339-b6bc166f20a1",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "auth.login",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {},
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -1371
+    },
+    {
+      "id": "d1ce2b46-8786-54ce-8f61-c420d9fddde7",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "command.issue.retry_task",
+      "target_type": "task",
+      "target_id": "celery:d99c42a6-6b76-5058-a0b5-c3c861c4f801",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "command_id": "c0000000-0000-4001-9000-000000000001",
+        "agent_id": "10000000-0000-4002-a000-000000000004",
+        "idempotency_key": null
+      },
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -1808
+    },
+    {
+      "id": "03040f70-5183-5b1e-a1ff-83ddf828c9fc",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "membership.granted",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "role": "operator"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -2245
+    },
+    {
+      "id": "40e91be3-4f7e-5f07-a810-6ad8b83642b5",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "notifications.channel.create",
+      "target_type": "notification_channel",
+      "target_id": "50000000-0000-4002-e000-000000000001",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "platform-oncall",
+        "type": "pagerduty"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -2682
+    },
+    {
+      "id": "e61e2b12-7a39-58b5-b2ae-c9dc5e2c6837",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "schedule.circuit_breaker.tripped",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000002",
+      "result": "success",
+      "outcome": "deny",
+      "event_id": null,
+      "metadata": {
+        "name": "emails.send_scheduled_campaigns",
+        "scheduler": "django-celery-beat",
+        "engine": "celery",
+        "consecutive_failures": 4
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -3119
+    },
+    {
+      "id": "e678cb68-2873-5578-a41c-e0e138bdd6d9",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "schedule.update",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000003",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "fields_changed": [
+          "kwargs"
+        ]
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -3556
+    },
+    {
+      "id": "4053f3f3-daba-59fb-b6c1-3f0bc21faddf",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "agent.offline_detected",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000007",
+      "result": "failed",
+      "outcome": "error",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-emails-1",
+        "framework_adapter": "django",
+        "engine_adapters": [
+          "celery"
+        ],
+        "last_seen_at_offset_s": -480
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -3993
+    },
+    {
+      "id": "e881a138-86f0-5cde-bfa3-e40465b35b25",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "agent.token.minted",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-default-2"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -4430
+    },
+    {
+      "id": "5f3e3537-a6c2-58e1-a283-c3b877cd7e98",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "auth.login",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {},
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -4867
+    },
+    {
+      "id": "2b00c432-02da-581d-ae9a-ae8a83533538",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "command.issue.retry_task",
+      "target_type": "task",
+      "target_id": "celery:d99c42a6-6b76-5058-a0b5-c3c861c4f801",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "command_id": "c0000000-0000-4001-9000-000000000001",
+        "agent_id": "10000000-0000-4002-a000-000000000004",
+        "idempotency_key": null
+      },
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -5304
+    },
+    {
+      "id": "9ba04dbb-2422-5fc8-8d76-00381bd4aed4",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "membership.granted",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "role": "operator"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -5741
+    },
+    {
+      "id": "0f4de09b-6b2a-5e89-ad2a-a55deef38f17",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "notifications.channel.create",
+      "target_type": "notification_channel",
+      "target_id": "50000000-0000-4002-e000-000000000001",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "platform-oncall",
+        "type": "pagerduty"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -6178
+    },
+    {
+      "id": "712e4031-7ba3-568d-bb8a-793921320f7a",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "schedule.circuit_breaker.tripped",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000002",
+      "result": "success",
+      "outcome": "deny",
+      "event_id": null,
+      "metadata": {
+        "name": "emails.send_scheduled_campaigns",
+        "scheduler": "django-celery-beat",
+        "engine": "celery",
+        "consecutive_failures": 4
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -6615
+    },
+    {
+      "id": "c09f6533-208b-50ba-9ecc-872727c0f0cb",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "schedule.update",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000003",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "fields_changed": [
+          "kwargs"
+        ]
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -7052
+    },
+    {
+      "id": "2ff47ab5-6cd8-5a64-90db-f23c08ec475b",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "agent.offline_detected",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000007",
+      "result": "failed",
+      "outcome": "error",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-emails-1",
+        "framework_adapter": "django",
+        "engine_adapters": [
+          "celery"
+        ],
+        "last_seen_at_offset_s": -480
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -7489
+    },
+    {
+      "id": "931f9bae-ab17-5682-bafd-e0cbfff3e8a5",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "agent.token.minted",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-default-2"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -7926
+    },
+    {
+      "id": "139aee84-8e10-52fa-b5ef-8d73fef1b6c6",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "auth.login",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {},
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -8363
+    },
+    {
+      "id": "f97bf450-25c8-5037-ac63-fd0182dff9f3",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "command.issue.retry_task",
+      "target_type": "task",
+      "target_id": "celery:d99c42a6-6b76-5058-a0b5-c3c861c4f801",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "command_id": "c0000000-0000-4001-9000-000000000001",
+        "agent_id": "10000000-0000-4002-a000-000000000004",
+        "idempotency_key": null
+      },
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -8800
+    },
+    {
+      "id": "552392a0-9b50-5167-8186-2ba490360949",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "membership.granted",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "role": "operator"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -9237
+    },
+    {
+      "id": "5b7e1430-bc33-5807-8074-b6e86ec3e973",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "notifications.channel.create",
+      "target_type": "notification_channel",
+      "target_id": "50000000-0000-4002-e000-000000000001",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "platform-oncall",
+        "type": "pagerduty"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -9674
+    },
+    {
+      "id": "267ad267-0923-5614-96c0-65101d6dde81",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "schedule.circuit_breaker.tripped",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000002",
+      "result": "success",
+      "outcome": "deny",
+      "event_id": null,
+      "metadata": {
+        "name": "emails.send_scheduled_campaigns",
+        "scheduler": "django-celery-beat",
+        "engine": "celery",
+        "consecutive_failures": 4
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -10111
+    },
+    {
+      "id": "814c3cfd-bd8e-5b24-a16e-557ee0a9b5af",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "schedule.update",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000003",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "fields_changed": [
+          "kwargs"
+        ]
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -10548
+    },
+    {
+      "id": "38fdb182-33bb-52de-815c-649f1f02e05c",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "agent.offline_detected",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000007",
+      "result": "failed",
+      "outcome": "error",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-emails-1",
+        "framework_adapter": "django",
+        "engine_adapters": [
+          "celery"
+        ],
+        "last_seen_at_offset_s": -480
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -10985
+    },
+    {
+      "id": "80a1e697-3c3f-5258-94ad-9339ef55f3a2",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "agent.token.minted",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-default-2"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -11422
+    },
+    {
+      "id": "7f8df07e-e931-5bcb-abba-fb80c868d37c",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "auth.login",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {},
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -11859
+    },
+    {
+      "id": "6b13cd79-806a-5915-879a-384b3446e902",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "command.issue.retry_task",
+      "target_type": "task",
+      "target_id": "celery:d99c42a6-6b76-5058-a0b5-c3c861c4f801",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "command_id": "c0000000-0000-4001-9000-000000000001",
+        "agent_id": "10000000-0000-4002-a000-000000000004",
+        "idempotency_key": null
+      },
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -12296
+    },
+    {
+      "id": "e8387857-9ca2-5c31-ab69-852bfa287c1b",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "membership.granted",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "role": "operator"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -12733
+    },
+    {
+      "id": "f2af3736-d0bd-5af2-89da-a31e84922da1",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "notifications.channel.create",
+      "target_type": "notification_channel",
+      "target_id": "50000000-0000-4002-e000-000000000001",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "platform-oncall",
+        "type": "pagerduty"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -13170
+    },
+    {
+      "id": "303567f5-7175-5cc4-93b7-5f2e2da42dbc",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "schedule.circuit_breaker.tripped",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000002",
+      "result": "success",
+      "outcome": "deny",
+      "event_id": null,
+      "metadata": {
+        "name": "emails.send_scheduled_campaigns",
+        "scheduler": "django-celery-beat",
+        "engine": "celery",
+        "consecutive_failures": 4
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -13607
+    },
+    {
+      "id": "326a845b-dbff-567b-b573-24cb30585781",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "schedule.update",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000003",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "fields_changed": [
+          "kwargs"
+        ]
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -14044
+    },
+    {
+      "id": "c16b2aa8-2fe1-5e7c-a7de-78428f391cd0",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "agent.offline_detected",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000007",
+      "result": "failed",
+      "outcome": "error",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-emails-1",
+        "framework_adapter": "django",
+        "engine_adapters": [
+          "celery"
+        ],
+        "last_seen_at_offset_s": -480
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -14481
+    },
+    {
+      "id": "16dcca4c-0a3e-5df8-9925-dc19d1b2f14f",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "agent.token.minted",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-default-2"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -14918
+    },
+    {
+      "id": "2ad71bdf-509d-562f-be1a-767a97d28c4b",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "auth.login",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {},
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -15355
+    },
+    {
+      "id": "dfa7c618-fcee-534e-956c-20a0ddf584c0",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "command.issue.retry_task",
+      "target_type": "task",
+      "target_id": "celery:d99c42a6-6b76-5058-a0b5-c3c861c4f801",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "command_id": "c0000000-0000-4001-9000-000000000001",
+        "agent_id": "10000000-0000-4002-a000-000000000004",
+        "idempotency_key": null
+      },
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -15792
+    },
+    {
+      "id": "f6606750-ad58-539b-93ad-2c2be236fc73",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "membership.granted",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "role": "operator"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -16229
+    },
+    {
+      "id": "f1c9bff0-6450-516f-810c-7ddc282c29c9",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "notifications.channel.create",
+      "target_type": "notification_channel",
+      "target_id": "50000000-0000-4002-e000-000000000001",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "platform-oncall",
+        "type": "pagerduty"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -16666
+    },
+    {
+      "id": "89f39f54-9ad3-5874-a2b6-439e14462b25",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "schedule.circuit_breaker.tripped",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000002",
+      "result": "success",
+      "outcome": "deny",
+      "event_id": null,
+      "metadata": {
+        "name": "emails.send_scheduled_campaigns",
+        "scheduler": "django-celery-beat",
+        "engine": "celery",
+        "consecutive_failures": 4
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -17103
+    },
+    {
+      "id": "46a39dbf-0e4f-5120-8136-0f81ac5c0ef1",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "schedule.update",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000003",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "fields_changed": [
+          "kwargs"
+        ]
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -17540
+    },
+    {
+      "id": "59e3696d-c5d4-589f-aaba-2ce87f66204b",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "agent.offline_detected",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000007",
+      "result": "failed",
+      "outcome": "error",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-emails-1",
+        "framework_adapter": "django",
+        "engine_adapters": [
+          "celery"
+        ],
+        "last_seen_at_offset_s": -480
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -17977
+    },
+    {
+      "id": "002c6c4d-2362-5971-a999-70f0d52c4b92",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "agent.token.minted",
+      "target_type": "agent",
+      "target_id": "10000000-0000-4002-a000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "worker-default-2"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -18414
+    },
+    {
+      "id": "ac0d8333-955e-5db1-9ecc-d64e12f918c6",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "auth.login",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {},
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -18851
+    },
+    {
+      "id": "289c8b1e-b7b4-5230-a8d5-9b498d0e5561",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000005",
+      "action": "command.issue.retry_task",
+      "target_type": "task",
+      "target_id": "celery:d99c42a6-6b76-5058-a0b5-c3c861c4f801",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "command_id": "c0000000-0000-4001-9000-000000000001",
+        "agent_id": "10000000-0000-4002-a000-000000000004",
+        "idempotency_key": null
+      },
+      "source_ip": "198.51.100.22",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0)",
+      "occurred_at_offset_s": -19288
+    },
+    {
+      "id": "1d1439c4-43cd-5a95-a8bd-90f7d1333a81",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "membership.granted",
+      "target_type": "user",
+      "target_id": "00000000-0000-4000-8000-000000000005",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "role": "operator"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -19725
+    },
+    {
+      "id": "1346f087-e629-55e4-9c4b-1fc641beef41",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "notifications.channel.create",
+      "target_type": "notification_channel",
+      "target_id": "50000000-0000-4002-e000-000000000001",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "name": "platform-oncall",
+        "type": "pagerduty"
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -20162
+    },
+    {
+      "id": "924edaaa-73f7-5b10-8c34-1fa8d553bb2b",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": null,
+      "action": "schedule.circuit_breaker.tripped",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000002",
+      "result": "success",
+      "outcome": "deny",
+      "event_id": null,
+      "metadata": {
+        "name": "emails.send_scheduled_campaigns",
+        "scheduler": "django-celery-beat",
+        "engine": "celery",
+        "consecutive_failures": 4
+      },
+      "source_ip": null,
+      "user_agent": null,
+      "occurred_at_offset_s": -20599
+    },
+    {
+      "id": "84c5b86a-6200-5a7b-aaea-2a45574d23cc",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "user_id": "00000000-0000-4000-8000-000000000001",
+      "action": "schedule.update",
+      "target_type": "schedule",
+      "target_id": "30000000-0000-4002-c000-000000000003",
+      "result": "success",
+      "outcome": "allow",
+      "event_id": null,
+      "metadata": {
+        "fields_changed": [
+          "kwargs"
+        ]
+      },
+      "source_ip": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0)",
+      "occurred_at_offset_s": -21036
     }
   ],
   "next_cursor": null

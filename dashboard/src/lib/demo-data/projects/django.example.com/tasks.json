@@ -10,7 +10,9 @@
       "state": "failure",
       "priority": "high",
       "args": [],
-      "kwargs": {"batch_size": 500},
+      "kwargs": {
+        "batch_size": 500
+      },
       "result": null,
       "exception": "ConnectionError: smtp.example.com:587 connection refused",
       "traceback": "Traceback (most recent call last):\n  File \"/app/emails/tasks.py\", line 88, in send_scheduled_campaigns\n    smtp = aiosmtplib.SMTP(hostname='smtp.example.com', port=587)\n    await smtp.connect()\n  File \"/usr/lib/python3.13/site-packages/aiosmtplib/connection.py\", line 142, in connect\n    raise SMTPConnectError(...)\naiosmtplib.errors.SMTPConnectError: connection refused",
@@ -23,7 +25,10 @@
       "worker_name": "worker-emails-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["emails", "incident"],
+      "tags": [
+        "emails",
+        "incident"
+      ],
       "created_at_offset_s": -480,
       "updated_at_offset_s": -475
     },
@@ -37,7 +42,9 @@
       "state": "retry",
       "priority": "high",
       "args": [],
-      "kwargs": {"batch_size": 500},
+      "kwargs": {
+        "batch_size": 500
+      },
       "result": null,
       "exception": "ConnectionError: smtp.example.com:587 connection refused",
       "traceback": null,
@@ -50,7 +57,10 @@
       "worker_name": "worker-emails-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["emails", "incident"],
+      "tags": [
+        "emails",
+        "incident"
+      ],
       "created_at_offset_s": -180,
       "updated_at_offset_s": -90
     },
@@ -77,7 +87,10 @@
       "worker_name": "worker-billing-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["billing", "stripe"],
+      "tags": [
+        "billing",
+        "stripe"
+      ],
       "created_at_offset_s": -76800,
       "updated_at_offset_s": -76308
     },
@@ -91,7 +104,9 @@
       "state": "success",
       "priority": "low",
       "args": [],
-      "kwargs": {"window_seconds": 600},
+      "kwargs": {
+        "window_seconds": 600
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -104,7 +119,9 @@
       "worker_name": "worker-default-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["search"],
+      "tags": [
+        "search"
+      ],
       "created_at_offset_s": -120,
       "updated_at_offset_s": -114
     },
@@ -131,7 +148,9 @@
       "worker_name": "worker-default-2",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["metrics"],
+      "tags": [
+        "metrics"
+      ],
       "created_at_offset_s": -22,
       "updated_at_offset_s": -21
     },
@@ -144,7 +163,9 @@
       "queue": "default",
       "state": "started",
       "priority": "high",
-      "args": ["user_id_882"],
+      "args": [
+        "user_id_882"
+      ],
       "kwargs": {},
       "result": null,
       "exception": null,
@@ -158,7 +179,10 @@
       "worker_name": "worker-default-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["users", "auth"],
+      "tags": [
+        "users",
+        "auth"
+      ],
       "created_at_offset_s": -2,
       "updated_at_offset_s": -1
     },
@@ -171,8 +195,12 @@
       "queue": "billing",
       "state": "success",
       "priority": "critical",
-      "args": ["sub_4421"],
-      "kwargs": {"retry_on_decline": true},
+      "args": [
+        "sub_4421"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -185,7 +213,10 @@
       "worker_name": "worker-billing-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["billing", "stripe"],
+      "tags": [
+        "billing",
+        "stripe"
+      ],
       "created_at_offset_s": -1800,
       "updated_at_offset_s": -1794
     },
@@ -212,7 +243,9 @@
       "worker_name": "worker-default-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["metrics"],
+      "tags": [
+        "metrics"
+      ],
       "created_at_offset_s": -82,
       "updated_at_offset_s": -81
     },
@@ -226,7 +259,9 @@
       "state": "success",
       "priority": "low",
       "args": [],
-      "kwargs": {"max_age_days": 14},
+      "kwargs": {
+        "max_age_days": 14
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -239,7 +274,10 @@
       "worker_name": "worker-default-2",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["users", "cleanup"],
+      "tags": [
+        "users",
+        "cleanup"
+      ],
       "created_at_offset_s": -68400,
       "updated_at_offset_s": -68326
     },
@@ -253,7 +291,9 @@
       "state": "failure",
       "priority": "high",
       "args": [],
-      "kwargs": {"batch_size": 500},
+      "kwargs": {
+        "batch_size": 500
+      },
       "result": null,
       "exception": "ConnectionError: smtp.example.com:587 connection refused",
       "traceback": null,
@@ -266,7 +306,10 @@
       "worker_name": "worker-emails-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["emails", "incident"],
+      "tags": [
+        "emails",
+        "incident"
+      ],
       "created_at_offset_s": -780,
       "updated_at_offset_s": -775
     },
@@ -280,7 +323,9 @@
       "state": "success",
       "priority": "low",
       "args": [],
-      "kwargs": {"window_seconds": 600},
+      "kwargs": {
+        "window_seconds": 600
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -293,7 +338,9 @@
       "worker_name": "worker-default-2",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["search"],
+      "tags": [
+        "search"
+      ],
       "created_at_offset_s": -240,
       "updated_at_offset_s": -233
     },
@@ -306,8 +353,12 @@
       "queue": "billing",
       "state": "success",
       "priority": "critical",
-      "args": ["sub_4422"],
-      "kwargs": {"retry_on_decline": true},
+      "args": [
+        "sub_4422"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -320,9 +371,1395 @@
       "worker_name": "worker-billing-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["billing", "stripe"],
+      "tags": [
+        "billing",
+        "stripe"
+      ],
       "created_at_offset_s": -3600,
       "updated_at_offset_s": -3593
+    },
+    {
+      "id": "46603cb9-a79c-5674-a020-ff2cb64bf0f3",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "018b1f43-a646-5e15-a79e-5c6276f068d3",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -511,
+      "started_at_offset_s": -510,
+      "finished_at_offset_s": -509,
+      "runtime_ms": 844,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -511,
+      "updated_at_offset_s": -509
+    },
+    {
+      "id": "a804b409-a059-5c1a-8c83-4249f11d94a8",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "40e659f3-fd70-5028-8e77-930edb516a8c",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "failure",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": "ConnectionError: smtp.example.com:587 connection refused",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/emails/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 2,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -842,
+      "started_at_offset_s": -841,
+      "finished_at_offset_s": -840,
+      "runtime_ms": 881,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -842,
+      "updated_at_offset_s": -840
+    },
+    {
+      "id": "21addd90-b679-5484-84db-68b48762fe2e",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "6f5b4e6d-253f-53e7-aa87-4674badb8798",
+      "name": "billing.run_daily_invoices",
+      "queue": "billing",
+      "state": "retry",
+      "priority": "critical",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -1173,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -1173,
+      "updated_at_offset_s": -1173
+    },
+    {
+      "id": "6d414e9f-114d-54e0-a3dd-cb96b8e55783",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "5308190f-3348-5474-a5d4-2c723fc41204",
+      "name": "search.reindex_recent_changes",
+      "queue": "search",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_seconds": 600
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1504,
+      "started_at_offset_s": -1503,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -1504,
+      "updated_at_offset_s": -1503
+    },
+    {
+      "id": "16e27ef3-d9b2-5d1a-a054-941c5f8c95b5",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "a3811b83-2480-579c-b23c-da52a34d4c46",
+      "name": "metrics.minute_rollup",
+      "queue": "default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1835,
+      "started_at_offset_s": -1834,
+      "finished_at_offset_s": -1833,
+      "runtime_ms": 992,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -1835,
+      "updated_at_offset_s": -1833
+    },
+    {
+      "id": "2bf1d773-9372-50c3-8406-fc4829527960",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "9f6f9b76-12f6-5b22-8ef9-6ce3e759afe6",
+      "name": "users.send_password_reset",
+      "queue": "default",
+      "state": "failure",
+      "priority": "high",
+      "args": [
+        "user_id_882"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/users/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 3,
+      "eta": null,
+      "received_at_offset_s": -2166,
+      "started_at_offset_s": -2165,
+      "finished_at_offset_s": -2164,
+      "runtime_ms": 1029,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "auth"
+      ],
+      "created_at_offset_s": -2166,
+      "updated_at_offset_s": -2164
+    },
+    {
+      "id": "fa863db3-3e91-5db2-8a73-c65236ec61a1",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "b5d8444c-c044-5ab0-ab13-a352f1d57c2d",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "retry",
+      "priority": "critical",
+      "args": [
+        "sub_4421"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -2497,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -2497,
+      "updated_at_offset_s": -2497
+    },
+    {
+      "id": "ea56146c-a71e-51ff-a2f5-997bd82dd606",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "ca6549dc-9716-53c1-b582-d0d26cbf2a0a",
+      "name": "metrics.minute_rollup",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -2828,
+      "started_at_offset_s": -2827,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -2828,
+      "updated_at_offset_s": -2827
+    },
+    {
+      "id": "4bd93bee-facf-554d-8671-62be044e7f6c",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "80c16ad0-2a78-53f2-a6a5-91d2b798ee90",
+      "name": "users.cleanup_expired_sessions",
+      "queue": "default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "max_age_days": 14
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -3159,
+      "started_at_offset_s": -3158,
+      "finished_at_offset_s": -3157,
+      "runtime_ms": 1140,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "cleanup"
+      ],
+      "created_at_offset_s": -3159,
+      "updated_at_offset_s": -3157
+    },
+    {
+      "id": "47c97129-5cfc-53ed-b3af-0e08fd817975",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "8a84d65f-cfc9-5f43-87b3-e0477fb2dcfe",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "failure",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": "ConnectionError: smtp.example.com:587 connection refused",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/emails/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -3490,
+      "started_at_offset_s": -3489,
+      "finished_at_offset_s": -3488,
+      "runtime_ms": 1177,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -3490,
+      "updated_at_offset_s": -3488
+    },
+    {
+      "id": "68ebcd66-33ba-5753-b8fe-c138edc7e779",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "9fc46808-ed58-53c1-ba43-59d9697a6558",
+      "name": "search.reindex_recent_changes",
+      "queue": "search",
+      "state": "retry",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_seconds": 600
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -3821,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -3821,
+      "updated_at_offset_s": -3821
+    },
+    {
+      "id": "fe6e38cc-3b22-5845-9995-4f33f80ac432",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "a9964952-a297-5d76-9e2e-b52ea03ce499",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "started",
+      "priority": "critical",
+      "args": [
+        "sub_4422"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -4152,
+      "started_at_offset_s": -4151,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -4152,
+      "updated_at_offset_s": -4151
+    },
+    {
+      "id": "f1c8dfc0-9fdc-53a3-9052-f4544832c3f0",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "40365510-cdfe-56ac-90c8-a85fda5b4f5f",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -4483,
+      "started_at_offset_s": -4482,
+      "finished_at_offset_s": -4481,
+      "runtime_ms": 1288,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -4483,
+      "updated_at_offset_s": -4481
+    },
+    {
+      "id": "c4c51b84-cfcd-5628-b502-6de2e41734b9",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "d2fc9665-ac10-5435-a6a9-ed6658c9f8ce",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "failure",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": "ConnectionError: smtp.example.com:587 connection refused",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/emails/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 2,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -4814,
+      "started_at_offset_s": -4813,
+      "finished_at_offset_s": -4812,
+      "runtime_ms": 1325,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -4814,
+      "updated_at_offset_s": -4812
+    },
+    {
+      "id": "b839e406-5081-5af2-b0ca-3b45a1afd60a",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "83543a8d-bd77-556f-acba-be5f7943969c",
+      "name": "billing.run_daily_invoices",
+      "queue": "billing",
+      "state": "retry",
+      "priority": "critical",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -5145,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -5145,
+      "updated_at_offset_s": -5145
+    },
+    {
+      "id": "99e66d26-c6de-5222-ab3f-4d29ceb579f6",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "b7895f3e-90b9-5615-9c69-1b342951d759",
+      "name": "search.reindex_recent_changes",
+      "queue": "search",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_seconds": 600
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -5476,
+      "started_at_offset_s": -5475,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -5476,
+      "updated_at_offset_s": -5475
+    },
+    {
+      "id": "9ce3f5d1-3adf-5051-8d2b-667922d4053b",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "a81c7508-0217-542c-94e2-65f22fad6785",
+      "name": "metrics.minute_rollup",
+      "queue": "default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -5807,
+      "started_at_offset_s": -5806,
+      "finished_at_offset_s": -5805,
+      "runtime_ms": 1436,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -5807,
+      "updated_at_offset_s": -5805
+    },
+    {
+      "id": "1ea8562a-9c79-5a1a-9dff-d12b26561b22",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "77659886-e601-51fe-83ed-995acf1ca70c",
+      "name": "users.send_password_reset",
+      "queue": "default",
+      "state": "failure",
+      "priority": "high",
+      "args": [
+        "user_id_882"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/users/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 3,
+      "eta": null,
+      "received_at_offset_s": -6138,
+      "started_at_offset_s": -6137,
+      "finished_at_offset_s": -6136,
+      "runtime_ms": 1473,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "auth"
+      ],
+      "created_at_offset_s": -6138,
+      "updated_at_offset_s": -6136
+    },
+    {
+      "id": "1dd23167-e12f-5baa-93c2-4062ab1578d2",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "c78d87e5-c06c-560c-9eee-955441a11b6a",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "retry",
+      "priority": "critical",
+      "args": [
+        "sub_4421"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -6469,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -6469,
+      "updated_at_offset_s": -6469
+    },
+    {
+      "id": "6aef5875-da1f-5bb4-af55-1fc3c20d17e0",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "3f120910-faba-595d-986d-4eebb676da84",
+      "name": "metrics.minute_rollup",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -6800,
+      "started_at_offset_s": -6799,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -6800,
+      "updated_at_offset_s": -6799
+    },
+    {
+      "id": "642338b4-da71-50ba-bd5b-5d3833439ab4",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "24550026-42d1-5ac8-a7a9-85844f9afb17",
+      "name": "users.cleanup_expired_sessions",
+      "queue": "default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "max_age_days": 14
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -7131,
+      "started_at_offset_s": -7130,
+      "finished_at_offset_s": -7129,
+      "runtime_ms": 1584,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "cleanup"
+      ],
+      "created_at_offset_s": -7131,
+      "updated_at_offset_s": -7129
+    },
+    {
+      "id": "a2af87e1-d97b-5060-a411-ffe7f3553b34",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "c19cc2e4-3c51-5b6e-bd3f-208901cf96eb",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "failure",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": "ConnectionError: smtp.example.com:587 connection refused",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/emails/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -7462,
+      "started_at_offset_s": -7461,
+      "finished_at_offset_s": -7460,
+      "runtime_ms": 1621,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -7462,
+      "updated_at_offset_s": -7460
+    },
+    {
+      "id": "bb600b5b-4617-5c65-be31-7ed3f94e1b09",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "0e875bc0-8b65-5df2-a377-124d4df6a603",
+      "name": "search.reindex_recent_changes",
+      "queue": "search",
+      "state": "retry",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_seconds": 600
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -7793,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -7793,
+      "updated_at_offset_s": -7793
+    },
+    {
+      "id": "f51fbda8-caaf-5c96-8dc0-4fac9f32867b",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "df871b5c-745e-5977-aee5-b40074ba2e7d",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "started",
+      "priority": "critical",
+      "args": [
+        "sub_4422"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -8124,
+      "started_at_offset_s": -8123,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -8124,
+      "updated_at_offset_s": -8123
+    },
+    {
+      "id": "133a741b-6f7d-5970-93af-f5c0783508d7",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "a82113d6-cdcc-5d0b-b013-05260a96f4e5",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -8455,
+      "started_at_offset_s": -8454,
+      "finished_at_offset_s": -8453,
+      "runtime_ms": 1732,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -8455,
+      "updated_at_offset_s": -8453
+    },
+    {
+      "id": "f4bd3175-a629-5686-a0d5-271492ba6f9e",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "6331ad77-c267-525c-a3b7-f57b72d89c15",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "failure",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": "ConnectionError: smtp.example.com:587 connection refused",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/emails/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 2,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -8786,
+      "started_at_offset_s": -8785,
+      "finished_at_offset_s": -8784,
+      "runtime_ms": 1769,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -8786,
+      "updated_at_offset_s": -8784
+    },
+    {
+      "id": "0bb43079-b9a7-5719-8eca-9e8291706595",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "d1318b10-0c93-5d4c-b855-9c8f32f1c05c",
+      "name": "billing.run_daily_invoices",
+      "queue": "billing",
+      "state": "retry",
+      "priority": "critical",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -9117,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -9117,
+      "updated_at_offset_s": -9117
+    },
+    {
+      "id": "14ec95e7-faa5-58c6-9853-3528981b3378",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "ed1ec798-8683-5792-a541-7f6c29cb72d6",
+      "name": "search.reindex_recent_changes",
+      "queue": "search",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_seconds": 600
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -9448,
+      "started_at_offset_s": -9447,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -9448,
+      "updated_at_offset_s": -9447
+    },
+    {
+      "id": "d383c130-c26a-5a40-897c-60ba5b67de27",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "00bf5df0-d8e2-589e-9ab3-39b8bcfa07d8",
+      "name": "metrics.minute_rollup",
+      "queue": "default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -9779,
+      "started_at_offset_s": -9778,
+      "finished_at_offset_s": -9777,
+      "runtime_ms": 1880,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -9779,
+      "updated_at_offset_s": -9777
+    },
+    {
+      "id": "e5440ddb-8952-5f6f-b86d-9f32b9938bf5",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "75f8b477-e05d-5753-abf2-8f2dda968ab6",
+      "name": "users.send_password_reset",
+      "queue": "default",
+      "state": "failure",
+      "priority": "high",
+      "args": [
+        "user_id_882"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/users/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 3,
+      "eta": null,
+      "received_at_offset_s": -10110,
+      "started_at_offset_s": -10109,
+      "finished_at_offset_s": -10108,
+      "runtime_ms": 1917,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "auth"
+      ],
+      "created_at_offset_s": -10110,
+      "updated_at_offset_s": -10108
+    },
+    {
+      "id": "d7ca448f-e9cc-5699-bdfd-e758227718f7",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "6bf4ab2c-cd7a-5a62-82a0-56129f3fa2a7",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "retry",
+      "priority": "critical",
+      "args": [
+        "sub_4421"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -10441,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -10441,
+      "updated_at_offset_s": -10441
+    },
+    {
+      "id": "6cdb40ad-3579-510b-9488-8f6f650d6672",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "bcef77cd-dc29-5ab9-8db2-839ae1d4b8e4",
+      "name": "metrics.minute_rollup",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -10772,
+      "started_at_offset_s": -10771,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -10772,
+      "updated_at_offset_s": -10771
+    },
+    {
+      "id": "74c0e6bf-f4e2-5dbf-a93c-ec6c767ec4b1",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "7273f152-4fff-5aa9-8ae2-a688f08adc63",
+      "name": "users.cleanup_expired_sessions",
+      "queue": "default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "max_age_days": 14
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -11103,
+      "started_at_offset_s": -11102,
+      "finished_at_offset_s": -11100,
+      "runtime_ms": 2028,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "cleanup"
+      ],
+      "created_at_offset_s": -11103,
+      "updated_at_offset_s": -11100
+    },
+    {
+      "id": "0fdb03e1-295d-5779-b47a-0d7b4a2404f0",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "f8382aca-b5dd-5bea-8753-9735082e7d5b",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "failure",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": "ConnectionError: smtp.example.com:587 connection refused",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/emails/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -11434,
+      "started_at_offset_s": -11433,
+      "finished_at_offset_s": -11431,
+      "runtime_ms": 2065,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -11434,
+      "updated_at_offset_s": -11431
+    },
+    {
+      "id": "a510e175-ed8c-5dac-935f-6237548c4990",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "07cc0ac5-e902-5baa-a0db-e5d9e8a9fbf4",
+      "name": "search.reindex_recent_changes",
+      "queue": "search",
+      "state": "retry",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_seconds": 600
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -11765,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -11765,
+      "updated_at_offset_s": -11765
+    },
+    {
+      "id": "e765f9ec-8709-5b1b-8ec1-a3fe4728179a",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "29ccd575-154c-5462-b7c8-7f4047600847",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "started",
+      "priority": "critical",
+      "args": [
+        "sub_4422"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -12096,
+      "started_at_offset_s": -12095,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -12096,
+      "updated_at_offset_s": -12095
+    },
+    {
+      "id": "de071579-8a63-5da5-8e86-8d66de09c976",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "1247aac6-03bd-503c-94b6-6c1b52c2b172",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -12427,
+      "started_at_offset_s": -12426,
+      "finished_at_offset_s": -12424,
+      "runtime_ms": 2176,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -12427,
+      "updated_at_offset_s": -12424
+    },
+    {
+      "id": "30df0875-f795-5093-9f6d-6f3445d22b54",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "befd1355-c73f-5576-b7ca-ffe4c96b6597",
+      "name": "emails.send_scheduled_campaigns",
+      "queue": "emails",
+      "state": "failure",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "batch_size": 500
+      },
+      "result": null,
+      "exception": "ConnectionError: smtp.example.com:587 connection refused",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/emails/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 2,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -12758,
+      "started_at_offset_s": -12757,
+      "finished_at_offset_s": -12755,
+      "runtime_ms": 2213,
+      "worker_name": "worker-emails-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "emails",
+        "incident"
+      ],
+      "created_at_offset_s": -12758,
+      "updated_at_offset_s": -12755
+    },
+    {
+      "id": "817189a9-0dc4-5d0f-953c-eee59288fd14",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "8d585077-3a58-53d2-9813-3ef0c97ce6c5",
+      "name": "billing.run_daily_invoices",
+      "queue": "billing",
+      "state": "retry",
+      "priority": "critical",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -13089,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -13089,
+      "updated_at_offset_s": -13089
+    },
+    {
+      "id": "4148ea41-a76c-5ed7-b5c7-f1f6eb4607b4",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "d3902312-30f7-580e-ba12-9b9e0f0ea2e9",
+      "name": "search.reindex_recent_changes",
+      "queue": "search",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_seconds": 600
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -13420,
+      "started_at_offset_s": -13419,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -13420,
+      "updated_at_offset_s": -13419
+    },
+    {
+      "id": "ee6687b0-61f7-547b-bae8-919f198d20c1",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "baa3cda9-91e4-5e65-a455-fc115c771346",
+      "name": "metrics.minute_rollup",
+      "queue": "default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -13751,
+      "started_at_offset_s": -13750,
+      "finished_at_offset_s": -13748,
+      "runtime_ms": 2324,
+      "worker_name": "worker-default-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -13751,
+      "updated_at_offset_s": -13748
+    },
+    {
+      "id": "b7131259-230e-53ef-92f5-80c8ff32f26d",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "d33916b1-e5db-5e70-9164-88288eb590e1",
+      "name": "users.send_password_reset",
+      "queue": "default",
+      "state": "failure",
+      "priority": "high",
+      "args": [
+        "user_id_882"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/users/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 3,
+      "eta": null,
+      "received_at_offset_s": -14082,
+      "started_at_offset_s": -14081,
+      "finished_at_offset_s": -14079,
+      "runtime_ms": 2361,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "auth"
+      ],
+      "created_at_offset_s": -14082,
+      "updated_at_offset_s": -14079
+    },
+    {
+      "id": "075ec8f1-7294-5753-b3b3-6526c4921ae3",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "304e2a11-25a1-5e62-92d8-72c0800a8b65",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "retry",
+      "priority": "critical",
+      "args": [
+        "sub_4421"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -14413,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-billing-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -14413,
+      "updated_at_offset_s": -14413
+    },
+    {
+      "id": "0ba47907-8cf7-5bb7-b08a-aaf8092840d6",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "1a2c9384-4301-562c-a5b9-75f9c2f31ed7",
+      "name": "metrics.minute_rollup",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -14744,
+      "started_at_offset_s": -14743,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -14744,
+      "updated_at_offset_s": -14743
     }
   ],
   "next_cursor": null

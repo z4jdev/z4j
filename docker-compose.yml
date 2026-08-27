@@ -61,7 +61,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        Z4J_VERSION: ${Z4J_VERSION:-1.9.0}
+        Z4J_VERSION: ${Z4J_VERSION:-1.9.1}
     image: ${Z4J_IMAGE:-z4jdev/z4j:latest}
     container_name: z4j
     environment:

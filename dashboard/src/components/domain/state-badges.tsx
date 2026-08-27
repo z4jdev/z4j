@@ -41,6 +41,23 @@ export function AgentStateBadge({ state }: { state: AgentState }) {
   return <Badge variant={AGENT_VARIANT[state]}>{state}</Badge>;
 }
 
+/**
+ * A schedule an operator put on hold.
+ *
+ * Held is not the same as disabled: ``is_enabled`` means retired versus active
+ * and ``paused_at`` means a live schedule is temporarily not firing. A held
+ * schedule keeps its Enabled toggle on, which is correct and which is exactly
+ * why the hold needs a mark of its own.
+ */
+export function SchedulePausedBadge({ pausedAt }: { pausedAt: string | null }) {
+  if (pausedAt === null) return null;
+  return (
+    <Badge variant="warning" title={`Held since ${new Date(pausedAt).toLocaleString()}`}>
+      held
+    </Badge>
+  );
+}
+
 const WORKER_VARIANT: Record<WorkerState, BadgeProps["variant"]> = {
   online: "success",
   offline: "muted",

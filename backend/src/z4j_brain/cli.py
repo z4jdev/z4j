@@ -233,6 +233,34 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             "VERIFIED_ANCESTOR, INVALID, or UNPROVABLE."
         ),
     )
+    audit_export_head = audit_sub.add_parser(
+        "export-head",
+        help=(
+            "print the authenticated current chain head as the JSON envelope "
+            "that `audit verify --known-head` accepts"
+        ),
+    )
+    audit_export_head.add_argument(
+        "--output",
+        metavar="PATH",
+        default=None,
+        help=(
+            "write the envelope to PATH instead of stdout, atomically. Prefer "
+            "this over a shell redirect: `> file` truncates the target before "
+            "this command runs, so a refusal would destroy the anchor you "
+            "already had. With --output an existing file is replaced only "
+            "after a complete envelope has been written."
+        ),
+    )
+    audit_export_head.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "walk the active generation first and refuse to print a head from "
+            "a chain that did not verify clean. Slower, and the right default "
+            "for an unattended job that anchors the result somewhere durable."
+        ),
+    )
     audit_rotate_key = audit_sub.add_parser(
         "rotate-chain-key",
         help=(
@@ -3588,6 +3616,8 @@ def _run_audit(args: argparse.Namespace) -> int:  # noqa: PLR0911  flat subcomma
     """Dispatch ``z4j audit <subcommand>``."""
     if args.audit_command == "verify":
         return _run_audit_verify(args)
+    if args.audit_command == "export-head":
+        return _run_audit_export_head(args)
     if args.audit_command == "rotate-chain-key":
         return _run_audit_rotate_chain_key(args)
     if args.audit_command == "retire-chain-key":
@@ -4847,6 +4877,223 @@ def _run_audit_retire_chain_key(  # noqa: PLR0915  state/file retirement
             file=sys.stderr,
         )
         return 1
+
+
+def _run_audit_export_head(  # noqa: PLR0915  read, authenticate, then write
+    args: argparse.Namespace,
+) -> int:
+    """Print the authenticated current audit chain head.
+
+    The output is the envelope ``audit verify --known-head`` consumes, so
+    ``z4j audit export-head > /secure/last-known-head`` produces a file the
+    documented mitigation reads verbatim. Anchoring that file somewhere the
+    database role cannot rewrite is what makes a rolled-back log detectable;
+    a head kept only in the same database proves nothing, because a writer can
+    restore an older copy of it.
+
+    The envelope carries exactly six keys because the verifier's parser is a
+    closed allow-list and reports INVALID on a seventh. Nothing is signed or
+    timestamped here for that reason. Authentication happens before printing
+    instead: the state row is proved against the configured keyring, and a row
+    that does not authenticate is refused rather than exported.
+
+    Every human-facing line goes to stderr, so a pipe from stdout carries a
+    complete envelope and nothing else. Prefer ``--output`` to a shell redirect
+    for a file: ``> file`` truncates before this runs, so a refusal would leave
+    the operator with an empty anchor exactly when something is already wrong.
+    ``--output`` writes through a temporary file and renames, so an existing
+    anchor survives every refusal here.
+
+    Returns 0 when a head was printed, 1 on a refusal the operator has to
+    resolve, and 2 on settings or connection failure.
+    """
+    import asyncio
+    import os
+    import pathlib
+    import tempfile
+
+    # Bootstrap env so fresh / bare-metal installs don't crash with
+    # a Settings ValidationError before we even open the DB.
+    _bootstrap_env_for_management_commands()
+
+    from sqlalchemy import select
+
+    from z4j_brain.domain.audit_chain import (
+        AUDIT_CHAIN_SINGLETON_ID,
+        AUDIT_ROW_HMAC_VERSION,
+        AuditChainIntegrityError,
+        authenticate_state,
+        canonical_audit_key_id,
+        canonical_json,
+        normalize_timestamp,
+    )
+    from z4j_brain.persistence.database import (
+        DatabaseManager,
+        create_engine_from_settings,
+    )
+    from z4j_brain.persistence.models import AuditChainState
+    from z4j_brain.settings import Settings
+
+    try:
+        settings = Settings()  # type: ignore[call-arg]
+    except Exception as exc:
+        print(  # noqa: T201
+            f"z4j audit export-head: failed to load settings: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if settings.audit_chain_secret is None:
+        print(  # noqa: T201
+            "z4j audit export-head: no audit-chain key is configured, so the "
+            "head cannot be authenticated before export. Set "
+            "Z4J_AUDIT_CHAIN_SECRET.",
+            file=sys.stderr,
+        )
+        return 2
+
+    async def _run() -> str | None:
+        engine = create_engine_from_settings(settings)
+        db = DatabaseManager(engine)
+        try:
+            async with db.session() as session:
+                # A plain read, deliberately not the repository's
+                # get_chain_state_for_update(): its FOR UPDATE would hold the
+                # singleton row against the live brain's audit writes for the
+                # duration of a read-only print.
+                rows = list(
+                    (
+                        await session.execute(
+                            select(AuditChainState).where(
+                                AuditChainState.singleton_id == AUDIT_CHAIN_SINGLETON_ID,
+                            ),
+                        )
+                    ).scalars(),
+                )
+                if len(rows) != 1:
+                    print(  # noqa: T201
+                        "z4j audit export-head: audit_chain_state holds "
+                        f"{len(rows)} rows where exactly one is required.",
+                        file=sys.stderr,
+                    )
+                    return None
+                state = rows[0]
+
+                keyring = {
+                    canonical_audit_key_id(secret): secret
+                    for secret in settings.all_audit_chain_secrets_for_verification()
+                }
+                try:
+                    authenticate_state(state, keyring)
+                except AuditChainIntegrityError:
+                    print(  # noqa: T201
+                        "z4j audit export-head: the audit chain state does not "
+                        "authenticate against the configured keys, so its head "
+                        "is not evidence of anything. Restore a rotated-out key "
+                        "into Z4J_AUDIT_CHAIN_PREVIOUS_SECRETS, or investigate "
+                        "the state row.",
+                        file=sys.stderr,
+                    )
+                    return None
+
+                if state.head_row_hmac is None or state.head_id is None:
+                    print(  # noqa: T201
+                        "z4j audit export-head: this chain has no head yet, so "
+                        "there is nothing to anchor. Export one once the log "
+                        "has its first row.",
+                        file=sys.stderr,
+                    )
+                    return None
+
+                if args.verify:
+                    from z4j_brain.domain.audit_verifier import (
+                        verify_active_audit_generation,
+                    )
+
+                    report = await verify_active_audit_generation(
+                        session,
+                        settings,
+                        page_size=1_000,
+                    )
+                    if report.mismatches:
+                        print(  # noqa: T201
+                            "z4j audit export-head: the active generation did "
+                            f"not verify clean ({len(report.mismatches)} "
+                            "finding(s)), so this head is not exported. "
+                            "Anchoring it would record a compromised chain as "
+                            "the trusted state.",
+                            file=sys.stderr,
+                        )
+                        return None
+
+                envelope: dict[str, Any] = {
+                    "row_hmac": state.head_row_hmac,
+                    "hmac_version": AUDIT_ROW_HMAC_VERSION,
+                    "generation": str(state.generation).lower(),
+                    "id": str(state.head_id).lower(),
+                }
+                if state.head_hmac_key_id is not None:
+                    envelope["hmac_key_id"] = state.head_hmac_key_id
+                if state.head_occurred_at is not None:
+                    envelope["occurred_at"] = (
+                        normalize_timestamp(state.head_occurred_at)
+                        .isoformat(timespec="microseconds")
+                        .replace("+00:00", "Z")
+                    )
+                # canonical_json is the same sorted-keys, no-whitespace form the
+                # chain itself canonicalises with, so the exported bytes are
+                # stable across runs and diffable in whatever sink holds them.
+                # The coroutine's job ends here. Persisting the envelope is
+                # the caller's, which keeps a blocking write out of the
+                # database session and off the event loop.
+                return canonical_json(envelope).decode("utf-8")
+        finally:
+            # Dispose the engine directly rather than through the manager.
+            # stdout here is a strict JSON protocol and the manager's
+            # informational dispose log may use structlog's pre-configuration
+            # stdout fallback in a short-lived CLI process, corrupting it.
+            await engine.dispose()
+
+    payload = asyncio.run(_run())
+    if payload is None:
+        return 1
+
+    if args.output is None:
+        print(payload)  # noqa: T201
+        return 0
+
+    # Written through a temporary file in the same directory and renamed, so an
+    # existing anchor is replaced only by a complete envelope. Every refusal
+    # above returns before this point and leaves the previous file untouched,
+    # which a shell redirect could not do: `> file` truncates first.
+    target = pathlib.Path(args.output)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(payload + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            staged = pathlib.Path(handle.name)
+        staged.replace(target)
+    except OSError as exc:
+        print(  # noqa: T201
+            f"z4j audit export-head: could not write {args.output}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(  # noqa: T201
+        f"wrote the authenticated chain head to {args.output}",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def _run_audit_verify(args: argparse.Namespace) -> int:  # noqa: PLR0915  audit chain verification

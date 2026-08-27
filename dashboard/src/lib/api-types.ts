@@ -547,3 +547,33 @@ export interface ErrorEnvelope {
   request_id: string | null;
   details: Record<string, unknown>;
 }
+
+// Worker configuration lint. Mirrors ProjectLintPublic in api/workers.py.
+// ``workers_not_evaluated`` is reported separately from a clean result on
+// purpose: a worker whose engine has no rules, or which reported no
+// configuration, has not been judged, and folding it into "no problems found"
+// would overstate what the check knows.
+export interface LintFindingPublic {
+  rule_id: string;
+  severity: string;
+  setting: string;
+  title: string;
+  detail: string;
+  remedy: string;
+}
+
+export interface WorkerLintPublic {
+  worker_id: string;
+  worker_name: string;
+  engine: string;
+  hostname: string | null;
+  evaluated: boolean;
+  findings: LintFindingPublic[];
+}
+
+export interface ProjectLintPublic {
+  workers_evaluated: number;
+  workers_not_evaluated: number;
+  findings_by_severity: Record<string, number>;
+  workers: WorkerLintPublic[];
+}

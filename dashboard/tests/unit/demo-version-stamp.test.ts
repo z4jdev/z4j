@@ -32,13 +32,13 @@ const expectedChangedPaths = [
   "system/schedulers.json",
 ];
 const expectedVersionInventory = {
-  total: 69,
+  total: 76,
   intended: 24,
-  preserved: 45,
+  preserved: 52,
   byKey: {
     agent_version: 20,
     database_version: 1,
-    model_version: 3,
+    model_version: 10,
     protocol_version: 20,
     python_version: 1,
     version: 3,
@@ -244,7 +244,7 @@ describe("stampDemoVersions", () => {
     const version = (
       await readFile(resolve(repositoryRoot, "VERSION"), "utf8")
     ).trim();
-    expect(version).toBe("1.9.0");
+    expect(version).toBe("1.9.1");
     const before = await jsonSnapshot(root);
     const {
       intendedValues: beforeIntendedValues,
@@ -256,7 +256,7 @@ describe("stampDemoVersions", () => {
     expect(new Set(Object.values(beforeIntendedValues))).toEqual(
       new Set(["1.8.0"]),
     );
-    expect(Object.keys(beforePreservedValues)).toHaveLength(45);
+    expect(Object.keys(beforePreservedValues)).toHaveLength(52);
     for (const path of expectedChangedPaths) {
       expect(before[path]).not.toContain("\\");
     }
@@ -303,7 +303,7 @@ describe("stampDemoVersions", () => {
       database_version: string;
       packages: Record<string, string>;
     };
-    expect(system.z4j_version).toBe("1.9.0");
+    expect(system.z4j_version).toBe("1.9.1");
     expect(system.python_version).toBe("3.14.0");
     expect(system.database_version).toBe(
       "PostgreSQL 18.3 on x86_64-pc-linux-gnu",

@@ -18,13 +18,15 @@ import {
   Plus,
   RefreshCcwDot,
   Trash2,
-  TriangleAlert,
-} from "lucide-react";
+  TriangleAlert, Pause,} from "lucide-react";
 import { toast } from "sonner";
 import { FilterToolbar } from "@/components/domain/filter-toolbar";
 import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
-import { TaskPriorityBadge } from "@/components/domain/state-badges";
+import {
+  SchedulePausedBadge,
+  TaskPriorityBadge,
+} from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
 import { useConfirm } from "@/components/domain/confirm-dialog";
 import { ScheduleFormDialog } from "@/components/domain/schedule-form-dialog";
@@ -48,6 +50,8 @@ import {
   useSchedules,
   useToggleSchedule,
   useTriggerSchedule,
+  usePauseSchedule,
+  useResumeSchedule,
 } from "@/hooks/use-schedules";
 import { DateCell } from "@/components/domain/date-cell";
 import { ApiError } from "@/lib/api";
@@ -73,6 +77,8 @@ function SchedulesPage() {
   } = useSchedules(slug);
   const toggle = useToggleSchedule(slug);
   const trigger = useTriggerSchedule(slug);
+  const pauseSchedule = usePauseSchedule(slug);
+  const resumeSchedule = useResumeSchedule(slug);
   const deleteSched = useDeleteSchedule(slug);
   const resync = useScheduleResync(slug);
   const { confirm, dialog: confirmDialog } = useConfirm();
@@ -140,6 +146,24 @@ function SchedulesPage() {
       const message =
         err instanceof ApiError ? err.message : (err as Error).message;
       toast.error(`trigger failed: ${message}`);
+    }
+  }
+
+  async function onToggleHold(s: SchedulePublic) {
+    if (!canOperate) return;
+    const held = s.paused_at !== null;
+    try {
+      if (held) {
+        await resumeSchedule.mutateAsync(s.id);
+        toast.success(`${s.name} released`);
+      } else {
+        await pauseSchedule.mutateAsync(s.id);
+        toast.success(`${s.name} held`);
+      }
+    } catch (err) {
+      const message =
+        err instanceof ApiError ? err.message : (err as Error).message;
+      toast.error(`${held ? "release" : "hold"} failed: ${message}`);
     }
   }
 
@@ -306,7 +330,9 @@ function SchedulesPage() {
     onTrigger,
     onEdit,
     onDelete,
+    onToggleHold,
     triggerPending: trigger.isPending,
+    holdPending: pauseSchedule.isPending || resumeSchedule.isPending,
     canOperate,
     canAdminister,
   });
@@ -518,7 +544,9 @@ function useScheduleColumns({
   onTrigger,
   onEdit,
   onDelete,
+  onToggleHold,
   triggerPending,
+  holdPending,
   canOperate,
   canAdminister,
 }: {
@@ -527,7 +555,9 @@ function useScheduleColumns({
   onTrigger: (scheduleId: string) => void;
   onEdit: (s: SchedulePublic) => void;
   onDelete: (s: SchedulePublic) => void;
+  onToggleHold: (s: SchedulePublic) => void;
   triggerPending: boolean;
+  holdPending: boolean;
   canOperate: boolean;
   canAdminister: boolean;
 }): DataTableColumnDef<SchedulePublic>[] {
@@ -544,14 +574,20 @@ function useScheduleColumns({
           // every row rendered it twice and paid a second line of
           // height for it - which pushed "Next run" off the right edge
           // even at 1680px.
+          // The hold is marked here rather than on the Enabled column,
+          // because the toggle reports is_enabled and is telling the truth:
+          // a held schedule is still enabled, it is just not firing.
           return (
-            <Link
-              to="/projects/$slug/schedules/$scheduleId"
-              params={{ slug, scheduleId: s.id }}
-              className="font-medium underline-offset-4 hover:underline"
-            >
-              {s.name}
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link
+                to="/projects/$slug/schedules/$scheduleId"
+                params={{ slug, scheduleId: s.id }}
+                className="font-medium underline-offset-4 hover:underline"
+              >
+                {s.name}
+              </Link>
+              <SchedulePausedBadge pausedAt={s.paused_at} />
+            </div>
           );
         },
         enableSorting: true,
@@ -675,6 +711,26 @@ function useScheduleColumns({
                   Run
                 </Button>
               )}
+              {canOperate && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onToggleHold(s)}
+                  disabled={holdPending}
+                  title={
+                    s.paused_at !== null
+                      ? "Release this schedule so it fires again"
+                      : "Hold this schedule without retiring it"
+                  }
+                >
+                  {s.paused_at !== null ? (
+                    <Play className="size-3" />
+                  ) : (
+                    <Pause className="size-3" />
+                  )}
+                  {s.paused_at !== null ? "Release" : "Hold"}
+                </Button>
+              )}
               {canAdminister && (
                 <>
                   <Button
@@ -709,7 +765,9 @@ function useScheduleColumns({
       onTrigger,
       onEdit,
       onDelete,
+      onToggleHold,
       triggerPending,
+      holdPending,
       canOperate,
       canAdminister,
     ],

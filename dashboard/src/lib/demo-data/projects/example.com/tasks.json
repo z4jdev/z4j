@@ -9,8 +9,12 @@
       "queue": "default",
       "state": "success",
       "priority": "normal",
-      "args": ["customer_id_42"],
-      "kwargs": {"template": "monthly"},
+      "args": [
+        "customer_id_42"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -23,7 +27,10 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["billing", "email"],
+      "tags": [
+        "billing",
+        "email"
+      ],
       "created_at_offset_s": -180,
       "updated_at_offset_s": -176
     },
@@ -37,7 +44,9 @@
       "state": "started",
       "priority": "low",
       "args": [],
-      "kwargs": {"window_minutes": 60},
+      "kwargs": {
+        "window_minutes": 60
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -50,7 +59,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["analytics"],
+      "tags": [
+        "analytics"
+      ],
       "created_at_offset_s": -90,
       "updated_at_offset_s": -88
     },
@@ -63,7 +74,9 @@
       "queue": "default",
       "state": "success",
       "priority": "high",
-      "args": ["new_user_88"],
+      "args": [
+        "new_user_88"
+      ],
       "kwargs": {},
       "result": null,
       "exception": null,
@@ -77,7 +90,10 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["users", "email"],
+      "tags": [
+        "users",
+        "email"
+      ],
       "created_at_offset_s": -420,
       "updated_at_offset_s": -417
     },
@@ -91,7 +107,10 @@
       "state": "failure",
       "priority": "normal",
       "args": [],
-      "kwargs": {"date_range": "last_30_days", "user_id": 42},
+      "kwargs": {
+        "date_range": "last_30_days",
+        "user_id": 42
+      },
       "result": null,
       "exception": "TimeoutError: query exceeded statement_timeout (30s)",
       "traceback": "Traceback (most recent call last):\n  File \"/app/exports/csv.py\", line 47, in generate_csv\n    rows = db.session.execute(query).fetchall()\n  File \"/usr/lib/python3.13/site-packages/sqlalchemy/engine/base.py\", line 1812, in execute\n    return meth(...)\nTimeoutError: query exceeded statement_timeout (30s)",
@@ -104,7 +123,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["exports"],
+      "tags": [
+        "exports"
+      ],
       "created_at_offset_s": -3600,
       "updated_at_offset_s": -3569
     },
@@ -117,8 +138,12 @@
       "queue": "billing",
       "state": "success",
       "priority": "critical",
-      "args": ["subscription_id_15"],
-      "kwargs": {"retry_on_decline": true},
+      "args": [
+        "subscription_id_15"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -131,7 +156,10 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["billing", "stripe"],
+      "tags": [
+        "billing",
+        "stripe"
+      ],
       "created_at_offset_s": -7200,
       "updated_at_offset_s": -7195
     },
@@ -145,7 +173,9 @@
       "state": "retry",
       "priority": "low",
       "args": [],
-      "kwargs": {"batch": 200},
+      "kwargs": {
+        "batch": 200
+      },
       "result": null,
       "exception": "ConnectionError: redis://search-cache:6379 unreachable",
       "traceback": null,
@@ -158,7 +188,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["search"],
+      "tags": [
+        "search"
+      ],
       "created_at_offset_s": -60,
       "updated_at_offset_s": -55
     },
@@ -171,7 +203,9 @@
       "queue": "default",
       "state": "success",
       "priority": "high",
-      "args": ["new_user_89"],
+      "args": [
+        "new_user_89"
+      ],
       "kwargs": {},
       "result": null,
       "exception": null,
@@ -185,7 +219,10 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["users", "email"],
+      "tags": [
+        "users",
+        "email"
+      ],
       "created_at_offset_s": -930,
       "updated_at_offset_s": -927
     },
@@ -198,8 +235,12 @@
       "queue": "default",
       "state": "pending",
       "priority": "normal",
-      "args": ["customer_id_43"],
-      "kwargs": {"template": "monthly"},
+      "args": [
+        "customer_id_43"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -212,7 +253,10 @@
       "worker_name": null,
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["billing", "email"],
+      "tags": [
+        "billing",
+        "email"
+      ],
       "created_at_offset_s": -10,
       "updated_at_offset_s": -10
     },
@@ -226,7 +270,9 @@
       "state": "success",
       "priority": "low",
       "args": [],
-      "kwargs": {"window_minutes": 60},
+      "kwargs": {
+        "window_minutes": 60
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -239,7 +285,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["analytics"],
+      "tags": [
+        "analytics"
+      ],
       "created_at_offset_s": -3690,
       "updated_at_offset_s": -3680
     },
@@ -252,8 +300,12 @@
       "queue": "billing",
       "state": "success",
       "priority": "critical",
-      "args": ["subscription_id_16"],
-      "kwargs": {"retry_on_decline": true},
+      "args": [
+        "subscription_id_16"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -266,9 +318,1506 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["billing", "stripe"],
+      "tags": [
+        "billing",
+        "stripe"
+      ],
       "created_at_offset_s": -10800,
       "updated_at_offset_s": -10795
+    },
+    {
+      "id": "6ebd6f55-42f9-58fe-a4de-eb62980f6a15",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "05e9b9c9-7bcf-5dc2-9aa1-52ebe88bcd24",
+      "name": "billing.send_invoice_email",
+      "queue": "default",
+      "state": "success",
+      "priority": "normal",
+      "args": [
+        "customer_id_42"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -511,
+      "started_at_offset_s": -510,
+      "finished_at_offset_s": -509,
+      "runtime_ms": 770,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "email"
+      ],
+      "created_at_offset_s": -511,
+      "updated_at_offset_s": -509
+    },
+    {
+      "id": "05078171-f5d9-5047-9af6-4a01c9b880b7",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "45ef0b39-d31d-56ff-bcde-86f2fb5b77d4",
+      "name": "analytics.aggregate_pageviews",
+      "queue": "analytics",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_minutes": 60
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -842,
+      "started_at_offset_s": -841,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "analytics"
+      ],
+      "created_at_offset_s": -842,
+      "updated_at_offset_s": -841
+    },
+    {
+      "id": "5aa7fd0f-1ba9-51ea-8a8c-a1552ec7c92a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "7fc6a7c3-8615-58a4-a44b-1852046c3f0a",
+      "name": "users.send_welcome_email",
+      "queue": "default",
+      "state": "failure",
+      "priority": "high",
+      "args": [
+        "new_user_88"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/users/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -1173,
+      "started_at_offset_s": -1172,
+      "finished_at_offset_s": -1171,
+      "runtime_ms": 844,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "email"
+      ],
+      "created_at_offset_s": -1173,
+      "updated_at_offset_s": -1171
+    },
+    {
+      "id": "e7e32e53-e166-5bcb-815e-7919b270cd43",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "72adfce0-f6b9-5c0e-9333-86da0d99e2d3",
+      "name": "exports.generate_csv",
+      "queue": "exports",
+      "state": "retry",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "date_range": "last_30_days",
+        "user_id": 42
+      },
+      "result": null,
+      "exception": "TimeoutError: query exceeded statement_timeout (30s)",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/exports/csv.py\", line 47, in generate_csv\n    rows = db.session.execute(query).fetchall()\n  File \"/usr/lib/python3.13/site-packages/sqlalchemy/engine/base.py\", line 1812, in execute\n    return meth(...)\nTimeoutError: query exceeded statement_timeout (30s)",
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -1504,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "exports"
+      ],
+      "created_at_offset_s": -1504,
+      "updated_at_offset_s": -1504
+    },
+    {
+      "id": "945b4809-2f82-5b79-afe9-d46c15cd599f",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "ab9e7d86-4810-598e-bc6a-bce7ac410acc",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "pending",
+      "priority": "critical",
+      "args": [
+        "subscription_id_15"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1835,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -1835,
+      "updated_at_offset_s": -1835
+    },
+    {
+      "id": "c4b9db1e-6e3e-524b-bc89-0b49aa71fcd6",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "b13f2bef-27c4-595b-9df0-d4a7f8c87d3c",
+      "name": "search.reindex_documents",
+      "queue": "search",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "batch": 200
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta_offset_s": 60,
+      "received_at_offset_s": -2166,
+      "started_at_offset_s": -2165,
+      "finished_at_offset_s": -2164,
+      "runtime_ms": 955,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -2166,
+      "updated_at_offset_s": -2164
+    },
+    {
+      "id": "7915a27c-08e6-5701-b9d3-5b67c3edeac3",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "de9866d6-61ab-51ea-848c-10d306785b17",
+      "name": "users.send_welcome_email",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [
+        "new_user_89"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -2497,
+      "started_at_offset_s": -2496,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "email"
+      ],
+      "created_at_offset_s": -2497,
+      "updated_at_offset_s": -2496
+    },
+    {
+      "id": "35e44563-e407-58aa-8247-1b6de48b4342",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "28a57b26-89cd-5b60-b111-e1fee7a693b2",
+      "name": "billing.send_invoice_email",
+      "queue": "default",
+      "state": "failure",
+      "priority": "normal",
+      "args": [
+        "customer_id_43"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/billing/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 3,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -2828,
+      "started_at_offset_s": -2827,
+      "finished_at_offset_s": -2826,
+      "runtime_ms": 1029,
+      "worker_name": null,
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "email"
+      ],
+      "created_at_offset_s": -2828,
+      "updated_at_offset_s": -2826
+    },
+    {
+      "id": "29891d64-9101-5ae8-b577-d4f60a733473",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "171a909e-10e3-57f6-9db3-16dfbea4d90a",
+      "name": "analytics.aggregate_pageviews",
+      "queue": "analytics",
+      "state": "retry",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_minutes": 60
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -3159,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "analytics"
+      ],
+      "created_at_offset_s": -3159,
+      "updated_at_offset_s": -3159
+    },
+    {
+      "id": "f3ac4fe6-94b4-580d-bcc9-e7b7daece5c2",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "af1bfc1e-0c88-5733-9759-a45828412d7a",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "pending",
+      "priority": "critical",
+      "args": [
+        "subscription_id_16"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -3490,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -3490,
+      "updated_at_offset_s": -3490
+    },
+    {
+      "id": "e273ac89-377a-54ef-bad8-32fe22a5edc0",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "0f485841-6215-51e1-82b3-6501bac51994",
+      "name": "billing.send_invoice_email",
+      "queue": "default",
+      "state": "success",
+      "priority": "normal",
+      "args": [
+        "customer_id_42"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -3821,
+      "started_at_offset_s": -3820,
+      "finished_at_offset_s": -3819,
+      "runtime_ms": 1140,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "email"
+      ],
+      "created_at_offset_s": -3821,
+      "updated_at_offset_s": -3819
+    },
+    {
+      "id": "8cf876ea-4feb-54b9-814a-07f1b824fcf0",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "4d3d140f-22b4-51d8-8f9f-4662866f8f7a",
+      "name": "analytics.aggregate_pageviews",
+      "queue": "analytics",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_minutes": 60
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -4152,
+      "started_at_offset_s": -4151,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "analytics"
+      ],
+      "created_at_offset_s": -4152,
+      "updated_at_offset_s": -4151
+    },
+    {
+      "id": "7ad3dbbc-5c48-5e50-a38d-f4400abbdf0f",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "60b6fd9e-489c-520d-be75-4476c76b057a",
+      "name": "users.send_welcome_email",
+      "queue": "default",
+      "state": "failure",
+      "priority": "high",
+      "args": [
+        "new_user_88"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/users/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -4483,
+      "started_at_offset_s": -4482,
+      "finished_at_offset_s": -4481,
+      "runtime_ms": 1214,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "email"
+      ],
+      "created_at_offset_s": -4483,
+      "updated_at_offset_s": -4481
+    },
+    {
+      "id": "a41fe5eb-ea77-5df6-bb23-da84882fdd25",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "9b30da13-50b5-51c2-919f-2688ed90163f",
+      "name": "exports.generate_csv",
+      "queue": "exports",
+      "state": "retry",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "date_range": "last_30_days",
+        "user_id": 42
+      },
+      "result": null,
+      "exception": "TimeoutError: query exceeded statement_timeout (30s)",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/exports/csv.py\", line 47, in generate_csv\n    rows = db.session.execute(query).fetchall()\n  File \"/usr/lib/python3.13/site-packages/sqlalchemy/engine/base.py\", line 1812, in execute\n    return meth(...)\nTimeoutError: query exceeded statement_timeout (30s)",
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -4814,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "exports"
+      ],
+      "created_at_offset_s": -4814,
+      "updated_at_offset_s": -4814
+    },
+    {
+      "id": "800126ab-a1ae-5f4d-9deb-10812e850ea8",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "3e5850fd-19ff-5eca-8d3a-f91ce0662012",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "pending",
+      "priority": "critical",
+      "args": [
+        "subscription_id_15"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -5145,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -5145,
+      "updated_at_offset_s": -5145
+    },
+    {
+      "id": "22c217e4-82f3-5b63-87d3-810f89f827f6",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "b4202ac2-ea4d-51a2-be93-3f161119e806",
+      "name": "search.reindex_documents",
+      "queue": "search",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "batch": 200
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta_offset_s": 60,
+      "received_at_offset_s": -5476,
+      "started_at_offset_s": -5475,
+      "finished_at_offset_s": -5474,
+      "runtime_ms": 1325,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -5476,
+      "updated_at_offset_s": -5474
+    },
+    {
+      "id": "c113877c-3ce4-5035-9dd3-1159c1ec9638",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "35b8b5e0-0ab5-529f-8b8e-8e6da8ba7fad",
+      "name": "users.send_welcome_email",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [
+        "new_user_89"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -5807,
+      "started_at_offset_s": -5806,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "email"
+      ],
+      "created_at_offset_s": -5807,
+      "updated_at_offset_s": -5806
+    },
+    {
+      "id": "8dfa9219-47da-5fdc-b862-63e472b2817f",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "fc3b995b-7f80-5c18-932d-80e46d85060b",
+      "name": "billing.send_invoice_email",
+      "queue": "default",
+      "state": "failure",
+      "priority": "normal",
+      "args": [
+        "customer_id_43"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/billing/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 1,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -6138,
+      "started_at_offset_s": -6137,
+      "finished_at_offset_s": -6136,
+      "runtime_ms": 1399,
+      "worker_name": null,
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "email"
+      ],
+      "created_at_offset_s": -6138,
+      "updated_at_offset_s": -6136
+    },
+    {
+      "id": "8483a199-fdd6-5f02-adf9-34f77a1dcf22",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "d619e511-cc78-53d3-937a-06a32ecf761d",
+      "name": "analytics.aggregate_pageviews",
+      "queue": "analytics",
+      "state": "retry",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_minutes": 60
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -6469,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "analytics"
+      ],
+      "created_at_offset_s": -6469,
+      "updated_at_offset_s": -6469
+    },
+    {
+      "id": "641efbdc-fae2-50e1-bfd1-4f584cba5e66",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "ee821e4d-9820-57e2-b7df-7bf040272a69",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "pending",
+      "priority": "critical",
+      "args": [
+        "subscription_id_16"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -6800,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -6800,
+      "updated_at_offset_s": -6800
+    },
+    {
+      "id": "b8571a52-12f9-59a2-984d-37a630afd0a5",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "69f96d9c-6d6d-5a4f-baa7-c06d4c56f682",
+      "name": "billing.send_invoice_email",
+      "queue": "default",
+      "state": "success",
+      "priority": "normal",
+      "args": [
+        "customer_id_42"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -7131,
+      "started_at_offset_s": -7130,
+      "finished_at_offset_s": -7129,
+      "runtime_ms": 1510,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "email"
+      ],
+      "created_at_offset_s": -7131,
+      "updated_at_offset_s": -7129
+    },
+    {
+      "id": "4d7779ac-d2a6-5ae3-922f-eb55469bc3a9",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "4cf68804-12c6-5f0e-aa24-effa2692a798",
+      "name": "analytics.aggregate_pageviews",
+      "queue": "analytics",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_minutes": 60
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -7462,
+      "started_at_offset_s": -7461,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "analytics"
+      ],
+      "created_at_offset_s": -7462,
+      "updated_at_offset_s": -7461
+    },
+    {
+      "id": "b97197ca-d1f1-52ee-9808-9877e329c0d2",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "634af3af-f12c-5deb-84ba-97c366e2169d",
+      "name": "users.send_welcome_email",
+      "queue": "default",
+      "state": "failure",
+      "priority": "high",
+      "args": [
+        "new_user_88"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/users/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 3,
+      "eta": null,
+      "received_at_offset_s": -7793,
+      "started_at_offset_s": -7792,
+      "finished_at_offset_s": -7791,
+      "runtime_ms": 1584,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "email"
+      ],
+      "created_at_offset_s": -7793,
+      "updated_at_offset_s": -7791
+    },
+    {
+      "id": "c61f04e1-be63-5df9-8102-88c493b0a373",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "e0f9255d-7db8-5d41-b5b1-b74f2c3c041b",
+      "name": "exports.generate_csv",
+      "queue": "exports",
+      "state": "retry",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "date_range": "last_30_days",
+        "user_id": 42
+      },
+      "result": null,
+      "exception": "TimeoutError: query exceeded statement_timeout (30s)",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/exports/csv.py\", line 47, in generate_csv\n    rows = db.session.execute(query).fetchall()\n  File \"/usr/lib/python3.13/site-packages/sqlalchemy/engine/base.py\", line 1812, in execute\n    return meth(...)\nTimeoutError: query exceeded statement_timeout (30s)",
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -8124,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "exports"
+      ],
+      "created_at_offset_s": -8124,
+      "updated_at_offset_s": -8124
+    },
+    {
+      "id": "22be9680-2e9d-5d6e-9b3f-7558d3f9ff26",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "5d57e575-652e-5925-aff6-a70f5f223f2c",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "pending",
+      "priority": "critical",
+      "args": [
+        "subscription_id_15"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -8455,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -8455,
+      "updated_at_offset_s": -8455
+    },
+    {
+      "id": "400b94e8-852a-572a-80f1-fcee8b374a7a",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "9b6cd119-2586-5bcc-9cb2-b6ac83af7d7a",
+      "name": "search.reindex_documents",
+      "queue": "search",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "batch": 200
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta_offset_s": 60,
+      "received_at_offset_s": -8786,
+      "started_at_offset_s": -8785,
+      "finished_at_offset_s": -8784,
+      "runtime_ms": 1695,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -8786,
+      "updated_at_offset_s": -8784
+    },
+    {
+      "id": "ce24b210-ffcf-5517-a4b1-c228e9ea6412",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "b4d1e07b-dd53-57b8-ad60-0b2cab04a631",
+      "name": "users.send_welcome_email",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [
+        "new_user_89"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -9117,
+      "started_at_offset_s": -9116,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "email"
+      ],
+      "created_at_offset_s": -9117,
+      "updated_at_offset_s": -9116
+    },
+    {
+      "id": "27eb4c4f-7a22-5d1f-8b29-af63d6eb166d",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "0be7e294-001c-5617-9a2e-8b81e2d66d45",
+      "name": "billing.send_invoice_email",
+      "queue": "default",
+      "state": "failure",
+      "priority": "normal",
+      "args": [
+        "customer_id_43"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/billing/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 2,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -9448,
+      "started_at_offset_s": -9447,
+      "finished_at_offset_s": -9446,
+      "runtime_ms": 1769,
+      "worker_name": null,
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "email"
+      ],
+      "created_at_offset_s": -9448,
+      "updated_at_offset_s": -9446
+    },
+    {
+      "id": "b94249d2-ad89-571d-952d-b7780fc977a4",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "d45360e3-a468-50ef-be0b-fab7d851a23b",
+      "name": "analytics.aggregate_pageviews",
+      "queue": "analytics",
+      "state": "retry",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_minutes": 60
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -9779,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "analytics"
+      ],
+      "created_at_offset_s": -9779,
+      "updated_at_offset_s": -9779
+    },
+    {
+      "id": "e79b77c5-211c-5af5-a07e-6ba4c42efabe",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "52237cfb-860e-5a77-bab9-b5e15eb870f2",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "pending",
+      "priority": "critical",
+      "args": [
+        "subscription_id_16"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -10110,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -10110,
+      "updated_at_offset_s": -10110
+    },
+    {
+      "id": "aa5fb64a-a76b-5100-8104-27a12ab3d743",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "ff9372cf-3cea-535b-b2ef-433778f4193e",
+      "name": "billing.send_invoice_email",
+      "queue": "default",
+      "state": "success",
+      "priority": "normal",
+      "args": [
+        "customer_id_42"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -10441,
+      "started_at_offset_s": -10440,
+      "finished_at_offset_s": -10439,
+      "runtime_ms": 1880,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "email"
+      ],
+      "created_at_offset_s": -10441,
+      "updated_at_offset_s": -10439
+    },
+    {
+      "id": "b0955b79-3778-503a-b03a-603476cf48b2",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "21f6581e-337a-51a2-82ad-042030b52cce",
+      "name": "analytics.aggregate_pageviews",
+      "queue": "analytics",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_minutes": 60
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -10772,
+      "started_at_offset_s": -10771,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "analytics"
+      ],
+      "created_at_offset_s": -10772,
+      "updated_at_offset_s": -10771
+    },
+    {
+      "id": "9cd5694f-84da-58b6-bee8-f3dde6b9cbd1",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "0dc1d618-c594-506c-bb3f-1cdd5546bae3",
+      "name": "users.send_welcome_email",
+      "queue": "default",
+      "state": "failure",
+      "priority": "high",
+      "args": [
+        "new_user_88"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/users/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -11103,
+      "started_at_offset_s": -11102,
+      "finished_at_offset_s": -11101,
+      "runtime_ms": 1954,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "email"
+      ],
+      "created_at_offset_s": -11103,
+      "updated_at_offset_s": -11101
+    },
+    {
+      "id": "a99a1fc3-596c-5340-ac37-0d643c5aa65f",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "4e215b44-ba00-527d-8ddb-438b2474be95",
+      "name": "exports.generate_csv",
+      "queue": "exports",
+      "state": "retry",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "date_range": "last_30_days",
+        "user_id": 42
+      },
+      "result": null,
+      "exception": "TimeoutError: query exceeded statement_timeout (30s)",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/exports/csv.py\", line 47, in generate_csv\n    rows = db.session.execute(query).fetchall()\n  File \"/usr/lib/python3.13/site-packages/sqlalchemy/engine/base.py\", line 1812, in execute\n    return meth(...)\nTimeoutError: query exceeded statement_timeout (30s)",
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -11434,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "exports"
+      ],
+      "created_at_offset_s": -11434,
+      "updated_at_offset_s": -11434
+    },
+    {
+      "id": "d99054a0-d98c-58a3-96af-2dc729be2e29",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "65c48fe6-ba5b-5da2-b73a-d657ad54f5b0",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "pending",
+      "priority": "critical",
+      "args": [
+        "subscription_id_15"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -11765,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -11765,
+      "updated_at_offset_s": -11765
+    },
+    {
+      "id": "1dfbcbf3-28ed-5c78-9ef5-8b6d0e418842",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "c5eec026-0ee7-5035-92a5-21a3b5176aeb",
+      "name": "search.reindex_documents",
+      "queue": "search",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "batch": 200
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta_offset_s": 60,
+      "received_at_offset_s": -12096,
+      "started_at_offset_s": -12095,
+      "finished_at_offset_s": -12093,
+      "runtime_ms": 2065,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -12096,
+      "updated_at_offset_s": -12093
+    },
+    {
+      "id": "3160d1fd-56db-5678-9a60-654e9b2399d9",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "1b0e350d-9ca9-538c-bdb9-f1c33d078232",
+      "name": "users.send_welcome_email",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [
+        "new_user_89"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -12427,
+      "started_at_offset_s": -12426,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "email"
+      ],
+      "created_at_offset_s": -12427,
+      "updated_at_offset_s": -12426
+    },
+    {
+      "id": "4ec5f5a3-e801-53a2-b90a-16798e6bae9f",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "30efc82b-8260-5b7a-b48d-412a0107e6c5",
+      "name": "billing.send_invoice_email",
+      "queue": "default",
+      "state": "failure",
+      "priority": "normal",
+      "args": [
+        "customer_id_43"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/billing/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 3,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -12758,
+      "started_at_offset_s": -12757,
+      "finished_at_offset_s": -12755,
+      "runtime_ms": 2139,
+      "worker_name": null,
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "email"
+      ],
+      "created_at_offset_s": -12758,
+      "updated_at_offset_s": -12755
+    },
+    {
+      "id": "8c60c24b-3831-57c8-9315-620d9efacd7b",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "25418d6c-afa3-55eb-bc36-a64d442471c9",
+      "name": "analytics.aggregate_pageviews",
+      "queue": "analytics",
+      "state": "retry",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_minutes": 60
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -13089,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "analytics"
+      ],
+      "created_at_offset_s": -13089,
+      "updated_at_offset_s": -13089
+    },
+    {
+      "id": "c67622ea-4bba-55b7-bd81-1e3e827d72b7",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "0c65be92-d14e-54e0-ad23-c43a0a665a04",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "pending",
+      "priority": "critical",
+      "args": [
+        "subscription_id_16"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -13420,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -13420,
+      "updated_at_offset_s": -13420
+    },
+    {
+      "id": "dac345c6-6c01-5be5-a7dd-730fc1b41013",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "6c8a8a99-aa7d-5f27-8d23-bc6102be6821",
+      "name": "billing.send_invoice_email",
+      "queue": "default",
+      "state": "success",
+      "priority": "normal",
+      "args": [
+        "customer_id_42"
+      ],
+      "kwargs": {
+        "template": "monthly"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -13751,
+      "started_at_offset_s": -13750,
+      "finished_at_offset_s": -13748,
+      "runtime_ms": 2250,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "email"
+      ],
+      "created_at_offset_s": -13751,
+      "updated_at_offset_s": -13748
+    },
+    {
+      "id": "5ffa5504-d9b0-5aac-be82-3bcb1cd72aa3",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "c2216913-3d03-5702-b206-54b41f47b6ae",
+      "name": "analytics.aggregate_pageviews",
+      "queue": "analytics",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "window_minutes": 60
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -14082,
+      "started_at_offset_s": -14081,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "analytics"
+      ],
+      "created_at_offset_s": -14082,
+      "updated_at_offset_s": -14081
+    },
+    {
+      "id": "dbb335f0-c4a0-5857-8833-ff5b380171cc",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "738ab20b-27f2-5d82-872b-6f22dc674315",
+      "name": "users.send_welcome_email",
+      "queue": "default",
+      "state": "failure",
+      "priority": "high",
+      "args": [
+        "new_user_88"
+      ],
+      "kwargs": {},
+      "result": null,
+      "exception": "TimeoutError",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/users/tasks.py\", line 88, in run\n    raise TimeoutError(\"upstream did not respond in 30s\")\nTimeoutError: upstream did not respond in 30s",
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -14413,
+      "started_at_offset_s": -14412,
+      "finished_at_offset_s": -14410,
+      "runtime_ms": 2324,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "users",
+        "email"
+      ],
+      "created_at_offset_s": -14413,
+      "updated_at_offset_s": -14410
+    },
+    {
+      "id": "772a11a4-e39d-5b10-84a7-861e688b91e5",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "d168c3c1-36af-5482-8925-57d3e1a84017",
+      "name": "exports.generate_csv",
+      "queue": "exports",
+      "state": "retry",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "date_range": "last_30_days",
+        "user_id": 42
+      },
+      "result": null,
+      "exception": "TimeoutError: query exceeded statement_timeout (30s)",
+      "traceback": "Traceback (most recent call last):\n  File \"/app/exports/csv.py\", line 47, in generate_csv\n    rows = db.session.execute(query).fetchall()\n  File \"/usr/lib/python3.13/site-packages/sqlalchemy/engine/base.py\", line 1812, in execute\n    return meth(...)\nTimeoutError: query exceeded statement_timeout (30s)",
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -14744,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "exports"
+      ],
+      "created_at_offset_s": -14744,
+      "updated_at_offset_s": -14744
+    },
+    {
+      "id": "170d9193-e1f1-50a3-8255-4cf07fdcf8a0",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "a1902207-2cbb-5bf2-a954-0e1a7a01993c",
+      "name": "billing.charge_subscription",
+      "queue": "billing",
+      "state": "pending",
+      "priority": "critical",
+      "args": [
+        "subscription_id_15"
+      ],
+      "kwargs": {
+        "retry_on_decline": true
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -15075,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing",
+        "stripe"
+      ],
+      "created_at_offset_s": -15075,
+      "updated_at_offset_s": -15075
+    },
+    {
+      "id": "49020cd2-3c95-5289-9fae-efd0e3fa6e90",
+      "project_id": "00000000-0000-4000-9000-000000000001",
+      "engine": "celery",
+      "task_id": "584d54ff-fa90-54ed-b0ca-d1df02b9b1ac",
+      "name": "search.reindex_documents",
+      "queue": "search",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "batch": 200
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta_offset_s": 60,
+      "received_at_offset_s": -15406,
+      "started_at_offset_s": -15405,
+      "finished_at_offset_s": -15403,
+      "runtime_ms": 2435,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "search"
+      ],
+      "created_at_offset_s": -15406,
+      "updated_at_offset_s": -15403
     }
   ],
   "next_cursor": null

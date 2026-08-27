@@ -37,6 +37,7 @@ import { DateCell } from "@/components/domain/date-cell";
 import { formatCompact } from "@/lib/format";
 import type { WorkerPublic, WorkerState } from "@/lib/api-types";
 import { PageShell } from "@/components/domain/page-shell";
+import { WorkerLintPanel } from "@/components/domain/worker-lint-panel";
 
 const WORKER_STATES: WorkerState[] = [
   "online",
@@ -103,6 +104,10 @@ function WorkersPage() {
           <RefreshButton onRefresh={() => refetch()} pending={isFetching} />
         }
       />
+
+      {/* Above the table on purpose: a dangerous default is a thing to act on,
+          and it should not be something an operator finds only by scrolling. */}
+      <WorkerLintPanel slug={slug} />
 
       <FilterToolbar
         searchValue={searchQuery}

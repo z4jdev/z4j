@@ -6,7 +6,7 @@
     "is_admin": true
   },
   "aggregate": {
-    "tasks_24h": 556210,
+    "tasks_24h": 556192,
     "failures_24h": 183,
     "failure_rate_24h": 0.00033,
     "workers_online": 9,

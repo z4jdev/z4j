@@ -46,7 +46,7 @@
 # cosmetic: the cadence runtime fingerprint hashes sys.version_info[:3]
 # (packages/z4j/docker/production/probe.py), and .python-version at the
 # repo root says 3.14.7. Bumping the patch here changes that fingerprint.
-FROM docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS python-builder
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83 AS python-builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -257,7 +257,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Stage 2 - runtime
 # ---------------------------------------------------------------------------
-FROM docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS runtime
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83 AS runtime
 
 # OCI image metadata. Version is injected at build time via --build-arg
 # Z4J_VERSION=... so we never have to keep a hardcoded version in sync
@@ -298,6 +298,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # apt path, so the versions are whatever trixie and trixie-security
 # serve on the day of the build.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         libpq5 \
@@ -458,7 +459,7 @@ CMD ["serve"]
 #
 # This stage exists so contributors can run the brain in Docker
 # without paying the dashboard build cost on every restart.
-FROM docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS dev-runtime
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83 AS dev-runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -469,6 +470,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     Z4J_ALEMBIC_INI=/app/alembic.ini
 
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \

@@ -23,7 +23,9 @@
       "worker_name": "celery-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["ops"],
+      "tags": [
+        "ops"
+      ],
       "created_at_offset_s": -32,
       "updated_at_offset_s": -31
     },
@@ -37,7 +39,13 @@
       "state": "started",
       "priority": "low",
       "args": [],
-      "kwargs": {"sizes": [128, 256, 512]},
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -50,7 +58,9 @@
       "worker_name": "rq-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["thumbnails"],
+      "tags": [
+        "thumbnails"
+      ],
       "created_at_offset_s": -240,
       "updated_at_offset_s": -239
     },
@@ -64,7 +74,9 @@
       "state": "started",
       "priority": "normal",
       "args": [],
-      "kwargs": {"feature_set": "default"},
+      "kwargs": {
+        "feature_set": "default"
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -77,7 +89,9 @@
       "worker_name": "dramatiq-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["ml"],
+      "tags": [
+        "ml"
+      ],
       "created_at_offset_s": -120,
       "updated_at_offset_s": -119
     },
@@ -91,7 +105,9 @@
       "state": "success",
       "priority": "high",
       "args": [],
-      "kwargs": {"target": "snowflake"},
+      "kwargs": {
+        "target": "snowflake"
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -104,7 +120,9 @@
       "worker_name": "celery-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["etl"],
+      "tags": [
+        "etl"
+      ],
       "created_at_offset_s": -68400,
       "updated_at_offset_s": -64560
     },
@@ -118,7 +136,9 @@
       "state": "success",
       "priority": "normal",
       "args": [],
-      "kwargs": {"model_version": "v3.2"},
+      "kwargs": {
+        "model_version": "v3.2"
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -131,7 +151,10 @@
       "worker_name": "dramatiq-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["ml", "inference"],
+      "tags": [
+        "ml",
+        "inference"
+      ],
       "created_at_offset_s": -3600,
       "updated_at_offset_s": -3540
     },
@@ -145,7 +168,9 @@
       "state": "success",
       "priority": "critical",
       "args": [],
-      "kwargs": {"dry_run": false},
+      "kwargs": {
+        "dry_run": false
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -158,7 +183,10 @@
       "worker_name": "celery-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["data", "gdpr"],
+      "tags": [
+        "data",
+        "gdpr"
+      ],
       "created_at_offset_s": -61200,
       "updated_at_offset_s": -61080
     },
@@ -172,7 +200,13 @@
       "state": "success",
       "priority": "low",
       "args": [],
-      "kwargs": {"sizes": [128, 256, 512]},
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -185,7 +219,9 @@
       "worker_name": "rq-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["thumbnails"],
+      "tags": [
+        "thumbnails"
+      ],
       "created_at_offset_s": -540,
       "updated_at_offset_s": -488
     },
@@ -212,7 +248,9 @@
       "worker_name": "celery-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["ops"],
+      "tags": [
+        "ops"
+      ],
       "created_at_offset_s": -92,
       "updated_at_offset_s": -91
     },
@@ -226,7 +264,9 @@
       "state": "success",
       "priority": "low",
       "args": [],
-      "kwargs": {"max_age_seconds": 3600},
+      "kwargs": {
+        "max_age_seconds": 3600
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -239,7 +279,9 @@
       "worker_name": "celery-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["ops"],
+      "tags": [
+        "ops"
+      ],
       "created_at_offset_s": -300,
       "updated_at_offset_s": -298
     },
@@ -253,7 +295,13 @@
       "state": "success",
       "priority": "low",
       "args": [],
-      "kwargs": {"sizes": [128, 256, 512]},
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -266,7 +314,9 @@
       "worker_name": "rq-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["thumbnails"],
+      "tags": [
+        "thumbnails"
+      ],
       "created_at_offset_s": -840,
       "updated_at_offset_s": -789
     },
@@ -280,7 +330,9 @@
       "state": "success",
       "priority": "normal",
       "args": [],
-      "kwargs": {"model_version": "v3.2"},
+      "kwargs": {
+        "model_version": "v3.2"
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -293,7 +345,10 @@
       "worker_name": "dramatiq-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["ml", "inference"],
+      "tags": [
+        "ml",
+        "inference"
+      ],
       "created_at_offset_s": -10800,
       "updated_at_offset_s": -10742
     },
@@ -320,9 +375,1408 @@
       "worker_name": "celery-worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["ops"],
+      "tags": [
+        "ops"
+      ],
       "created_at_offset_s": -152,
       "updated_at_offset_s": -151
+    },
+    {
+      "id": "951a715d-f4eb-5b88-ab44-1ec9534a1399",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "5699bc49-4f58-580c-9232-2572fedcd376",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -511,
+      "started_at_offset_s": -510,
+      "finished_at_offset_s": -509,
+      "runtime_ms": 844,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -511,
+      "updated_at_offset_s": -509
+    },
+    {
+      "id": "b40f5489-7507-5f0f-b670-0a0543799cf4",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "c1e55a45-9065-51d1-b8ea-abc790397c6d",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -842,
+      "started_at_offset_s": -841,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -842,
+      "updated_at_offset_s": -841
+    },
+    {
+      "id": "aae01358-6718-593c-b5a0-9a973163fe00",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "a8c86862-cdea-5d7d-8123-b7d79c3fb91d",
+      "name": "ml.refresh_feature_store",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "feature_set": "default"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1173,
+      "started_at_offset_s": -1172,
+      "finished_at_offset_s": -1171,
+      "runtime_ms": 918,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml"
+      ],
+      "created_at_offset_s": -1173,
+      "updated_at_offset_s": -1171
+    },
+    {
+      "id": "4970b6f1-63d0-5015-a11e-9b3537c8818f",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "6ee22de4-4861-54ca-8697-95d300c16a9a",
+      "name": "etl.warehouse_load",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "target": "snowflake"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1504,
+      "started_at_offset_s": -1503,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "etl"
+      ],
+      "created_at_offset_s": -1504,
+      "updated_at_offset_s": -1503
+    },
+    {
+      "id": "63f4dd08-7e00-592e-b073-01ce35309708",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "7afa92a0-6d35-50ce-9642-628f0593c6e1",
+      "name": "ml.run_batch_inference",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "model_version": "v3.2"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1835,
+      "started_at_offset_s": -1834,
+      "finished_at_offset_s": -1833,
+      "runtime_ms": 992,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml",
+        "inference"
+      ],
+      "created_at_offset_s": -1835,
+      "updated_at_offset_s": -1833
+    },
+    {
+      "id": "9aa9878c-45bf-5690-b917-1038e6c72e2d",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "9f691420-e3f5-55e0-a337-c75f48df8d4b",
+      "name": "data.gdpr_purge_eligible_users",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "critical",
+      "args": [],
+      "kwargs": {
+        "dry_run": false
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -2166,
+      "started_at_offset_s": -2165,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "data",
+        "gdpr"
+      ],
+      "created_at_offset_s": -2166,
+      "updated_at_offset_s": -2165
+    },
+    {
+      "id": "41596d34-064d-5a89-b440-dda7075144b0",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "32101a2b-f013-5f83-b92c-598b39abf122",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -2497,
+      "started_at_offset_s": -2496,
+      "finished_at_offset_s": -2495,
+      "runtime_ms": 1066,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -2497,
+      "updated_at_offset_s": -2495
+    },
+    {
+      "id": "5aa2d1de-c95c-57f3-832a-c5ddae536ef3",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "30e96a86-c078-5ef1-8b71-e3562a69e4ae",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -2828,
+      "started_at_offset_s": -2827,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -2828,
+      "updated_at_offset_s": -2827
+    },
+    {
+      "id": "50db7716-e9c1-5e68-8cae-c286f17aa425",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "6fa327ca-d171-5c69-8d18-22c774c75d57",
+      "name": "ops.sweep_zombie_tasks",
+      "queue": "celery-default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "max_age_seconds": 3600
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -3159,
+      "started_at_offset_s": -3158,
+      "finished_at_offset_s": -3157,
+      "runtime_ms": 1140,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -3159,
+      "updated_at_offset_s": -3157
+    },
+    {
+      "id": "13eee0a4-dbdc-50ab-9c1c-d330bcecdbf7",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "50d4daca-2cb4-5388-b51d-73ee024054a2",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -3490,
+      "started_at_offset_s": -3489,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -3490,
+      "updated_at_offset_s": -3489
+    },
+    {
+      "id": "4dce4327-9ab3-5a1e-8382-e37398a90450",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "2cf43628-542a-53dd-b98f-9a54b04d648c",
+      "name": "ml.run_batch_inference",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "model_version": "v3.2"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -3821,
+      "started_at_offset_s": -3820,
+      "finished_at_offset_s": -3819,
+      "runtime_ms": 1214,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml",
+        "inference"
+      ],
+      "created_at_offset_s": -3821,
+      "updated_at_offset_s": -3819
+    },
+    {
+      "id": "29936084-ab71-5f72-be0e-ff1033a8e3ef",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "43dde58f-f8be-5662-b620-5d570869c269",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -4152,
+      "started_at_offset_s": -4151,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -4152,
+      "updated_at_offset_s": -4151
+    },
+    {
+      "id": "cf84da3e-cdc9-5af4-a8b7-5e09efbba7f3",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "16a40bb8-c714-545b-b565-6675edf5dc97",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -4483,
+      "started_at_offset_s": -4482,
+      "finished_at_offset_s": -4481,
+      "runtime_ms": 1288,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -4483,
+      "updated_at_offset_s": -4481
+    },
+    {
+      "id": "6aa34d92-e449-5614-af8f-51fb1781e1b9",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "08183350-9a19-5b94-ae8e-2a9fa0ce99c0",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -4814,
+      "started_at_offset_s": -4813,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -4814,
+      "updated_at_offset_s": -4813
+    },
+    {
+      "id": "63e11be1-f8a3-5109-954d-4885838af888",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "e8594aaa-a8dd-50d4-96a5-55deb1023afc",
+      "name": "ml.refresh_feature_store",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "feature_set": "default"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -5145,
+      "started_at_offset_s": -5144,
+      "finished_at_offset_s": -5143,
+      "runtime_ms": 1362,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml"
+      ],
+      "created_at_offset_s": -5145,
+      "updated_at_offset_s": -5143
+    },
+    {
+      "id": "12d5646c-4b5a-52f5-b1b5-940a630c591d",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "ecbb3f19-6198-5032-999a-88e2e42da37a",
+      "name": "etl.warehouse_load",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "target": "snowflake"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -5476,
+      "started_at_offset_s": -5475,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "etl"
+      ],
+      "created_at_offset_s": -5476,
+      "updated_at_offset_s": -5475
+    },
+    {
+      "id": "fcb5b192-f3de-5a1e-befe-d39aed40ccff",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "987a74b6-aea4-5016-8b17-c6e46af1b595",
+      "name": "ml.run_batch_inference",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "model_version": "v3.2"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -5807,
+      "started_at_offset_s": -5806,
+      "finished_at_offset_s": -5805,
+      "runtime_ms": 1436,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml",
+        "inference"
+      ],
+      "created_at_offset_s": -5807,
+      "updated_at_offset_s": -5805
+    },
+    {
+      "id": "7200fb9f-d48b-5bd8-8907-ee9e1eb9c4fa",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "147a9c8a-5c65-5b2e-84cb-ed9930428fc4",
+      "name": "data.gdpr_purge_eligible_users",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "critical",
+      "args": [],
+      "kwargs": {
+        "dry_run": false
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -6138,
+      "started_at_offset_s": -6137,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "data",
+        "gdpr"
+      ],
+      "created_at_offset_s": -6138,
+      "updated_at_offset_s": -6137
+    },
+    {
+      "id": "596856d8-a844-5e8e-9713-bc1ef6d41927",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "5f40150f-e1f2-57f6-ac65-fea8598cfe56",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -6469,
+      "started_at_offset_s": -6468,
+      "finished_at_offset_s": -6467,
+      "runtime_ms": 1510,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -6469,
+      "updated_at_offset_s": -6467
+    },
+    {
+      "id": "991272c8-8421-5a26-b1f0-892d35d675a6",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "78b063ea-8cdf-51a6-917a-fcb9a47d2379",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -6800,
+      "started_at_offset_s": -6799,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -6800,
+      "updated_at_offset_s": -6799
+    },
+    {
+      "id": "56cfc8da-5a4b-568c-8c63-aadee191f874",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "e35c17d8-3173-5ada-9488-4fe2b1528765",
+      "name": "ops.sweep_zombie_tasks",
+      "queue": "celery-default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "max_age_seconds": 3600
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -7131,
+      "started_at_offset_s": -7130,
+      "finished_at_offset_s": -7129,
+      "runtime_ms": 1584,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -7131,
+      "updated_at_offset_s": -7129
+    },
+    {
+      "id": "a77c8635-faa8-5110-9a5b-ed3b6b7954ac",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "1b0af352-4ff6-5c33-8c9a-ece769988882",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -7462,
+      "started_at_offset_s": -7461,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -7462,
+      "updated_at_offset_s": -7461
+    },
+    {
+      "id": "a203a62d-486c-5c44-9d15-d09ea7e7c2e3",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "de09b698-800d-5ecd-ad9c-2cc0029a150d",
+      "name": "ml.run_batch_inference",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "model_version": "v3.2"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -7793,
+      "started_at_offset_s": -7792,
+      "finished_at_offset_s": -7791,
+      "runtime_ms": 1658,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml",
+        "inference"
+      ],
+      "created_at_offset_s": -7793,
+      "updated_at_offset_s": -7791
+    },
+    {
+      "id": "e393fd58-63b3-5e00-981c-9aadd7db10a0",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "ef25eb4a-3a5b-5dbe-bc75-e896308bd0f5",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -8124,
+      "started_at_offset_s": -8123,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -8124,
+      "updated_at_offset_s": -8123
+    },
+    {
+      "id": "a7a2e169-30b3-53e3-8679-b8e52c4ad7d0",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "0c299058-70d6-5dbc-bb21-c3793f0583df",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -8455,
+      "started_at_offset_s": -8454,
+      "finished_at_offset_s": -8453,
+      "runtime_ms": 1732,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -8455,
+      "updated_at_offset_s": -8453
+    },
+    {
+      "id": "6c3fc581-3c1a-5ad2-b431-489d6b1294ce",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "39586177-2e32-5085-90f6-c0d98a174d0a",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -8786,
+      "started_at_offset_s": -8785,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -8786,
+      "updated_at_offset_s": -8785
+    },
+    {
+      "id": "d09097eb-b789-55b3-bdac-cafb61aa012b",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "aed4e6b9-8163-5f12-abd4-4ce711a17741",
+      "name": "ml.refresh_feature_store",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "feature_set": "default"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -9117,
+      "started_at_offset_s": -9116,
+      "finished_at_offset_s": -9115,
+      "runtime_ms": 1806,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml"
+      ],
+      "created_at_offset_s": -9117,
+      "updated_at_offset_s": -9115
+    },
+    {
+      "id": "4ac4e03d-82b8-5e4e-80c2-45232b8b6050",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "5a6d9b00-e170-576f-8706-ddf6b3293691",
+      "name": "etl.warehouse_load",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "target": "snowflake"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -9448,
+      "started_at_offset_s": -9447,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "etl"
+      ],
+      "created_at_offset_s": -9448,
+      "updated_at_offset_s": -9447
+    },
+    {
+      "id": "985c7c9d-0d4d-5625-9054-528e4c6307a0",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "58ff8923-b8fd-581e-9a45-75bb13daea81",
+      "name": "ml.run_batch_inference",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "model_version": "v3.2"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -9779,
+      "started_at_offset_s": -9778,
+      "finished_at_offset_s": -9777,
+      "runtime_ms": 1880,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml",
+        "inference"
+      ],
+      "created_at_offset_s": -9779,
+      "updated_at_offset_s": -9777
+    },
+    {
+      "id": "180977eb-3d66-5757-a294-bb5a8fb5a8f6",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "2d4c5a5f-e345-5d86-aa5e-138d1e7c0d7d",
+      "name": "data.gdpr_purge_eligible_users",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "critical",
+      "args": [],
+      "kwargs": {
+        "dry_run": false
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -10110,
+      "started_at_offset_s": -10109,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "data",
+        "gdpr"
+      ],
+      "created_at_offset_s": -10110,
+      "updated_at_offset_s": -10109
+    },
+    {
+      "id": "2d31b2ed-9997-5941-b8ac-8d5ad9745bd2",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "3e0f40af-d35e-5b88-81d9-9c735d2c832b",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -10441,
+      "started_at_offset_s": -10440,
+      "finished_at_offset_s": -10439,
+      "runtime_ms": 1954,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -10441,
+      "updated_at_offset_s": -10439
+    },
+    {
+      "id": "64bc94b2-e363-5c77-aba8-75b02092ca7a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "d139cff0-d7d9-540a-b903-aa5a0247d41b",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -10772,
+      "started_at_offset_s": -10771,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -10772,
+      "updated_at_offset_s": -10771
+    },
+    {
+      "id": "f0602d93-43c5-5970-aba6-f2e98fc00aab",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "414d242e-eac0-5f32-a7bf-d97c5d3d312d",
+      "name": "ops.sweep_zombie_tasks",
+      "queue": "celery-default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "max_age_seconds": 3600
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -11103,
+      "started_at_offset_s": -11102,
+      "finished_at_offset_s": -11100,
+      "runtime_ms": 2028,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -11103,
+      "updated_at_offset_s": -11100
+    },
+    {
+      "id": "0555a331-da0a-519b-a623-10a14438f2cc",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "52603594-0577-5259-b833-a48599aba50a",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -11434,
+      "started_at_offset_s": -11433,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -11434,
+      "updated_at_offset_s": -11433
+    },
+    {
+      "id": "39172e61-92a3-5728-99be-d2a4f1a85d7f",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "f7b675dc-e3f4-5ee9-ab76-fbecfbe99a5b",
+      "name": "ml.run_batch_inference",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "model_version": "v3.2"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -11765,
+      "started_at_offset_s": -11764,
+      "finished_at_offset_s": -11762,
+      "runtime_ms": 2102,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml",
+        "inference"
+      ],
+      "created_at_offset_s": -11765,
+      "updated_at_offset_s": -11762
+    },
+    {
+      "id": "5bde3942-aeb4-516f-a188-dae7aaa2e3e1",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "d2a5a920-e9f4-5aa3-bfbf-48c335852ec0",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -12096,
+      "started_at_offset_s": -12095,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -12096,
+      "updated_at_offset_s": -12095
+    },
+    {
+      "id": "39160152-36b2-5b9d-bbd9-81d86dfbe567",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "96183586-c329-5142-a67b-3c13a6cddb3c",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -12427,
+      "started_at_offset_s": -12426,
+      "finished_at_offset_s": -12424,
+      "runtime_ms": 2176,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -12427,
+      "updated_at_offset_s": -12424
+    },
+    {
+      "id": "ac37646e-7598-5fde-8581-c8daac8ef6c7",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "5e940074-2880-5e69-848d-4628745b2565",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -12758,
+      "started_at_offset_s": -12757,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -12758,
+      "updated_at_offset_s": -12757
+    },
+    {
+      "id": "fc396fdf-e8d4-59fa-a1e5-fe563aa97fb0",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "cb489667-2fe9-5346-a12c-c9480823913d",
+      "name": "ml.refresh_feature_store",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "feature_set": "default"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -13089,
+      "started_at_offset_s": -13088,
+      "finished_at_offset_s": -13086,
+      "runtime_ms": 2250,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml"
+      ],
+      "created_at_offset_s": -13089,
+      "updated_at_offset_s": -13086
+    },
+    {
+      "id": "9792c38d-616f-5ade-a0ee-dd445c89a151",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "d61ee1d2-8e4f-5241-a18a-31ada9c1e266",
+      "name": "etl.warehouse_load",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "target": "snowflake"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -13420,
+      "started_at_offset_s": -13419,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "etl"
+      ],
+      "created_at_offset_s": -13420,
+      "updated_at_offset_s": -13419
+    },
+    {
+      "id": "3e9342c3-19b7-5f02-96b0-1392fee615e7",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "dramatiq",
+      "task_id": "552bd2ee-8105-5c42-9c78-d6005f2a7c98",
+      "name": "ml.run_batch_inference",
+      "queue": "dramatiq-default",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "model_version": "v3.2"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -13751,
+      "started_at_offset_s": -13750,
+      "finished_at_offset_s": -13748,
+      "runtime_ms": 2324,
+      "worker_name": "dramatiq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ml",
+        "inference"
+      ],
+      "created_at_offset_s": -13751,
+      "updated_at_offset_s": -13748
+    },
+    {
+      "id": "b27002f9-d165-5f4f-af8f-8d762cfb9683",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "43537874-6820-57dc-9912-010a93f6bf27",
+      "name": "data.gdpr_purge_eligible_users",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "critical",
+      "args": [],
+      "kwargs": {
+        "dry_run": false
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -14082,
+      "started_at_offset_s": -14081,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "data",
+        "gdpr"
+      ],
+      "created_at_offset_s": -14082,
+      "updated_at_offset_s": -14081
+    },
+    {
+      "id": "5d44fee1-ba2a-5b46-b716-0d6a252e5d2c",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "rq",
+      "task_id": "78a2faf2-b1b8-5169-9381-9e8e5a59986d",
+      "name": "thumbnails.regen_batch",
+      "queue": "rq-default",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "sizes": [
+          128,
+          256,
+          512
+        ]
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -14413,
+      "started_at_offset_s": -14412,
+      "finished_at_offset_s": -14410,
+      "runtime_ms": 2398,
+      "worker_name": "rq-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "thumbnails"
+      ],
+      "created_at_offset_s": -14413,
+      "updated_at_offset_s": -14410
+    },
+    {
+      "id": "01583d32-d6bc-5253-b59f-f98bd1e6bc93",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "engine": "celery",
+      "task_id": "f7096dea-18d7-5a20-b689-892ea2e96d97",
+      "name": "ops.run_health_probe",
+      "queue": "celery-default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -14744,
+      "started_at_offset_s": -14743,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "celery-worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "ops"
+      ],
+      "created_at_offset_s": -14744,
+      "updated_at_offset_s": -14743
     }
   ],
   "next_cursor": null

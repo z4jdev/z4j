@@ -1,1 +1,1789 @@
-{"items": [], "next_cursor": null}
+{
+  "items": [
+    {
+      "id": "b22c8c7d-410c-58c5-a890-1e9051ac6da9",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d430af8d-6d77-581f-9ad2-a4c7782c7d18",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 420
+      },
+      "occurred_at_offset_s": -31
+    },
+    {
+      "id": "cd9fc41f-6f56-5562-9b72-1e13919c3e25",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d430af8d-6d77-581f-9ad2-a4c7782c7d18",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -32
+    },
+    {
+      "id": "e6e15a5f-4b37-580f-827a-25e25727e3ce",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d430af8d-6d77-581f-9ad2-a4c7782c7d18",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -32
+    },
+    {
+      "id": "f27b8398-8e8e-54d7-9545-f05d88f1443e",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b3c1e1ae-bacf-5895-be0e-eaa9bb2ce9ed",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 380
+      },
+      "occurred_at_offset_s": -91
+    },
+    {
+      "id": "4c34c0f4-4e3e-5be9-92e3-dd6c913abe8a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b3c1e1ae-bacf-5895-be0e-eaa9bb2ce9ed",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -92
+    },
+    {
+      "id": "cc00a193-d654-59f9-82a4-adc8740bc288",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "b3c1e1ae-bacf-5895-be0e-eaa9bb2ce9ed",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -92
+    },
+    {
+      "id": "0f31cafa-d558-566d-b897-e0054daf1e0f",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "29462e87-86da-5e93-87fc-dc2b2d208563",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -119
+    },
+    {
+      "id": "5b2bce8e-6bc0-5bf0-9bea-e0ec1eb72c46",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "29462e87-86da-5e93-87fc-dc2b2d208563",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.refresh_feature_store"
+      },
+      "occurred_at_offset_s": -120
+    },
+    {
+      "id": "542e945b-14d5-55ce-ac41-7836cc72546d",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "670c7a67-0228-5b08-83c2-13303ae71dc7",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 410
+      },
+      "occurred_at_offset_s": -151
+    },
+    {
+      "id": "edf1670a-9f5d-574e-8efd-0e754d893c4f",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "670c7a67-0228-5b08-83c2-13303ae71dc7",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -152
+    },
+    {
+      "id": "5a1a4b36-8777-570a-84b1-46391cb30184",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "670c7a67-0228-5b08-83c2-13303ae71dc7",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -152
+    },
+    {
+      "id": "b25b1498-599a-548a-bafa-5d2da88a6e41",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "45dc6c4a-aebb-5ad6-81ef-d8a5e4f67f45",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -239
+    },
+    {
+      "id": "9d88e3df-a5f6-501b-8739-0cf8e865e1fa",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "45dc6c4a-aebb-5ad6-81ef-d8a5e4f67f45",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -240
+    },
+    {
+      "id": "9a16c28a-3aae-52b4-b225-5f6b2106d73d",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9172b425-d6cf-544e-8aec-c9c6d8ab3c8e",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1820
+      },
+      "occurred_at_offset_s": -298
+    },
+    {
+      "id": "b8aa50e8-0e7f-561d-a83a-0fa58b5a8f4c",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9172b425-d6cf-544e-8aec-c9c6d8ab3c8e",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.sweep_zombie_tasks"
+      },
+      "occurred_at_offset_s": -300
+    },
+    {
+      "id": "46ca81f0-ec4f-5876-a7f0-b69fa67d073f",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9172b425-d6cf-544e-8aec-c9c6d8ab3c8e",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -300
+    },
+    {
+      "id": "07542487-c225-593b-a8cc-90014f30fada",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "7c828fa6-d50e-5962-9071-da2222f582f0",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 51280
+      },
+      "occurred_at_offset_s": -488
+    },
+    {
+      "id": "d63add18-d4bd-5307-abfe-e302aba71aec",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "5699bc49-4f58-580c-9232-2572fedcd376",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 844
+      },
+      "occurred_at_offset_s": -509
+    },
+    {
+      "id": "0c831e0e-2850-5960-a918-4b8fe4e43a1c",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "5699bc49-4f58-580c-9232-2572fedcd376",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -510
+    },
+    {
+      "id": "d8f1348a-f8d9-5321-bea6-ce8d641828fe",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "5699bc49-4f58-580c-9232-2572fedcd376",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -511
+    },
+    {
+      "id": "e88e209a-69b4-5623-98b3-ec2eb1c0c9a4",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "7c828fa6-d50e-5962-9071-da2222f582f0",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -539
+    },
+    {
+      "id": "a42901f6-d390-5252-997d-39b86cf954f4",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "7c828fa6-d50e-5962-9071-da2222f582f0",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -540
+    },
+    {
+      "id": "422f3b62-e1e0-57d2-a0dc-eac2423215ae",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "11c30cba-bf3c-543f-b239-3a77076c8d53",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 50420
+      },
+      "occurred_at_offset_s": -789
+    },
+    {
+      "id": "54301961-ca16-5fda-a38f-7ef1ed7b1d34",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "11c30cba-bf3c-543f-b239-3a77076c8d53",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -839
+    },
+    {
+      "id": "049f5d39-8faa-5b9a-9c58-d3d89dcc6590",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "11c30cba-bf3c-543f-b239-3a77076c8d53",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -840
+    },
+    {
+      "id": "6eec77ec-ff5d-5312-8925-e1156c47c69b",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "c1e55a45-9065-51d1-b8ea-abc790397c6d",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -841
+    },
+    {
+      "id": "2face6f0-dd7f-577b-b869-67ce9cc19dee",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "c1e55a45-9065-51d1-b8ea-abc790397c6d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -842
+    },
+    {
+      "id": "9158cbae-155f-56ad-87b8-6fc044b72ecb",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "a8c86862-cdea-5d7d-8123-b7d79c3fb91d",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 918
+      },
+      "occurred_at_offset_s": -1171
+    },
+    {
+      "id": "e5eeda45-d8ed-5af7-af2a-b0f424dece92",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "a8c86862-cdea-5d7d-8123-b7d79c3fb91d",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -1172
+    },
+    {
+      "id": "fc1fe3d2-6198-5fcd-949f-da83d3ac6531",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "a8c86862-cdea-5d7d-8123-b7d79c3fb91d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.refresh_feature_store"
+      },
+      "occurred_at_offset_s": -1173
+    },
+    {
+      "id": "afdc62bd-5d27-5d0b-82fd-f845719df23a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "6ee22de4-4861-54ca-8697-95d300c16a9a",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -1503
+    },
+    {
+      "id": "456afd88-48b7-5777-8c87-7e129671518b",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "6ee22de4-4861-54ca-8697-95d300c16a9a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "etl.warehouse_load"
+      },
+      "occurred_at_offset_s": -1504
+    },
+    {
+      "id": "0571c35f-42ca-5c28-94c8-8b2ce44b0b9a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "7afa92a0-6d35-50ce-9642-628f0593c6e1",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 992
+      },
+      "occurred_at_offset_s": -1833
+    },
+    {
+      "id": "221c2d6b-144f-5799-b3d5-e78f884c8bb6",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "7afa92a0-6d35-50ce-9642-628f0593c6e1",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -1834
+    },
+    {
+      "id": "64b943a5-c5e3-5a3c-8a40-6d16b6da3b0f",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "7afa92a0-6d35-50ce-9642-628f0593c6e1",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.run_batch_inference"
+      },
+      "occurred_at_offset_s": -1835
+    },
+    {
+      "id": "9ba88f7b-40b6-5b4a-9edb-d0a3e9497fe0",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9f691420-e3f5-55e0-a337-c75f48df8d4b",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -2165
+    },
+    {
+      "id": "6d13575c-55d1-5eec-a64e-61a882a89fce",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "9f691420-e3f5-55e0-a337-c75f48df8d4b",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "data.gdpr_purge_eligible_users"
+      },
+      "occurred_at_offset_s": -2166
+    },
+    {
+      "id": "613c214b-9369-56ff-abd6-1a193fd0f9a9",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "32101a2b-f013-5f83-b92c-598b39abf122",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1066
+      },
+      "occurred_at_offset_s": -2495
+    },
+    {
+      "id": "803021ce-abf4-5ae6-8991-06ce34d48fbd",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "32101a2b-f013-5f83-b92c-598b39abf122",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -2496
+    },
+    {
+      "id": "f012183e-257a-522e-907b-f89a2b9d22bf",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "32101a2b-f013-5f83-b92c-598b39abf122",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -2497
+    },
+    {
+      "id": "c99454d9-1448-58aa-a4f8-5f588ffd2eef",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "30e96a86-c078-5ef1-8b71-e3562a69e4ae",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -2827
+    },
+    {
+      "id": "1596abe9-03f3-53b7-b8c2-8bbdb060821e",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "30e96a86-c078-5ef1-8b71-e3562a69e4ae",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -2828
+    },
+    {
+      "id": "6dd14dd3-0d97-5004-91a1-f5db20fb91e2",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "6fa327ca-d171-5c69-8d18-22c774c75d57",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1140
+      },
+      "occurred_at_offset_s": -3157
+    },
+    {
+      "id": "19959071-67ad-5059-bcad-d534544d60f7",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "6fa327ca-d171-5c69-8d18-22c774c75d57",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -3158
+    },
+    {
+      "id": "882d74b5-0e87-591c-bdd0-13d4e516da8a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "6fa327ca-d171-5c69-8d18-22c774c75d57",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.sweep_zombie_tasks"
+      },
+      "occurred_at_offset_s": -3159
+    },
+    {
+      "id": "e8a6facc-1c83-57d3-a1cf-09a99ab0233b",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "50d4daca-2cb4-5388-b51d-73ee024054a2",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -3489
+    },
+    {
+      "id": "755c318c-e49c-575e-9ecf-5382f1a34e1a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "50d4daca-2cb4-5388-b51d-73ee024054a2",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -3490
+    },
+    {
+      "id": "949af6d8-46b1-5775-8dc4-52f74758a3d3",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "dc5e2196-03e7-5ae3-bacd-fe1450cceec8",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 59820
+      },
+      "occurred_at_offset_s": -3540
+    },
+    {
+      "id": "524b8ba5-eae5-511c-85b2-270d6807848a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "dc5e2196-03e7-5ae3-bacd-fe1450cceec8",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -3599
+    },
+    {
+      "id": "3c8b49a2-dd58-5b29-b35d-7ca6be2c42ba",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "dc5e2196-03e7-5ae3-bacd-fe1450cceec8",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.run_batch_inference"
+      },
+      "occurred_at_offset_s": -3600
+    },
+    {
+      "id": "1fe99944-01ee-51db-bd29-b7d3d21df67a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "2cf43628-542a-53dd-b98f-9a54b04d648c",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1214
+      },
+      "occurred_at_offset_s": -3819
+    },
+    {
+      "id": "7c9528c6-bdcd-543a-b08b-4f99955e09e2",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "2cf43628-542a-53dd-b98f-9a54b04d648c",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -3820
+    },
+    {
+      "id": "5363b521-a11a-555c-828e-727530c864f5",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "2cf43628-542a-53dd-b98f-9a54b04d648c",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.run_batch_inference"
+      },
+      "occurred_at_offset_s": -3821
+    },
+    {
+      "id": "8db5988d-ed79-5be7-850e-e8d427cdf3a6",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "43dde58f-f8be-5662-b620-5d570869c269",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -4151
+    },
+    {
+      "id": "a5646a21-0afe-5c2b-b420-ca2cd9145b63",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "43dde58f-f8be-5662-b620-5d570869c269",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -4152
+    },
+    {
+      "id": "91341380-8688-53c5-81c5-c567e8e2d0d7",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "16a40bb8-c714-545b-b565-6675edf5dc97",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1288
+      },
+      "occurred_at_offset_s": -4481
+    },
+    {
+      "id": "cf6530ec-6939-5eed-ba24-169c0b3e3544",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "16a40bb8-c714-545b-b565-6675edf5dc97",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -4482
+    },
+    {
+      "id": "035808ff-fde0-5300-bceb-776c97b812c5",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "16a40bb8-c714-545b-b565-6675edf5dc97",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -4483
+    },
+    {
+      "id": "e7886b0f-0b47-529d-b0a9-80fb3166dcee",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "08183350-9a19-5b94-ae8e-2a9fa0ce99c0",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -4813
+    },
+    {
+      "id": "b9d6e47f-a2c2-549c-8656-2baf17bcc388",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "08183350-9a19-5b94-ae8e-2a9fa0ce99c0",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -4814
+    },
+    {
+      "id": "29886b9f-0103-560b-b425-c1e89a9f51de",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "e8594aaa-a8dd-50d4-96a5-55deb1023afc",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1362
+      },
+      "occurred_at_offset_s": -5143
+    },
+    {
+      "id": "d5424c53-1d92-5c94-8589-70a1579f47ae",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "e8594aaa-a8dd-50d4-96a5-55deb1023afc",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -5144
+    },
+    {
+      "id": "9a06ee20-51f8-55b9-88ce-0ccee1254530",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "e8594aaa-a8dd-50d4-96a5-55deb1023afc",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.refresh_feature_store"
+      },
+      "occurred_at_offset_s": -5145
+    },
+    {
+      "id": "31b96b4d-b6a2-5aa1-906a-1e661682fab9",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "ecbb3f19-6198-5032-999a-88e2e42da37a",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -5475
+    },
+    {
+      "id": "a99835e6-74d5-5529-8efc-dfd6d0709a0b",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "ecbb3f19-6198-5032-999a-88e2e42da37a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "etl.warehouse_load"
+      },
+      "occurred_at_offset_s": -5476
+    },
+    {
+      "id": "77bc4f3f-6c87-53b6-bde3-177025a943f7",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "987a74b6-aea4-5016-8b17-c6e46af1b595",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1436
+      },
+      "occurred_at_offset_s": -5805
+    },
+    {
+      "id": "4b580d70-56d3-55ad-aaf4-be30678ba56b",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "987a74b6-aea4-5016-8b17-c6e46af1b595",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -5806
+    },
+    {
+      "id": "5bddaa6c-1331-52a2-ac93-1c945a867960",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "987a74b6-aea4-5016-8b17-c6e46af1b595",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.run_batch_inference"
+      },
+      "occurred_at_offset_s": -5807
+    },
+    {
+      "id": "9ad006de-2daa-59ff-ad2c-a7e8ea33a28d",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "147a9c8a-5c65-5b2e-84cb-ed9930428fc4",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -6137
+    },
+    {
+      "id": "2df28836-3f17-59bd-8c63-fcbb3f10fa4c",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "147a9c8a-5c65-5b2e-84cb-ed9930428fc4",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "data.gdpr_purge_eligible_users"
+      },
+      "occurred_at_offset_s": -6138
+    },
+    {
+      "id": "556d13ed-e86a-57c1-9337-557a16cda98a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "5f40150f-e1f2-57f6-ac65-fea8598cfe56",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1510
+      },
+      "occurred_at_offset_s": -6467
+    },
+    {
+      "id": "deba40ea-bf50-5988-b32e-d7ec9813a9cc",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "5f40150f-e1f2-57f6-ac65-fea8598cfe56",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -6468
+    },
+    {
+      "id": "3ec1aef8-f3fb-53c7-b810-5c428e4574f9",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "5f40150f-e1f2-57f6-ac65-fea8598cfe56",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -6469
+    },
+    {
+      "id": "74ffed18-11f8-55ba-a8d5-e3cf845d2b23",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "78b063ea-8cdf-51a6-917a-fcb9a47d2379",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -6799
+    },
+    {
+      "id": "1c6079d6-60e6-503d-954c-43cb381a66f0",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "78b063ea-8cdf-51a6-917a-fcb9a47d2379",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -6800
+    },
+    {
+      "id": "e02691f8-37f9-5d55-9dd6-1e63c2b9bab0",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "e35c17d8-3173-5ada-9488-4fe2b1528765",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1584
+      },
+      "occurred_at_offset_s": -7129
+    },
+    {
+      "id": "9443b111-d62b-589c-a3a6-beac500b6e23",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "e35c17d8-3173-5ada-9488-4fe2b1528765",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -7130
+    },
+    {
+      "id": "5e7163f3-dfbb-562b-b2fd-3556b0869583",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "e35c17d8-3173-5ada-9488-4fe2b1528765",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.sweep_zombie_tasks"
+      },
+      "occurred_at_offset_s": -7131
+    },
+    {
+      "id": "04ef07ef-fd22-50ff-81a4-c1461419493d",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "1b0af352-4ff6-5c33-8c9a-ece769988882",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -7461
+    },
+    {
+      "id": "b542321e-40eb-5b54-bfe7-35cdc6ffe92d",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "1b0af352-4ff6-5c33-8c9a-ece769988882",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -7462
+    },
+    {
+      "id": "b75e782f-4b53-50f9-8690-96a312455744",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "de09b698-800d-5ecd-ad9c-2cc0029a150d",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1658
+      },
+      "occurred_at_offset_s": -7791
+    },
+    {
+      "id": "6dfc1348-b55b-5c98-8144-96c34b1ea768",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "de09b698-800d-5ecd-ad9c-2cc0029a150d",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -7792
+    },
+    {
+      "id": "144cc0a5-1d2c-5a94-b705-c0d9e00209a3",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "de09b698-800d-5ecd-ad9c-2cc0029a150d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.run_batch_inference"
+      },
+      "occurred_at_offset_s": -7793
+    },
+    {
+      "id": "2053997c-b656-5ecc-a83b-9cf002f888d2",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "ef25eb4a-3a5b-5dbe-bc75-e896308bd0f5",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -8123
+    },
+    {
+      "id": "9399a0bf-1545-5373-8348-3d377034d5e8",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "ef25eb4a-3a5b-5dbe-bc75-e896308bd0f5",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -8124
+    },
+    {
+      "id": "4988d1c2-6368-5c2c-bec0-0d85f752ca00",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0c299058-70d6-5dbc-bb21-c3793f0583df",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1732
+      },
+      "occurred_at_offset_s": -8453
+    },
+    {
+      "id": "3222f569-c087-5b1f-a99f-1884ceb6d114",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0c299058-70d6-5dbc-bb21-c3793f0583df",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -8454
+    },
+    {
+      "id": "2443fced-9ce6-56a7-a5dc-a2d0d6ac0373",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "0c299058-70d6-5dbc-bb21-c3793f0583df",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -8455
+    },
+    {
+      "id": "805d7fb1-8286-5ad0-90bd-1eb2877c113b",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "39586177-2e32-5085-90f6-c0d98a174d0a",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -8785
+    },
+    {
+      "id": "5ea12cc1-9f32-589d-8874-b4123420b747",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "39586177-2e32-5085-90f6-c0d98a174d0a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -8786
+    },
+    {
+      "id": "049ae557-35b5-504e-81c8-8ddba8218c3d",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "aed4e6b9-8163-5f12-abd4-4ce711a17741",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1806
+      },
+      "occurred_at_offset_s": -9115
+    },
+    {
+      "id": "d67a0ea9-b20b-5680-aa1e-03c593fbc3bf",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "aed4e6b9-8163-5f12-abd4-4ce711a17741",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -9116
+    },
+    {
+      "id": "c6ce0357-37fc-5d5e-abc3-b0f1b2538b04",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "aed4e6b9-8163-5f12-abd4-4ce711a17741",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.refresh_feature_store"
+      },
+      "occurred_at_offset_s": -9117
+    },
+    {
+      "id": "5746b549-e2d0-579b-8c37-28d02f28d905",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "5a6d9b00-e170-576f-8706-ddf6b3293691",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -9447
+    },
+    {
+      "id": "824eeb0e-430a-56c5-834d-6ca7b59894f4",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "5a6d9b00-e170-576f-8706-ddf6b3293691",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "etl.warehouse_load"
+      },
+      "occurred_at_offset_s": -9448
+    },
+    {
+      "id": "bb6ed249-9e06-5295-8f48-4c3334cab0cc",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "58ff8923-b8fd-581e-9a45-75bb13daea81",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1880
+      },
+      "occurred_at_offset_s": -9777
+    },
+    {
+      "id": "c7d38e07-0d27-5944-bc34-978f21625071",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "58ff8923-b8fd-581e-9a45-75bb13daea81",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -9778
+    },
+    {
+      "id": "de0ff6d2-75dc-593e-9d8c-758f837d00ea",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "58ff8923-b8fd-581e-9a45-75bb13daea81",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.run_batch_inference"
+      },
+      "occurred_at_offset_s": -9779
+    },
+    {
+      "id": "0feff530-0e81-5cdd-bb24-d697ae848437",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "2d4c5a5f-e345-5d86-aa5e-138d1e7c0d7d",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -10109
+    },
+    {
+      "id": "95b0d5b4-df4c-5a02-8dca-f86a8269eb68",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "2d4c5a5f-e345-5d86-aa5e-138d1e7c0d7d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "data.gdpr_purge_eligible_users"
+      },
+      "occurred_at_offset_s": -10110
+    },
+    {
+      "id": "34dc902d-a0a1-53dc-979d-80abcf3b9431",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "3e0f40af-d35e-5b88-81d9-9c735d2c832b",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 1954
+      },
+      "occurred_at_offset_s": -10439
+    },
+    {
+      "id": "410e5ce5-916f-5c8f-914d-af4e90188cb4",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "3e0f40af-d35e-5b88-81d9-9c735d2c832b",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -10440
+    },
+    {
+      "id": "06b2b069-6577-565d-aac2-a4dc07af7cdc",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "3e0f40af-d35e-5b88-81d9-9c735d2c832b",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -10441
+    },
+    {
+      "id": "96e751d5-f2c7-586d-b316-a0647ede1532",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "4f9b5fc7-360e-5fd3-80e0-f284444fcde8",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 58420
+      },
+      "occurred_at_offset_s": -10742
+    },
+    {
+      "id": "537f150a-8478-5dd2-b6d4-9316437b02ea",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d139cff0-d7d9-540a-b903-aa5a0247d41b",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -10771
+    },
+    {
+      "id": "281af72e-7455-50ae-9ac9-3ec37f0fe2f7",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d139cff0-d7d9-540a-b903-aa5a0247d41b",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -10772
+    },
+    {
+      "id": "fffc8d90-500c-53df-9e41-0fc16dcdb02d",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "4f9b5fc7-360e-5fd3-80e0-f284444fcde8",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.run_batch_inference"
+      },
+      "occurred_at_offset_s": -10800
+    },
+    {
+      "id": "9dfc231a-01c6-5909-bb06-633408efeb99",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "4f9b5fc7-360e-5fd3-80e0-f284444fcde8",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -10800
+    },
+    {
+      "id": "729805b5-28cd-5ec2-966c-f6be82e93556",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "414d242e-eac0-5f32-a7bf-d97c5d3d312d",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 2028
+      },
+      "occurred_at_offset_s": -11100
+    },
+    {
+      "id": "a9ecf443-d741-5c22-bdb4-052c119c3850",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "414d242e-eac0-5f32-a7bf-d97c5d3d312d",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -11102
+    },
+    {
+      "id": "a3aed1ff-6d03-5729-a58f-8b6cb3066870",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "414d242e-eac0-5f32-a7bf-d97c5d3d312d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.sweep_zombie_tasks"
+      },
+      "occurred_at_offset_s": -11103
+    },
+    {
+      "id": "162c0e4d-1fd8-5fab-86ff-09c318bc724a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "52603594-0577-5259-b833-a48599aba50a",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -11433
+    },
+    {
+      "id": "f8c11fb9-cfe9-59fc-8617-80cbc7829717",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "52603594-0577-5259-b833-a48599aba50a",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -11434
+    },
+    {
+      "id": "561cd954-67a0-538a-b7ae-ad2894da9b2b",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "f7b675dc-e3f4-5ee9-ab76-fbecfbe99a5b",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 2102
+      },
+      "occurred_at_offset_s": -11762
+    },
+    {
+      "id": "eb1ad427-a778-5983-8331-f31280db8738",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "f7b675dc-e3f4-5ee9-ab76-fbecfbe99a5b",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -11764
+    },
+    {
+      "id": "ec381a58-1fb2-5d4c-ada2-bac91dbba6de",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "f7b675dc-e3f4-5ee9-ab76-fbecfbe99a5b",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.run_batch_inference"
+      },
+      "occurred_at_offset_s": -11765
+    },
+    {
+      "id": "9a42cd99-f2ee-5ca9-a312-36d86ca58d73",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d2a5a920-e9f4-5aa3-bfbf-48c335852ec0",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -12095
+    },
+    {
+      "id": "33ed3910-402b-5cad-959a-9822759c3a80",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d2a5a920-e9f4-5aa3-bfbf-48c335852ec0",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -12096
+    },
+    {
+      "id": "8d03df08-df99-5ad6-b980-f1eb046cbf12",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "96183586-c329-5142-a67b-3c13a6cddb3c",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 2176
+      },
+      "occurred_at_offset_s": -12424
+    },
+    {
+      "id": "7478db18-a6bd-579c-b8c9-50a7f0bacb09",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "96183586-c329-5142-a67b-3c13a6cddb3c",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -12426
+    },
+    {
+      "id": "413e8187-2690-5d67-a090-90ae89531ece",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "96183586-c329-5142-a67b-3c13a6cddb3c",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -12427
+    },
+    {
+      "id": "9a88d4a0-563f-56b9-8519-739778ec4626",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "5e940074-2880-5e69-848d-4628745b2565",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -12757
+    },
+    {
+      "id": "4c09f80b-647d-5b0e-b9f4-b890bdc20e73",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "5e940074-2880-5e69-848d-4628745b2565",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -12758
+    },
+    {
+      "id": "1477f8ad-e410-5431-968b-be2ecbd08c12",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "cb489667-2fe9-5346-a12c-c9480823913d",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 2250
+      },
+      "occurred_at_offset_s": -13086
+    },
+    {
+      "id": "3069caa7-228c-5951-9a9c-eb538d629393",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "cb489667-2fe9-5346-a12c-c9480823913d",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -13088
+    },
+    {
+      "id": "2a6085cd-b054-5b14-bb97-81ad3ae83a97",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "cb489667-2fe9-5346-a12c-c9480823913d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.refresh_feature_store"
+      },
+      "occurred_at_offset_s": -13089
+    },
+    {
+      "id": "392b59d1-38b6-5407-8f8d-7db7cdb3a913",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d61ee1d2-8e4f-5241-a18a-31ada9c1e266",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -13419
+    },
+    {
+      "id": "28a9c6c1-4a6f-55af-8fc4-83df6ba4d616",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "d61ee1d2-8e4f-5241-a18a-31ada9c1e266",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "etl.warehouse_load"
+      },
+      "occurred_at_offset_s": -13420
+    },
+    {
+      "id": "2e0b01db-a94b-5c6e-94dc-367640434dbd",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "552bd2ee-8105-5c42-9c78-d6005f2a7c98",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 2324
+      },
+      "occurred_at_offset_s": -13748
+    },
+    {
+      "id": "62c3fefe-c63c-5a17-849b-b72b757e2fbf",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "552bd2ee-8105-5c42-9c78-d6005f2a7c98",
+      "kind": "task.started",
+      "payload": {
+        "worker": "dramatiq-worker-1"
+      },
+      "occurred_at_offset_s": -13750
+    },
+    {
+      "id": "67cb36e0-e2a4-5c75-a070-b4ddfaebb596",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "dramatiq",
+      "task_id": "552bd2ee-8105-5c42-9c78-d6005f2a7c98",
+      "kind": "task.received",
+      "payload": {
+        "queue": "dramatiq-default",
+        "name": "ml.run_batch_inference"
+      },
+      "occurred_at_offset_s": -13751
+    },
+    {
+      "id": "70c18226-b48c-53fe-89d3-7d7b1a1ef1fc",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "43537874-6820-57dc-9912-010a93f6bf27",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -14081
+    },
+    {
+      "id": "37cb86ca-6bdd-55b1-8dfb-546c366ee83f",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "43537874-6820-57dc-9912-010a93f6bf27",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "data.gdpr_purge_eligible_users"
+      },
+      "occurred_at_offset_s": -14082
+    },
+    {
+      "id": "6b8f1cdc-8851-5000-9da0-41aac562685c",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "78a2faf2-b1b8-5169-9381-9e8e5a59986d",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 2398
+      },
+      "occurred_at_offset_s": -14410
+    },
+    {
+      "id": "d65a9228-a8af-525b-a8cd-4843bc91462a",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "78a2faf2-b1b8-5169-9381-9e8e5a59986d",
+      "kind": "task.started",
+      "payload": {
+        "worker": "rq-worker-1"
+      },
+      "occurred_at_offset_s": -14412
+    },
+    {
+      "id": "641500a7-6048-5600-ad38-627825213bd6",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "rq",
+      "task_id": "78a2faf2-b1b8-5169-9381-9e8e5a59986d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "rq-default",
+        "name": "thumbnails.regen_batch"
+      },
+      "occurred_at_offset_s": -14413
+    },
+    {
+      "id": "1757a805-acbb-5ef9-a163-b889e31c1382",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "f7096dea-18d7-5a20-b689-892ea2e96d97",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -14743
+    },
+    {
+      "id": "dc9b580b-2a0a-59f9-bd0d-2cd2be321e11",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "f7096dea-18d7-5a20-b689-892ea2e96d97",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "ops.run_health_probe"
+      },
+      "occurred_at_offset_s": -14744
+    },
+    {
+      "id": "f8a10b3c-f02d-511d-8149-b57e911a5c2f",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "99f64089-ef4c-572d-a65a-ccee2f1bc570",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 119820
+      },
+      "occurred_at_offset_s": -61080
+    },
+    {
+      "id": "6b233773-4a87-5dbe-87a4-92731c388950",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "99f64089-ef4c-572d-a65a-ccee2f1bc570",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "data.gdpr_purge_eligible_users"
+      },
+      "occurred_at_offset_s": -61200
+    },
+    {
+      "id": "e052f4ee-9ec8-590b-aaba-4e6b6f495a80",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "99f64089-ef4c-572d-a65a-ccee2f1bc570",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -61200
+    },
+    {
+      "id": "eb559d75-8307-5341-b432-14baf4c12981",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "3ec57b12-2046-5ea0-89bd-cbc3a4e2c87d",
+      "kind": "task.succeeded",
+      "payload": {
+        "runtime_ms": 3840000
+      },
+      "occurred_at_offset_s": -64560
+    },
+    {
+      "id": "5d5257c1-64b7-5b91-8b44-4e4279928cf8",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "3ec57b12-2046-5ea0-89bd-cbc3a4e2c87d",
+      "kind": "task.received",
+      "payload": {
+        "queue": "celery-default",
+        "name": "etl.warehouse_load"
+      },
+      "occurred_at_offset_s": -68400
+    },
+    {
+      "id": "338725fb-8397-55a0-a3b8-2ac40ad60b20",
+      "project_id": "00000000-0000-4000-9000-000000000004",
+      "agent_id": "10000000-0000-4003-a000-000000000001",
+      "engine": "celery",
+      "task_id": "3ec57b12-2046-5ea0-89bd-cbc3a4e2c87d",
+      "kind": "task.started",
+      "payload": {
+        "worker": "celery-worker-1"
+      },
+      "occurred_at_offset_s": -68400
+    }
+  ],
+  "next_cursor": null
+}

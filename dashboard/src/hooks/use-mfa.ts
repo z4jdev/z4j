@@ -16,6 +16,12 @@ export interface MfaStatusResponse {
   enrolled: boolean;
   enrolled_at: string | null;
   remaining_recovery_codes: number;
+  /** True when the operator's enforcement policy targets this user and they
+   *  have not enrolled. The status endpoint stays reachable past the deadline
+   *  so the dashboard can say so rather than reporting a permission error. */
+  enrollment_required: boolean;
+  /** End of the grace window, null until a login observes the policy. */
+  enrollment_deadline?: string | null;
 }
 
 export interface EnrollStartResponse {

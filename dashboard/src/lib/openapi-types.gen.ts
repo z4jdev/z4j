@@ -1537,6 +1537,42 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/projects/{slug}/commands/requeue-dead-letter": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Issue Requeue Dead Letter
+         * @description Move one dead-lettered task back onto its queue.
+         *
+         *     Deliberately not gated on engine support, and the reason is safety rather
+         *     than convenience. Whether a requeue is safe is a property of the engine's
+         *     own dead-letter primitive, which only the adapter knows. RQ has one:
+         *     ``FailedJobRegistry`` IS its dead-letter concept and ``registry.requeue``
+         *     consumes the entry and preserves its original routing. Celery does not, and
+         *     its adapter's implementation was removed as a breaking safety correction
+         *     after it was found to publish a plain retry without consuming the broker
+         *     entry, which could duplicate work; it now refuses without touching the
+         *     broker at all.
+         *
+         *     So an unsupported engine returns a FAILED command naming the reason, which
+         *     is honest. An engine allowlist here would encode today's adapter set into
+         *     the brain, and would go stale in both directions: it would block an adapter
+         *     that gains a safe primitive, and it would keep advertising one whose
+         *     implementation was withdrawn.
+         */
+        readonly post: operations["issue_requeue_dead_letter_api_v1_projects__slug__commands_requeue_dead_letter_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/projects/{slug}/commands/restart-worker": {
         readonly parameters: {
             readonly query?: never;
@@ -5217,6 +5253,20 @@ export interface components {
         readonly RegenerateResponse: {
             /** Recovery Codes */
             readonly recovery_codes: readonly string[];
+        };
+        /** RequeueDeadLetterRequest */
+        readonly RequeueDeadLetterRequest: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            readonly agent_id: string;
+            /** Engine */
+            readonly engine: string;
+            /** Idempotency Key */
+            readonly idempotency_key?: string | null;
+            /** Task Id */
+            readonly task_id: string;
         };
         /** ResolveLegacyEvidenceIn */
         readonly ResolveLegacyEvidenceIn: {
@@ -8940,6 +8990,41 @@ export interface operations {
         readonly requestBody: {
             readonly content: {
                 readonly "application/json": components["schemas"]["RateLimitRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly issue_requeue_dead_letter_api_v1_projects__slug__commands_requeue_dead_letter_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["RequeueDeadLetterRequest"];
             };
         };
         readonly responses: {

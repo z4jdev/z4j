@@ -94,20 +94,6 @@ function DemoBannerInner() {
         Reset demo
       </button>
       <span className="h-3 w-px bg-yellow-900/30" />
-      <button
-        type="button"
-        onClick={() => {
-          // The brain's first-boot setup page is server-rendered HTML
-          // outside the TanStack Router app, so navigate via
-          // window.location instead of the router (matches the other
-          // off-router transitions in this component).
-          window.location.href = "/setup";
-        }}
-        className="hidden underline decoration-1 underline-offset-2 hover:decoration-2 sm:inline"
-      >
-        First-boot setup
-      </button>
-      <span className="hidden h-3 w-px bg-yellow-900/30 sm:inline-block" />
       <a
         href="https://z4j.com/install/"
         target="_blank"

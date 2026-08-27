@@ -4,6 +4,7 @@ import { api, ApiError } from "@/lib/api";
 import type { UserMePublic } from "@/lib/api-types";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { DemoBanner } from "@/components/layout/demo-banner";
+import { MfaEnrollmentBanner } from "@/components/domain/mfa-enrollment-banner";
 import { SidebarProvider } from "@/components/layout/sidebar-context";
 import { Topbar } from "@/components/layout/topbar";
 import {
@@ -70,6 +71,10 @@ function AuthenticatedLayout() {
               persistent reminder lives in the toast that fires
               on every blocked mutation. */}
           <DemoBanner />
+          {/* Enrollment is enforced by the brain on every non-exempt
+              route. Without this the user only sees a permission error,
+              so it belongs in the shell rather than on one page. */}
+          <MfaEnrollmentBanner />
           <Outlet />
         </main>
       </div>

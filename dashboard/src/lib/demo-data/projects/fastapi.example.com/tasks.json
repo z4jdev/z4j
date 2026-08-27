@@ -23,7 +23,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["metrics"],
+      "tags": [
+        "metrics"
+      ],
       "created_at_offset_s": -12,
       "updated_at_offset_s": -11
     },
@@ -36,8 +38,12 @@
       "queue": "webhooks",
       "state": "started",
       "priority": "normal",
-      "args": ["wh_evt_882"],
-      "kwargs": {"target": "https://customer-1.example.com/hooks"},
+      "args": [
+        "wh_evt_882"
+      ],
+      "kwargs": {
+        "target": "https://customer-1.example.com/hooks"
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -50,7 +56,9 @@
       "worker_name": "worker-2",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["webhooks"],
+      "tags": [
+        "webhooks"
+      ],
       "created_at_offset_s": -3,
       "updated_at_offset_s": -2
     },
@@ -77,7 +85,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["billing"],
+      "tags": [
+        "billing"
+      ],
       "created_at_offset_s": -1800,
       "updated_at_offset_s": -1796
     },
@@ -91,7 +101,9 @@
       "state": "success",
       "priority": "low",
       "args": [],
-      "kwargs": {"shards": 8},
+      "kwargs": {
+        "shards": 8
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -104,7 +116,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["indexing"],
+      "tags": [
+        "indexing"
+      ],
       "created_at_offset_s": -10800,
       "updated_at_offset_s": -10672
     },
@@ -117,8 +131,12 @@
       "queue": "webhooks",
       "state": "success",
       "priority": "normal",
-      "args": ["wh_evt_881"],
-      "kwargs": {"target": "https://customer-2.example.com/hooks"},
+      "args": [
+        "wh_evt_881"
+      ],
+      "kwargs": {
+        "target": "https://customer-2.example.com/hooks"
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -131,7 +149,9 @@
       "worker_name": "worker-2",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["webhooks"],
+      "tags": [
+        "webhooks"
+      ],
       "created_at_offset_s": -45,
       "updated_at_offset_s": -44
     },
@@ -144,8 +164,13 @@
       "queue": "default",
       "state": "success",
       "priority": "high",
-      "args": ["user_4429"],
-      "kwargs": {"ip": "203.0.113.88", "ua": "Chrome/142"},
+      "args": [
+        "user_4429"
+      ],
+      "kwargs": {
+        "ip": "203.0.113.88",
+        "ua": "Chrome/142"
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -158,7 +183,10 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["auth", "email"],
+      "tags": [
+        "auth",
+        "email"
+      ],
       "created_at_offset_s": -240,
       "updated_at_offset_s": -238
     },
@@ -171,8 +199,12 @@
       "queue": "webhooks",
       "state": "retry",
       "priority": "normal",
-      "args": ["wh_evt_879"],
-      "kwargs": {"target": "https://customer-3.example.com/hooks"},
+      "args": [
+        "wh_evt_879"
+      ],
+      "kwargs": {
+        "target": "https://customer-3.example.com/hooks"
+      },
       "result": null,
       "exception": "ConnectTimeout: HTTPSConnectionPool(host='customer-3.example.com', port=443): connect timeout",
       "traceback": null,
@@ -185,7 +217,9 @@
       "worker_name": "worker-2",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["webhooks"],
+      "tags": [
+        "webhooks"
+      ],
       "created_at_offset_s": -180,
       "updated_at_offset_s": -90
     },
@@ -212,7 +246,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["metrics"],
+      "tags": [
+        "metrics"
+      ],
       "created_at_offset_s": -72,
       "updated_at_offset_s": -71
     },
@@ -226,7 +262,9 @@
       "state": "success",
       "priority": "normal",
       "args": [],
-      "kwargs": {"batch_size": 100},
+      "kwargs": {
+        "batch_size": 100
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -239,7 +277,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["auth"],
+      "tags": [
+        "auth"
+      ],
       "created_at_offset_s": -3600,
       "updated_at_offset_s": -3592
     },
@@ -266,7 +306,9 @@
       "worker_name": "worker-2",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["webhooks"],
+      "tags": [
+        "webhooks"
+      ],
       "created_at_offset_s": -180,
       "updated_at_offset_s": -178
     },
@@ -280,7 +322,9 @@
       "state": "success",
       "priority": "low",
       "args": [],
-      "kwargs": {"max_age_days": 7},
+      "kwargs": {
+        "max_age_days": 7
+      },
       "result": null,
       "exception": null,
       "traceback": null,
@@ -293,7 +337,9 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["exports"],
+      "tags": [
+        "exports"
+      ],
       "created_at_offset_s": -42600,
       "updated_at_offset_s": -42588
     },
@@ -320,9 +366,1379 @@
       "worker_name": "worker-1",
       "parent_task_id": null,
       "root_task_id": null,
-      "tags": ["metrics"],
+      "tags": [
+        "metrics"
+      ],
       "created_at_offset_s": -132,
       "updated_at_offset_s": -131
+    },
+    {
+      "id": "fb5fcd89-35ef-5bdb-8028-a21c93d5eb5a",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "21cf1f3f-dffe-545f-8a84-3e2788b6e279",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -511,
+      "started_at_offset_s": -510,
+      "finished_at_offset_s": -509,
+      "runtime_ms": 844,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -511,
+      "updated_at_offset_s": -509
+    },
+    {
+      "id": "b970ef72-0bca-50c6-be45-106eb0683222",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "3ec3e058-34d9-5b75-95b1-baa75a33bd2d",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "started",
+      "priority": "normal",
+      "args": [
+        "wh_evt_882"
+      ],
+      "kwargs": {
+        "target": "https://customer-1.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -842,
+      "started_at_offset_s": -841,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -842,
+      "updated_at_offset_s": -841
+    },
+    {
+      "id": "3defcf36-7058-5759-8af9-989bf3b24f8e",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "3a24347a-50bf-52c3-9174-9a74bc337058",
+      "name": "billing.usage_meter_flush",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -1173,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing"
+      ],
+      "created_at_offset_s": -1173,
+      "updated_at_offset_s": -1173
+    },
+    {
+      "id": "842c2d0c-de78-5c25-b6cb-2368f79fa719",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "4e1be726-d4c8-5df6-b1cb-90cf4800aa49",
+      "name": "indexing.rebuild_search_index",
+      "queue": "indexing",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "shards": 8
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1504,
+      "started_at_offset_s": -1503,
+      "finished_at_offset_s": -1502,
+      "runtime_ms": 955,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "indexing"
+      ],
+      "created_at_offset_s": -1504,
+      "updated_at_offset_s": -1502
+    },
+    {
+      "id": "9e13f5b3-cbbd-5783-b737-a80e34aa55a7",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "4c5822d7-3316-5e7b-8f51-aafa133737c6",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "started",
+      "priority": "normal",
+      "args": [
+        "wh_evt_881"
+      ],
+      "kwargs": {
+        "target": "https://customer-2.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1835,
+      "started_at_offset_s": -1834,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -1835,
+      "updated_at_offset_s": -1834
+    },
+    {
+      "id": "e6a715bd-f65c-5003-81e7-970256f4b896",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "05226dff-c0ed-5a4e-9ec8-e9ed27b834f7",
+      "name": "auth.send_login_alert_email",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [
+        "user_4429"
+      ],
+      "kwargs": {
+        "ip": "203.0.113.88",
+        "ua": "Chrome/142"
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -2166,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "auth",
+        "email"
+      ],
+      "created_at_offset_s": -2166,
+      "updated_at_offset_s": -2166
+    },
+    {
+      "id": "fee44dfb-00ed-5b5e-ab1c-3b215d49fb81",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "94e1459e-2bd2-5355-8228-b6b450811623",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "success",
+      "priority": "normal",
+      "args": [
+        "wh_evt_879"
+      ],
+      "kwargs": {
+        "target": "https://customer-3.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -2497,
+      "started_at_offset_s": -2496,
+      "finished_at_offset_s": -2495,
+      "runtime_ms": 1066,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -2497,
+      "updated_at_offset_s": -2495
+    },
+    {
+      "id": "76c8a481-4c06-5633-84f8-a5f83bec87d3",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "2bc617a3-1330-598e-b0c9-63fbd4e986db",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -2828,
+      "started_at_offset_s": -2827,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -2828,
+      "updated_at_offset_s": -2827
+    },
+    {
+      "id": "6a3f3ca4-6435-5041-91ce-725b92afe739",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "9642839d-0fba-5db7-8d44-b750b0ec707e",
+      "name": "auth.refresh_oauth_tokens",
+      "queue": "default",
+      "state": "retry",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "batch_size": 100
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -3159,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "auth"
+      ],
+      "created_at_offset_s": -3159,
+      "updated_at_offset_s": -3159
+    },
+    {
+      "id": "fc146afb-a0dc-516c-a344-b0aef2d87e28",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "b5033052-3720-5ad3-a821-5068be8059ff",
+      "name": "webhooks.flush_dead_letter",
+      "queue": "webhooks",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -3490,
+      "started_at_offset_s": -3489,
+      "finished_at_offset_s": -3488,
+      "runtime_ms": 1177,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -3490,
+      "updated_at_offset_s": -3488
+    },
+    {
+      "id": "0e21ab24-4ebb-5924-8f88-f75bcd60dd9e",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "3a73ac64-da24-5deb-9d6e-67bbf04b19ea",
+      "name": "exports.purge_old_files",
+      "queue": "default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "max_age_days": 7
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -3821,
+      "started_at_offset_s": -3820,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "exports"
+      ],
+      "created_at_offset_s": -3821,
+      "updated_at_offset_s": -3820
+    },
+    {
+      "id": "156c6971-824c-5846-9095-8aa57409d300",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "4eab4f4f-3593-5c90-83da-dd0c9e507001",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -4152,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -4152,
+      "updated_at_offset_s": -4152
+    },
+    {
+      "id": "d1e281ea-e335-59e8-a50c-9f29d7d34ebe",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "2862c034-0363-5295-8582-05eeb9dc85c9",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -4483,
+      "started_at_offset_s": -4482,
+      "finished_at_offset_s": -4481,
+      "runtime_ms": 1288,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -4483,
+      "updated_at_offset_s": -4481
+    },
+    {
+      "id": "bc7ebbd5-2909-5ceb-af1b-a391876252d2",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "e1d87552-3318-532f-aabc-681c0ab15ab6",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "started",
+      "priority": "normal",
+      "args": [
+        "wh_evt_882"
+      ],
+      "kwargs": {
+        "target": "https://customer-1.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -4814,
+      "started_at_offset_s": -4813,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -4814,
+      "updated_at_offset_s": -4813
+    },
+    {
+      "id": "b63a47a9-1806-55e4-ada6-f5dc700910ba",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "b10a92e1-b6a6-557a-9b1f-ecdd87665aec",
+      "name": "billing.usage_meter_flush",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -5145,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing"
+      ],
+      "created_at_offset_s": -5145,
+      "updated_at_offset_s": -5145
+    },
+    {
+      "id": "1379c75a-14da-5c3d-beff-44dc4317dcc3",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "8aabfde3-8d93-54f9-bcb9-ad5de19c6876",
+      "name": "indexing.rebuild_search_index",
+      "queue": "indexing",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "shards": 8
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -5476,
+      "started_at_offset_s": -5475,
+      "finished_at_offset_s": -5474,
+      "runtime_ms": 1399,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "indexing"
+      ],
+      "created_at_offset_s": -5476,
+      "updated_at_offset_s": -5474
+    },
+    {
+      "id": "a236932a-ab9b-522e-8e67-c27427999e9c",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "272d0036-9058-5b84-9ab9-fc495d364b11",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "started",
+      "priority": "normal",
+      "args": [
+        "wh_evt_881"
+      ],
+      "kwargs": {
+        "target": "https://customer-2.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -5807,
+      "started_at_offset_s": -5806,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -5807,
+      "updated_at_offset_s": -5806
+    },
+    {
+      "id": "ef847d44-d6f8-5bfd-a677-948846391cd2",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "0d780299-8731-5bdd-a446-40c5af474d58",
+      "name": "auth.send_login_alert_email",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [
+        "user_4429"
+      ],
+      "kwargs": {
+        "ip": "203.0.113.88",
+        "ua": "Chrome/142"
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -6138,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "auth",
+        "email"
+      ],
+      "created_at_offset_s": -6138,
+      "updated_at_offset_s": -6138
+    },
+    {
+      "id": "a178b04d-6fab-5cc8-88dd-695d3c572b23",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "f466b8a9-6fb5-59d3-89db-efd97b392b48",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "success",
+      "priority": "normal",
+      "args": [
+        "wh_evt_879"
+      ],
+      "kwargs": {
+        "target": "https://customer-3.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -6469,
+      "started_at_offset_s": -6468,
+      "finished_at_offset_s": -6467,
+      "runtime_ms": 1510,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -6469,
+      "updated_at_offset_s": -6467
+    },
+    {
+      "id": "4b401fed-3ef9-5420-af6f-c33e8c7250aa",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "7907562f-7806-502d-b246-7ae0bcb8d797",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -6800,
+      "started_at_offset_s": -6799,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -6800,
+      "updated_at_offset_s": -6799
+    },
+    {
+      "id": "59ce2c9a-1b3f-586c-bcd0-c63e460dee04",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "e78f0f52-726d-5eb1-840d-441a1cf00d36",
+      "name": "auth.refresh_oauth_tokens",
+      "queue": "default",
+      "state": "retry",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "batch_size": 100
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -7131,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "auth"
+      ],
+      "created_at_offset_s": -7131,
+      "updated_at_offset_s": -7131
+    },
+    {
+      "id": "79a61742-09ae-5c0c-9f45-22c2c419fa3f",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "0ac69ca3-52da-5322-a06e-a53c580898f3",
+      "name": "webhooks.flush_dead_letter",
+      "queue": "webhooks",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -7462,
+      "started_at_offset_s": -7461,
+      "finished_at_offset_s": -7460,
+      "runtime_ms": 1621,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -7462,
+      "updated_at_offset_s": -7460
+    },
+    {
+      "id": "9573acee-e9ee-5d55-a8f8-a008be628323",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "10819429-3e12-5823-9652-0b5145c9076b",
+      "name": "exports.purge_old_files",
+      "queue": "default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "max_age_days": 7
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -7793,
+      "started_at_offset_s": -7792,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "exports"
+      ],
+      "created_at_offset_s": -7793,
+      "updated_at_offset_s": -7792
+    },
+    {
+      "id": "aebfe09d-b272-541a-b448-89d1246af501",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "f44d7e73-0921-53e0-9bd5-d8c29df12123",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -8124,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -8124,
+      "updated_at_offset_s": -8124
+    },
+    {
+      "id": "dd3c841b-7a06-548c-aacf-7895a394019b",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "aa1787ee-cc9c-5ee6-b636-bb3a4868f3a9",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -8455,
+      "started_at_offset_s": -8454,
+      "finished_at_offset_s": -8453,
+      "runtime_ms": 1732,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -8455,
+      "updated_at_offset_s": -8453
+    },
+    {
+      "id": "861eaaa2-4be1-5f6e-b158-779868bf2ff9",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "4005dde0-d56d-5914-9b1f-e86192e93f43",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "started",
+      "priority": "normal",
+      "args": [
+        "wh_evt_882"
+      ],
+      "kwargs": {
+        "target": "https://customer-1.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -8786,
+      "started_at_offset_s": -8785,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -8786,
+      "updated_at_offset_s": -8785
+    },
+    {
+      "id": "6c88a204-b15b-5e55-aa1f-5f2d68363b3b",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "c6715a79-2d31-52a1-a3d5-60fd6a372663",
+      "name": "billing.usage_meter_flush",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -9117,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing"
+      ],
+      "created_at_offset_s": -9117,
+      "updated_at_offset_s": -9117
+    },
+    {
+      "id": "fcd880d6-9d00-548c-98b7-ea1b63158c4c",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "688aa5cf-2f10-5690-8f89-63f7fee8bc67",
+      "name": "indexing.rebuild_search_index",
+      "queue": "indexing",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "shards": 8
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -9448,
+      "started_at_offset_s": -9447,
+      "finished_at_offset_s": -9446,
+      "runtime_ms": 1843,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "indexing"
+      ],
+      "created_at_offset_s": -9448,
+      "updated_at_offset_s": -9446
+    },
+    {
+      "id": "882a9d5c-8526-5e87-81a7-5f5abd0a039e",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "6b597674-7e9a-58f6-9746-50b9d8c4a9f3",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "started",
+      "priority": "normal",
+      "args": [
+        "wh_evt_881"
+      ],
+      "kwargs": {
+        "target": "https://customer-2.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -9779,
+      "started_at_offset_s": -9778,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -9779,
+      "updated_at_offset_s": -9778
+    },
+    {
+      "id": "056a108f-2561-5dd8-aa6f-5fd52dc5c226",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "595b1d5e-2751-54ed-ad48-17b9918f1426",
+      "name": "auth.send_login_alert_email",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [
+        "user_4429"
+      ],
+      "kwargs": {
+        "ip": "203.0.113.88",
+        "ua": "Chrome/142"
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -10110,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "auth",
+        "email"
+      ],
+      "created_at_offset_s": -10110,
+      "updated_at_offset_s": -10110
+    },
+    {
+      "id": "e4060c8b-be5e-5085-b6ee-719571a4bb88",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "d0fc2e42-af23-57ac-a965-311c90cdf77a",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "success",
+      "priority": "normal",
+      "args": [
+        "wh_evt_879"
+      ],
+      "kwargs": {
+        "target": "https://customer-3.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -10441,
+      "started_at_offset_s": -10440,
+      "finished_at_offset_s": -10439,
+      "runtime_ms": 1954,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -10441,
+      "updated_at_offset_s": -10439
+    },
+    {
+      "id": "07200e17-9db2-55bb-84d6-a3b0865cbf5d",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "5a50c008-e6c8-52a8-9e42-7603e8480e96",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -10772,
+      "started_at_offset_s": -10771,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -10772,
+      "updated_at_offset_s": -10771
+    },
+    {
+      "id": "8b9ac66b-f117-52e4-94b9-321146488e9a",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "178275c4-8243-58cf-8e4b-463cf9275509",
+      "name": "auth.refresh_oauth_tokens",
+      "queue": "default",
+      "state": "retry",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "batch_size": 100
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -11103,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "auth"
+      ],
+      "created_at_offset_s": -11103,
+      "updated_at_offset_s": -11103
+    },
+    {
+      "id": "a5273ea1-21ee-5e96-9cfc-63da7767ca4f",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "4f8caca2-2b92-52e1-8a11-a828ee91c1ff",
+      "name": "webhooks.flush_dead_letter",
+      "queue": "webhooks",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -11434,
+      "started_at_offset_s": -11433,
+      "finished_at_offset_s": -11431,
+      "runtime_ms": 2065,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -11434,
+      "updated_at_offset_s": -11431
+    },
+    {
+      "id": "79a4fb52-638e-5aac-85d6-5035c5a27272",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "3d8e95bc-3f21-5a90-8a2e-d9e8425996bd",
+      "name": "exports.purge_old_files",
+      "queue": "default",
+      "state": "started",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "max_age_days": 7
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -11765,
+      "started_at_offset_s": -11764,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "exports"
+      ],
+      "created_at_offset_s": -11765,
+      "updated_at_offset_s": -11764
+    },
+    {
+      "id": "cf6b4c99-8ad1-5293-bf13-c70a0fb77854",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "c71f90d8-41bb-58fc-8124-f90dc28cbcaf",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -12096,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -12096,
+      "updated_at_offset_s": -12096
+    },
+    {
+      "id": "ebeed559-8faf-505d-891e-0f7c1c48689e",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "fee4bf91-6bed-5dea-a7f5-8c1dfbd37ed8",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -12427,
+      "started_at_offset_s": -12426,
+      "finished_at_offset_s": -12424,
+      "runtime_ms": 2176,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -12427,
+      "updated_at_offset_s": -12424
+    },
+    {
+      "id": "174591df-4330-5056-8e8e-e311d27ea0b8",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "ce93055a-6980-5091-870b-8956babcdaf7",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "started",
+      "priority": "normal",
+      "args": [
+        "wh_evt_882"
+      ],
+      "kwargs": {
+        "target": "https://customer-1.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -12758,
+      "started_at_offset_s": -12757,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -12758,
+      "updated_at_offset_s": -12757
+    },
+    {
+      "id": "30ad90cd-22f0-5b8c-b8c1-dcfceaddf6fc",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "b2a06230-dacb-58d1-9120-cfcf50ff923b",
+      "name": "billing.usage_meter_flush",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -13089,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "billing"
+      ],
+      "created_at_offset_s": -13089,
+      "updated_at_offset_s": -13089
+    },
+    {
+      "id": "ee06ecb4-0f40-5ef5-abea-abb87fcab8cd",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "60eda35b-6d63-58e6-a4fa-8bb2c1776d76",
+      "name": "indexing.rebuild_search_index",
+      "queue": "indexing",
+      "state": "success",
+      "priority": "low",
+      "args": [],
+      "kwargs": {
+        "shards": 8
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -13420,
+      "started_at_offset_s": -13419,
+      "finished_at_offset_s": -13417,
+      "runtime_ms": 2287,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "indexing"
+      ],
+      "created_at_offset_s": -13420,
+      "updated_at_offset_s": -13417
+    },
+    {
+      "id": "c3fb52f7-7742-5640-95ee-b10929e0156d",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "f2985679-bc33-57d5-b633-40480596c52c",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "started",
+      "priority": "normal",
+      "args": [
+        "wh_evt_881"
+      ],
+      "kwargs": {
+        "target": "https://customer-2.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -13751,
+      "started_at_offset_s": -13750,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -13751,
+      "updated_at_offset_s": -13750
+    },
+    {
+      "id": "d0cbc2fe-ce0f-58cc-b554-51b033172b89",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "5b61eac8-60a2-5f9d-904d-454e1084ad05",
+      "name": "auth.send_login_alert_email",
+      "queue": "default",
+      "state": "retry",
+      "priority": "high",
+      "args": [
+        "user_4429"
+      ],
+      "kwargs": {
+        "ip": "203.0.113.88",
+        "ua": "Chrome/142"
+      },
+      "result": null,
+      "exception": "ConnectionResetError",
+      "traceback": null,
+      "retry_count": 2,
+      "eta": null,
+      "received_at_offset_s": -14082,
+      "started_at_offset_s": null,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "auth",
+        "email"
+      ],
+      "created_at_offset_s": -14082,
+      "updated_at_offset_s": -14082
+    },
+    {
+      "id": "7a8fe73d-cfdd-5630-b70c-09f91bf62c27",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "60d01e39-6718-51cb-9401-1ffd710d634f",
+      "name": "webhooks.deliver",
+      "queue": "webhooks",
+      "state": "success",
+      "priority": "normal",
+      "args": [
+        "wh_evt_879"
+      ],
+      "kwargs": {
+        "target": "https://customer-3.example.com/hooks"
+      },
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta_offset_s": 30,
+      "received_at_offset_s": -14413,
+      "started_at_offset_s": -14412,
+      "finished_at_offset_s": -14410,
+      "runtime_ms": 2398,
+      "worker_name": "worker-2",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "webhooks"
+      ],
+      "created_at_offset_s": -14413,
+      "updated_at_offset_s": -14410
+    },
+    {
+      "id": "24b34af9-3aff-521a-920e-a5f6eed8b1bf",
+      "project_id": "00000000-0000-4000-9000-000000000002",
+      "engine": "arq",
+      "task_id": "d2cdd3bf-b43b-5f08-b5ad-220e7ec63351",
+      "name": "metrics.aggregate_minute",
+      "queue": "default",
+      "state": "started",
+      "priority": "high",
+      "args": [],
+      "kwargs": {},
+      "result": null,
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -14744,
+      "started_at_offset_s": -14743,
+      "finished_at_offset_s": null,
+      "runtime_ms": null,
+      "worker_name": "worker-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "metrics"
+      ],
+      "created_at_offset_s": -14744,
+      "updated_at_offset_s": -14743
     }
   ],
   "next_cursor": null

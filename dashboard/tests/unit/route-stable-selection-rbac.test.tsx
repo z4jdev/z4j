@@ -23,6 +23,8 @@ const mutations = vi.hoisted(() => ({
   toggle: vi.fn(),
   deleteSchedule: vi.fn(),
   resync: vi.fn(),
+  pause: vi.fn(),
+  resume: vi.fn(),
 }));
 
 vi.mock("lucide-react", async () => {
@@ -46,6 +48,7 @@ vi.mock("lucide-react", async () => {
     GitCompare: Icon,
     History: Icon,
     Minus: Icon,
+    Pause: Icon,
     Pencil: Icon,
     Play: Icon,
     Plus: Icon,
@@ -147,6 +150,14 @@ vi.mock("@/hooks/use-schedules", () => ({
     mutateAsync: mutations.trigger,
     isPending: false,
   }),
+  usePauseSchedule: () => ({
+    mutateAsync: mutations.pause,
+    isPending: false,
+  }),
+  useResumeSchedule: () => ({
+    mutateAsync: mutations.resume,
+    isPending: false,
+  }),
   useDeleteSchedule: () => ({
     mutateAsync: mutations.deleteSchedule,
     isPending: false,
@@ -190,7 +201,11 @@ vi.mock("@/components/domain/refresh-button", () => ({
 vi.mock("@/components/domain/state-badges", async () => {
   const React = await import("react");
   const Badge = () => React.createElement("span");
-  return { TaskPriorityBadge: Badge, TaskStateBadge: Badge };
+  return {
+    TaskPriorityBadge: Badge,
+    TaskStateBadge: Badge,
+    SchedulePausedBadge: Badge,
+  };
 });
 
 vi.mock("@/components/domain/empty-state", () => ({

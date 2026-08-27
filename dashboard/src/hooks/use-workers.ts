@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { WorkerPublic } from "@/lib/api-types";
+import type { ProjectLintPublic, WorkerPublic } from "@/lib/api-types";
 
 export interface WorkerDetail extends WorkerPublic {
   metadata: {
@@ -18,6 +18,17 @@ export function useWorkers(slug: string) {
     queryFn: () => api.get<WorkerPublic[]>(`/projects/${slug}/workers`),
     enabled: !!slug,
     refetchInterval: 15_000,
+  });
+}
+
+// Configuration lint (GET /projects/{slug}/workers/lint). Advisory and
+// read-only: it evaluates the configuration workers already report on their
+// heartbeat, so it costs one query and collects nothing new.
+export function useWorkerLint(slug: string) {
+  return useQuery({
+    queryKey: ["workers", slug, "lint"],
+    queryFn: () => api.get<ProjectLintPublic>(`/projects/${slug}/workers/lint`),
+    staleTime: 60_000,
   });
 }
 

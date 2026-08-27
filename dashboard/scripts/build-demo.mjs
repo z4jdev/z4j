@@ -135,10 +135,23 @@ await requireDemoDataTree(dataSrc);
 await mkdir(dataDst, { recursive: true });
 await cp(dataSrc, dataDst, { recursive: true });
 console.log(`[build:demo] copied demo data tree: ${dataSrc} -> ${dataDst}`);
-const versionFile = resolve(dashboardRoot, "../../../VERSION");
-const version = (await readFile(versionFile, "utf8")).trim();
-if (!/^\d+\.\d+\.\d+$/.test(version)) {
-  console.error(`[build:demo] VERSION is not a release number: ${version}`);
+// versions.json is tracked inside packages/z4j and therefore lands at the
+// root of the published polyrepo, where the dashboard sits one level down.
+// The old ../../../VERSION path only resolved in the dev monorepo.
+const versionFile = resolve(dashboardRoot, "../versions.json");
+// versions.json is a document, not a bare string: read the umbrella's entry.
+let version;
+try {
+  const manifest = JSON.parse(await readFile(versionFile, "utf8"));
+  version = manifest?.packages?.z4j?.version ?? manifest?.packages?.z4j;
+} catch (err) {
+  console.error(`[build:demo] cannot read ${versionFile}: ${err.message}`);
+  process.exit(1);
+}
+if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
+  console.error(
+    `[build:demo] versions.json has no usable z4j version: ${JSON.stringify(version)}`,
+  );
   process.exit(1);
 }
 const inventory = await stampDemoVersions(dataDst, version, {

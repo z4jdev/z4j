@@ -6,9 +6,16 @@
     "state": "online",
     "protocol_version": "2",
     "framework_adapter": "django",
-    "engine_adapters": ["celery"],
-    "scheduler_adapters": ["django-celery-beat"],
-    "capabilities": {"cancel_task": true, "retry_task": true},
+    "engine_adapters": [
+      "celery"
+    ],
+    "scheduler_adapters": [
+      "django-celery-beat"
+    ],
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true
+    },
     "last_seen_at_offset_s": -2,
     "last_connect_at_offset_s": -432000,
     "created_at_offset_s": -31536000,
@@ -24,9 +31,14 @@
     "state": "online",
     "protocol_version": "2",
     "framework_adapter": "django",
-    "engine_adapters": ["celery"],
+    "engine_adapters": [
+      "celery"
+    ],
     "scheduler_adapters": [],
-    "capabilities": {"cancel_task": true, "retry_task": true},
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true
+    },
     "last_seen_at_offset_s": -5,
     "last_connect_at_offset_s": -432000,
     "created_at_offset_s": -31536000,
@@ -42,9 +54,14 @@
     "state": "online",
     "protocol_version": "2",
     "framework_adapter": "django",
-    "engine_adapters": ["celery"],
+    "engine_adapters": [
+      "celery"
+    ],
     "scheduler_adapters": [],
-    "capabilities": {"cancel_task": true, "retry_task": true},
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true
+    },
     "last_seen_at_offset_s": -3,
     "last_connect_at_offset_s": -432000,
     "created_at_offset_s": -31536000,
@@ -60,9 +77,15 @@
     "state": "online",
     "protocol_version": "2",
     "framework_adapter": "django",
-    "engine_adapters": ["celery"],
+    "engine_adapters": [
+      "celery"
+    ],
     "scheduler_adapters": [],
-    "capabilities": {"cancel_task": true, "retry_task": true, "restart_worker": true},
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true,
+      "restart_worker": true
+    },
     "last_seen_at_offset_s": -4,
     "last_connect_at_offset_s": -432000,
     "created_at_offset_s": -31536000,
@@ -78,9 +101,15 @@
     "state": "online",
     "protocol_version": "2",
     "framework_adapter": "django",
-    "engine_adapters": ["celery"],
+    "engine_adapters": [
+      "celery"
+    ],
     "scheduler_adapters": [],
-    "capabilities": {"cancel_task": true, "retry_task": true, "restart_worker": true},
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true,
+      "restart_worker": true
+    },
     "last_seen_at_offset_s": -8,
     "last_connect_at_offset_s": -432000,
     "created_at_offset_s": -31536000,
@@ -96,9 +125,15 @@
     "state": "online",
     "protocol_version": "2",
     "framework_adapter": "django",
-    "engine_adapters": ["celery"],
+    "engine_adapters": [
+      "celery"
+    ],
     "scheduler_adapters": [],
-    "capabilities": {"cancel_task": true, "retry_task": true, "restart_worker": true},
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true,
+      "restart_worker": true
+    },
     "last_seen_at_offset_s": -6,
     "last_connect_at_offset_s": -432000,
     "created_at_offset_s": -31536000,
@@ -114,9 +149,15 @@
     "state": "offline",
     "protocol_version": "2",
     "framework_adapter": "django",
-    "engine_adapters": ["celery"],
+    "engine_adapters": [
+      "celery"
+    ],
     "scheduler_adapters": [],
-    "capabilities": {"cancel_task": true, "retry_task": true, "restart_worker": true},
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true,
+      "restart_worker": true
+    },
     "last_seen_at_offset_s": -480,
     "last_connect_at_offset_s": -432000,
     "created_at_offset_s": -31536000,
@@ -133,7 +174,9 @@
     "protocol_version": "2",
     "framework_adapter": "django",
     "engine_adapters": [],
-    "scheduler_adapters": ["django-celery-beat"],
+    "scheduler_adapters": [
+      "django-celery-beat"
+    ],
     "capabilities": {},
     "last_seen_at_offset_s": -10,
     "last_connect_at_offset_s": -432000,

@@ -275,6 +275,18 @@ class CancelTaskRequest(BaseModel):
         return _validate_engine_dispatch(v)
 
 
+class RequeueDeadLetterRequest(BaseModel):
+    agent_id: uuid.UUID
+    engine: str = Field(min_length=1, max_length=40)
+    task_id: str = Field(min_length=1, max_length=200)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("engine")
+    @classmethod
+    def _check_engine(cls, v: str) -> str:
+        return _validate_engine_dispatch(v)
+
+
 class BulkRetryRequest(BaseModel):
     """Bulk retry request body.
 
@@ -681,6 +693,61 @@ async def issue_cancel_task(
     return await _issue_task_command(
         slug=slug,
         action="cancel_task",
+        agent_id=body.agent_id,
+        target_id=f"{body.engine}:{body.task_id}",
+        payload={
+            "engine": body.engine,
+            "task_id": body.task_id,
+        },
+        idempotency_key=body.idempotency_key,
+        user=user,
+        memberships=memberships,
+        projects=projects,
+        audit_log=audit_log,
+        dispatcher=dispatcher,
+        db_session=db_session,
+        ip=ip,
+    )
+
+
+@router.post(
+    "/requeue-dead-letter",
+    response_model=CommandPublic,
+    status_code=202,
+    dependencies=[Depends(require_csrf)],
+)
+async def issue_requeue_dead_letter(
+    slug: str,
+    body: RequeueDeadLetterRequest,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
+    ip: str = Depends(get_client_ip),
+) -> CommandPublic:
+    """Move one dead-lettered task back onto its queue.
+
+    Deliberately not gated on engine support, and the reason is safety rather
+    than convenience. Whether a requeue is safe is a property of the engine's
+    own dead-letter primitive, which only the adapter knows. RQ has one:
+    ``FailedJobRegistry`` IS its dead-letter concept and ``registry.requeue``
+    consumes the entry and preserves its original routing. Celery does not, and
+    its adapter's implementation was removed as a breaking safety correction
+    after it was found to publish a plain retry without consuming the broker
+    entry, which could duplicate work; it now refuses without touching the
+    broker at all.
+
+    So an unsupported engine returns a FAILED command naming the reason, which
+    is honest. An engine allowlist here would encode today's adapter set into
+    the brain, and would go stale in both directions: it would block an adapter
+    that gains a safe primitive, and it would keep advertising one whose
+    implementation was withdrawn.
+    """
+    return await _issue_task_command(
+        slug=slug,
+        action="requeue_dead_letter",
         agent_id=body.agent_id,
         target_id=f"{body.engine}:{body.task_id}",
         payload={

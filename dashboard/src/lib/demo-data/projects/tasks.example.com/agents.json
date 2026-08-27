@@ -7,8 +7,14 @@
     "protocol_version": "2",
     "framework_adapter": "bare",
     "engine_adapters": [],
-    "scheduler_adapters": ["z4j-scheduler"],
-    "capabilities": {"create_schedule": true, "update_schedule": true, "pause_schedule": true},
+    "scheduler_adapters": [
+      "z4j-scheduler"
+    ],
+    "capabilities": {
+      "create_schedule": true,
+      "update_schedule": true,
+      "pause_schedule": true
+    },
     "last_seen_at_offset_s": -1,
     "last_connect_at_offset_s": -86400,
     "created_at_offset_s": -10368000,
@@ -25,8 +31,14 @@
     "protocol_version": "2",
     "framework_adapter": "bare",
     "engine_adapters": [],
-    "scheduler_adapters": ["z4j-scheduler"],
-    "capabilities": {"create_schedule": true, "update_schedule": true, "pause_schedule": true},
+    "scheduler_adapters": [
+      "z4j-scheduler"
+    ],
+    "capabilities": {
+      "create_schedule": true,
+      "update_schedule": true,
+      "pause_schedule": true
+    },
     "last_seen_at_offset_s": -2,
     "last_connect_at_offset_s": -86400,
     "created_at_offset_s": -10368000,
@@ -42,9 +54,15 @@
     "state": "online",
     "protocol_version": "2",
     "framework_adapter": "bare",
-    "engine_adapters": ["celery"],
+    "engine_adapters": [
+      "celery"
+    ],
     "scheduler_adapters": [],
-    "capabilities": {"cancel_task": true, "retry_task": true, "restart_worker": true},
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true,
+      "restart_worker": true
+    },
     "last_seen_at_offset_s": -4,
     "last_connect_at_offset_s": -86400,
     "created_at_offset_s": -10368000,
@@ -60,9 +78,14 @@
     "state": "online",
     "protocol_version": "2",
     "framework_adapter": "bare",
-    "engine_adapters": ["rq"],
+    "engine_adapters": [
+      "rq"
+    ],
     "scheduler_adapters": [],
-    "capabilities": {"cancel_task": true, "retry_task": true},
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true
+    },
     "last_seen_at_offset_s": -6,
     "last_connect_at_offset_s": -86400,
     "created_at_offset_s": -10368000,
@@ -78,9 +101,14 @@
     "state": "online",
     "protocol_version": "2",
     "framework_adapter": "bare",
-    "engine_adapters": ["dramatiq"],
+    "engine_adapters": [
+      "dramatiq"
+    ],
     "scheduler_adapters": [],
-    "capabilities": {"cancel_task": true, "retry_task": true},
+    "capabilities": {
+      "cancel_task": true,
+      "retry_task": true
+    },
     "last_seen_at_offset_s": -3,
     "last_connect_at_offset_s": -86400,
     "created_at_offset_s": -10368000,

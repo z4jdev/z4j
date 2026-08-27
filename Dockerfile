@@ -56,7 +56,7 @@
 # here changes the fingerprint and the image would negotiate schedule firing
 # differently from the wheels published beside it. 1.8.x pinned only the 3.14
 # tag here and took whatever patch the tag pointed at on the day of the build.
-FROM docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS runtime
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83 AS runtime
 
 # OCI image metadata -- consumed by Docker Hub UI, GitHub Container
 # Registry, Syft, Trivy, Docker Scout, etc.
@@ -111,6 +111,7 @@ COPY . /build/source
 # build.
 RUN set -eux; \
     apt-get update; \
+    apt-get upgrade -y --no-install-recommends; \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         libpq5 \

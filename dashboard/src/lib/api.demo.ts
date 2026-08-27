@@ -80,6 +80,67 @@ function serveJson(file: string) {
 }
 
 /**
+ * Events intercept. The task detail panel asks for one task's lifecycle
+ * (`engine` + `task_id`), so serving the whole project feed would fill a single
+ * task's panel with every other task's events. Honour the filter, as the
+ * issues intercept does.
+ */
+async function serveEvents(req: Request, project: string): Promise<Response> {
+  const raw = await serveJson(`projects/${project}/events.json`)();
+  if (!raw.ok) return raw;
+  const payload = (await raw.json()) as {
+    items: Array<{ engine?: string; task_id?: string }>;
+    next_cursor: string | null;
+  };
+  const params = new URL(req.url).searchParams;
+  const engine = params.get("engine");
+  const taskId = params.get("task_id");
+  const limit = Number(params.get("limit") ?? "0");
+
+  let items = payload.items ?? [];
+  if (engine) items = items.filter((e) => e.engine === engine);
+  if (taskId) items = items.filter((e) => e.task_id === taskId);
+  if (Number.isFinite(limit) && limit > 0) items = items.slice(0, limit);
+
+  return new Response(JSON.stringify({ items, next_cursor: null }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * Serve ONE record out of a list seed file.
+ *
+ * The detail endpoints have no seed of their own, and they do not need one:
+ * the list seeds already carry full records. Matching on either `id` or the
+ * engine-scoped `task_id` covers both the task and schedule detail routes.
+ * A miss returns the same structured 404 the module uses everywhere else,
+ * rather than a list envelope the caller cannot parse.
+ */
+async function serveItemFromList(
+  file: string,
+  matches: (item: Record<string, unknown>) => boolean,
+): Promise<Response> {
+  const raw = await serveJson(file)();
+  if (!raw.ok) return raw;
+  const payload = (await raw.json()) as { items?: Array<Record<string, unknown>> };
+  const found = (payload.items ?? []).find(matches);
+  if (!found) {
+    return new Response(
+      JSON.stringify({
+        error: "demo_record_not_found",
+        message: `No demo record in /demo-data/${file}`,
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  return new Response(JSON.stringify(found), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
  * Issues intercept. Unlike the other project resources this one honors
  * the endpoint's query params (the real backend filters server-side, so
  * the Issues page sends `status` / `engine` / `hours` and renders the
@@ -253,8 +314,22 @@ const ROUTES: RouteHandler[] = [
   // demo serves the same canned page regardless; the dashboard's
   // filter UI still renders, just not predictively.
   {
+    // MUST precede the general /tasks route (first match wins) so a task
+    // DETAIL request resolves to a single record rather than the paged list
+    // envelope, which the detail page cannot render.
     method: "GET",
-    pattern: /^\/api\/v1\/projects\/([^/]+)\/tasks/,
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/tasks\/([^/?]+)\/([^/?]+)(?:\?|$)/,
+    handler: (_req, match) =>
+      serveItemFromList(
+        `projects/${match[1]}/tasks.json`,
+        (item) => item.task_id === match[3] || item.id === match[3],
+      ),
+  },
+  {
+    // Anchored to the collection path. Unanchored, this swallowed every
+    // deeper /tasks/... request and answered it with the list envelope.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/tasks(?:\?|$)/,
     handler: (_req, match) => serveJson(`projects/${match[1]}/tasks.json`)(),
   },
   {
@@ -270,8 +345,32 @@ const ROUTES: RouteHandler[] = [
     handler: (_req, match) => serveJson(`projects/${match[1]}/misfires.json`)(),
   },
   {
+    // Fire history has no seed. An explicit empty page is the honest answer
+    // and renders as an empty state; falling through to the list route below
+    // would hand the fire-history table a list of schedules instead.
     method: "GET",
-    pattern: /^\/api\/v1\/projects\/([^/]+)\/schedules/,
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/schedules\/([^/?]+)\/fires/,
+    handler: () =>
+      new Response(JSON.stringify({ items: [], next_cursor: null }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  },
+  {
+    // MUST follow /schedules/misfires and precede the general /schedules
+    // route, for the same first-match-wins reason documented above.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/schedules\/([^/?]+)(?:\?|$)/,
+    handler: (_req, match) =>
+      serveItemFromList(
+        `projects/${match[1]}/schedules.json`,
+        (item) => item.id === match[2],
+      ),
+  },
+  {
+    // Anchored to the collection path, as with /tasks above.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/schedules(?:\?|$)/,
     handler: (_req, match) => serveJson(`projects/${match[1]}/schedules.json`)(),
   },
   {
@@ -287,7 +386,7 @@ const ROUTES: RouteHandler[] = [
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/events/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/events.json`)(),
+    handler: (req, match) => serveEvents(req, match[1]),
   },
   {
     method: "GET",

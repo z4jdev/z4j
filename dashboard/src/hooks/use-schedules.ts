@@ -142,6 +142,33 @@ export function useTriggerSchedule(slug: string) {
   });
 }
 
+// Hold and release. Deliberately separate from useToggleSchedule:
+// ``is_enabled`` means retired versus active, while ``paused_at`` means an
+// operator put a live schedule on hold. The brain enforces the hold in six
+// places and projects it onto the scheduler wire, so a schedule can be enabled
+// and held at the same time and the two controls are not interchangeable.
+export function usePauseSchedule(slug: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (scheduleId: string) =>
+      api.post<SchedulePublic>(
+        `/projects/${slug}/schedules/${scheduleId}/pause`,
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules", slug] }),
+  });
+}
+
+export function useResumeSchedule(slug: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (scheduleId: string) =>
+      api.post<SchedulePublic>(
+        `/projects/${slug}/schedules/${scheduleId}/resume`,
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules", slug] }),
+  });
+}
+
 // Reconciliation diff (POST /projects/{slug}/schedules:diff). Pure
 // dry-run preview - z4j endpoint does not mutate state and
 // writes no audit row. The dashboard reconciliation panel uses this

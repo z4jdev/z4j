@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.9.1 (2026-08-26)
+
+* The 1.9.0 container images are published. Every 1.9.0 feature was reachable
+  only from a pip install until now, which left schedule hold, the worker lint,
+  the deep health probe, the scheduled chain verifier, connection-pool sizing
+  and previous-release restore invisible to anyone running the published image.
+* `z4j audit export-head` prints the authenticated chain head as the envelope
+  `audit verify --known-head` accepts. The documentation has always named that
+  check as the defence against a database role that can rewrite history, but
+  nothing in the product would tell an operator what their head was, so the
+  advice could only be followed by reading the state row out of the database and
+  assembling the JSON by hand. The state is authenticated before anything is
+  printed, `--verify` refuses to export a head from a chain that did not verify
+  clean, and the envelope carries only the keys the verifier accepts.
+* Schedule hold is visible and controllable from the dashboard. The brain has
+  enforced it in six places and projects it onto the scheduler wire, but the
+  dashboard had no pause or resume control at all and gave a held schedule no
+  mark, because `is_enabled` means retired rather than held and was correctly
+  showing enabled.
+* A user blocked by MFA enrollment enforcement is told so, and given the route
+  to enroll. Previously the brain answered every non-exempt route with a 403 the
+  dashboard rendered as "your role doesn't have access", which is both wrong and
+  a dead end. The status response's `enrollment_required` and
+  `enrollment_deadline` had been sent all along and were missing from the
+  dashboard's hand-written type.
+* The worker configuration lint has a panel on the Workers page and a
+  documentation page. It reports what it did not evaluate separately from a
+  clean result, because a worker whose engine has no rules has not been judged.
+* Dead-letter requeue is reachable. The adapter implementation, the policy
+  action, the agent handler and the wire contract all existed; no endpoint ever
+  issued the command. Engines without a safe dead-letter primitive refuse at the
+  adapter and report why.
+* The scheduler no longer loses a fire to its own dispatch latency. A slot the
+  leader had already seen as due could be reclassified as missed by the time a
+  retry ran, and under the default `catch_up="skip"` it was then advanced past
+  and recorded as fired without ever being dispatched. A slot judged on-time now
+  stays on-time across retries, for a bounded window rather than indefinitely;
+  one that genuinely elapsed while the scheduler was down is unchanged, and
+  `skip` still discards it. Slots a `catch_up` policy
+  does drop are now logged and counted rather than dropped in silence, the
+  on-time grace is configurable, and an unexpected error in one tick no longer
+  takes the whole scheduler process down. See the `z4j-scheduler` changelog.
+* Documentation corrections: the settings reference stated that the connection
+  pool is not configurable, which stopped being true when it became configurable;
+  the threat model scoped both database-boundary weaknesses to PostgreSQL when
+  only the schedule guard is engine-specific, leaving SQLite operators reading
+  that the audit-log weakness did not apply to them.
+
 ## 1.9.0 (2026-08-25)
 
 * **Dashboard dependency refresh:** The bundled dashboard is rebuilt against
