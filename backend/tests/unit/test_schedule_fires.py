@@ -23,6 +23,7 @@ refuses outright; those tests keep the create_all() fixtures.
 
 from __future__ import annotations
 
+import os
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -747,3 +748,382 @@ class TestPrune:
         async with db.session() as s:
             rows = (await s.execute(select(ScheduleFire))).scalars().all()
         assert len(rows) == 1
+
+
+class TestRetentionFloor:
+    """The floor on both breaker reads is a bound on ``fired_at``.
+
+    Retention removes rows by fire age: the prune worker DELETEs on
+    ``fired_at`` and the partition worker drops whole days of slots, whose
+    fires are at least that old. A bound at the retention cutoff on
+    ``fired_at`` therefore excludes nothing that still exists. The previous
+    bound was on ``scheduled_for``, and that was not lossless: a catch-up fire
+    or a buffered replay carries an old slot with a recent ``fired_at``, so
+    the breaker stopped seeing exactly the fires the per-schedule ``/fires``
+    route still showed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_floor_keeps_a_recent_fire_for_an_old_slot(
+        self,
+        db: DatabaseManager,
+    ) -> None:
+        project_id, schedule_id = await _seed_project_and_schedule(db)
+        now = datetime.now(UTC).replace(microsecond=0)
+        async with db.session() as session:
+            # A catch-up fire: the slot is 45 days old, the fire happened now.
+            await _record_fire(
+                session,
+                project_id=project_id,
+                schedule_id=schedule_id,
+                status="acked_success",
+                scheduled_for=now - timedelta(days=45),
+                fired_at=now - timedelta(minutes=2),
+            )
+            # A fire retention has removed on any real install: 60 days old by
+            # fire time. It only exists here because nothing pruned it.
+            await _record_fire(
+                session,
+                project_id=project_id,
+                schedule_id=schedule_id,
+                status="failed",
+                scheduled_for=now - timedelta(days=60),
+                fired_at=now - timedelta(days=60),
+            )
+            await session.commit()
+
+        floor = now - timedelta(days=31)
+        async with db.session() as session:
+            repo = ScheduleFireRepository(session)
+            single = await repo.recent_failures(
+                schedule_id=schedule_id,
+                limit=10,
+                fired_at_floor=floor,
+            )
+            assert [f.status for f in single] == ["acked_success"]
+            bulk = await repo.recent_failures_for_many(
+                schedule_ids=[schedule_id],
+                per_schedule_limit=10,
+                fired_at_floor=floor,
+            )
+            assert [f.status for f in bulk[schedule_id]] == ["acked_success"]
+            unbounded = await repo.recent_failures(schedule_id=schedule_id, limit=10)
+            assert len(unbounded) == 2, "both rows exist without a floor"
+
+    @pytest.mark.asyncio
+    async def test_bulk_read_is_newest_first_per_schedule_and_capped(
+        self,
+        db: DatabaseManager,
+    ) -> None:
+        project_id, first = await _seed_project_and_schedule(db)
+        second = await _add_schedule(db, project_id, "second")
+        now = datetime.now(UTC).replace(microsecond=0)
+        async with db.session() as session:
+            for minutes in (50, 40, 30, 20, 10):
+                await _record_fire(
+                    session,
+                    project_id=project_id,
+                    schedule_id=first,
+                    status="acked_failed" if minutes == 10 else "acked_success",
+                    scheduled_for=now - timedelta(minutes=minutes),
+                    fired_at=now - timedelta(minutes=minutes),
+                )
+            for minutes in (25, 5):
+                await _record_fire(
+                    session,
+                    project_id=project_id,
+                    schedule_id=second,
+                    status="acked_success",
+                    scheduled_for=now - timedelta(minutes=minutes),
+                    fired_at=now - timedelta(minutes=minutes),
+                )
+            await session.commit()
+
+        unknown = uuid.uuid4()
+        async with db.session() as session:
+            got = await ScheduleFireRepository(session).recent_failures_for_many(
+                schedule_ids=[first, second, unknown, first],
+                per_schedule_limit=3,
+            )
+        assert set(got) == {first, second, unknown}
+        assert [f.status for f in got[first]] == ["acked_failed", "acked_success", "acked_success"]
+        fired = [f.fired_at.replace(tzinfo=None) for f in got[first]]
+        assert fired == sorted(fired, reverse=True), "newest first"
+        assert len(got[second]) == 2
+        assert got[unknown] == []
+
+    @pytest.mark.asyncio
+    async def test_breaker_still_sees_a_caught_up_success(
+        self,
+        db: DatabaseManager,
+        settings: Settings,
+    ) -> None:
+        """F, F, S, F, F newest-last with a threshold of 3 stays enabled, even
+        when the success is a catch-up fire for a slot older than retention.
+        Under the previous slot bound that success was invisible and a healthy
+        schedule was auto-disabled."""
+        from z4j_brain.domain.workers.schedule_circuit_breaker import (
+            ScheduleCircuitBreakerWorker,
+        )
+
+        settings = settings.model_copy(
+            update={
+                "schedule_circuit_breaker_threshold": 3,
+                "schedule_fires_retention_days": 7,
+            },
+        )
+        project_id, schedule_id = await _seed_project_and_schedule(db)
+        now = datetime.now(UTC).replace(microsecond=0)
+        async with db.session() as session:
+            sequence = [
+                (50, "acked_failed", now - timedelta(minutes=50)),
+                (40, "acked_failed", now - timedelta(minutes=40)),
+                (30, "acked_success", now - timedelta(days=45)),
+                (20, "acked_failed", now - timedelta(minutes=20)),
+                (10, "acked_failed", now - timedelta(minutes=10)),
+            ]
+            for minutes, status, slot in sequence:
+                await _record_fire(
+                    session,
+                    project_id=project_id,
+                    schedule_id=schedule_id,
+                    status=status,
+                    scheduled_for=slot,
+                    fired_at=now - timedelta(minutes=minutes),
+                )
+            await session.commit()
+
+        await ScheduleCircuitBreakerWorker(db=db, settings=settings).tick()
+
+        async with db.session() as session:
+            row = await session.get(Schedule, schedule_id)
+        assert row.is_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_breaker_still_sees_caught_up_failures(
+        self,
+        db: DatabaseManager,
+        settings: Settings,
+    ) -> None:
+        """Three failures for slots older than retention, fired in the last
+        hour, trip the breaker: they are recent fires, whatever their slot."""
+        from z4j_brain.domain.workers.schedule_circuit_breaker import (
+            ScheduleCircuitBreakerWorker,
+        )
+
+        settings = settings.model_copy(
+            update={
+                "schedule_circuit_breaker_threshold": 3,
+                "schedule_fires_retention_days": 7,
+            },
+        )
+        project_id, schedule_id = await _seed_project_and_schedule(db)
+        now = datetime.now(UTC).replace(microsecond=0)
+        async with db.session() as session:
+            for i in range(3):
+                await _record_fire(
+                    session,
+                    project_id=project_id,
+                    schedule_id=schedule_id,
+                    status="acked_failed",
+                    scheduled_for=now - timedelta(days=45) + timedelta(minutes=i),
+                    fired_at=now - timedelta(minutes=30) + timedelta(minutes=i),
+                )
+            await session.commit()
+
+        await ScheduleCircuitBreakerWorker(db=db, settings=settings).tick()
+
+        async with db.session() as session:
+            row = await session.get(Schedule, schedule_id)
+        assert row.is_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_omitting_the_floor_changes_nothing(
+        self,
+        db: DatabaseManager,
+    ) -> None:
+        """The parameter is optional and defaults to the unbounded read."""
+        project_id, schedule_id = await _seed_project_and_schedule(db)
+        now = datetime.now(UTC).replace(microsecond=0)
+
+        async with db.session() as session:
+            for offset in (900, 400, 3):
+                slot = now - timedelta(days=offset)
+                await _record_fire(
+                    session,
+                    project_id=project_id,
+                    schedule_id=schedule_id,
+                    status="failed",
+                    scheduled_for=slot,
+                    fired_at=slot,
+                )
+            await session.commit()
+
+        async with db.session() as session:
+            repo = ScheduleFireRepository(session)
+            assert len(await repo.recent_failures(schedule_id=schedule_id, limit=10)) == 3
+            got = await repo.recent_failures_for_many(
+                schedule_ids=[schedule_id],
+                per_schedule_limit=10,
+            )
+            assert len(got[schedule_id]) == 3
+
+
+async def _add_schedule(
+    db: DatabaseManager,
+    project_id: uuid.UUID,
+    name: str,
+) -> uuid.UUID:
+    """A second schedule in an existing project, through the control repository."""
+    async with db.session() as s:
+        row = await ScheduleControlRepository(s).create_current(
+            project_id=project_id,
+            data={
+                "engine": "celery",
+                "scheduler": "z4j-scheduler",
+                "name": name,
+                "task_name": "t.t",
+                "kind": ScheduleKind.CRON.value,
+                "expression": "0 * * * *",
+                "timezone": "UTC",
+                "args": [],
+                "kwargs": {},
+                "is_enabled": True,
+            },
+            planning_at=datetime.now(UTC),
+        )
+        await s.commit()
+        return row.id
+
+
+# ---------------------------------------------------------------------------
+# The PostgreSQL path of the bulk read is a LATERAL top-N per id, which
+# SQLite cannot express, so it is exercised against a real PostgreSQL when
+# ``Z4J_TEST_POSTGRES_URL`` names one (the ci-local brainpg lane does).
+# ---------------------------------------------------------------------------
+
+_POSTGRES_URL = os.environ.get("Z4J_TEST_POSTGRES_URL")
+
+requires_postgres = pytest.mark.skipif(
+    _POSTGRES_URL is None,
+    reason="the LATERAL top-N read is PostgreSQL SQL",
+)
+
+
+@requires_postgres
+class TestBulkReadPostgres:
+    @pytest.mark.asyncio
+    async def test_lateral_top_n_per_schedule(self) -> None:
+        from sqlalchemy import text
+
+        scheme, _, rest = (_POSTGRES_URL or "").partition("://")
+        url = f"postgresql+asyncpg://{rest}" if scheme.startswith("postgresql") else _POSTGRES_URL
+        schema = f"z4j_lateral_{uuid.uuid4().hex[:8]}"
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as conn:
+                # create_all() needs the extension the migrations install
+                # (users.email is CITEXT); the schema keeps the tables apart
+                # from anything else sharing this database.
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
+                await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+            await engine.dispose()
+            engine = create_async_engine(
+                url,
+                # public stays on the path so the citext type resolves.
+                connect_args={"server_settings": {"search_path": f"{schema},public"}},
+            )
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            db = DatabaseManager(engine)
+            project_id = uuid.uuid4()
+            first, second = uuid.uuid4(), uuid.uuid4()
+            now = datetime.now(UTC).replace(microsecond=0)
+            async with db.session() as s:
+                s.add(Project(id=project_id, slug="lateral", name="L"))
+                for sid, name in ((first, "first"), (second, "second")):
+                    s.add(
+                        Schedule(
+                            id=sid,
+                            project_id=project_id,
+                            engine="celery",
+                            scheduler="z4j-scheduler",
+                            name=name,
+                            task_name="t.t",
+                            kind=ScheduleKind.CRON,
+                            expression="0 * * * *",
+                            timezone="UTC",
+                            args=[],
+                            kwargs={},
+                            is_enabled=True,
+                        ),
+                    )
+                await s.flush()
+                repo = ScheduleFireRepository(s)
+                for minutes, status in (
+                    (50, "acked_success"),
+                    (40, "acked_success"),
+                    (30, "acked_failed"),
+                    (20, "acked_success"),
+                    (10, "acked_failed"),
+                ):
+                    await repo.record(
+                        fire_id=uuid.uuid4(),
+                        schedule_id=first,
+                        project_id=project_id,
+                        command_id=None,
+                        status=status,
+                        scheduled_for=now - timedelta(minutes=minutes),
+                        fired_at=now - timedelta(minutes=minutes),
+                    )
+                # A catch-up fire for the second schedule: old slot, recent fire.
+                await repo.record(
+                    fire_id=uuid.uuid4(),
+                    schedule_id=second,
+                    project_id=project_id,
+                    command_id=None,
+                    status="acked_success",
+                    scheduled_for=now - timedelta(days=45),
+                    fired_at=now - timedelta(minutes=5),
+                )
+                # And one retention would have removed already.
+                await repo.record(
+                    fire_id=uuid.uuid4(),
+                    schedule_id=second,
+                    project_id=project_id,
+                    command_id=None,
+                    status="failed",
+                    scheduled_for=now - timedelta(days=60),
+                    fired_at=now - timedelta(days=60),
+                )
+                await s.commit()
+
+            unknown = uuid.uuid4()
+            async with db.session() as s:
+                repo = ScheduleFireRepository(s)
+                got = await repo.recent_failures_for_many(
+                    schedule_ids=[first, second, unknown],
+                    per_schedule_limit=3,
+                )
+                assert [f.status for f in got[first]] == [
+                    "acked_failed",
+                    "acked_success",
+                    "acked_failed",
+                ]
+                assert [f.status for f in got[second]] == ["acked_success", "failed"]
+                assert got[unknown] == []
+                bounded = await repo.recent_failures_for_many(
+                    schedule_ids=[first, second],
+                    per_schedule_limit=3,
+                    fired_at_floor=now - timedelta(days=31),
+                )
+                assert len(bounded[first]) == 3
+                assert [f.status for f in bounded[second]] == ["acked_success"], (
+                    "the catch-up fire stays visible, the pruned-age row does not"
+                )
+        finally:
+            await engine.dispose()
+            cleanup = create_async_engine(url)
+            async with cleanup.begin() as conn:
+                await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            await cleanup.dispose()

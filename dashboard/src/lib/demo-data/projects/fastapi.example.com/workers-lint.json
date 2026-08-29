@@ -1,0 +1,23 @@
+{
+  "workers_evaluated": 0,
+  "workers_not_evaluated": 2,
+  "findings_by_severity": {},
+  "workers": [
+    {
+      "worker_id": "70000000-0000-4001-0000-000000000001",
+      "worker_name": "worker-1@worker-1.fastapi.example.com",
+      "engine": "arq",
+      "hostname": "worker-1.fastapi.example.com",
+      "evaluated": false,
+      "findings": []
+    },
+    {
+      "worker_id": "70000000-0000-4001-0000-000000000002",
+      "worker_name": "worker-2@worker-2.fastapi.example.com",
+      "engine": "arq",
+      "hostname": "worker-2.fastapi.example.com",
+      "evaluated": false,
+      "findings": []
+    }
+  ]
+}

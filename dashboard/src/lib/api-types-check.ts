@@ -54,6 +54,7 @@ import type {
   UserPublic,
   WorkerPublic,
 } from "@/lib/api-types";
+import type { TaskTreeNode } from "@/hooks/use-tasks";
 import type { components } from "@/lib/openapi-types.gen";
 
 type Schemas = components["schemas"];
@@ -185,6 +186,16 @@ type _CommandPublic = Assert<
 >;
 type _EventPublic = Assert<
   NotNever<StructurallyEquivalent<EventPublic, Schemas["EventPublic"]>>
+>;
+
+// TaskTreeNode lives in hooks/use-tasks.ts rather than api-types.ts, so it sat
+// outside this file's reach and drifted: the brain grew started_at and the
+// dashboard mirror did not, which surfaced as a tsc error in the component that
+// wanted the field rather than as a named drift here. Being hand-typed
+// elsewhere is not a reason to be unguarded, so it is asserted from where it
+// actually lives.
+type _TaskTreeNode = Assert<
+  NotNever<StructurallyEquivalent<TaskTreeNode, Schemas["TaskTreeNode"]>>
 >;
 
 // Schemas not currently in the assertion set:

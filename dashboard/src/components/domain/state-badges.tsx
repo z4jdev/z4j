@@ -49,11 +49,64 @@ export function AgentStateBadge({ state }: { state: AgentState }) {
  * schedule keeps its Enabled toggle on, which is correct and which is exactly
  * why the hold needs a mark of its own.
  */
-export function SchedulePausedBadge({ pausedAt }: { pausedAt: string | null }) {
-  if (pausedAt === null) return null;
+export function SchedulePausedBadge({
+  pausedAt,
+}: {
+  pausedAt: string | null | undefined;
+}) {
+  // Falsy, not strictly null: a payload that omits the field is not a held
+  // schedule, and a badge that says "held" because a field is absent is a
+  // false alarm.
+  if (!pausedAt) return null;
   return (
     <Badge variant="warning" title={`Held since ${new Date(pausedAt).toLocaleString()}`}>
       held
+    </Badge>
+  );
+}
+
+/**
+ * A schedule's unbroken run of trailing failures, shown before the circuit
+ * breaker acts on it.
+ *
+ * Renders nothing while a schedule is healthy, so a table of working schedules
+ * stays quiet and the badge means something when it appears. Once failures
+ * start it shows the run against the threshold, because "3" alone does not say
+ * whether the schedule is nearly disabled or barely troubled.
+ */
+export function ScheduleHealthBadge({
+  consecutiveFailures,
+  threshold,
+}: {
+  consecutiveFailures: number;
+  threshold: number;
+}) {
+  if (consecutiveFailures <= 0) return null;
+
+  // threshold 0 means the operator disabled the breaker: the run is real and
+  // worth showing, but nothing will auto-disable, so do not imply a countdown.
+  if (threshold <= 0) {
+    return (
+      <Badge
+        variant="warning"
+        title={`${consecutiveFailures} consecutive failures. The circuit breaker is switched off, so this schedule will not be auto-disabled.`}
+      >
+        {consecutiveFailures} failing
+      </Badge>
+    );
+  }
+
+  const atThreshold = consecutiveFailures >= threshold;
+  return (
+    <Badge
+      variant={atThreshold ? "destructive" : "warning"}
+      title={
+        atThreshold
+          ? `${consecutiveFailures} consecutive failures: at the auto-disable threshold of ${threshold}.`
+          : `${consecutiveFailures} consecutive failures. This schedule is auto-disabled at ${threshold}.`
+      }
+    >
+      {consecutiveFailures} of {threshold} failing
     </Badge>
   );
 }

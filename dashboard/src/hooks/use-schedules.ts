@@ -1,4 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type {
   ScheduleDiffRequest,
@@ -7,15 +13,27 @@ import type {
   SchedulePublic,
 } from "@/lib/api-types";
 
-export function useSchedules(slug: string) {
-  // v1.1.0: GET /projects/{slug}/schedules now returns
-  // ``{items, next_cursor}``. The hook flattens to the legacy
-  // array shape so existing call sites keep working; the loop
-  // walks the cursor transparently for projects with >500 rows.
-  return useQuery<SchedulePublic[]>({
-    queryKey: ["schedules", slug],
-    queryFn: async () => {
+interface SchedulesEnvelope {
+  items: SchedulePublic[];
+  /** Project-wide breaker setting, identical on every page of the list. */
+  circuit_breaker_threshold: number;
+}
+
+/**
+ * One query for the schedule list and the breaker threshold together. The
+ * envelope carries both, so reading the threshold with a second request was
+ * a wasted round-trip and a five-minute window in which the badge's "N of T"
+ * could disagree with the list beside it. Both hooks below share this cache
+ * entry and pick their slice with `select`.
+ */
+function schedulesQuery(slug: string) {
+  return {
+    queryKey: ["schedules", slug] as const,
+    queryFn: async (): Promise<SchedulesEnvelope> => {
+      // GET /projects/{slug}/schedules returns ``{items, next_cursor}``; the
+      // loop walks the cursor transparently for projects with >500 rows.
       const items: SchedulePublic[] = [];
+      let threshold = 0;
       let cursor: string | null = null;
       do {
         const params = new URLSearchParams();
@@ -24,15 +42,121 @@ export function useSchedules(slug: string) {
         const page = await api.get<{
           items: SchedulePublic[];
           next_cursor: string | null;
+          circuit_breaker_threshold?: number;
         }>(`/projects/${slug}/schedules?${params.toString()}`);
         items.push(...page.items);
+        threshold = page.circuit_breaker_threshold ?? threshold;
         cursor = page.next_cursor;
       } while (cursor);
-      return items;
+      return { items, circuit_breaker_threshold: threshold };
     },
     enabled: !!slug,
     refetchInterval: 30_000,
+  };
+}
+
+export function useSchedules(slug: string) {
+  return useQuery({
+    ...schedulesQuery(slug),
+    select: (envelope: SchedulesEnvelope) => envelope.items,
   });
+}
+
+/**
+ * The consecutive-failure count at which the brain auto-disables a schedule.
+ * 0 means the operator switched the breaker off. Read from the same list
+ * query the table renders from, so the two never disagree.
+ */
+export function useCircuitBreakerThreshold(slug: string) {
+  return useQuery({
+    ...schedulesQuery(slug),
+    select: (envelope: SchedulesEnvelope) => envelope.circuit_breaker_threshold,
+  });
+}
+
+/** One cell of the cross-run grid. Mirrors ``ScheduleRunCell``. */
+export interface ScheduleRunCell {
+  fire_id: string;
+  status: string;
+  scheduled_for: string;
+  fired_at: string;
+  latency_ms: number | null;
+}
+
+export interface ScheduleRunsRow {
+  schedule_id: string;
+  /** Newest first, at most ``limit``. Fewer means fewer fires in the window. */
+  runs: ScheduleRunCell[];
+}
+
+export interface ScheduleRunsPublic {
+  items: ScheduleRunsRow[];
+  limit: number;
+  circuit_breaker_threshold: number;
+}
+
+/** The brain refuses more than 500 ids per request; well under that keeps
+ *  the query string short enough for the common proxy header limits too. */
+export const SCHEDULE_RUNS_CHUNK = 100;
+
+async function fetchScheduleRuns(
+  slug: string,
+  ids: readonly string[],
+  limit: number,
+): Promise<Map<string, ScheduleRunCell[]>> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  for (const id of ids) params.append("id", id);
+  const page = await api.get<ScheduleRunsPublic>(
+    `/projects/${slug}/schedules/runs?${params.toString()}`,
+  );
+  return new Map(page.items.map((row) => [row.schedule_id, row.runs]));
+}
+
+/**
+ * Last-N runs for every schedule on the page.
+ *
+ * The ids are chunked so a project with more schedules than the endpoint
+ * accepts per request still gets its strips, and each chunk is keyed by its
+ * sorted ids so a re-render with the same rows in a different order hits
+ * the cache. The map form is what the grid wants: a row looks itself up by
+ * id. `data` fills in chunk by chunk and `isError` reports any chunk that
+ * failed, so a caller can say "unavailable" instead of "no fires".
+ */
+export function useScheduleRuns(
+  slug: string,
+  scheduleIds: readonly string[],
+  limit = 20,
+) {
+  const ids = [...scheduleIds].sort();
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += SCHEDULE_RUNS_CHUNK) {
+    chunks.push(ids.slice(i, i + SCHEDULE_RUNS_CHUNK));
+  }
+  const results = useQueries({
+    queries: chunks.map((chunk) => ({
+      queryKey: ["schedule-runs", slug, limit, chunk] as const,
+      queryFn: () => fetchScheduleRuns(slug, chunk, limit),
+      enabled: !!slug && chunk.length > 0,
+      // Same cadence as the fire-history panel: an operator watching a
+      // failing schedule wants the newest cell to appear promptly.
+      refetchInterval: 10_000,
+    })),
+  });
+  const data = useMemo(() => {
+    let merged: Map<string, ScheduleRunCell[]> | undefined;
+    for (const r of results) {
+      if (!r.data) continue;
+      merged ??= new Map();
+      for (const [k, v] of r.data) merged.set(k, v);
+    }
+    return merged;
+  }, [results]);
+  return {
+    data,
+    isError: results.some((r) => r.isError),
+    isPending: results.some((r) => r.isPending),
+  };
 }
 
 export function useSchedule(slug: string, scheduleId: string | undefined) {

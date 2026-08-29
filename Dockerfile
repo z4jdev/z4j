@@ -14,15 +14,18 @@
 #   uv pip install "/build/source[postgres,scheduler-grpc]" z4j-core z4j-scheduler
 #   z4j serve
 #
-# Built by .github/workflows/release-docker.yml on tag push (multi-arch
-# native amd64 + arm64). Published as z4jdev/z4j:VERSION + :latest.
+# Built by .github/workflows/publish-docker.yml, dispatched after the wave is
+# on PyPI: it downloads the released sdist, verifies it against the digest
+# PyPI publishes, and builds this file from that context on native amd64 and
+# arm64 runners. Published as z4jdev/z4j:VERSION + :latest, signed with
+# keyless cosign.
 #
 # Note on the build-arg name: the workflow passes ``Z4J_BRAIN_VERSION``
 # for backwards compatibility with the pre-1.4.0 build system (the
 # secret name on GitHub uses that key). We accept it under both names.
 #
-# 1.9.0 provenance note. This file builds from ordinary upstream base images,
-# the same way the 1.8.x images that actually shipped were built. The
+# Provenance note. This file builds from ordinary upstream base images, the
+# same way every image that has actually shipped was built. The
 # production-authority apparatus that briefly lived here (sealed wheelhouse /
 # system-bundle / dashboard-bundle carrier images, hash-locked offline
 # installs, a sealed Debian .deb closure, a cosign verifier, and manifest
@@ -35,19 +38,15 @@
 # file does instead, is noted at each site below so nobody mistakes the
 # ordinary build for the sealed one.
 #
-# TWO build contexts are supported, and both are real:
-#
-#   1. An extracted release sdist. The context root is the sdist root, which
-#      carries docker/vendor/z4j-core and docker/vendor/z4j-scheduler. This is
-#      the ``pip download --no-binary :all: z4j`` then ``docker build`` path,
-#      and it is what docker-compose.yml builds.
-#   2. A checkout of the flattened z4jdev/z4j repository, which
-#      release-docker.yml builds. That tree carries no docker/ directory at
-#      all, so the vendored sources are absent and the wave siblings resolve
-#      from the index instead.
-#
-# Only the sdist path can be built before the coordinated package wave is
-# published, which is exactly why the vendored payload exists.
+# ONE build context is supported: an extracted release sdist. The context
+# root is the sdist root, which carries docker/vendor/z4j-core and
+# docker/vendor/z4j-scheduler. This is the ``pip download --no-binary :all:
+# z4j`` then ``docker build`` path; it is what docker-compose.yml builds and
+# what publish-docker.yml builds. A checkout of the flattened repository
+# carries no docker/ directory, and the install step below refuses to reach
+# for the index in its place: the sdist path is the only one that can be
+# built before the coordinated package wave is published, which is exactly
+# why the vendored payload exists.
 # =============================================================================
 
 # The base is pinned by tag AND digest. The tag documents intent, the digest is
@@ -126,10 +125,9 @@ RUN set -eux; \
 # Install z4j from the released build context. Release sdists carry matching
 # z4j-core and z4j-scheduler sources in their Docker deployment payload so a
 # candidate image can be built before the coordinated package wave is
-# published. A flattened-checkout build falls back to the index after that
-# version exists.
+# published.
 #
-# uv 0.12.5 is the resolver version the 1.9.0 production manifest names
+# uv 0.12.5 is the resolver version the frozen production manifest names
 # (docker/production/manifest.json, "resolver"). Pinning it exactly keeps this
 # ordinary build on the same resolver the sealed build would have used, and
 # UV_PYTHON_DOWNLOADS=never forbids uv from fetching some other CPython behind
@@ -163,8 +161,29 @@ RUN set -eux; \
         "/build/source[postgres,scheduler-grpc]" \
         "/build/source/docker/vendor/z4j-scheduler"; \
     uv pip check --system; \
+    # grpcio-tools is the protoc toolchain, needed only to regenerate the
+    # committed gencode, and it is the only thing that pulls setuptools into
+    # this image. Neither is imported at runtime: the gencode needs grpcio and
+    # protobuf, version lookups use importlib.metadata. Removing them and
+    # re-running the dependency check proves nothing else wanted them; the
+    # import below proves the service still loads without them.
+    uv pip uninstall --system grpcio-tools setuptools; \
+    uv pip check --system; \
+    python -c "import z4j_brain.main, z4j_scheduler"; \
     pip uninstall -y uv; \
     SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])"); \
+    # A service image has no reason to carry a package installer. Removing pip
+    # also removes pip/_vendor/vendor.txt, which is an inventory of the
+    # libraries pip vendors for its own use. A scanner reads that file and
+    # reports them as if this image depended on them: it produced two HIGH
+    # findings for an msgpack that is not importable here and a setuptools
+    # version older than the one actually installed. ensurepip's bundled
+    # wheel and the pip launchers go with it, or the installer is one
+    # ``python -m ensurepip`` away. Nothing in z4j shells out to pip, so this
+    # costs nothing at runtime.
+    rm -rf "${SITE_PACKAGES}/pip" "${SITE_PACKAGES}"/pip-*.dist-info \
+        "$(python -c "import sysconfig; print(sysconfig.get_paths()['stdlib'])")/ensurepip" \
+        /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.*; \
     find "${SITE_PACKAGES}" -type d -name '__pycache__' -prune -exec rm -rf {} +; \
     find "${SITE_PACKAGES}" -type f -name '*.pyc' -delete; \
     find "${SITE_PACKAGES}" -type d \( \

@@ -1,0 +1,33 @@
+# pnpm 11.22 project authority. pnpm 11 reads project settings here;
+# .npmrc is retained only for npm-compatible script blocking and registry TLS.
+packages:
+  - "."
+
+# Registry and transport policy.
+registry: https://registry.npmjs.org/
+strictSsl: true
+
+# Dependency layout and lock discipline.
+hoist: false
+shamefullyHoist: false
+preferFrozenLockfile: true
+
+# Supply-chain quarantine. Missing publish timestamps fail closed, and the
+# independent scripts/check-lockfile-age.py gate verifies committed locks.
+minimumReleaseAge: 4320
+minimumReleaseAgeIgnoreMissingTime: false
+minimumReleaseAgeStrict: true
+
+# Lifecycle scripts are denied twice: ignore every lifecycle hook, then make
+# every package currently known to declare one an explicit false decision.
+# Unknown future build scripts remain unreviewed and fail strictDepBuilds.
+ignoreScripts: true
+enablePrePostScripts: false
+strictDepBuilds: true
+dangerouslyAllowAllBuilds: false
+allowBuilds:
+  esbuild: false
+  fsevents: false
+  # Version selection stays with Wrangler's lock graph; this is script policy,
+  # not a workerd dependency override.
+  workerd: false

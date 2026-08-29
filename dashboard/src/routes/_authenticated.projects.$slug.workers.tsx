@@ -365,8 +365,11 @@ function useWorkerColumns(slug: string): DataTableColumnDef<WorkerPublic>[] {
           const la = row.original.load_average;
           if (!la || !Array.isArray(la) || la.length === 0) return "-";
           return (
-            <span className="text-xs tabular-nums text-muted-foreground">
-              {la.map((v) => Number(v).toFixed(2)).join(", ")}
+            <span
+              className="whitespace-nowrap text-xs tabular-nums text-muted-foreground"
+              title="1, 5 and 15 minute load averages"
+            >
+              {la.map((v) => Number(v).toFixed(2)).join(" / ")}
             </span>
           );
         },
@@ -376,7 +379,7 @@ function useWorkerColumns(slug: string): DataTableColumnDef<WorkerPublic>[] {
         accessorKey: "last_heartbeat",
         header: "Heartbeat",
         cell: ({ row }: { row: { original: WorkerPublic } }) => (
-          <DateCell value={row.original.last_heartbeat} />
+          <DateCell value={row.original.last_heartbeat} compact />
         ),
         enableSorting: true,
       },

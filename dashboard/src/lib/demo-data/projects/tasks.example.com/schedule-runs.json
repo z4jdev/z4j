@@ -1,0 +1,1172 @@
+{
+  "items": [
+    {
+      "schedule_id": "30000000-0000-4003-c000-000000000001",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -68402,
+          "fired_at_offset_s": -68400,
+          "latency_ms": 75
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -90003,
+          "fired_at_offset_s": -90000,
+          "latency_ms": 265
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -111601,
+          "fired_at_offset_s": -111600,
+          "latency_ms": 410
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -133200,
+          "fired_at_offset_s": -133200,
+          "latency_ms": 192
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -154801,
+          "fired_at_offset_s": -154800,
+          "latency_ms": 193
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -176403,
+          "fired_at_offset_s": -176400,
+          "latency_ms": 703
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -198003,
+          "fired_at_offset_s": -198000,
+          "latency_ms": 640
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -219603,
+          "fired_at_offset_s": -219600,
+          "latency_ms": 255
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -241203,
+          "fired_at_offset_s": -241200,
+          "latency_ms": 891
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -262801,
+          "fired_at_offset_s": -262800,
+          "latency_ms": 371
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -284403,
+          "fired_at_offset_s": -284400,
+          "latency_ms": 853
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -306000,
+          "fired_at_offset_s": -306000,
+          "latency_ms": 406
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -327601,
+          "fired_at_offset_s": -327600,
+          "latency_ms": 442
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -349200,
+          "fired_at_offset_s": -349200,
+          "latency_ms": 257
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -370800,
+          "fired_at_offset_s": -370800,
+          "latency_ms": 430
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -392402,
+          "fired_at_offset_s": -392400,
+          "latency_ms": 620
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -414001,
+          "fired_at_offset_s": -414000,
+          "latency_ms": 762
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -435603,
+          "fired_at_offset_s": -435600,
+          "latency_ms": 413
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -457200,
+          "fired_at_offset_s": -457200,
+          "latency_ms": 384
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c001-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -478800,
+          "fired_at_offset_s": -478800,
+          "latency_ms": 484
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4003-c000-000000000002",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -241,
+          "fired_at_offset_s": -240,
+          "latency_ms": 815
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -540,
+          "fired_at_offset_s": -540,
+          "latency_ms": 275
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -842,
+          "fired_at_offset_s": -840,
+          "latency_ms": 552
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1142,
+          "fired_at_offset_s": -1140,
+          "latency_ms": 405
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1443,
+          "fired_at_offset_s": -1440,
+          "latency_ms": 622
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1740,
+          "fired_at_offset_s": -1740,
+          "latency_ms": 319
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -2040,
+          "fired_at_offset_s": -2040,
+          "latency_ms": 196
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -2343,
+          "fired_at_offset_s": -2340,
+          "latency_ms": 532
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -2640,
+          "fired_at_offset_s": -2640,
+          "latency_ms": 789
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -2942,
+          "fired_at_offset_s": -2940,
+          "latency_ms": 654
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3241,
+          "fired_at_offset_s": -3240,
+          "latency_ms": 596
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3543,
+          "fired_at_offset_s": -3540,
+          "latency_ms": 51
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3841,
+          "fired_at_offset_s": -3840,
+          "latency_ms": 766
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -4141,
+          "fired_at_offset_s": -4140,
+          "latency_ms": 303
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -4442,
+          "fired_at_offset_s": -4440,
+          "latency_ms": 829
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -4743,
+          "fired_at_offset_s": -4740,
+          "latency_ms": 155
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5041,
+          "fired_at_offset_s": -5040,
+          "latency_ms": 532
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5343,
+          "fired_at_offset_s": -5340,
+          "latency_ms": 538
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5643,
+          "fired_at_offset_s": -5640,
+          "latency_ms": 832
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c002-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5940,
+          "fired_at_offset_s": -5940,
+          "latency_ms": 753
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4003-c000-000000000003",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3601,
+          "fired_at_offset_s": -3600,
+          "latency_ms": 371
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -10802,
+          "fired_at_offset_s": -10800,
+          "latency_ms": 261
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -18000,
+          "fired_at_offset_s": -18000,
+          "latency_ms": 164
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -25202,
+          "fired_at_offset_s": -25200,
+          "latency_ms": 125
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -32403,
+          "fired_at_offset_s": -32400,
+          "latency_ms": 391
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -39600,
+          "fired_at_offset_s": -39600,
+          "latency_ms": 741
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -46802,
+          "fired_at_offset_s": -46800,
+          "latency_ms": 427
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -54001,
+          "fired_at_offset_s": -54000,
+          "latency_ms": 856
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -61202,
+          "fired_at_offset_s": -61200,
+          "latency_ms": 652
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -68403,
+          "fired_at_offset_s": -68400,
+          "latency_ms": 130
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -75600,
+          "fired_at_offset_s": -75600,
+          "latency_ms": 329
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -82800,
+          "fired_at_offset_s": -82800,
+          "latency_ms": 788
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -90002,
+          "fired_at_offset_s": -90000,
+          "latency_ms": 376
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -97201,
+          "fired_at_offset_s": -97200,
+          "latency_ms": 749
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -104400,
+          "fired_at_offset_s": -104400,
+          "latency_ms": 309
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -111601,
+          "fired_at_offset_s": -111600,
+          "latency_ms": 413
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -118803,
+          "fired_at_offset_s": -118800,
+          "latency_ms": 354
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -126003,
+          "fired_at_offset_s": -126000,
+          "latency_ms": 229
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -133202,
+          "fired_at_offset_s": -133200,
+          "latency_ms": 126
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c003-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -140400,
+          "fired_at_offset_s": -140400,
+          "latency_ms": 250
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4003-c000-000000000004",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -35,
+          "fired_at_offset_s": -32,
+          "latency_ms": 102
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -94,
+          "fired_at_offset_s": -92,
+          "latency_ms": 599
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -155,
+          "fired_at_offset_s": -152,
+          "latency_ms": 344
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -214,
+          "fired_at_offset_s": -212,
+          "latency_ms": 56
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -272,
+          "fired_at_offset_s": -272,
+          "latency_ms": 213
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -332,
+          "fired_at_offset_s": -332,
+          "latency_ms": 492
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -392,
+          "fired_at_offset_s": -392,
+          "latency_ms": 816
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -454,
+          "fired_at_offset_s": -452,
+          "latency_ms": 724
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -514,
+          "fired_at_offset_s": -512,
+          "latency_ms": 664
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -575,
+          "fired_at_offset_s": -572,
+          "latency_ms": 338
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -633,
+          "fired_at_offset_s": -632,
+          "latency_ms": 602
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -693,
+          "fired_at_offset_s": -692,
+          "latency_ms": 539
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -755,
+          "fired_at_offset_s": -752,
+          "latency_ms": 521
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -812,
+          "fired_at_offset_s": -812,
+          "latency_ms": 174
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -872,
+          "fired_at_offset_s": -872,
+          "latency_ms": 325
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -933,
+          "fired_at_offset_s": -932,
+          "latency_ms": 362
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -995,
+          "fired_at_offset_s": -992,
+          "latency_ms": 365
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1054,
+          "fired_at_offset_s": -1052,
+          "latency_ms": 214
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1112,
+          "fired_at_offset_s": -1112,
+          "latency_ms": 354
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c004-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1175,
+          "fired_at_offset_s": -1172,
+          "latency_ms": 109
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4003-c000-000000000005",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -489603,
+          "fired_at_offset_s": -489600,
+          "latency_ms": 676
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -511202,
+          "fired_at_offset_s": -511200,
+          "latency_ms": 261
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -532801,
+          "fired_at_offset_s": -532800,
+          "latency_ms": 212
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -554403,
+          "fired_at_offset_s": -554400,
+          "latency_ms": 369
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -576001,
+          "fired_at_offset_s": -576000,
+          "latency_ms": 239
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -597601,
+          "fired_at_offset_s": -597600,
+          "latency_ms": 545
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -619202,
+          "fired_at_offset_s": -619200,
+          "latency_ms": 653
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -640802,
+          "fired_at_offset_s": -640800,
+          "latency_ms": 208
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -662401,
+          "fired_at_offset_s": -662400,
+          "latency_ms": 593
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -684002,
+          "fired_at_offset_s": -684000,
+          "latency_ms": 334
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-00000000000a",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -705601,
+          "fired_at_offset_s": -705600,
+          "latency_ms": 1781,
+          "error_code": "task_failed",
+          "error_message": "FileNotFoundError: [Errno 2] No such file or directory: '/mnt/reports/template.xlsx'"
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -727202,
+          "fired_at_offset_s": -727200,
+          "latency_ms": 770
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -748801,
+          "fired_at_offset_s": -748800,
+          "latency_ms": 568
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -770403,
+          "fired_at_offset_s": -770400,
+          "latency_ms": 400
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -792003,
+          "fired_at_offset_s": -792000,
+          "latency_ms": 838
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -813601,
+          "fired_at_offset_s": -813600,
+          "latency_ms": 798
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -835200,
+          "fired_at_offset_s": -835200,
+          "latency_ms": 390
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -856800,
+          "fired_at_offset_s": -856800,
+          "latency_ms": 628
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -878402,
+          "fired_at_offset_s": -878400,
+          "latency_ms": 758
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c005-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -900002,
+          "fired_at_offset_s": -900000,
+          "latency_ms": 61
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4003-c000-000000000006",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000000",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -61203,
+          "fired_at_offset_s": -61200,
+          "latency_ms": 3752,
+          "error_code": "task_failed",
+          "error_message": "RuntimeError: worker exited with status 137 (killed)"
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -82801,
+          "fired_at_offset_s": -82800,
+          "latency_ms": 278
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -104401,
+          "fired_at_offset_s": -104400,
+          "latency_ms": 700
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -126001,
+          "fired_at_offset_s": -126000,
+          "latency_ms": 790
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -147600,
+          "fired_at_offset_s": -147600,
+          "latency_ms": 488
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -169203,
+          "fired_at_offset_s": -169200,
+          "latency_ms": 393
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -190801,
+          "fired_at_offset_s": -190800,
+          "latency_ms": 114
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -212403,
+          "fired_at_offset_s": -212400,
+          "latency_ms": 711
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -234002,
+          "fired_at_offset_s": -234000,
+          "latency_ms": 524
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -255603,
+          "fired_at_offset_s": -255600,
+          "latency_ms": 70
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -277200,
+          "fired_at_offset_s": -277200,
+          "latency_ms": 172
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -298800,
+          "fired_at_offset_s": -298800,
+          "latency_ms": 861
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -320401,
+          "fired_at_offset_s": -320400,
+          "latency_ms": 613
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -342000,
+          "fired_at_offset_s": -342000,
+          "latency_ms": 554
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -363600,
+          "fired_at_offset_s": -363600,
+          "latency_ms": 498
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -385200,
+          "fired_at_offset_s": -385200,
+          "latency_ms": 425
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -406801,
+          "fired_at_offset_s": -406800,
+          "latency_ms": 288
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -428400,
+          "fired_at_offset_s": -428400,
+          "latency_ms": 740
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -450002,
+          "fired_at_offset_s": -450000,
+          "latency_ms": 439
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c006-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -471601,
+          "fired_at_offset_s": -471600,
+          "latency_ms": 189
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4003-c000-000000000007",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -123,
+          "fired_at_offset_s": -120,
+          "latency_ms": 362
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1021,
+          "fired_at_offset_s": -1020,
+          "latency_ms": 119
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1921,
+          "fired_at_offset_s": -1920,
+          "latency_ms": 252
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -2821,
+          "fired_at_offset_s": -2820,
+          "latency_ms": 45
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3722,
+          "fired_at_offset_s": -3720,
+          "latency_ms": 422
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -4620,
+          "fired_at_offset_s": -4620,
+          "latency_ms": 288
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5522,
+          "fired_at_offset_s": -5520,
+          "latency_ms": 580
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -6420,
+          "fired_at_offset_s": -6420,
+          "latency_ms": 215
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000008",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -7323,
+          "fired_at_offset_s": -7320,
+          "latency_ms": 2040,
+          "error_code": "task_failed",
+          "error_message": "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB"
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -8220,
+          "fired_at_offset_s": -8220,
+          "latency_ms": 816
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -9121,
+          "fired_at_offset_s": -9120,
+          "latency_ms": 878
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -10021,
+          "fired_at_offset_s": -10020,
+          "latency_ms": 133
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -10922,
+          "fired_at_offset_s": -10920,
+          "latency_ms": 392
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -11821,
+          "fired_at_offset_s": -11820,
+          "latency_ms": 272
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -12722,
+          "fired_at_offset_s": -12720,
+          "latency_ms": 523
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -13620,
+          "fired_at_offset_s": -13620,
+          "latency_ms": 208
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -14521,
+          "fired_at_offset_s": -14520,
+          "latency_ms": 870
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -15422,
+          "fired_at_offset_s": -15420,
+          "latency_ms": 728
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -16322,
+          "fired_at_offset_s": -16320,
+          "latency_ms": 268
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c007-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -17220,
+          "fired_at_offset_s": -17220,
+          "latency_ms": 103
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4003-c000-000000000008",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -303,
+          "fired_at_offset_s": -300,
+          "latency_ms": 864
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -902,
+          "fired_at_offset_s": -900,
+          "latency_ms": 256
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1502,
+          "fired_at_offset_s": -1500,
+          "latency_ms": 632
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -2100,
+          "fired_at_offset_s": -2100,
+          "latency_ms": 224
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -2703,
+          "fired_at_offset_s": -2700,
+          "latency_ms": 729
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3302,
+          "fired_at_offset_s": -3300,
+          "latency_ms": 252
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3903,
+          "fired_at_offset_s": -3900,
+          "latency_ms": 210
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -4502,
+          "fired_at_offset_s": -4500,
+          "latency_ms": 842
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5100,
+          "fired_at_offset_s": -5100,
+          "latency_ms": 139
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5700,
+          "fired_at_offset_s": -5700,
+          "latency_ms": 885
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -6300,
+          "fired_at_offset_s": -6300,
+          "latency_ms": 798
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -6900,
+          "fired_at_offset_s": -6900,
+          "latency_ms": 492
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -7501,
+          "fired_at_offset_s": -7500,
+          "latency_ms": 809
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -8103,
+          "fired_at_offset_s": -8100,
+          "latency_ms": 202
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -8701,
+          "fired_at_offset_s": -8700,
+          "latency_ms": 420
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -9301,
+          "fired_at_offset_s": -9300,
+          "latency_ms": 773
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -9903,
+          "fired_at_offset_s": -9900,
+          "latency_ms": 86
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -10503,
+          "fired_at_offset_s": -10500,
+          "latency_ms": 291
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -11100,
+          "fired_at_offset_s": -11100,
+          "latency_ms": 828
+        },
+        {
+          "fire_id": "30000000-0000-4f03-c008-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -11702,
+          "fired_at_offset_s": -11700,
+          "latency_ms": 417
+        }
+      ]
+    }
+  ],
+  "limit": 20,
+  "circuit_breaker_threshold": 5
+}

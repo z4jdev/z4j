@@ -1,5 +1,12 @@
 # Production container authority
 
+This directory is a frozen record of the sealed production-image apparatus
+as it stood when it was cut, and it is deliberately unfinalized
+(`locks/UNFINALIZED`). It is not the contract of the image currently
+published; that image is built by the ordinary `Dockerfile` at the package
+root from the released sdist. The version named below is the cut this record
+describes, not the current release.
+
 This directory is the fail-closed source contract for the complete z4j 1.9.0
 production image. It covers the Python environment, Debian runtime packages,
 the compiled dashboard, the carrier images and build tooling, and the evidence
@@ -278,8 +285,8 @@ python docker/production/verify.py signature-verifier-probe \
 ```
 
 The same checks run natively on arm64. The release workflow verifies all five
-OCI authorities—Python, Node, wheelhouse, system bundle, and dashboard
-bundle—before BuildKit. Each Dockerfile repeats source, payload, uv, local
+OCI authorities (Python, Node, wheelhouse, system bundle, and dashboard
+bundle) before BuildKit. Each Dockerfile repeats source, payload, uv, local
 wheel, installed closure, and cadence checks inside the image build.
 Qualification also boots each exact runnable leaf with its real
 `ENTRYPOINT ["/usr/bin/tini","--","z4j"]` and `CMD ["serve"]`, an isolated

@@ -82,6 +82,8 @@ vi.mock("@/hooks/use-memberships", () => ({
 }));
 
 vi.mock("@/hooks/use-schedules", () => ({
+  useCircuitBreakerThreshold: () => ({ data: 0 }),
+  useScheduleRuns: () => ({ data: undefined }),
   useScheduleDiff: () => ({
     data: reconcileMocks.diffResult,
     isPending: false,

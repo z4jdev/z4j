@@ -7,16 +7,132 @@
     "hostname": "worker-default-1.django.example.com",
     "pid": 4118,
     "concurrency": 24,
-    "queues": ["default"],
+    "queues": [
+      "default"
+    ],
     "state": "online",
     "last_heartbeat_offset_s": -4,
-    "load_average": [1.42, 1.38, 1.35],
+    "load_average": [
+      1.42,
+      1.38,
+      1.35
+    ],
     "active_tasks": 12,
     "processed": 8421888,
     "failed": 3142,
     "succeeded": 8418746,
     "retried": 18420,
-    "created_at_offset_s": -31536000
+    "created_at_offset_s": -31536000,
+    "metadata": {
+      "stats": {
+        "pool": {
+          "implementation": "celery.concurrency.prefork:TaskPool",
+          "max-concurrency": 24,
+          "processes": [
+            4200,
+            4201,
+            4202,
+            4203,
+            4204,
+            4205,
+            4206,
+            4207,
+            4208,
+            4209,
+            4210,
+            4211,
+            4212,
+            4213,
+            4214,
+            4215,
+            4216,
+            4217,
+            4218,
+            4219,
+            4220,
+            4221,
+            4222,
+            4223
+          ],
+          "max-tasks-per-child": "N/A",
+          "timeouts": [
+            0,
+            0
+          ]
+        },
+        "prefetch_count": 1536,
+        "clock": "184732",
+        "uptime": 1123200,
+        "loadavg": [
+          1.42,
+          1.38,
+          1.35
+        ],
+        "rusage": {
+          "utime": 48213.4,
+          "stime": 9120.1,
+          "maxrss": 412488
+        },
+        "total": {
+          "billing.charge_subscription": 3137,
+          "billing.run_daily_invoices": 6274,
+          "emails.send_scheduled_campaigns": 9411,
+          "metrics.minute_rollup": 12548,
+          "reports.nightly_rollup": 15685,
+          "reports.rollup_shard": 18822,
+          "search.reindex_recent_changes": 21959,
+          "users.cleanup_expired_sessions": 25096
+        },
+        "broker": {
+          "hostname": "rabbitmq.django.example.com",
+          "port": 5672,
+          "transport": "amqp",
+          "virtual_host": "/",
+          "ssl": false,
+          "connect_timeout": 4,
+          "heartbeat": 120,
+          "login_method": "AMQPLAIN",
+          "failover_strategy": "round-robin"
+        }
+      },
+      "active_queues": [
+        {
+          "name": "default",
+          "exchange": {
+            "name": "default",
+            "type": "direct"
+          },
+          "routing_key": "default"
+        }
+      ],
+      "registered": [
+        "billing.charge_subscription",
+        "billing.run_daily_invoices",
+        "emails.send_scheduled_campaigns",
+        "metrics.minute_rollup",
+        "reports.nightly_rollup",
+        "reports.rollup_shard",
+        "search.reindex_recent_changes",
+        "users.cleanup_expired_sessions",
+        "users.send_password_reset"
+      ],
+      "conf": {
+        "task_acks_late": false,
+        "task_reject_on_worker_lost": false,
+        "worker_prefetch_multiplier": 64,
+        "task_time_limit": null,
+        "task_soft_time_limit": null,
+        "worker_max_tasks_per_child": null,
+        "task_serializer": "json",
+        "accept_content": [
+          "json"
+        ],
+        "result_backend": "redis://cache:6379/1",
+        "broker_url": "amqp://z4j:********@rabbitmq.django.example.com:5672//",
+        "timezone": "UTC",
+        "worker_concurrency": 24
+      }
+    }
   },
   {
     "id": "70000000-0000-4002-0000-000000000002",
@@ -26,10 +142,16 @@
     "hostname": "worker-default-2.django.example.com",
     "pid": 3887,
     "concurrency": 24,
-    "queues": ["default"],
+    "queues": [
+      "default"
+    ],
     "state": "online",
     "last_heartbeat_offset_s": -8,
-    "load_average": [1.38, 1.41, 1.39],
+    "load_average": [
+      1.38,
+      1.41,
+      1.39
+    ],
     "active_tasks": 14,
     "processed": 8398430,
     "failed": 3088,
@@ -45,10 +167,16 @@
     "hostname": "worker-billing-1.django.example.com",
     "pid": 2012,
     "concurrency": 8,
-    "queues": ["billing"],
+    "queues": [
+      "billing"
+    ],
     "state": "online",
     "last_heartbeat_offset_s": -6,
-    "load_average": [0.42, 0.38, 0.40],
+    "load_average": [
+      0.42,
+      0.38,
+      0.4
+    ],
     "active_tasks": 2,
     "processed": 184320,
     "failed": 28,
@@ -64,7 +192,9 @@
     "hostname": "worker-emails-1.django.example.com",
     "pid": 1944,
     "concurrency": 4,
-    "queues": ["emails"],
+    "queues": [
+      "emails"
+    ],
     "state": "offline",
     "last_heartbeat_offset_s": -480,
     "load_average": null,

@@ -63,6 +63,13 @@ export interface TaskTreeNode {
   parent_task_id: string | null;
   root_task_id: string | null;
   received_at: string | null;
+  /**
+   * When a worker began executing, as opposed to when the brain observed the
+   * task. Both are needed to split queue-wait from execution in the canvas
+   * waterfall; with only received_at and finished_at a node can show one
+   * undifferentiated span and nothing more.
+   */
+  started_at: string | null;
   finished_at: string | null;
 }
 export interface TaskTreeResponse {

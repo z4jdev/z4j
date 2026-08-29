@@ -26,7 +26,7 @@ import type { TaskTreeNode, TaskTreeResponse } from "@/hooks/use-tasks";
 
 /** SVG sizing. Constants on purpose - the layout is tidy not adaptive. */
 const NODE_WIDTH = 180;
-const NODE_HEIGHT = 48;
+const NODE_HEIGHT = 60;
 const COL_GAP = 24;
 const ROW_GAP = 56;
 const PAD = 12;
@@ -141,16 +141,56 @@ function layoutTree(
   };
 }
 
-function formatRuntime(node: TaskTreeNode): string | null {
-  if (!node.received_at || !node.finished_at) return null;
-  const start = Date.parse(node.received_at);
-  const end = Date.parse(node.finished_at);
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  const ms = Math.max(0, end - start);
-  if (ms < 1000) return `${ms}ms`;
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
   if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)}m`;
   return `${(ms / 3_600_000).toFixed(1)}h`;
+}
+
+interface NodeTimings {
+  /** received_at -> started_at: time the task sat in the queue. */
+  waitMs: number | null;
+  /** started_at -> finished_at: time a worker spent running it. */
+  execMs: number | null;
+  /** received_at -> finished_at, the span the node occupied overall. */
+  totalMs: number;
+}
+
+/**
+ * Split a node's span into queue-wait and execution.
+ *
+ * Before started_at reached this shape the node could only show one number,
+ * received_at -> finished_at, labelled "runtime". That figure is really total
+ * latency: a task that ran for 40ms after waiting four minutes for a free
+ * worker looked identical to one that ground away for four minutes. Those are
+ * opposite problems and they want opposite fixes, which is the whole point of
+ * separating them.
+ *
+ * waitMs is null when started_at is absent, which is normal for a task that
+ * never ran or for history written before the field existed; the bar then
+ * renders as a single undifferentiated span rather than guessing.
+ */
+export function nodeTimings(node: TaskTreeNode): NodeTimings | null {
+  if (!node.received_at || !node.finished_at) return null;
+  const received = Date.parse(node.received_at);
+  const finished = Date.parse(node.finished_at);
+  if (!Number.isFinite(received) || !Number.isFinite(finished)) return null;
+  const totalMs = Math.max(0, finished - received);
+
+  const started = node.started_at ? Date.parse(node.started_at) : NaN;
+  if (!Number.isFinite(started)) {
+    return { waitMs: null, execMs: null, totalMs };
+  }
+  // Clamp into the span. A worker clock slightly ahead of the brain's can put
+  // started_at outside [received, finished], and a negative segment would
+  // render as a bar pointing the wrong way.
+  const clamped = Math.min(Math.max(started, received), finished);
+  return {
+    waitMs: clamped - received,
+    execMs: finished - clamped,
+    totalMs,
+  };
 }
 
 interface Props {
@@ -180,6 +220,26 @@ export function TaskTree({ slug, engine, activeTaskId, data }: Props) {
             (showing the first 500 - the full tree is larger)
           </span>
         )}
+        <span
+          className="flex items-baseline gap-1.5"
+          title={
+            "Queue wait is measured from when the brain observed the task, " +
+            "not from when your client called apply_async, so it is a close " +
+            "lower bound rather than an exact figure."
+          }
+        >
+          <span
+            aria-hidden
+            className="inline-block h-[3px] w-4 rounded-sm bg-muted-foreground/35"
+          />
+          waiting
+          <span
+            aria-hidden
+            className="ml-1.5 inline-block h-[3px] w-4 rounded-sm bg-muted-foreground"
+          />
+          running
+          <span className="ml-1 opacity-70">(wait is approximate)</span>
+        </span>
       </div>
       <div className="overflow-auto rounded-md border bg-card">
         <svg
@@ -215,7 +275,7 @@ export function TaskTree({ slug, engine, activeTaskId, data }: Props) {
           {positioned.map((n) => {
             const fill = STATE_FILL[n.state] ?? "fill-muted";
             const isActive = n.task_id === activeTaskId;
-            const runtime = formatRuntime(n);
+            const timings = nodeTimings(n);
             return (
               <Link
                 key={n.task_id}
@@ -223,6 +283,14 @@ export function TaskTree({ slug, engine, activeTaskId, data }: Props) {
                 params={{ slug, engine, taskId: n.task_id }}
               >
                 <g transform={`translate(${n.x}, ${n.y})`}>
+                  <title>
+                    {timings === null
+                      ? n.name
+                      : timings.waitMs === null
+                        ? `${n.name}: ${formatMs(timings.totalMs)} total`
+                        : `${n.name}: ${formatMs(timings.waitMs)} waiting, ` +
+                          `${formatMs(timings.execMs ?? 0)} running`}
+                  </title>
                   <rect
                     width={NODE_WIDTH}
                     height={NODE_HEIGHT}
@@ -248,7 +316,7 @@ export function TaskTree({ slug, engine, activeTaskId, data }: Props) {
                     {n.task_id.slice(0, 18)}
                     {n.task_id.length > 18 ? "…" : ""}
                   </text>
-                  {runtime && (
+                  {timings && (
                     <text
                       x={NODE_WIDTH - 10}
                       y={36}
@@ -256,8 +324,58 @@ export function TaskTree({ slug, engine, activeTaskId, data }: Props) {
                       className="fill-background font-mono text-[10px]"
                       style={{ pointerEvents: "none", opacity: 0.9 }}
                     >
-                      {runtime}
+                      {formatMs(timings.totalMs)}
                     </text>
+                  )}
+                  {timings && timings.totalMs > 0 && (
+                    <g style={{ pointerEvents: "none" }} aria-hidden>
+                      {/* Track, so a mostly-executing bar still reads as a bar. */}
+                      <rect
+                        x={10}
+                        y={NODE_HEIGHT - 13}
+                        width={NODE_WIDTH - 20}
+                        height={6}
+                        rx={2}
+                        className="fill-background"
+                        opacity={0.18}
+                      />
+                      {(() => {
+                        // Wait on the left, execution on the right, a one-unit
+                        // gap between them when both exist, and the right edge
+                        // exactly on the track's.
+                        const track = NODE_WIDTH - 20;
+                        const wait = timings.waitMs;
+                        const waitWidth =
+                          wait === null ? 0 : (track * wait) / timings.totalMs;
+                        const gapPx = wait !== null && waitWidth > 0 ? 1 : 0;
+                        const execX = 10 + waitWidth + gapPx;
+                        const execWidth = Math.max(0, track - waitWidth - gapPx);
+                        return (
+                          <>
+                            {wait !== null && waitWidth > 0 && (
+                              <rect
+                                x={10}
+                                y={NODE_HEIGHT - 13}
+                                width={waitWidth}
+                                height={6}
+                                rx={2}
+                                className="fill-background"
+                                opacity={0.35}
+                              />
+                            )}
+                            <rect
+                              x={execX}
+                              y={NODE_HEIGHT - 13}
+                              width={execWidth}
+                              height={6}
+                              rx={2}
+                              className="fill-background"
+                              opacity={1}
+                            />
+                          </>
+                        );
+                      })()}
+                    </g>
                   )}
                 </g>
               </Link>

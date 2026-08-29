@@ -1,0 +1,890 @@
+{
+  "items": [
+    {
+      "schedule_id": "30000000-0000-4001-c000-000000000001",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -10800,
+          "fired_at_offset_s": -10800,
+          "latency_ms": 81
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -32403,
+          "fired_at_offset_s": -32400,
+          "latency_ms": 534
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -54003,
+          "fired_at_offset_s": -54000,
+          "latency_ms": 330
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000003",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -75603,
+          "fired_at_offset_s": -75600,
+          "latency_ms": 383,
+          "error_code": "task_failed",
+          "error_message": "RuntimeError: worker exited with status 137 (killed)"
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -97203,
+          "fired_at_offset_s": -97200,
+          "latency_ms": 829
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -118801,
+          "fired_at_offset_s": -118800,
+          "latency_ms": 691
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -140400,
+          "fired_at_offset_s": -140400,
+          "latency_ms": 69
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -162003,
+          "fired_at_offset_s": -162000,
+          "latency_ms": 829
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -183603,
+          "fired_at_offset_s": -183600,
+          "latency_ms": 61
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -205200,
+          "fired_at_offset_s": -205200,
+          "latency_ms": 769
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -226801,
+          "fired_at_offset_s": -226800,
+          "latency_ms": 629
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -248403,
+          "fired_at_offset_s": -248400,
+          "latency_ms": 342
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -270003,
+          "fired_at_offset_s": -270000,
+          "latency_ms": 645
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -291603,
+          "fired_at_offset_s": -291600,
+          "latency_ms": 461
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -313202,
+          "fired_at_offset_s": -313200,
+          "latency_ms": 745
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -334800,
+          "fired_at_offset_s": -334800,
+          "latency_ms": 92
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -356403,
+          "fired_at_offset_s": -356400,
+          "latency_ms": 702
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -378000,
+          "fired_at_offset_s": -378000,
+          "latency_ms": 456
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -399601,
+          "fired_at_offset_s": -399600,
+          "latency_ms": 439
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c001-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -421201,
+          "fired_at_offset_s": -421200,
+          "latency_ms": 640
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4001-c000-000000000002",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -183,
+          "fired_at_offset_s": -180,
+          "latency_ms": 196
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -780,
+          "fired_at_offset_s": -780,
+          "latency_ms": 384
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1383,
+          "fired_at_offset_s": -1380,
+          "latency_ms": 230
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1981,
+          "fired_at_offset_s": -1980,
+          "latency_ms": 259
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -2580,
+          "fired_at_offset_s": -2580,
+          "latency_ms": 82
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3182,
+          "fired_at_offset_s": -3180,
+          "latency_ms": 629
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3782,
+          "fired_at_offset_s": -3780,
+          "latency_ms": 736
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -4382,
+          "fired_at_offset_s": -4380,
+          "latency_ms": 184
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -4982,
+          "fired_at_offset_s": -4980,
+          "latency_ms": 835
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5581,
+          "fired_at_offset_s": -5580,
+          "latency_ms": 897
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -6180,
+          "fired_at_offset_s": -6180,
+          "latency_ms": 229
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -6782,
+          "fired_at_offset_s": -6780,
+          "latency_ms": 531
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -7381,
+          "fired_at_offset_s": -7380,
+          "latency_ms": 874
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -7982,
+          "fired_at_offset_s": -7980,
+          "latency_ms": 514
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -8583,
+          "fired_at_offset_s": -8580,
+          "latency_ms": 234
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -9182,
+          "fired_at_offset_s": -9180,
+          "latency_ms": 662
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -9781,
+          "fired_at_offset_s": -9780,
+          "latency_ms": 325
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -10380,
+          "fired_at_offset_s": -10380,
+          "latency_ms": 287
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -10981,
+          "fired_at_offset_s": -10980,
+          "latency_ms": 660
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c002-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -11581,
+          "fired_at_offset_s": -11580,
+          "latency_ms": 203
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4001-c000-000000000003",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -12,
+          "fired_at_offset_s": -12,
+          "latency_ms": 769
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -72,
+          "fired_at_offset_s": -72,
+          "latency_ms": 45
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -135,
+          "fired_at_offset_s": -132,
+          "latency_ms": 387
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -194,
+          "fired_at_offset_s": -192,
+          "latency_ms": 45
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -253,
+          "fired_at_offset_s": -252,
+          "latency_ms": 129
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -315,
+          "fired_at_offset_s": -312,
+          "latency_ms": 361
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -374,
+          "fired_at_offset_s": -372,
+          "latency_ms": 834
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -435,
+          "fired_at_offset_s": -432,
+          "latency_ms": 674
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000008",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -492,
+          "fired_at_offset_s": -492,
+          "latency_ms": 1471,
+          "error_code": "task_failed",
+          "error_message": "redis.exceptions.BusyLoadingError: Redis is loading the dataset in memory"
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -552,
+          "fired_at_offset_s": -552,
+          "latency_ms": 325
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -612,
+          "fired_at_offset_s": -612,
+          "latency_ms": 341
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -674,
+          "fired_at_offset_s": -672,
+          "latency_ms": 767
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -733,
+          "fired_at_offset_s": -732,
+          "latency_ms": 784
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -793,
+          "fired_at_offset_s": -792,
+          "latency_ms": 281
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -855,
+          "fired_at_offset_s": -852,
+          "latency_ms": 672
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -914,
+          "fired_at_offset_s": -912,
+          "latency_ms": 347
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -972,
+          "fired_at_offset_s": -972,
+          "latency_ms": 409
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000011",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -1035,
+          "fired_at_offset_s": -1032,
+          "latency_ms": 2192,
+          "error_code": "task_failed",
+          "error_message": "redis.exceptions.BusyLoadingError: Redis is loading the dataset in memory"
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1095,
+          "fired_at_offset_s": -1092,
+          "latency_ms": 116
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c003-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1155,
+          "fired_at_offset_s": -1152,
+          "latency_ms": 264
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4001-c000-000000000004",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -50401,
+          "fired_at_offset_s": -50400,
+          "latency_ms": 144
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -72002,
+          "fired_at_offset_s": -72000,
+          "latency_ms": 713
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -93603,
+          "fired_at_offset_s": -93600,
+          "latency_ms": 882
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -115203,
+          "fired_at_offset_s": -115200,
+          "latency_ms": 506
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -136802,
+          "fired_at_offset_s": -136800,
+          "latency_ms": 353
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -158403,
+          "fired_at_offset_s": -158400,
+          "latency_ms": 612
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000006",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -180003,
+          "fired_at_offset_s": -180000,
+          "latency_ms": 2778,
+          "error_code": "task_failed",
+          "error_message": "RuntimeError: worker exited with status 137 (killed)"
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -201603,
+          "fired_at_offset_s": -201600,
+          "latency_ms": 603
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -223202,
+          "fired_at_offset_s": -223200,
+          "latency_ms": 263
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -244800,
+          "fired_at_offset_s": -244800,
+          "latency_ms": 91
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -266403,
+          "fired_at_offset_s": -266400,
+          "latency_ms": 454
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -288003,
+          "fired_at_offset_s": -288000,
+          "latency_ms": 280
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -309601,
+          "fired_at_offset_s": -309600,
+          "latency_ms": 459
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -331203,
+          "fired_at_offset_s": -331200,
+          "latency_ms": 190
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -352802,
+          "fired_at_offset_s": -352800,
+          "latency_ms": 367
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -374403,
+          "fired_at_offset_s": -374400,
+          "latency_ms": 130
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -396002,
+          "fired_at_offset_s": -396000,
+          "latency_ms": 764
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -417600,
+          "fired_at_offset_s": -417600,
+          "latency_ms": 663
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000012",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -439202,
+          "fired_at_offset_s": -439200,
+          "latency_ms": 2256,
+          "error_code": "task_failed",
+          "error_message": "RuntimeError: worker exited with status 137 (killed)"
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c004-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -460803,
+          "fired_at_offset_s": -460800,
+          "latency_ms": 307
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4001-c000-000000000005",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1801,
+          "fired_at_offset_s": -1800,
+          "latency_ms": 854
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5401,
+          "fired_at_offset_s": -5400,
+          "latency_ms": 788
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -9002,
+          "fired_at_offset_s": -9000,
+          "latency_ms": 835
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -12603,
+          "fired_at_offset_s": -12600,
+          "latency_ms": 576
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -16201,
+          "fired_at_offset_s": -16200,
+          "latency_ms": 397
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -19803,
+          "fired_at_offset_s": -19800,
+          "latency_ms": 721
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -23400,
+          "fired_at_offset_s": -23400,
+          "latency_ms": 826
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -27001,
+          "fired_at_offset_s": -27000,
+          "latency_ms": 161
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000008",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -30600,
+          "fired_at_offset_s": -30600,
+          "latency_ms": 3062,
+          "error_code": "task_failed",
+          "error_message": "psycopg.errors.SerializationFailure: could not serialize access due to concurrent update"
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -34201,
+          "fired_at_offset_s": -34200,
+          "latency_ms": 765
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -37801,
+          "fired_at_offset_s": -37800,
+          "latency_ms": 181
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -41402,
+          "fired_at_offset_s": -41400,
+          "latency_ms": 641
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -45003,
+          "fired_at_offset_s": -45000,
+          "latency_ms": 675
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -48603,
+          "fired_at_offset_s": -48600,
+          "latency_ms": 389
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-00000000000e",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -52203,
+          "fired_at_offset_s": -52200,
+          "latency_ms": 2447,
+          "error_code": "task_failed",
+          "error_message": "psycopg.errors.SerializationFailure: could not serialize access due to concurrent update"
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -55802,
+          "fired_at_offset_s": -55800,
+          "latency_ms": 806
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -59403,
+          "fired_at_offset_s": -59400,
+          "latency_ms": 716
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -63002,
+          "fired_at_offset_s": -63000,
+          "latency_ms": 864
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -66601,
+          "fired_at_offset_s": -66600,
+          "latency_ms": 578
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c005-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -70203,
+          "fired_at_offset_s": -70200,
+          "latency_ms": 718
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4001-c000-000000000006",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -42600,
+          "fired_at_offset_s": -42600,
+          "latency_ms": 210
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -64203,
+          "fired_at_offset_s": -64200,
+          "latency_ms": 375
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -85800,
+          "fired_at_offset_s": -85800,
+          "latency_ms": 527
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -107400,
+          "fired_at_offset_s": -107400,
+          "latency_ms": 830
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -129003,
+          "fired_at_offset_s": -129000,
+          "latency_ms": 442
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -150600,
+          "fired_at_offset_s": -150600,
+          "latency_ms": 341
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -172203,
+          "fired_at_offset_s": -172200,
+          "latency_ms": 98
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -193800,
+          "fired_at_offset_s": -193800,
+          "latency_ms": 495
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -215402,
+          "fired_at_offset_s": -215400,
+          "latency_ms": 687
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -237002,
+          "fired_at_offset_s": -237000,
+          "latency_ms": 215
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -258600,
+          "fired_at_offset_s": -258600,
+          "latency_ms": 182
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -280201,
+          "fired_at_offset_s": -280200,
+          "latency_ms": 48
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -301802,
+          "fired_at_offset_s": -301800,
+          "latency_ms": 188
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -323401,
+          "fired_at_offset_s": -323400,
+          "latency_ms": 348
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -345003,
+          "fired_at_offset_s": -345000,
+          "latency_ms": 512
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -366603,
+          "fired_at_offset_s": -366600,
+          "latency_ms": 575
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -388202,
+          "fired_at_offset_s": -388200,
+          "latency_ms": 601
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -409802,
+          "fired_at_offset_s": -409800,
+          "latency_ms": 398
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -431400,
+          "fired_at_offset_s": -431400,
+          "latency_ms": 886
+        },
+        {
+          "fire_id": "30000000-0000-4f01-c006-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -453003,
+          "fired_at_offset_s": -453000,
+          "latency_ms": 628
+        }
+      ]
+    }
+  ],
+  "limit": 20,
+  "circuit_breaker_threshold": 5
+}

@@ -32,7 +32,16 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
+  Columns3,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -102,6 +111,14 @@ interface DataTableBaseProps<TData extends RowData> {
    * bulk action UI without layout shift.
    */
   toolbar?: (ctx: BulkActionContext<TData>) => React.ReactNode;
+  /**
+   * Columns hidden until the reader asks for them, keyed by column id. A
+   * wide table should open on the handful of columns that answer the page's
+   * question and keep the rest one click away, not spill past the viewport.
+   */
+  initialColumnVisibility?: Record<string, boolean>;
+  /** Show a "Columns" chooser in the footer so hidden columns are reachable. */
+  enableColumnChooser?: boolean;
 }
 
 type DataTableSelectionProps<TData extends RowData> =
@@ -133,6 +150,12 @@ type DataTableProps<TData extends RowData> = DataTableBaseProps<TData> &
  */
 export function DataTable<TData extends RowData>(props: DataTableProps<TData>) {
   const [sorting, setSorting] = useState<SortingState>([]);
+  // Hoisted beside sorting: the keyed inner table remounts on every filter
+  // or search change, and a reader who revealed a column must not watch it
+  // vanish on the next keystroke.
+  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>(
+    () => props.initialColumnVisibility ?? {},
+  );
 
   if (
     props.enableSelection &&
@@ -151,6 +174,8 @@ export function DataTable<TData extends RowData>(props: DataTableProps<TData>) {
       {...props}
       sorting={sorting}
       setSorting={setSorting}
+      columnVisibility={columnVisibility}
+      setColumnVisibility={setColumnVisibility}
     />
   );
 }
@@ -173,11 +198,16 @@ function DataTableInner<TData extends RowData>({
   onSelectionChange,
   totalCount,
   toolbar,
+  enableColumnChooser = false,
   sorting,
   setSorting,
+  columnVisibility,
+  setColumnVisibility,
 }: DataTableProps<TData> & {
   sorting: SortingState;
   setSorting: React.Dispatch<React.SetStateAction<SortingState>>;
+  columnVisibility: Record<string, boolean>;
+  setColumnVisibility: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
 }) {
   const [storedRowSelection, setStoredRowSelection] =
     useState<RowSelectionState>({});
@@ -246,7 +276,11 @@ function DataTableInner<TData extends RowData>({
     features: dataTableFeatures,
     data,
     columns: allColumns,
-    state: { sorting, rowSelection },
+    state: { sorting, rowSelection, columnVisibility },
+    onColumnVisibilityChange: (updater) =>
+      setColumnVisibility((prev) =>
+        typeof updater === "function" ? updater(prev) : updater,
+      ),
     onSortingChange: setSorting,
     onRowSelectionChange: (updater) => {
       const next =
@@ -349,7 +383,10 @@ function DataTableInner<TData extends RowData>({
       )}
 
       {/* Table */}
-      <div className="mt-2 overflow-hidden rounded-lg border bg-card">
+      {/* overflow-x-auto, not hidden: a table wider than the viewport must
+          scroll, not silently lose its rightmost columns. The schedules table
+          lost Last run, Next run, Enabled and its actions at 1440px this way. */}
+      <div className="mt-2 overflow-x-auto rounded-lg border bg-card">
         <Table>
           <TableHeader>
             {table.getHeaderGroups().map((hg) => (
@@ -363,7 +400,7 @@ function DataTableInner<TData extends RowData>({
                     )}
                     onClick={header.column.getToggleSortingHandler()}
                   >
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 whitespace-nowrap">
                       {header.isPlaceholder
                         ? null
                         : flexRender(
@@ -383,7 +420,7 @@ function DataTableInner<TData extends RowData>({
             {table.getRowModel().rows.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={allColumns.length}
+                  colSpan={table.getVisibleLeafColumns().length}
                   className="h-24 text-center text-muted-foreground"
                 >
                   No results.
@@ -415,6 +452,40 @@ function DataTableInner<TData extends RowData>({
       <div className="flex items-center justify-between px-1 pt-3">
         <div className="flex items-center gap-4 text-sm text-muted-foreground">
           {totalLabel && <span>{totalLabel}</span>}
+          {enableColumnChooser && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-7 gap-1.5 px-2">
+                  <Columns3 className="size-3.5" />
+                  Columns
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-48">
+                <DropdownMenuLabel>Show columns</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {table
+                  .getAllLeafColumns()
+                  .filter((c) => c.getCanHide() && c.id !== "select")
+                  .map((c) => {
+                    const header = c.columnDef.header;
+                    const label =
+                      typeof header === "string" && header.length > 0
+                        ? header
+                        : c.id;
+                    return (
+                      <DropdownMenuCheckboxItem
+                        key={c.id}
+                        checked={c.getIsVisible()}
+                        onCheckedChange={(v) => c.toggleVisibility(!!v)}
+                        onSelect={(e) => e.preventDefault()}
+                      >
+                        {label}
+                      </DropdownMenuCheckboxItem>
+                    );
+                  })}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
 
         <div className="flex items-center gap-4">

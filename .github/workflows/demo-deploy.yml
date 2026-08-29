@@ -28,6 +28,11 @@ name: demo-deploy
 # this workflow rather than deploying. Note there is no pull_request
 # trigger below, so that check happens after a change lands on main, not
 # before it merges.
+#
+# The deploy tool is the wrangler pinned in deploy/demo-pages/pnpm-lock.yaml,
+# installed with --frozen-lockfile under the same three-day release-age
+# quarantine every other lockfile in the repository observes. Nothing on the
+# runner resolves a dependency graph fresh while holding the Cloudflare token.
 
 on:
   push:
@@ -64,7 +69,9 @@ jobs:
         with:
           node-version: "24.19.0"
           cache: pnpm
-          cache-dependency-path: dashboard/pnpm-lock.yaml
+          cache-dependency-path: |
+            dashboard/pnpm-lock.yaml
+            deploy/demo-pages/pnpm-lock.yaml
 
       - name: Install dashboard dependencies
         working-directory: dashboard
@@ -94,14 +101,22 @@ jobs:
           done
           echo "Demo build output shape OK."
 
-      # Cloudflare Pages deploy. Uses wrangler-action so secrets stay
-      # masked in the workflow log. Branch=main marks this as the
-      # production deploy; preview deploys (Cloudflare's per-PR
-      # previews) are not used here because we deploy from main only.
+      # The deploy tool comes from a committed lockfile, never from a fresh
+      # resolution on the runner: wrangler-action installs the named version
+      # plus its whole closure by version only, with no integrity pins and no
+      # release-age quarantine, on the one job that holds the Cloudflare
+      # token. This tree pins the same wrangler the site deploy helper runs.
+      - name: Install the locked deploy tool
+        working-directory: deploy/demo-pages
+        run: pnpm install --frozen-lockfile
+
+      # Cloudflare Pages deploy. Secrets travel by environment variable, which
+      # wrangler reads and the workflow log masks. Branch=main marks this as
+      # the production deploy; preview deploys (Cloudflare's per-PR previews)
+      # are not used here because we deploy from main only.
       - name: Deploy to Cloudflare Pages (z4jdemo)
-        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # immutable ref; audited 2026-08-20
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: "4.124.0"
-          command: pages deploy dashboard/dist-demo --project-name=z4jdemo --branch=main --commit-dirty=true
+        working-directory: deploy/demo-pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm exec wrangler pages deploy ../../dashboard/dist-demo --project-name=z4jdemo --branch=main --commit-dirty=true

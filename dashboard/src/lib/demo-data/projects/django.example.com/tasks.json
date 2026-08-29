@@ -1,6 +1,169 @@
 {
   "items": [
     {
+      "id": "20000000-0000-4002-b000-0000000c0000",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "c0ffee00-0000-5000-a000-000000000001",
+      "name": "reports.nightly_rollup",
+      "queue": "reports",
+      "state": "success",
+      "priority": "high",
+      "args": [],
+      "kwargs": {
+        "report_date": "2026-08-27"
+      },
+      "result": {
+        "rows": 12000
+      },
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1500,
+      "started_at_offset_s": -1498,
+      "finished_at_offset_s": -1120,
+      "runtime_ms": 378000,
+      "worker_name": "worker-default-1",
+      "parent_task_id": null,
+      "root_task_id": null,
+      "tags": [
+        "canvas"
+      ],
+      "created_at_offset_s": -1500,
+      "updated_at_offset_s": -1120
+    },
+    {
+      "id": "20000000-0000-4002-b000-0000000c0001",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "c0ffee00-0000-5000-a000-000000000002",
+      "name": "reports.rollup_shard",
+      "queue": "reports",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "shard": 1
+      },
+      "result": {
+        "rows": 13000
+      },
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1497,
+      "started_at_offset_s": -1257,
+      "finished_at_offset_s": -1251,
+      "runtime_ms": 6000,
+      "worker_name": "worker-default-2",
+      "parent_task_id": "c0ffee00-0000-5000-a000-000000000001",
+      "root_task_id": "c0ffee00-0000-5000-a000-000000000001",
+      "tags": [
+        "canvas"
+      ],
+      "created_at_offset_s": -1497,
+      "updated_at_offset_s": -1251
+    },
+    {
+      "id": "20000000-0000-4002-b000-0000000c0002",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "c0ffee00-0000-5000-a000-000000000003",
+      "name": "reports.rollup_shard",
+      "queue": "reports",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "shard": 2
+      },
+      "result": {
+        "rows": 14000
+      },
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1497,
+      "started_at_offset_s": -1495,
+      "finished_at_offset_s": -1195,
+      "runtime_ms": 300000,
+      "worker_name": "worker-default-1",
+      "parent_task_id": "c0ffee00-0000-5000-a000-000000000001",
+      "root_task_id": "c0ffee00-0000-5000-a000-000000000001",
+      "tags": [
+        "canvas"
+      ],
+      "created_at_offset_s": -1497,
+      "updated_at_offset_s": -1195
+    },
+    {
+      "id": "20000000-0000-4002-b000-0000000c0003",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "c0ffee00-0000-5000-a000-000000000004",
+      "name": "reports.rollup_shard",
+      "queue": "reports",
+      "state": "success",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "shard": 3
+      },
+      "result": {
+        "rows": 15000
+      },
+      "exception": null,
+      "traceback": null,
+      "retry_count": 0,
+      "eta": null,
+      "received_at_offset_s": -1497,
+      "started_at_offset_s": -1460,
+      "finished_at_offset_s": -1405,
+      "runtime_ms": 55000,
+      "worker_name": "worker-default-2",
+      "parent_task_id": "c0ffee00-0000-5000-a000-000000000001",
+      "root_task_id": "c0ffee00-0000-5000-a000-000000000001",
+      "tags": [
+        "canvas"
+      ],
+      "created_at_offset_s": -1497,
+      "updated_at_offset_s": -1405
+    },
+    {
+      "id": "20000000-0000-4002-b000-0000000c0004",
+      "project_id": "00000000-0000-4000-9000-000000000003",
+      "engine": "celery",
+      "task_id": "c0ffee00-0000-5000-a000-000000000005",
+      "name": "reports.rollup_shard",
+      "queue": "reports",
+      "state": "failure",
+      "priority": "normal",
+      "args": [],
+      "kwargs": {
+        "shard": 4
+      },
+      "result": null,
+      "exception": "IntegrityError: duplicate key value violates unique constraint \"rollup_shard_pkey\"",
+      "traceback": "Traceback (most recent call last):\n  ...\nIntegrityError: duplicate key value violates unique constraint \"rollup_shard_pkey\"",
+      "retry_count": 1,
+      "eta": null,
+      "received_at_offset_s": -1497,
+      "started_at_offset_s": -1390,
+      "finished_at_offset_s": -1369,
+      "runtime_ms": 21000,
+      "worker_name": "worker-default-2",
+      "parent_task_id": "c0ffee00-0000-5000-a000-000000000001",
+      "root_task_id": "c0ffee00-0000-5000-a000-000000000001",
+      "tags": [
+        "canvas"
+      ],
+      "created_at_offset_s": -1497,
+      "updated_at_offset_s": -1369
+    },
+    {
       "id": "20000000-0000-4002-b000-000000000001",
       "project_id": "00000000-0000-4000-9000-000000000003",
       "engine": "celery",

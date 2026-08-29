@@ -17,7 +17,7 @@
 # rationale (glibc wheels, asyncpg + argon2-cffi + uvloop
 # compile-from-source pain on musl, enterprise scanner baselines).
 #
-# 1.9.0 provenance note. This file builds from ordinary upstream base
+# Provenance note. This file builds from ordinary upstream base
 # images. The production-authority apparatus that briefly lived here
 # (sealed wheelhouse / system-bundle / dashboard-bundle carrier images,
 # hash-locked offline installs, a sealed Debian .deb closure, a cosign
@@ -64,7 +64,7 @@ RUN apt-get update \
         libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# uv 0.12.5 is the resolver version the 1.9.0 production manifest names
+# uv 0.12.5 is the resolver version the frozen production manifest names
 # (packages/z4j/docker/production/manifest.json, "resolver"). Pinning it
 # exactly keeps this ordinary build on the same resolver the sealed build
 # would have used. UV_PYTHON_DOWNLOADS=never above forbids uv from
@@ -106,7 +106,7 @@ COPY packages/z4j-scheduler /build/packages/z4j-scheduler
 
 # All three distributions are installed FROM THIS TREE, never from
 # PyPI. Passing all three paths to one uv invocation is what makes the
-# intra-wave requirements (z4j depends on z4j-core>=1.9.0,<2) resolve to
+# intra-wave requirements (z4j depends on z4j-core at the wave floor) resolve to
 # the local trees instead of whatever the index happens to hold.
 #
 # Deferred with the apparatus: --require-hashes, --no-index and

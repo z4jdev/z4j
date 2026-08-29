@@ -177,7 +177,15 @@ class TestSchedulesPagination:
             r = await client.get("/api/v1/projects/default/schedules")
         assert r.status_code == 200
         body = r.json()
-        assert body == {"items": [], "next_cursor": None}
+        # circuit_breaker_threshold joins the SCHEDULES envelope in 1.10.0 so a
+        # client can render consecutive_failures as a proportion without
+        # hardcoding the operator's threshold. Left as exact equality: this
+        # assertion exists to catch an unintended field, and it did.
+        assert body == {
+            "items": [],
+            "next_cursor": None,
+            "circuit_breaker_threshold": 5,
+        }
 
     async def test_pagination_walks_all_pages(
         self,

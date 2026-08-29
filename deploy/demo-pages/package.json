@@ -1,0 +1,14 @@
+{
+  "name": "z4j-demo-pages-deploy",
+  "packageManager": "pnpm@11.24.0",
+  "private": true,
+  "description": "demo.z4j.dev deploy tool, locked. demo-deploy.yml installs this tree with --frozen-lockfile and runs its wrangler, so the deploy never resolves a dependency graph fresh on the runner.",
+  "type": "module",
+  "dependencies": {
+    "wrangler": "4.125.0"
+  },
+  "engines": {
+    "node": ">=22.13.0",
+    "pnpm": ">=11.24.0 <12"
+  }
+}

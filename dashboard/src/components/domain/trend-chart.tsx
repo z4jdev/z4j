@@ -31,9 +31,10 @@ export function TrendChart({
         maxY: 0,
       };
     }
-    const maxY = Math.max(
-      1,
-      ...series.map((b) => Math.max(b.success, b.failure)),
+    // Scale to a round ceiling rather than the raw maximum, so the gridlines
+    // read as 5k / 10k / 15k / 20k instead of 5306 / 10613 / 15919 / 21225.
+    const maxY = niceCeiling(
+      Math.max(1, ...series.map((b) => Math.max(b.success, b.failure))),
     );
     const innerW = w - pad.left - pad.right;
     const innerH = height - pad.top - pad.bottom;
@@ -64,9 +65,12 @@ export function TrendChart({
   }
 
   const innerH = height - padding.top - padding.bottom;
-  const tickCount = 4;
+  // Ticks walk the round step up to the round ceiling, so every gridline
+  // label is a number a reader would say out loud.
+  const step = niceStep(maxY);
+  const tickCount = Math.max(1, Math.round(maxY / step));
   const ticks = Array.from({ length: tickCount + 1 }, (_, i) => {
-    const v = Math.round((maxY / tickCount) * i);
+    const v = step * i;
     const y = padding.top + innerH - (v / maxY) * innerH;
     return { v, y };
   });
@@ -82,7 +86,7 @@ export function TrendChart({
       >
         {/* Horizontal grid */}
         {ticks.map((t) => (
-          <g key={t.v}>
+          <g key={compactTick(t.v)}>
             <line
               x1={padding.left}
               x2={width - padding.right}
@@ -97,7 +101,7 @@ export function TrendChart({
               textAnchor="end"
               className="fill-muted-foreground text-[10px]"
             >
-              {t.v}
+              {compactTick(t.v)}
             </text>
           </g>
         ))}
@@ -157,7 +161,9 @@ export function TrendChart({
               key={i}
               x={xs[i]}
               y={height - 10}
-              textAnchor="middle"
+              // The edge labels anchor inward so the last one is not cut off
+              // at the chart's right edge.
+              textAnchor={i === 0 ? "start" : i === series.length - 1 ? "end" : "middle"}
               className="fill-muted-foreground text-[10px]"
             >
               {formatTick(series[i]!.t)}
@@ -177,6 +183,38 @@ export function TrendChart({
       </div>
     </div>
   );
+}
+
+/**
+ * A round tick step for a value range: the smallest of {1, 2, 2.5, 5} x 10^k
+ * that divides the range into at most six intervals. The series are counts,
+ * so the step is never below 1 and the 2.5 multiplier is only used from
+ * 25 upwards (2.5 itself would label a count axis 2.5 / 7.5 / 12.5). The
+ * ceiling is then the step rounded up over the raw maximum, so the axis
+ * reads 0 / 5k / 10k / 15k / 20k / 25k rather than quarters of an arbitrary
+ * ceiling.
+ */
+export function niceStep(rawMax: number): number {
+  const target = Math.max(1, rawMax) / 6;
+  if (target <= 1) return 1;
+  const exp = Math.floor(Math.log10(target));
+  const base = Math.pow(10, exp);
+  for (const m of [1, 2, 2.5, 5, 10]) {
+    if (m === 2.5 && base < 10) continue;
+    if (m * base >= target) return m * base;
+  }
+  return 10 * base;
+}
+
+export function niceCeiling(v: number): number {
+  const step = niceStep(v);
+  return Math.max(step, Math.ceil(v / step) * step);
+}
+
+export function compactTick(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(v % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(v % 1_000 === 0 ? 0 : 1)}k`;
+  return String(v);
 }
 
 function LegendDot({ className, label }: { className: string; label: string }) {

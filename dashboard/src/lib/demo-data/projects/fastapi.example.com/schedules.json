@@ -25,7 +25,10 @@
       "updated_at_offset_s": -10800,
       "catch_up": "skip",
       "source": "arq-cron",
-      "source_hash": null
+      "source_hash": null,
+      "paused_at": null,
+      "overlap_policy": "allow",
+      "consecutive_failures": 0
     },
     {
       "id": "30000000-0000-4001-c000-000000000002",
@@ -50,7 +53,10 @@
       "updated_at_offset_s": -180,
       "catch_up": "skip",
       "source": "declarative",
-      "source_hash": null
+      "source_hash": null,
+      "paused_at": null,
+      "overlap_policy": "allow",
+      "consecutive_failures": 0
     },
     {
       "id": "30000000-0000-4001-c000-000000000003",
@@ -75,7 +81,10 @@
       "updated_at_offset_s": -12,
       "catch_up": "fire_one_missed",
       "source": "arq-cron",
-      "source_hash": null
+      "source_hash": null,
+      "paused_at": null,
+      "overlap_policy": "allow",
+      "consecutive_failures": 0
     },
     {
       "id": "30000000-0000-4001-c000-000000000004",
@@ -102,7 +111,10 @@
       "updated_at_offset_s": -50400,
       "catch_up": "skip",
       "source": "declarative",
-      "source_hash": null
+      "source_hash": null,
+      "paused_at": null,
+      "overlap_policy": "allow",
+      "consecutive_failures": 0
     },
     {
       "id": "30000000-0000-4001-c000-000000000005",
@@ -127,7 +139,10 @@
       "updated_at_offset_s": -1800,
       "catch_up": "skip",
       "source": "arq-cron",
-      "source_hash": null
+      "source_hash": null,
+      "paused_at": null,
+      "overlap_policy": "allow",
+      "consecutive_failures": 0
     },
     {
       "id": "30000000-0000-4001-c000-000000000006",
@@ -154,8 +169,12 @@
       "updated_at_offset_s": -42600,
       "catch_up": "skip",
       "source": "declarative",
-      "source_hash": null
+      "source_hash": null,
+      "paused_at": null,
+      "overlap_policy": "allow",
+      "consecutive_failures": 0
     }
   ],
-  "next_cursor": null
+  "next_cursor": null,
+  "circuit_breaker_threshold": 5
 }

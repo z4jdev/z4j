@@ -7,16 +7,111 @@
     "hostname": "celery-worker-1.tasks.example.com",
     "pid": 5012,
     "concurrency": 12,
-    "queues": ["celery-default"],
+    "queues": [
+      "celery-default"
+    ],
     "state": "online",
     "last_heartbeat_offset_s": -4,
-    "load_average": [0.82, 0.78, 0.75],
+    "load_average": [
+      0.82,
+      0.78,
+      0.75
+    ],
     "active_tasks": 4,
     "processed": 1024480,
     "failed": 142,
     "succeeded": 1024338,
     "retried": 480,
-    "created_at_offset_s": -10368000
+    "created_at_offset_s": -10368000,
+    "metadata": {
+      "stats": {
+        "pool": {
+          "implementation": "celery.concurrency.prefork:TaskPool",
+          "max-concurrency": 12,
+          "processes": [
+            4200,
+            4201,
+            4202,
+            4203,
+            4204,
+            4205,
+            4206,
+            4207,
+            4208,
+            4209,
+            4210,
+            4211
+          ],
+          "max-tasks-per-child": "N/A",
+          "timeouts": [
+            0,
+            0
+          ]
+        },
+        "prefetch_count": 768,
+        "clock": "184732",
+        "uptime": 1123200,
+        "loadavg": [
+          0.82,
+          0.78,
+          0.75
+        ],
+        "rusage": {
+          "utime": 48213.4,
+          "stime": 9120.1,
+          "maxrss": 412488
+        },
+        "total": {
+          "data.gdpr_purge_eligible_users": 3137,
+          "etl.warehouse_load": 6274,
+          "ops.run_health_probe": 9411,
+          "ops.sweep_zombie_tasks": 12548
+        },
+        "broker": {
+          "hostname": "rabbitmq.tasks.example.com",
+          "port": 5672,
+          "transport": "amqp",
+          "virtual_host": "/",
+          "ssl": false,
+          "connect_timeout": 4,
+          "heartbeat": 120,
+          "login_method": "AMQPLAIN",
+          "failover_strategy": "round-robin"
+        }
+      },
+      "active_queues": [
+        {
+          "name": "celery-default",
+          "exchange": {
+            "name": "celery-default",
+            "type": "direct"
+          },
+          "routing_key": "celery-default"
+        }
+      ],
+      "registered": [
+        "data.gdpr_purge_eligible_users",
+        "etl.warehouse_load",
+        "ops.run_health_probe",
+        "ops.sweep_zombie_tasks"
+      ],
+      "conf": {
+        "task_acks_late": false,
+        "task_reject_on_worker_lost": false,
+        "worker_prefetch_multiplier": 64,
+        "task_time_limit": null,
+        "task_soft_time_limit": null,
+        "worker_max_tasks_per_child": null,
+        "task_serializer": "json",
+        "accept_content": [
+          "json"
+        ],
+        "result_backend": "redis://cache:6379/1",
+        "broker_url": "amqp://z4j:********@rabbitmq.tasks.example.com:5672//",
+        "timezone": "UTC",
+        "worker_concurrency": 12
+      }
+    }
   },
   {
     "id": "70000000-0000-4003-0000-000000000002",
@@ -26,10 +121,16 @@
     "hostname": "rq-worker-1.tasks.example.com",
     "pid": 4988,
     "concurrency": 8,
-    "queues": ["rq-default"],
+    "queues": [
+      "rq-default"
+    ],
     "state": "online",
     "last_heartbeat_offset_s": -6,
-    "load_average": [0.55, 0.52, 0.48],
+    "load_average": [
+      0.55,
+      0.52,
+      0.48
+    ],
     "active_tasks": 2,
     "processed": 512240,
     "failed": 88,
@@ -45,10 +146,16 @@
     "hostname": "dramatiq-worker-1.tasks.example.com",
     "pid": 5101,
     "concurrency": 16,
-    "queues": ["dramatiq-default"],
+    "queues": [
+      "dramatiq-default"
+    ],
     "state": "online",
     "last_heartbeat_offset_s": -3,
-    "load_average": [1.12, 1.08, 1.05],
+    "load_average": [
+      1.12,
+      1.08,
+      1.05
+    ],
     "active_tasks": 6,
     "processed": 768360,
     "failed": 124,

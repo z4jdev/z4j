@@ -610,6 +610,7 @@ class ScheduleFireRepository:
         *,
         schedule_id: UUID,
         limit: int,
+        fired_at_floor: datetime | None = None,
     ) -> list[ScheduleFire]:
         """Last N fires for circuit-breaker evaluation.
 
@@ -619,12 +620,16 @@ class ScheduleFireRepository:
         'acked_failed')``). Fetching all-status rows lets the
         worker distinguish "10 failures in a row" from "5 failures
         and 5 successes interleaved" - the second is healthy.
+
+        ``fired_at_floor`` bounds the read to rows retention can still be
+        keeping. See :meth:`recent_failures_for_many` for why that excludes
+        nothing.
         """
+        stmt = select(ScheduleFire).where(ScheduleFire.schedule_id == schedule_id)
+        if fired_at_floor is not None:
+            stmt = stmt.where(ScheduleFire.fired_at >= fired_at_floor)
         result = await self.session.execute(
-            select(ScheduleFire)
-            .where(ScheduleFire.schedule_id == schedule_id)
-            .order_by(ScheduleFire.fired_at.desc())
-            .limit(limit),
+            stmt.order_by(ScheduleFire.fired_at.desc()).limit(limit),
         )
         return list(result.scalars().all())
 
@@ -633,73 +638,75 @@ class ScheduleFireRepository:
         *,
         schedule_ids: list[UUID],
         per_schedule_limit: int,
+        fired_at_floor: datetime | None = None,
     ) -> dict[UUID, list[ScheduleFire]]:
-        """Bulk variant of :meth:`recent_failures`.
+        """Bulk variant of :meth:`recent_failures`: the newest
+        ``per_schedule_limit`` fires for every supplied id, newest first.
 
-        The per-schedule call pattern would issue one
-        :meth:`recent_failures` SELECT per enabled schedule (10k
-        SELECTs + 10k sessions for a 10k-fleet). This
-        single-query variant returns the most-recent
-        ``per_schedule_limit`` rows for every supplied id in one
-        round-trip via ``ROW_NUMBER() OVER (PARTITION BY
-        schedule_id ORDER BY fired_at DESC)``.
+        On PostgreSQL this is one round-trip: a ``VALUES`` list of the ids
+        joined to a ``LATERAL`` top-N per id. Each id costs an index walk that
+        stops after ``per_schedule_limit`` rows, so the cost is
+        schedules x limit, not schedules x fires-in-window. The previous
+        shape, ``ROW_NUMBER() OVER (PARTITION BY schedule_id)`` filtered
+        afterwards, had to read every fire of every requested schedule in the
+        window to number them before discarding all but N.
 
-        On SQLite (no window function in older builds) we fall back
-        to a single ``WHERE schedule_id IN (...)`` then sort + slice
-        in Python. Acceptable for dev because SQLite installs are
-        single-tenant.
+        SQLite has no LATERAL; it runs one bounded ``LIMIT N`` query per id,
+        which is fine for the single-tenant installs SQLite serves.
+
+        ``fired_at_floor`` is a bound on the rows retention can still be
+        keeping, not a heuristic window. Both prune mechanisms remove rows by
+        the age of ``fired_at`` (the prune worker's DELETE keys on it; the
+        partition worker drops whole days of slots, whose fires are at least
+        that old), so a bound at the retention cutoff excludes nothing that
+        still exists. It is NOT a bound on ``scheduled_for``: a catch-up fire
+        or a buffered replay carries an old slot with a recent ``fired_at``,
+        and bounding the slot hid those fires from the breaker while the
+        per-schedule ``/fires`` route still showed them.
         """
         from sqlalchemy import select as _select
 
         if not schedule_ids:
             return {}
+        # Preserve the caller's order and drop duplicates without changing it.
+        ordered_ids = list(dict.fromkeys(schedule_ids))
+        out: dict[UUID, list[ScheduleFire]] = {sid: [] for sid in ordered_ids}
+        limit = max(1, int(per_schedule_limit))
         dialect = self.session.bind.dialect.name if self.session.bind is not None else ""
-        out: dict[UUID, list[ScheduleFire]] = {sid: [] for sid in schedule_ids}
         if dialect == "postgresql":
-            from sqlalchemy import func as _func
-
-            row_num = (
-                _func.row_number()
-                .over(
-                    partition_by=ScheduleFire.schedule_id,
-                    order_by=ScheduleFire.fired_at.desc(),
-                )
-                .label("rn")
-            )
-            inner = (
-                _select(ScheduleFire, row_num)
-                .where(ScheduleFire.schedule_id.in_(schedule_ids))
-                .subquery()
-            )
+            from sqlalchemy import column, true, values
             from sqlalchemy.orm import aliased
+            from sqlalchemy.types import Uuid
 
-            sf = aliased(ScheduleFire, inner)
+            requested = values(column("schedule_id", Uuid()), name="requested").data(
+                [(sid,) for sid in ordered_ids],
+            )
+            per_schedule = _select(ScheduleFire).where(
+                ScheduleFire.schedule_id == requested.c.schedule_id,
+            )
+            if fired_at_floor is not None:
+                per_schedule = per_schedule.where(ScheduleFire.fired_at >= fired_at_floor)
+            recent = (
+                per_schedule.order_by(ScheduleFire.fired_at.desc()).limit(limit).lateral("recent")
+            )
+            sf = aliased(ScheduleFire, recent)
             stmt = (
                 _select(sf)
-                .where(inner.c.rn <= per_schedule_limit)
-                .order_by(
-                    sf.schedule_id,
-                    sf.fired_at.desc(),
-                )
+                .select_from(requested.join(recent, true()))
+                .order_by(sf.schedule_id, sf.fired_at.desc())
             )
             result = await self.session.execute(stmt)
             for fire in result.scalars().all():
                 out[fire.schedule_id].append(fire)
             return out
-        # SQLite fallback: one IN-list query, sort + slice in Python.
-        stmt = (
-            _select(ScheduleFire)
-            .where(ScheduleFire.schedule_id.in_(schedule_ids))
-            .order_by(
-                ScheduleFire.schedule_id,
-                ScheduleFire.fired_at.desc(),
+        for sid in ordered_ids:
+            stmt = _select(ScheduleFire).where(ScheduleFire.schedule_id == sid)
+            if fired_at_floor is not None:
+                stmt = stmt.where(ScheduleFire.fired_at >= fired_at_floor)
+            result = await self.session.execute(
+                stmt.order_by(ScheduleFire.fired_at.desc()).limit(limit),
             )
-        )
-        result = await self.session.execute(stmt)
-        for fire in result.scalars().all():
-            bucket = out[fire.schedule_id]
-            if len(bucket) < per_schedule_limit:
-                bucket.append(fire)
+            out[sid] = list(result.scalars().all())
         return out
 
     async def delete_older_than(

@@ -1,7 +1,82 @@
 # Changelog
 
-## 1.9.1 (2026-08-26)
+## 1.10.0 (2026-08-28)
 
+* The dashboard shows a schedule's recent history as a picture. Each row of
+  the schedules table carries a strip of the last twenty fires, oldest on the
+  left, coloured by outcome, so a schedule that flaps, one that fails in
+  bursts, and one that has been dead for a week look different rather than
+  sharing a number. The same strip, fifty fires wide, sits above the
+  fire-history table on the schedule detail page, and a twenty-wide one sits
+  in a new "Schedules needing attention" panel on the
+  project overview, which lists schedules whose most recent fires are an
+  unbroken run of failures, worst first, and stays silent when everything is
+  healthy.
+* A schedule that is failing is visible before the circuit breaker disables
+  it. The brain counted every schedule's run of consecutive failures on each
+  breaker tick and kept nothing but the disable. The schedules list and the
+  single-schedule read now report `consecutive_failures` (0 means the newest
+  fire is not a failure; responses to mutations do not recount and carry
+  `null`), the list reports the operator's `circuit_breaker_threshold`, and
+  the table shows a Health badge reading, for example, "3 of 5 failing" while
+  the schedule is still enabled. With the breaker switched off the count is
+  still reported, over the newest twenty fires.
+* `GET /projects/{slug}/schedules/runs` returns the last N fires for many
+  schedules in one request. It is the endpoint the strips read; the dashboard
+  asks for at most a hundred schedules per request and the route refuses more
+  than five hundred.
+* Both circuit-breaker reads of fire history are bounded and cheap. On
+  PostgreSQL the bulk read is a per-schedule top-N (`LATERAL`), so its cost is
+  schedules times the limit rather than every fire of every schedule in the
+  retention window numbered and then discarded. Both reads are bounded by the
+  retention cutoff on `fired_at`, which is what the prune worker deletes by,
+  so the bound excludes nothing that still exists: a fire caught up for an
+  old slot, or replayed from the buffer, has a recent `fired_at` and stays
+  visible to the breaker and the grid alike.
+* The canvas tree separates queue wait from execution. A task that ran for
+  40ms after four minutes in the queue and a task that ran for four minutes
+  used to look identical; each node now carries a two-segment bar, and the
+  legend says the wait is measured from when the brain observed the task, so
+  it is a close lower bound rather than an exact figure. The tree node shape
+  gains `started_at` to make that possible.
+* Wide tables scroll instead of losing columns. The table wrapper clipped its
+  overflow, so at common widths the schedules table silently dropped Last run,
+  Next run, Runs, Enabled and its row actions while provenance columns took
+  the space. Tables now open on a chosen column set with a Columns chooser in
+  the footer, header labels never wrap, dates in dense tables render on one
+  line with the absolute timestamp on hover, and counts get thousands
+  separators. Schedule rows are roughly half their previous height.
+* The public demo matches the API again. It showed every schedule as held,
+  because its fixtures omit `paused_at` and the badge tested strictly for
+  null; every schedule detail page showed a blank fire-history card, because
+  the mock answered with a paginated envelope where the real route returns a
+  list; and the overview's five recent tasks were sixty, because the mock
+  ignored `limit`. All three are fixed and the demo carries fire history for
+  every schedule.
+* Every node workspace moves to its newest release that clears the three-day
+  minimum age, with one deliberate hold: the dashboard's TypeScript stays on
+  the 5.9 line. The 6.0 line clears the age gate and the linter's peer range,
+  and the 7.0 line does not; the compiler major is held until its tsconfig
+  changes are reviewed on their own, not folded into a release wave.
+* The Workers page's configuration lint panel is readable and cannot take the
+  page down. Its finding text used a background colour token and was
+  invisible, and a payload without a `workers` array crashed the page; the
+  panel now uses the foreground token and renders nothing on an unexpected
+  shape. The trend chart's axis is labelled in round steps and its last time
+  label is no longer clipped, and the workers table shows the three load
+  averages on one line.
+* The published container image carries no package installer. pip, its
+  vendored-library inventory, ensurepip's bundled wheel and the pip launchers
+  are removed, as are `grpcio-tools` and `setuptools`, which the runtime
+  never imports (the gRPC gencode is committed and needs only `grpcio` and
+  `protobuf`). The inventory alone produced two false HIGH scanner findings
+  in the previous image. A derived image that installs extra packages must
+  add an installer first.
+
+## 1.9.1 (2026-08-27)
+
+* The published image takes the security updates its Debian base was behind
+  on, and pins the base by digest as well as by tag.
 * The 1.9.0 container images are published. Every 1.9.0 feature was reachable
   only from a pip install until now, which left schedule hold, the worker lint,
   the deep health probe, the scheduled chain verifier, connection-pool sizing

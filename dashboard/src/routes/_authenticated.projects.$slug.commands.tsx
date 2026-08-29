@@ -210,7 +210,7 @@ function useCommandColumns(): DataTableColumnDef<CommandPublic>[] {
         accessorKey: "issued_at",
         header: "Issued",
         cell: ({ row }: { row: { original: CommandPublic } }) => (
-          <DateCell value={row.original.issued_at} />
+          <DateCell value={row.original.issued_at} compact />
         ),
         enableSorting: true,
       },
@@ -218,7 +218,7 @@ function useCommandColumns(): DataTableColumnDef<CommandPublic>[] {
         accessorKey: "completed_at",
         header: "Completed",
         cell: ({ row }: { row: { original: CommandPublic } }) => (
-          <DateCell value={row.original.completed_at} />
+          <DateCell value={row.original.completed_at} compact />
         ),
         enableSorting: true,
       },

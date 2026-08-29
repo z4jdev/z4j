@@ -26,9 +26,11 @@ import { PageHeader } from "@/components/domain/page-header";
 import {
   SchedulePausedBadge,
   TaskPriorityBadge,
+  ScheduleHealthBadge,
 } from "@/components/domain/state-badges";
 import { EmptyState } from "@/components/domain/empty-state";
 import { useConfirm } from "@/components/domain/confirm-dialog";
+import { ScheduleRunStrip } from "@/components/domain/schedule-run-strip";
 import { ScheduleFormDialog } from "@/components/domain/schedule-form-dialog";
 import { DataTable, type DataTableColumnDef } from "@/components/ui/data-table";
 import { Badge } from "@/components/ui/badge";
@@ -52,6 +54,9 @@ import {
   useTriggerSchedule,
   usePauseSchedule,
   useResumeSchedule,
+  useCircuitBreakerThreshold,
+  useScheduleRuns,
+  type ScheduleRunCell,
 } from "@/hooks/use-schedules";
 import { DateCell } from "@/components/domain/date-cell";
 import { ApiError } from "@/lib/api";
@@ -83,6 +88,9 @@ function SchedulesPage() {
   const resync = useScheduleResync(slug);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const canOperate = useCan(slug, "operate_schedules");
+  // Undefined while loading: fall back to 0, which shows the failure run
+  // without implying a countdown rather than inventing a threshold.
+  const { data: cbThreshold = 0 } = useCircuitBreakerThreshold(slug);
   const canAdminister = useCan(slug, "admin_schedules");
 
   // Form-dialog state. Single component handles both create and
@@ -124,6 +132,11 @@ function SchedulesPage() {
       return true;
     });
   }, [schedules, kindFilter, enabledFilter, searchQuery]);
+  const visibleIds = useMemo(
+    () => filteredSchedules.map((s) => s.id),
+    [filteredSchedules],
+  );
+  const { data: runsById, isError: runsError } = useScheduleRuns(slug, visibleIds);
 
   async function onToggle(scheduleId: string, enabled: boolean) {
     if (!canOperate) return;
@@ -151,7 +164,7 @@ function SchedulesPage() {
 
   async function onToggleHold(s: SchedulePublic) {
     if (!canOperate) return;
-    const held = s.paused_at !== null;
+    const held = s.paused_at;
     try {
       if (held) {
         await resumeSchedule.mutateAsync(s.id);
@@ -335,6 +348,9 @@ function SchedulesPage() {
     holdPending: pauseSchedule.isPending || resumeSchedule.isPending,
     canOperate,
     canAdminister,
+    cbThreshold,
+    runsById,
+    runsError,
   });
   const scheduleSelectionScopeKey = JSON.stringify({
     slug,
@@ -488,6 +504,18 @@ function SchedulesPage() {
         <DataTable
           columns={columns}
           data={filteredSchedules}
+          // Open on the columns that answer "is it running and is it
+          // healthy". Provenance and tuning columns stay one click away in
+          // the chooser instead of pushing Last run and Enabled off-screen.
+          initialColumnVisibility={{
+            kind: false,
+            task_name: false,
+            source: false,
+            scheduler: false,
+            catch_up: false,
+            priority: false,
+          }}
+          enableColumnChooser
           enableSelection
           getRowId={scheduleRowId}
           selectionScopeKey={scheduleSelectionScopeKey}
@@ -549,6 +577,9 @@ function useScheduleColumns({
   holdPending,
   canOperate,
   canAdminister,
+  cbThreshold,
+  runsById,
+  runsError,
 }: {
   slug: string;
   onToggle: (scheduleId: string, enabled: boolean) => void;
@@ -560,11 +591,19 @@ function useScheduleColumns({
   holdPending: boolean;
   canOperate: boolean;
   canAdminister: boolean;
+  /** Auto-disable threshold from the list envelope; 0 means breaker off. */
+  cbThreshold: number;
+  /** Last-N fires per schedule id, for the Recent runs strip. */
+  runsById: Map<string, ScheduleRunCell[]> | undefined;
+  runsError: boolean;
 }): DataTableColumnDef<SchedulePublic>[] {
   return useMemo(
     () => [
       {
         accessorKey: "name",
+        // The identity column: a table with no way to tell rows apart is not
+        // a table, so the chooser cannot hide it.
+        enableHiding: false,
         header: "Name",
         cell: ({ row }: { row: { original: SchedulePublic } }) => {
           const s = row.original;
@@ -605,7 +644,9 @@ function useScheduleColumns({
         accessorKey: "expression",
         header: "Expression",
         cell: ({ row }: { row: { original: SchedulePublic } }) => (
-          <span className="font-mono text-xs">{row.original.expression}</span>
+          <span className="whitespace-nowrap font-mono text-xs">
+            {row.original.expression}
+          </span>
         ),
         enableSorting: false,
       },
@@ -657,7 +698,7 @@ function useScheduleColumns({
         accessorKey: "last_run_at",
         header: "Last run",
         cell: ({ row }: { row: { original: SchedulePublic } }) => (
-          <DateCell value={row.original.last_run_at} />
+          <DateCell value={row.original.last_run_at} compact />
         ),
         enableSorting: true,
       },
@@ -665,7 +706,7 @@ function useScheduleColumns({
         accessorKey: "next_run_at",
         header: "Next run",
         cell: ({ row }: { row: { original: SchedulePublic } }) => (
-          <DateCell value={row.original.next_run_at} />
+          <DateCell value={row.original.next_run_at} compact />
         ),
         enableSorting: true,
       },
@@ -674,10 +715,39 @@ function useScheduleColumns({
         header: "Runs",
         cell: ({ row }: { row: { original: SchedulePublic } }) => (
           <span className="tabular-nums text-sm">
-            {row.original.total_runs}
+            {row.original.total_runs.toLocaleString()}
           </span>
         ),
         enableSorting: true,
+      },
+      {
+        id: "health",
+        accessorKey: "consecutive_failures",
+        header: "Health",
+        // Sits beside Runs because that is where a reader already looks for
+        // outcomes. Empty for a healthy schedule: the column earns attention
+        // by being blank until something is actually wrong.
+        cell: ({ row }: { row: { original: SchedulePublic } }) => (
+          <ScheduleHealthBadge
+            consecutiveFailures={row.original.consecutive_failures ?? 0}
+            threshold={cbThreshold}
+          />
+        ),
+        enableSorting: true,
+      },
+      {
+        id: "recent_runs",
+        header: "Recent runs",
+        // The picture behind the Health number: last twenty fires, oldest on
+        // the left. Links to the detail page where each fire has a row.
+        cell: ({ row }: { row: { original: SchedulePublic } }) => (
+          <ScheduleRunStrip
+            runs={runsById?.get(row.original.id)}
+            error={runsError}
+            href={{ slug, scheduleId: row.original.id }}
+          />
+        ),
+        enableSorting: false,
       },
       {
         id: "enabled",
@@ -693,6 +763,7 @@ function useScheduleColumns({
       },
       {
         id: "actions",
+        enableHiding: false,
         header: "",
         cell: ({ row }: { row: { original: SchedulePublic } }) => {
           if (!canOperate && !canAdminister) return null;
@@ -718,17 +789,17 @@ function useScheduleColumns({
                   onClick={() => onToggleHold(s)}
                   disabled={holdPending}
                   title={
-                    s.paused_at !== null
+                    s.paused_at
                       ? "Release this schedule so it fires again"
                       : "Hold this schedule without retiring it"
                   }
                 >
-                  {s.paused_at !== null ? (
+                  {s.paused_at ? (
                     <Play className="size-3" />
                   ) : (
                     <Pause className="size-3" />
                   )}
-                  {s.paused_at !== null ? "Release" : "Hold"}
+                  {s.paused_at ? "Release" : "Hold"}
                 </Button>
               )}
               {canAdminister && (
@@ -761,6 +832,9 @@ function useScheduleColumns({
     ],
     [
       slug,
+      cbThreshold,
+      runsById,
+      runsError,
       onToggle,
       onTrigger,
       onEdit,

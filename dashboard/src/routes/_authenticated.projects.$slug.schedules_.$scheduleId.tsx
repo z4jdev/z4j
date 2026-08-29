@@ -26,6 +26,7 @@ import {
 import { toast } from "sonner";
 import { PageHeader } from "@/components/domain/page-header";
 import { TaskPriorityBadge } from "@/components/domain/state-badges";
+import { ScheduleRunStrip } from "@/components/domain/schedule-run-strip";
 import { EmptyState } from "@/components/domain/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -314,7 +315,13 @@ function FireHistoryCard({
           />
         )}
         {fires && fires.length > 0 && (
-          <div className="overflow-hidden rounded-md border">
+          <div className="mb-4 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+            <ScheduleRunStrip runs={fires} slots={50} size="md" />
+            <span>oldest on the left, newest on the right; hover a cell for detail</span>
+          </div>
+        )}
+        {fires && fires.length > 0 && (
+          <div className="overflow-x-auto rounded-md border">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -332,10 +339,10 @@ function FireHistoryCard({
                       <FireStatusBadge status={fire.status} />
                     </TableCell>
                     <TableCell>
-                      <DateCell value={fire.scheduled_for} />
+                      <DateCell value={fire.scheduled_for} compact />
                     </TableCell>
                     <TableCell>
-                      <DateCell value={fire.fired_at} />
+                      <DateCell value={fire.fired_at} compact />
                     </TableCell>
                     <TableCell className="text-right">
                       <FireLatency latencyMs={fire.latency_ms} />
@@ -399,6 +406,52 @@ function FireStatusBadge({ status }: { status: ScheduleFireStatus }) {
     },
     failed: {
       label: "failed",
+      className:
+        "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-400",
+      icon: AlertTriangle,
+    },
+    accepted: {
+      label: "accepted",
+      className:
+        "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-400",
+      icon: Clock,
+    },
+    buffer_stale: {
+      label: "buffered, stale",
+      className:
+        "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+      icon: Inbox,
+    },
+    buffer_expired: {
+      label: "expired in buffer",
+      className:
+        "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+      icon: Inbox,
+    },
+    operator_skipped: {
+      label: "skipped",
+      className: "border-border bg-muted/40 text-muted-foreground",
+      icon: Clock,
+    },
+    terminal_completed: {
+      label: "completed",
+      className:
+        "border-green-500/40 bg-green-500/10 text-green-700 dark:text-green-400",
+      icon: CheckCircle2,
+    },
+    terminal_failed: {
+      label: "failed",
+      className:
+        "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-400",
+      icon: XCircle,
+    },
+    terminal_cancelled: {
+      label: "cancelled",
+      className: "border-border bg-muted/40 text-muted-foreground",
+      icon: XCircle,
+    },
+    terminal_timeout: {
+      label: "timed out",
       className:
         "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-400",
       icon: AlertTriangle,

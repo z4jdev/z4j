@@ -23,9 +23,12 @@ breaker is for "broken", not "flaky."
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.settings import Settings
@@ -33,7 +36,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger("z4j.brain.workers.schedule_circuit_breaker")
 
 
-_FAILURE_STATUSES = frozenset({"failed", "acked_failed"})
+#: Fire statuses that count as a failure for the circuit breaker AND for the
+#: consecutive-failure count the schedules list surfaces. Defined once: if the
+#: API and the worker disagreed about what a failure is, the dashboard would
+#: show a run that never trips or a schedule that trips with nothing showing.
+FAILURE_STATUSES = frozenset({"failed", "acked_failed"})
+
+#: Back-compat alias for the module-private name this used to have.
+_FAILURE_STATUSES = FAILURE_STATUSES
+
+#: How many of a schedule's newest fires the consecutive-failure count looks
+#: at when the breaker is switched off. With the breaker on, the count looks
+#: at ``threshold`` fires, because that is all the breaker itself examines.
+CONSECUTIVE_FAILURES_WINDOW = 20
+
+
+def retention_floor(settings: object) -> datetime | None:
+    """Oldest ``fired_at`` a fire row can still have, or None with retention off.
+
+    Both retention mechanisms remove rows by the age of ``fired_at``: the
+    prune worker DELETEs ``fired_at < now - schedule_fires_retention_days``,
+    and the PostgreSQL partition worker drops whole days of slots, whose
+    fires are at least that old. A read bounded here therefore excludes
+    nothing that still exists. It is deliberately NOT a bound on the
+    partition key: a fire replayed from the buffer, or caught up for a
+    missed slot, carries an old ``scheduled_for`` with a recent ``fired_at``,
+    and a bound on the slot hid exactly those fires from the breaker. One
+    day of slack absorbs the prune worker's cadence and the partition
+    worker's date arithmetic.
+    """
+    days = int(getattr(settings, "schedule_fires_retention_days", 0) or 0)
+    if days <= 0:
+        return None
+    return datetime.now(UTC) - timedelta(days=days + 1)
 
 
 class ScheduleCircuitBreakerWorker:
@@ -50,6 +85,10 @@ class ScheduleCircuitBreakerWorker:
         self._settings = settings
         self._audit = audit
         self._threshold = settings.schedule_circuit_breaker_threshold
+
+    def _retention_floor(self) -> datetime | None:
+        """See :func:`retention_floor`; the same bound the API reads use."""
+        return retention_floor(self._settings)
 
     async def tick(self) -> None:
         if self._threshold <= 0:
@@ -89,6 +128,7 @@ class ScheduleCircuitBreakerWorker:
             ).recent_failures_for_many(
                 schedule_ids=schedule_ids,
                 per_schedule_limit=self._threshold,
+                fired_at_floor=self._retention_floor(),
             )
 
         tripped: list[tuple[object, int]] = []  # (schedule, streak)
@@ -159,6 +199,7 @@ class ScheduleCircuitBreakerWorker:
             ).recent_failures(
                 schedule_id=schedule.id,
                 limit=self._threshold,
+                fired_at_floor=self._retention_floor(),
             )
             if len(fires) < self._threshold:
                 return
@@ -299,6 +340,9 @@ class ScheduleFiresPruneWorker:
 
 
 __all__ = [
+    "CONSECUTIVE_FAILURES_WINDOW",
+    "FAILURE_STATUSES",
     "ScheduleCircuitBreakerWorker",
     "ScheduleFiresPruneWorker",
+    "retention_floor",
 ]

@@ -19,9 +19,9 @@ function Finding({ finding }: { finding: LintFindingPublic }) {
           {finding.severity}
         </Badge>
         <span className="font-medium">{finding.title}</span>
-        <code className="text-xs text-[var(--color-muted)]">{finding.setting}</code>
+        <code className="text-xs text-muted-foreground">{finding.setting}</code>
       </div>
-      <p className="mt-1 text-sm text-[var(--color-muted)]">{finding.detail}</p>
+      <p className="mt-1 text-sm text-muted-foreground">{finding.detail}</p>
       <p className="mt-1 text-sm">
         <span className="font-medium">Fix: </span>
         {finding.remedy}
@@ -38,7 +38,7 @@ function WorkerFindings({ worker }: { worker: WorkerLintPublic }) {
         <span className="font-medium">{worker.worker_name}</span>
         <Badge variant="outline">{worker.engine}</Badge>
         {worker.hostname ? (
-          <span className="text-[var(--color-muted)]">{worker.hostname}</span>
+          <span className="text-muted-foreground">{worker.hostname}</span>
         ) : null}
       </div>
       <ul className="space-y-3">
@@ -62,8 +62,6 @@ function WorkerFindings({ worker }: { worker: WorkerLintPublic }) {
 export function WorkerLintPanel({ slug }: { slug: string }) {
   const { data, isPending, isError } = useWorkerLint(slug);
 
-  if (isError) return null;
-
   if (isPending) {
     return (
       <SectionCard title="Configuration lint" description="Reading reported worker settings.">
@@ -72,12 +70,19 @@ export function WorkerLintPanel({ slug }: { slug: string }) {
     );
   }
 
+  // A payload without a workers array is treated like an error: this panel is
+  // advisory, and a crash on an unexpected shape would take the Workers page
+  // down with it. The shape is guaranteed by the brain, not by every proxy or
+  // mock that might sit in front of it. Checked after the pending branch, or
+  // the skeleton could never render.
+  if (isError || !data || !Array.isArray(data.workers)) return null;
+
   const withFindings = data.workers.filter((w) => w.findings.length > 0);
   const total = Object.values(data.findings_by_severity).reduce((a, b) => a + b, 0);
 
   const notEvaluated =
     data.workers_not_evaluated > 0 ? (
-      <p className="mt-3 flex items-start gap-2 text-sm text-[var(--color-muted)]">
+      <p className="mt-3 flex items-start gap-2 text-sm text-muted-foreground">
         <Info className="mt-0.5 size-4 shrink-0" />
         <span>
           {data.workers_not_evaluated}{" "}
@@ -114,7 +119,7 @@ export function WorkerLintPanel({ slug }: { slug: string }) {
         </div>
       ) : (
         <div className="space-y-5">
-          <p className="flex items-start gap-2 text-sm text-[var(--color-muted)]">
+          <p className="flex items-start gap-2 text-sm text-muted-foreground">
             <AlertTriangle className="mt-0.5 size-4 shrink-0" />
             <span>
               Advisory only. Nothing here changes a worker, and a finding is a

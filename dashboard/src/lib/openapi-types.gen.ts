@@ -2089,6 +2089,35 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/projects/{slug}/schedules/runs": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Schedule Runs
+         * @description Last ``limit`` fires for each requested schedule, newest first.
+         *
+         *     Declared before the ``/{schedule_id}`` routes on purpose: FastAPI matches
+         *     in declaration order, and after them the literal ``runs`` would be parsed
+         *     as a schedule id and refused with a 422.
+         *
+         *     ``id`` repeats (``?id=...&id=...``) and is capped at one list page. Ids
+         *     from another project are dropped silently rather than refused: this is a
+         *     read of history the caller can already list, and a 403 on a stale id from
+         *     a cached page would turn a routine refresh into an error.
+         */
+        readonly get: operations["list_schedule_runs_api_v1_projects__slug__schedules_runs_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/projects/{slug}/schedules/{schedule_id}": {
         readonly parameters: {
             readonly query?: never;
@@ -5669,6 +5698,8 @@ export interface components {
              * @default skip
              */
             readonly catch_up: string;
+            /** Consecutive Failures */
+            readonly consecutive_failures?: number | null;
             /** Control Token */
             readonly control_token?: string | null;
             /**
@@ -5749,6 +5780,69 @@ export interface components {
             readonly updated_at: string;
         };
         /**
+         * ScheduleRunCell
+         * @description One cell of the cross-run grid: a single fire, reduced to what the
+         *     grid draws. The full fire record stays on the per-schedule ``/fires``
+         *     route; this shape exists so a page of schedules times twenty runs each
+         *     does not carry error messages and command ids it never renders.
+         */
+        readonly ScheduleRunCell: {
+            /**
+             * Fire Id
+             * Format: uuid
+             */
+            readonly fire_id: string;
+            /**
+             * Fired At
+             * Format: date-time
+             */
+            readonly fired_at: string;
+            /** Latency Ms */
+            readonly latency_ms: number | null;
+            /**
+             * Scheduled For
+             * Format: date-time
+             */
+            readonly scheduled_for: string;
+            /** Status */
+            readonly status: string;
+        };
+        /**
+         * ScheduleRunsPublic
+         * @description Last-N runs for many schedules in one round-trip.
+         *
+         *     Answers "which of my schedules are chronically failing" as a picture
+         *     rather than a number: a row per schedule, a cell per run, newest first.
+         *     ``consecutive_failures`` on the list already gives the number; this is the
+         *     history behind it, for the operator who wants to see whether a schedule
+         *     flaps, fails in bursts, or has been dead for a week.
+         *
+         *     One bulk window query for the whole request, bounded by the partition key
+         *     the same way the circuit breaker's read is, so it prunes partitions rather
+         *     than scanning every day in the retention window.
+         */
+        readonly ScheduleRunsPublic: {
+            /**
+             * Circuit Breaker Threshold
+             * @default 0
+             */
+            readonly circuit_breaker_threshold: number;
+            /** Items */
+            readonly items: readonly components["schemas"]["ScheduleRunsRow"][];
+            /** Limit */
+            readonly limit: number;
+        };
+        /** ScheduleRunsRow */
+        readonly ScheduleRunsRow: {
+            /** Runs */
+            readonly runs: readonly components["schemas"]["ScheduleRunCell"][];
+            /**
+             * Schedule Id
+             * Format: uuid
+             */
+            readonly schedule_id: string;
+        };
+        /**
          * ScheduleUpdateIn
          * @description Body for ``PATCH /schedules/{id}`` - all fields optional.
          *
@@ -5798,6 +5892,11 @@ export interface components {
          * SchedulesListPublic
          * @description Paged list of schedules (v1.1.0 N+1 fix).
          *
+         *     Carries ``circuit_breaker_threshold`` so a client can render
+         *     ``consecutive_failures`` as a proportion ("3 of 5 before auto-disable")
+         *     without hardcoding a number the operator can change, or 0 when the
+         *     operator has switched the breaker off entirely.
+         *
          *     Pre-1.1 ``GET /schedules`` returned a bare ``list[SchedulePublic]``
          *     with no LIMIT, a project with 1000+ schedules pulled every row
          *     on every dashboard refresh. v1.1.0 adds keyset pagination on
@@ -5813,6 +5912,11 @@ export interface components {
          *     in the brain CHANGELOG.
          */
         readonly SchedulesListPublic: {
+            /**
+             * Circuit Breaker Threshold
+             * @default 0
+             */
+            readonly circuit_breaker_threshold: number;
             /** Items */
             readonly items: readonly components["schemas"]["SchedulePublic"][];
             /** Next Cursor */
@@ -6128,6 +6232,8 @@ export interface components {
             readonly received_at: string | null;
             /** Root Task Id */
             readonly root_task_id: string | null;
+            /** Started At */
+            readonly started_at: string | null;
             /** State */
             readonly state: string;
             /** Task Id */
@@ -10039,6 +10145,40 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": readonly components["schemas"]["ScheduleMisfirePublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_schedule_runs_api_v1_projects__slug__schedules_runs_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly id?: readonly string[];
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ScheduleRunsPublic"];
                 };
             };
             /** @description Validation Error */

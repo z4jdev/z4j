@@ -5610,6 +5610,17 @@
             "title": "Catch Up",
             "type": "string"
           },
+          "consecutive_failures": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consecutive Failures"
+          },
           "control_token": {
             "anyOf": [
               {
@@ -5859,6 +5870,99 @@
         "title": "SchedulePublic",
         "type": "object"
       },
+      "ScheduleRunCell": {
+        "description": "One cell of the cross-run grid: a single fire, reduced to what the\ngrid draws. The full fire record stays on the per-schedule ``/fires``\nroute; this shape exists so a page of schedules times twenty runs each\ndoes not carry error messages and command ids it never renders.",
+        "properties": {
+          "fire_id": {
+            "format": "uuid",
+            "title": "Fire Id",
+            "type": "string"
+          },
+          "fired_at": {
+            "format": "date-time",
+            "title": "Fired At",
+            "type": "string"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "scheduled_for": {
+            "format": "date-time",
+            "title": "Scheduled For",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fire_id",
+          "status",
+          "scheduled_for",
+          "fired_at",
+          "latency_ms"
+        ],
+        "title": "ScheduleRunCell",
+        "type": "object"
+      },
+      "ScheduleRunsPublic": {
+        "description": "Last-N runs for many schedules in one round-trip.\n\nAnswers \"which of my schedules are chronically failing\" as a picture\nrather than a number: a row per schedule, a cell per run, newest first.\n``consecutive_failures`` on the list already gives the number; this is the\nhistory behind it, for the operator who wants to see whether a schedule\nflaps, fails in bursts, or has been dead for a week.\n\nOne bulk window query for the whole request, bounded by the partition key\nthe same way the circuit breaker's read is, so it prunes partitions rather\nthan scanning every day in the retention window.",
+        "properties": {
+          "circuit_breaker_threshold": {
+            "default": 0,
+            "title": "Circuit Breaker Threshold",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduleRunsRow"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "limit"
+        ],
+        "title": "ScheduleRunsPublic",
+        "type": "object"
+      },
+      "ScheduleRunsRow": {
+        "properties": {
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduleRunCell"
+            },
+            "title": "Runs",
+            "type": "array"
+          },
+          "schedule_id": {
+            "format": "uuid",
+            "title": "Schedule Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "runs"
+        ],
+        "title": "ScheduleRunsRow",
+        "type": "object"
+      },
       "ScheduleUpdateIn": {
         "description": "Body for ``PATCH /schedules/{id}`` - all fields optional.\n\nNone means \"do not touch this field.\" This lets the dashboard\nflip a single attribute (timezone, expression, queue) without\nre-sending the rest of the row.\n\nNOTE: ``scheduler`` is intentionally NOT in this model.\nChanging a schedule's owner mid-flight would\ncreate surprising side-effects (the new owner has different\nfire history, possibly different `allowed_schedulers`\nmembership). Operators who need to migrate ownership delete +\nrecreate via the importer or the dashboard \"Promote\" action.\nIf this list ever gains a ``scheduler`` field, the\n``update_schedule`` handler MUST call\n``_validate_scheduler_in_allowlist`` before persisting it.",
         "properties": {
@@ -6016,8 +6120,13 @@
         "type": "object"
       },
       "SchedulesListPublic": {
-        "description": "Paged list of schedules (v1.1.0 N+1 fix).\n\nPre-1.1 ``GET /schedules`` returned a bare ``list[SchedulePublic]``\nwith no LIMIT, a project with 1000+ schedules pulled every row\non every dashboard refresh. v1.1.0 adds keyset pagination on\n``(name, id)``; the response envelope mirrors the existing\ndeliveries / audit / commands list shape.\n\nBack-compat: when neither ``limit`` nor ``cursor`` is supplied\nAND the result set fits inside the default page (50), the\nresponse is structurally compatible with anything that just\niterates ``items``. A consumer that previously did\n``response.json()`` and got a list now gets a dict, bumping\nthe response_model is a v1.0 \u2192 v1.1 contract change documented\nin the brain CHANGELOG.",
+        "description": "Paged list of schedules (v1.1.0 N+1 fix).\n\nCarries ``circuit_breaker_threshold`` so a client can render\n``consecutive_failures`` as a proportion (\"3 of 5 before auto-disable\")\nwithout hardcoding a number the operator can change, or 0 when the\noperator has switched the breaker off entirely.\n\nPre-1.1 ``GET /schedules`` returned a bare ``list[SchedulePublic]``\nwith no LIMIT, a project with 1000+ schedules pulled every row\non every dashboard refresh. v1.1.0 adds keyset pagination on\n``(name, id)``; the response envelope mirrors the existing\ndeliveries / audit / commands list shape.\n\nBack-compat: when neither ``limit`` nor ``cursor`` is supplied\nAND the result set fits inside the default page (50), the\nresponse is structurally compatible with anything that just\niterates ``items``. A consumer that previously did\n``response.json()`` and got a list now gets a dict, bumping\nthe response_model is a v1.0 \u2192 v1.1 contract change documented\nin the brain CHANGELOG.",
         "properties": {
+          "circuit_breaker_threshold": {
+            "default": 0,
+            "title": "Circuit Breaker Threshold",
+            "type": "integer"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/SchedulePublic"
@@ -6711,6 +6820,18 @@
             ],
             "title": "Root Task Id"
           },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
           "state": {
             "title": "State",
             "type": "string"
@@ -6727,6 +6848,7 @@
           "parent_task_id",
           "root_task_id",
           "received_at",
+          "started_at",
           "finished_at"
         ],
         "title": "TaskTreeNode",
@@ -8644,7 +8766,7 @@
   },
   "info": {
     "title": "z4j",
-    "version": "1.9.1"
+    "version": "1.10.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -13542,6 +13664,75 @@
           }
         },
         "summary": "List Project Misfires",
+        "tags": [
+          "schedules"
+        ]
+      }
+    },
+    "/api/v1/projects/{slug}/schedules/runs": {
+      "get": {
+        "description": "Last ``limit`` fires for each requested schedule, newest first.\n\nDeclared before the ``/{schedule_id}`` routes on purpose: FastAPI matches\nin declaration order, and after them the literal ``runs`` would be parsed\nas a schedule id and refused with a 422.\n\n``id`` repeats (``?id=...&id=...``) and is capped at one list page. Ids\nfrom another project are dropped silently rather than refused: this is a\nread of history the caller can already list, and a 403 on a stale id from\na cached page would turn a routine refresh into an error.",
+        "operationId": "list_schedule_runs_api_v1_projects__slug__schedules_runs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "title": "Id",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleRunsPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Schedule Runs",
         "tags": [
           "schedules"
         ]

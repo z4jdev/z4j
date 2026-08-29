@@ -102,7 +102,7 @@ function QueuesPage() {
                     {q.broker_type ?? "-"}
                   </TableCell>
                   <TableCell className="text-right">
-                    <DateCell value={q.last_seen_at} />
+                    <DateCell value={q.last_seen_at} compact />
                   </TableCell>
                 </TableRow>
               ))}

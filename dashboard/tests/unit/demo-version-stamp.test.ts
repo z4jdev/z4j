@@ -244,7 +244,7 @@ describe("stampDemoVersions", () => {
     const version = (
       await readFile(resolve(repositoryRoot, "VERSION"), "utf8")
     ).trim();
-    expect(version).toBe("1.9.1");
+    expect(version).toBe("1.10.0");
     const before = await jsonSnapshot(root);
     const {
       intendedValues: beforeIntendedValues,
@@ -303,7 +303,7 @@ describe("stampDemoVersions", () => {
       database_version: string;
       packages: Record<string, string>;
     };
-    expect(system.z4j_version).toBe("1.9.1");
+    expect(system.z4j_version).toBe("1.10.0");
     expect(system.python_version).toBe("3.14.0");
     expect(system.database_version).toBe(
       "PostgreSQL 18.3 on x86_64-pc-linux-gnu",

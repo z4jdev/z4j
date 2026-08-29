@@ -31,6 +31,7 @@ vi.mock("lucide-react", async () => {
   return {
     Ban: Icon,
     ChevronDown: Icon,
+    Columns3: Icon,
     ClipboardList: Icon,
     Download: Icon,
     FileJson: Icon,
@@ -159,6 +160,9 @@ vi.mock("@/components/domain/date-cell", () => ({
 vi.mock("@/components/domain/page-shell", async () => {
   const React = await import("react");
   return {
+    // Renders null for a healthy schedule, which is every fixture row
+    // here, so the Health column stays out of these assertions.
+    ScheduleHealthBadge: () => null,
     PageShell: ({ children }: { children: React.ReactNode }) =>
       React.createElement("div", null, children),
   };

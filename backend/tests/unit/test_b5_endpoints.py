@@ -141,10 +141,15 @@ async def client(brain_app, settings: Settings, seeded):
 class TestSchedulesRouter:
     async def test_list_empty(self, client) -> None:
         # v1.1.0: response is now ``{items, next_cursor}``.
+        # 1.10.0 adds circuit_breaker_threshold to the envelope.
         r = await client.get("/api/v1/projects/default/schedules")
         assert r.status_code == 200
         body = r.json()
-        assert body == {"items": [], "next_cursor": None}
+        assert body == {
+            "items": [],
+            "next_cursor": None,
+            "circuit_breaker_threshold": 5,
+        }
 
     async def test_list_with_seeded_schedule(
         self,
@@ -781,3 +786,362 @@ class TestAuthMeMemberships:
         # Global admin gets a synthesized membership for every active project.
         assert any(m["project_slug"] == "default" for m in body["memberships"])
         assert all(m["role"] == "admin" for m in body["memberships"])
+
+
+class TestScheduleRuns:
+    """``GET /schedules/runs``: last-N fires for many schedules at once."""
+
+    async def _seed_schedule_with_fires(self, brain_app, project_id, statuses):
+        from z4j_brain.persistence.repositories import ScheduleFireRepository
+
+        async with brain_app.state.db.session() as s:
+            sched = Schedule(
+                project_id=project_id,
+                engine="celery",
+                scheduler="celery-beat",
+                name=f"runs-{uuid.uuid4().hex[:6]}",
+                task_name="app.tasks.job",
+                kind=ScheduleKind.CRON,
+                expression="*/5 * * * *",
+            )
+            s.add(sched)
+            await s.flush()
+            base = datetime.now(UTC).replace(microsecond=0)
+            # Oldest first on insert; the endpoint must return newest first.
+            for i, status in enumerate(reversed(statuses)):
+                await ScheduleFireRepository(s).record(
+                    fire_id=uuid.uuid4(),
+                    schedule_id=sched.id,
+                    project_id=project_id,
+                    command_id=None,
+                    status=status,
+                    scheduled_for=base - timedelta(minutes=5 * (len(statuses) - i)),
+                )
+            await s.commit()
+            return sched.id
+
+    async def test_returns_newest_first_and_caps_at_limit(
+        self,
+        brain_app,
+        client,
+        seeded,
+    ) -> None:
+        sid = await self._seed_schedule_with_fires(
+            brain_app,
+            seeded["project_id"],
+            ["failed", "failed", "delivered", "delivered", "failed", "delivered"],
+        )
+        r = await client.get(
+            f"/api/v1/projects/default/schedules/runs?id={sid}&limit=4",
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["limit"] == 4
+        assert "circuit_breaker_threshold" in body
+        assert len(body["items"]) == 1
+        row = body["items"][0]
+        assert row["schedule_id"] == str(sid)
+        assert [c["status"] for c in row["runs"]] == [
+            "failed",
+            "failed",
+            "delivered",
+            "delivered",
+        ], "newest first, cut at limit"
+        fired = [c["fired_at"] for c in row["runs"]]
+        assert fired == sorted(fired, reverse=True)
+        for cell in row["runs"]:
+            assert set(cell) == {
+                "fire_id",
+                "status",
+                "scheduled_for",
+                "fired_at",
+                "latency_ms",
+            }, "the grid cell carries only what the grid draws"
+
+    async def test_ids_from_another_project_are_dropped_not_refused(
+        self,
+        brain_app,
+        client,
+        seeded,
+    ) -> None:
+        """A guessed or stale id must not read another tenant's history.
+
+        Dropped rather than 403: a cached page holding an id that has since
+        moved or been deleted would otherwise turn a routine refresh into an
+        error. The important property is that nothing leaks.
+        """
+        mine = await self._seed_schedule_with_fires(
+            brain_app,
+            seeded["project_id"],
+            ["failed"],
+        )
+        other_project = uuid.uuid4()
+        async with brain_app.state.db.session() as s:
+            s.add(Project(id=other_project, slug="other", name="Other"))
+            await s.commit()
+        theirs = await self._seed_schedule_with_fires(
+            brain_app,
+            other_project,
+            ["failed", "failed"],
+        )
+        r = await client.get(
+            f"/api/v1/projects/default/schedules/runs?id={mine}&id={theirs}",
+        )
+        assert r.status_code == 200, r.text
+        got = {row["schedule_id"] for row in r.json()["items"]}
+        assert got == {str(mine)}, "the foreign id must be absent, not errored"
+
+    async def test_no_ids_is_an_empty_envelope(self, client, seeded) -> None:
+        r = await client.get("/api/v1/projects/default/schedules/runs")
+        assert r.status_code == 200
+        assert r.json()["items"] == []
+
+    async def test_runs_is_not_swallowed_by_the_schedule_id_route(
+        self,
+        client,
+        seeded,
+    ) -> None:
+        """Declaration order matters: after the ``/{schedule_id}`` routes the
+        literal ``runs`` would parse as a schedule id and 422."""
+        r = await client.get("/api/v1/projects/default/schedules/runs?limit=3")
+        assert r.status_code == 200, r.text
+        assert r.json()["limit"] == 3
+
+
+# ---------------------------------------------------------------------------
+# consecutive_failures: the contract through the API
+# ---------------------------------------------------------------------------
+
+
+async def _seed_schedule_with_fires(brain_app, project_id, statuses):
+    """Newest-first ``statuses``; returns the schedule id."""
+    from z4j_brain.persistence.repositories import ScheduleFireRepository
+
+    async with brain_app.state.db.session() as s:
+        sched = Schedule(
+            project_id=project_id,
+            engine="celery",
+            scheduler="celery-beat",
+            name=f"cf-{uuid.uuid4().hex[:6]}",
+            task_name="app.tasks.job",
+            kind=ScheduleKind.CRON,
+            expression="*/5 * * * *",
+        )
+        s.add(sched)
+        await s.flush()
+        base = datetime.now(UTC).replace(microsecond=0)
+        for i, status in enumerate(reversed(statuses)):
+            age = timedelta(minutes=5 * (len(statuses) - i))
+            await ScheduleFireRepository(s).record(
+                fire_id=uuid.uuid4(),
+                schedule_id=sched.id,
+                project_id=project_id,
+                command_id=None,
+                status=status,
+                scheduled_for=base - age,
+                fired_at=base - age,
+            )
+        await s.commit()
+        return sched.id
+
+
+@pytest.mark.asyncio
+class TestConsecutiveFailuresContract:
+    async def test_list_reports_the_trailing_run(self, brain_app, client, seeded) -> None:
+        sid = await _seed_schedule_with_fires(
+            brain_app,
+            seeded["project_id"],
+            ["failed", "acked_failed", "delivered", "failed"],
+        )
+        r = await client.get("/api/v1/projects/default/schedules")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        item = next(i for i in body["items"] if i["id"] == str(sid))
+        assert item["consecutive_failures"] == 2
+        assert body["circuit_breaker_threshold"] == 5
+
+    async def test_count_saturates_at_the_threshold(self, brain_app, client, seeded) -> None:
+        sid = await _seed_schedule_with_fires(brain_app, seeded["project_id"], ["failed"] * 8)
+        r = await client.get(f"/api/v1/projects/default/schedules/{sid}")
+        assert r.status_code == 200, r.text
+        assert r.json()["consecutive_failures"] == 5
+
+    async def test_a_pending_newest_fire_reads_as_zero(self, brain_app, client, seeded) -> None:
+        """0 means "the newest fire is not a failure", not "the last fire succeeded"."""
+        sid = await _seed_schedule_with_fires(
+            brain_app,
+            seeded["project_id"],
+            ["buffered", "failed", "failed"],
+        )
+        r = await client.get(f"/api/v1/projects/default/schedules/{sid}")
+        assert r.json()["consecutive_failures"] == 0
+
+    async def test_single_read_reports_the_same_count_as_the_list(
+        self,
+        brain_app,
+        client,
+        seeded,
+    ) -> None:
+        sid = await _seed_schedule_with_fires(
+            brain_app,
+            seeded["project_id"],
+            ["failed", "failed", "failed", "acked_success"],
+        )
+        one = await client.get(f"/api/v1/projects/default/schedules/{sid}")
+        many = await client.get("/api/v1/projects/default/schedules")
+        listed = next(i for i in many.json()["items"] if i["id"] == str(sid))
+        assert one.json()["consecutive_failures"] == listed["consecutive_failures"] == 3
+
+    async def test_mutation_responses_do_not_recount(self, client, seeded) -> None:
+        """null on a response that did not count, never a false-healthy 0."""
+        r = await client.post(
+            "/api/v1/projects/default/schedules",
+            json={
+                "name": "created.by_test",
+                "engine": "celery",
+                "kind": "cron",
+                "expression": "0 * * * *",
+                "task_name": "app.tasks.job",
+            },
+            headers={"X-CSRF-Token": seeded["csrf"]},
+        )
+        assert r.status_code in (200, 201), r.text
+        assert "consecutive_failures" in r.json()
+        assert r.json()["consecutive_failures"] is None
+
+    async def test_breaker_off_still_counts_over_a_fixed_window(
+        self,
+        brain_app,
+        client,
+        seeded,
+        settings,
+    ) -> None:
+        brain_app.state.settings = settings.model_copy(
+            update={"schedule_circuit_breaker_threshold": 0},
+        )
+        sid = await _seed_schedule_with_fires(brain_app, seeded["project_id"], ["failed"] * 3)
+        r = await client.get("/api/v1/projects/default/schedules")
+        body = r.json()
+        assert body["circuit_breaker_threshold"] == 0
+        item = next(i for i in body["items"] if i["id"] == str(sid))
+        assert item["consecutive_failures"] == 3
+
+    async def test_runs_exclude_fires_retention_has_removed(
+        self,
+        brain_app,
+        client,
+        seeded,
+    ) -> None:
+        from z4j_brain.persistence.repositories import ScheduleFireRepository
+
+        sid = await _seed_schedule_with_fires(brain_app, seeded["project_id"], ["acked_success"])
+        old = datetime.now(UTC) - timedelta(days=60)
+        async with brain_app.state.db.session() as s:
+            await ScheduleFireRepository(s).record(
+                fire_id=uuid.uuid4(),
+                schedule_id=sid,
+                project_id=seeded["project_id"],
+                command_id=None,
+                status="failed",
+                scheduled_for=old,
+                fired_at=old,
+            )
+            await s.commit()
+        r = await client.get(f"/api/v1/projects/default/schedules/runs?id={sid}&limit=10")
+        assert r.status_code == 200, r.text
+        row = r.json()["items"][0]
+        assert [c["status"] for c in row["runs"]] == ["acked_success"]
+
+    async def test_runs_refuse_more_than_five_hundred_ids(self, client, seeded) -> None:
+        params = "&".join(f"id={uuid.uuid4()}" for _ in range(501))
+        r = await client.get(f"/api/v1/projects/default/schedules/runs?{params}")
+        assert r.status_code == 422, r.text
+
+    async def test_runs_refuse_a_non_member(self, brain_app, settings, seeded) -> None:
+        from httpx import ASGITransport, AsyncClient
+        from z4j_brain.auth.csrf import csrf_cookie_name
+
+        hasher = PasswordHasher(settings)
+        outsider_id, session_id, csrf = uuid.uuid4(), uuid.uuid4(), secrets.token_urlsafe(32)
+        async with brain_app.state.db.session() as s:
+            s.add(
+                User(
+                    id=outsider_id,
+                    email="outsider@example.com",
+                    password_hash=hasher.hash("correct horse battery staple 9"),
+                    is_admin=False,
+                    is_active=True,
+                ),
+            )
+            await s.flush()
+            s.add(
+                Session(
+                    id=session_id,
+                    user_id=outsider_id,
+                    csrf_token=csrf,
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    ip_at_issue="127.0.0.1",
+                    user_agent_at_issue="test",
+                ),
+            )
+            await s.commit()
+        sid = await _seed_schedule_with_fires(brain_app, seeded["project_id"], ["failed"])
+        codec = SessionCookieCodec(settings)
+        async with AsyncClient(
+            transport=ASGITransport(app=brain_app),
+            base_url="http://testserver",
+        ) as outsider:
+            outsider.cookies.set(
+                cookie_name(environment=settings.environment), codec.encode(session_id)
+            )
+            outsider.cookies.set(csrf_cookie_name(environment=settings.environment), csrf)
+            r = await outsider.get(f"/api/v1/projects/default/schedules/runs?id={sid}")
+        # Non-members are not told the project exists: the policy answers 404,
+        # the same anti-enumeration shape every project-scoped route uses.
+        assert r.status_code == 404, r.text
+        assert r.json()["error"] == "not_found"
+
+
+@pytest.mark.asyncio
+class TestTaskTreeStartedAt:
+    async def test_tree_nodes_carry_started_at(self, brain_app, client, seeded) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+        async with brain_app.state.db.session() as s:
+            s.add(
+                Task(
+                    project_id=seeded["project_id"],
+                    engine="celery",
+                    task_id="tree-root",
+                    name="reports.rollup",
+                    state=TaskState.SUCCESS,
+                    received_at=now - timedelta(minutes=10),
+                    started_at=now - timedelta(minutes=9),
+                    finished_at=now,
+                    root_task_id="tree-root",
+                ),
+            )
+            s.add(
+                Task(
+                    project_id=seeded["project_id"],
+                    engine="celery",
+                    task_id="tree-child",
+                    name="reports.shard",
+                    state=TaskState.SUCCESS,
+                    received_at=now - timedelta(minutes=8),
+                    started_at=now - timedelta(minutes=4),
+                    finished_at=now - timedelta(minutes=1),
+                    parent_task_id="tree-root",
+                    root_task_id="tree-root",
+                ),
+            )
+            await s.commit()
+        r = await client.get("/api/v1/projects/default/tasks/celery/tree-child/tree")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        by_id = {n["task_id"]: n for n in body["nodes"]}
+        assert set(by_id) == {"tree-root", "tree-child"}
+        assert by_id["tree-child"]["started_at"] is not None
+        assert by_id["tree-child"]["started_at"].startswith(
+            (now - timedelta(minutes=4)).strftime("%Y-%m-%dT%H:%M")
+        )
+        assert by_id["tree-child"]["parent_task_id"] == "tree-root"

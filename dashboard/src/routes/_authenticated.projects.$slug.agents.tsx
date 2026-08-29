@@ -274,7 +274,7 @@ function AgentsPage() {
                       />
                     </TableCell>
                     <TableCell className="text-right">
-                      <DateCell value={agent.last_seen_at} />
+                      <DateCell value={agent.last_seen_at} compact />
                     </TableCell>
                     <TableCell className="text-right">
                       {canManageAgents && (

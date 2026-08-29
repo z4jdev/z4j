@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   Activity,
@@ -16,7 +16,11 @@ import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageShell } from "@/components/domain/page-shell";
 import { QueryError } from "@/components/domain/query-error";
 import { StatCard } from "@/components/domain/stat-card";
-import { TaskStateBadge } from "@/components/domain/state-badges";
+import { ScheduleRunStrip } from "@/components/domain/schedule-run-strip";
+import {
+  ScheduleHealthBadge,
+  TaskStateBadge,
+} from "@/components/domain/state-badges";
 import { TimeRangeSelect } from "@/components/domain/time-range-select";
 import {
   Card,
@@ -31,6 +35,11 @@ import {
   TIME_RANGE_LABELS,
   type TimeRange,
 } from "@/hooks/use-stats";
+import {
+  useCircuitBreakerThreshold,
+  useScheduleRuns,
+  useSchedules,
+} from "@/hooks/use-schedules";
 import { useTasks } from "@/hooks/use-tasks";
 import { formatCompact, formatPercent, formatRelative } from "@/lib/format";
 import type { TaskState } from "@/lib/api-types";
@@ -170,7 +179,7 @@ function OverviewPage() {
         />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
+      <div className="grid gap-6 lg:grid-cols-3 lg:items-start">
         {/* Task state breakdown */}
         <Card className="lg:col-span-2">
           <CardHeader>
@@ -202,8 +211,9 @@ function OverviewPage() {
           </CardContent>
         </Card>
 
-        {/* Recent tasks */}
-        <Card>
+        {/* Recent tasks: spans both rows of the right column so the first
+            row has no empty cell beside Tasks by state. */}
+        <Card className="lg:row-span-2">
           <CardHeader>
             <CardTitle>Recent tasks</CardTitle>
             <CardDescription>
@@ -250,7 +260,99 @@ function OverviewPage() {
               ))}
           </CardContent>
         </Card>
+
+        {/* Schedules needing attention: under Tasks by state in the wide
+            column. Silent when everything is healthy, because a panel that
+            always says "fine" trains the eye to skip it. */}
+        <ScheduleAttentionCard slug={slug} className="lg:col-span-2" />
       </div>
     </PageShell>
+  );
+}
+
+/**
+ * Schedules whose most recent fires are an unbroken run of failures, worst
+ * first, each with its run strip. This is the "which of my schedules are
+ * chronically failing" answer on the page an operator lands on, drawn from
+ * the same counts the circuit breaker acts on.
+ */
+export function ScheduleAttentionCard({
+  slug,
+  className,
+}: {
+  slug: string;
+  className?: string;
+}) {
+  const {
+    data: schedules,
+    isPending: schedulesPending,
+    isError: schedulesError,
+  } = useSchedules(slug);
+  const { data: threshold = 0 } = useCircuitBreakerThreshold(slug);
+  const failing = useMemo(
+    () =>
+      (schedules ?? [])
+        .filter((s) => (s.consecutive_failures ?? 0) > 0)
+        .sort((a, b) => (b.consecutive_failures ?? 0) - (a.consecutive_failures ?? 0))
+        .slice(0, 8),
+    [schedules],
+  );
+  const ids = useMemo(() => failing.map((s) => s.id), [failing]);
+  const { data: runsById, isError: runsError } = useScheduleRuns(slug, ids);
+
+  // Nothing until the list has loaded and nothing on an error: a warning
+  // card over skeletons, or over a failed request, is a false alarm on the
+  // page an operator lands on.
+  if (schedulesPending || schedulesError || failing.length === 0) return null;
+
+  return (
+    <Card className={className}>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <AlertTriangle className="size-4 text-warning" aria-hidden />
+              Schedules needing attention
+            </CardTitle>
+            <CardDescription>
+              Consecutive failures on the most recent fires.{" "}
+              {threshold > 0
+                ? `The breaker auto-disables a schedule at ${threshold}.`
+                : "The circuit breaker is switched off, so nothing is auto-disabled."}
+            </CardDescription>
+          </div>
+          <Link
+            to="/projects/$slug/schedules"
+            params={{ slug }}
+            className="whitespace-nowrap text-sm text-primary hover:underline"
+          >
+            all schedules
+          </Link>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {failing.map((s) => (
+          <Link
+            key={s.id}
+            to="/projects/$slug/schedules/$scheduleId"
+            params={{ slug, scheduleId: s.id }}
+            className="flex items-center gap-4 rounded-md border bg-card/40 p-2 pl-3 transition-colors hover:bg-accent"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-medium">{s.name}</div>
+              <div className="truncate text-xs text-muted-foreground">
+                {s.task_name}
+                {s.last_run_at ? ` · last fired ${formatRelative(s.last_run_at)}` : ""}
+              </div>
+            </div>
+            <ScheduleRunStrip runs={runsById?.get(s.id)} error={runsError} />
+            <ScheduleHealthBadge
+              consecutiveFailures={s.consecutive_failures ?? 0}
+              threshold={threshold}
+            />
+          </Link>
+        ))}
+      </CardContent>
+    </Card>
   );
 }

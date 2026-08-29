@@ -1,0 +1,43 @@
+{
+  "workers_evaluated": 1,
+  "workers_not_evaluated": 0,
+  "findings_by_severity": {
+    "medium": 2,
+    "low": 1
+  },
+  "workers": [
+    {
+      "worker_id": "70000000-0000-4000-0000-000000000001",
+      "worker_name": "worker-1@worker-host.example.com",
+      "engine": "celery",
+      "hostname": "worker-host.example.com",
+      "evaluated": true,
+      "findings": [
+        {
+          "rule_id": "celery.acks-late-off",
+          "severity": "medium",
+          "setting": "task_acks_late",
+          "title": "Tasks are acknowledged before they run",
+          "detail": "The broker is told the task is handled the moment it is delivered, before the work happens. If the worker is killed, runs out of memory, or the host disappears mid-task, the task is gone: it will not be redelivered and nothing records that it was lost. This is Celery's default, so most deployments are here without choosing to be.",
+          "remedy": "Set task_acks_late = True so the acknowledgement happens after the task completes. Tasks must be idempotent first, because a redelivered task may have partially run."
+        },
+        {
+          "rule_id": "celery.no-time-limit",
+          "severity": "medium",
+          "setting": "task_time_limit",
+          "title": "Tasks can run forever",
+          "detail": "No hard or soft time limit is in force, so a task that hangs on a socket, a lock, or an external call occupies its slot indefinitely. Enough of them and the pool is full of tasks that will never finish, which presents as a queue backing up for no visible reason. A limit of zero reads like a setting but disables the limit, so a worker can be here with the keys apparently configured.",
+          "remedy": "Set task_soft_time_limit to the longest a healthy task should take, and task_time_limit somewhat above it, so a task gets the chance to clean up before it is killed. Both must be greater than zero to take effect."
+        },
+        {
+          "rule_id": "celery.prefetch-hoarding",
+          "severity": "low",
+          "setting": "worker_prefetch_multiplier",
+          "title": "Each worker reserves 64 tasks per slot",
+          "detail": "A worker claims several tasks at once and holds them until it gets to them. With short, uniform tasks this is a throughput win. With long or uneven tasks it means work sits idle inside a busy worker while another worker has nothing to do, and a queue that looks backed up is really just badly distributed.",
+          "remedy": "Set worker_prefetch_multiplier = 1 for long or variable-length tasks. Leave it higher only when tasks are short and predictable."
+        }
+      ]
+    }
+  ]
+}

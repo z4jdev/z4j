@@ -201,7 +201,7 @@ function AuditPage() {
                       {row.source_ip ?? "-"}
                     </TableCell>
                     <TableCell className="text-right">
-                      <DateCell value={row.occurred_at} />
+                      <DateCell value={row.occurred_at} compact />
                     </TableCell>
                   </TableRow>
                 ))}

@@ -282,7 +282,7 @@ function ActivityRow({
           )}
         </div>
         <div className="shrink-0 text-right text-xs text-muted-foreground">
-          <DateCell value={item.occurred_at} />
+          <DateCell value={item.occurred_at} compact />
           {item.source_ip && <p className="font-mono">{item.source_ip}</p>}
         </div>
       </CardContent>

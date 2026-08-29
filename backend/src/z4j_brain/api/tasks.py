@@ -287,6 +287,12 @@ class TaskTreeNode(BaseModel):
     parent_task_id: str | None
     root_task_id: str | None
     received_at: datetime | None
+    #: When a worker actually began executing, as distinct from when the brain
+    #: observed the task. Both are needed to separate queue-wait from execute
+    #: time in the canvas waterfall: without it a node can only show a single
+    #: undifferentiated span. TaskPublic has carried this on the list and detail
+    #: responses all along; the tree node was the one shape that omitted it.
+    started_at: datetime | None
     finished_at: datetime | None
 
 
@@ -367,6 +373,7 @@ async def get_task_tree(
                 parent_task_id=t.parent_task_id,
                 root_task_id=t.root_task_id,
                 received_at=t.received_at,
+                started_at=t.started_at,
                 finished_at=t.finished_at,
             )
             for t in rows

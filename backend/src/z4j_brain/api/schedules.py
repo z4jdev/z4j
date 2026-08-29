@@ -37,10 +37,16 @@ from z4j_brain.api.deps import (
     get_membership_repo,
     get_project_repo,
     get_session,
+    get_settings,
     require_csrf,
     resolve_api_key_id,
 )
 from z4j_brain.domain.ip_rate_limit import require_bulk_action_throttle
+from z4j_brain.domain.workers.schedule_circuit_breaker import (
+    CONSECUTIVE_FAILURES_WINDOW,
+    FAILURE_STATUSES,
+    retention_floor,
+)
 from z4j_brain.errors import ConflictError, NotFoundError, ValidationError
 from z4j_brain.persistence.enums import CommandStatus, ProjectRole
 
@@ -55,6 +61,7 @@ if TYPE_CHECKING:
         MembershipRepository,
         ProjectRepository,
     )
+    from z4j_brain.settings import Settings
 
 
 router = APIRouter(prefix="/projects/{slug}/schedules", tags=["schedules"])
@@ -83,6 +90,26 @@ class SchedulePublic(BaseModel):
     last_run_at: datetime | None
     next_run_at: datetime | None
     total_runs: int
+    #: How many of this schedule's most recent fires failed in an unbroken run,
+    #: newest first, counted at read time. 0 means the newest fire is not a
+    #: failure: a success, or a fire still pending, buffered or in flight.
+    #:
+    #: This is the signal the circuit breaker acts on, surfaced BEFORE it acts.
+    #: The breaker auto-disables a schedule once the run reaches
+    #: ``circuit_breaker_threshold`` (on the list envelope), so a schedule
+    #: sitting at 3 of 5 is failing chronically and still enabled, which is
+    #: exactly the state an operator wants to see and could not see before:
+    #: the breaker computed this number every tick and kept it.
+    #:
+    #: Counted over the same bounded window the breaker uses, so it saturates
+    #: at the threshold rather than reporting an unbounded history streak.
+    #: With the breaker switched off it is counted over a fixed window of the
+    #: newest twenty fires instead.
+    #:
+    #: Reported by the list and by the single-schedule read. Responses to
+    #: mutations (create, update, enable, pause, trigger, ...) do not recount
+    #: and carry ``null``, which is "not counted here", never "healthy".
+    consecutive_failures: int | None = None
     external_id: str | None
     created_at: datetime
     updated_at: datetime
@@ -141,7 +168,11 @@ class ExternalScheduleControlOperationPublic(BaseModel):
     updated_at: datetime
 
 
-def _payload(schedule: Schedule) -> SchedulePublic:
+def _payload(
+    schedule: Schedule,
+    *,
+    consecutive_failures: int | None = None,
+) -> SchedulePublic:
     return SchedulePublic(
         id=schedule.id,
         project_id=schedule.project_id,
@@ -164,6 +195,7 @@ def _payload(schedule: Schedule) -> SchedulePublic:
         last_run_at=schedule.last_run_at,
         next_run_at=schedule.next_run_at,
         total_runs=schedule.total_runs,
+        consecutive_failures=consecutive_failures,
         external_id=schedule.external_id,
         created_at=schedule.created_at,
         updated_at=schedule.updated_at,
@@ -221,6 +253,11 @@ def _external_control_payload(
 class SchedulesListPublic(BaseModel):
     """Paged list of schedules (v1.1.0 N+1 fix).
 
+    Carries ``circuit_breaker_threshold`` so a client can render
+    ``consecutive_failures`` as a proportion ("3 of 5 before auto-disable")
+    without hardcoding a number the operator can change, or 0 when the
+    operator has switched the breaker off entirely.
+
     Pre-1.1 ``GET /schedules`` returned a bare ``list[SchedulePublic]``
     with no LIMIT, a project with 1000+ schedules pulled every row
     on every dashboard refresh. v1.1.0 adds keyset pagination on
@@ -236,8 +273,55 @@ class SchedulesListPublic(BaseModel):
     in the brain CHANGELOG.
     """
 
+    #: The consecutive-failure count at which the circuit breaker auto-disables
+    #: a schedule, so a client can render each item's ``consecutive_failures``
+    #: as a proportion rather than a bare number. 0 means the operator has
+    #: switched the breaker off; the counts are then informational only and
+    #: are taken over a fixed window of the newest twenty fires.
+    circuit_breaker_threshold: int = 0
+
     items: list[SchedulePublic]
     next_cursor: str | None
+
+
+class ScheduleRunCell(BaseModel):
+    """One cell of the cross-run grid: a single fire, reduced to what the
+    grid draws. The full fire record stays on the per-schedule ``/fires``
+    route; this shape exists so a page of schedules times twenty runs each
+    does not carry error messages and command ids it never renders."""
+
+    fire_id: uuid.UUID
+    status: str
+    scheduled_for: datetime
+    fired_at: datetime
+    latency_ms: int | None
+
+
+class ScheduleRunsRow(BaseModel):
+    schedule_id: uuid.UUID
+    #: Newest first, at most ``limit`` cells. Fewer means the schedule has
+    #: fired fewer times inside the retention window, not that rows were
+    #: dropped.
+    runs: list[ScheduleRunCell]
+
+
+class ScheduleRunsPublic(BaseModel):
+    """Last-N runs for many schedules in one round-trip.
+
+    Answers "which of my schedules are chronically failing" as a picture
+    rather than a number: a row per schedule, a cell per run, newest first.
+    ``consecutive_failures`` on the list already gives the number; this is the
+    history behind it, for the operator who wants to see whether a schedule
+    flaps, fails in bursts, or has been dead for a week.
+
+    One bulk window query for the whole request, bounded by the partition key
+    the same way the circuit breaker's read is, so it prunes partitions rather
+    than scanning every day in the retention window.
+    """
+
+    items: list[ScheduleRunsRow]
+    limit: int
+    circuit_breaker_threshold: int = 0
 
 
 def _encode_schedules_cursor(name: str, schedule_id: uuid.UUID) -> str:
@@ -263,6 +347,49 @@ def _decode_schedules_cursor(
     return name, sched_id
 
 
+async def _consecutive_failures_for(
+    db_session: AsyncSession,
+    *,
+    schedules: list[Schedule],
+    settings: Settings,
+) -> dict[uuid.UUID, int]:
+    """Count each schedule's unbroken run of trailing failures.
+
+    One bulk query for the whole page, not one per row: this is the same
+    ``recent_failures_for_many`` read the circuit breaker runs, bounded by the
+    same retention floor, so the number here and the breaker's decision are
+    taken from the same rows.
+
+    Counting stops at the first fire that is not a failure, so five failures
+    with one success interleaved reports the run since that success, not five.
+    It also stops at the breaker threshold, because that is all the breaker
+    itself looks at and a number larger than the threshold would imply history
+    nobody measured. With the breaker switched off the window is a fixed
+    ``CONSECUTIVE_FAILURES_WINDOW`` fires, so the count is still reported.
+    """
+    if not schedules:
+        return {}
+
+    from z4j_brain.persistence.repositories import ScheduleFireRepository
+
+    threshold = int(getattr(settings, "schedule_circuit_breaker_threshold", 0) or 0)
+    window = threshold if threshold > 0 else CONSECUTIVE_FAILURES_WINDOW
+    fires = await ScheduleFireRepository(db_session).recent_failures_for_many(
+        schedule_ids=[s.id for s in schedules],
+        per_schedule_limit=window,
+        fired_at_floor=retention_floor(settings),
+    )
+    out: dict[uuid.UUID, int] = {}
+    for schedule_id, rows in fires.items():
+        run = 0
+        for fire in rows:  # newest first
+            if fire.status not in FAILURE_STATUSES:
+                break
+            run += 1
+        out[schedule_id] = run
+    return out
+
+
 @router.get("", response_model=SchedulesListPublic)
 async def list_schedules(
     slug: str,
@@ -272,6 +399,7 @@ async def list_schedules(
     memberships: MembershipRepository = Depends(get_membership_repo),
     projects: ProjectRepository = Depends(get_project_repo),
     db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> SchedulesListPublic:
     """List schedules in a project, paginated.
 
@@ -306,9 +434,99 @@ async def list_schedules(
         rows = rows[:limit]
         last = rows[-1]
         next_cursor = _encode_schedules_cursor(last.name, last.id)
+    threshold = int(getattr(settings, "schedule_circuit_breaker_threshold", 0) or 0)
+    runs = await _consecutive_failures_for(db_session, schedules=rows, settings=settings)
     return SchedulesListPublic(
-        items=[_payload(s) for s in rows],
+        items=[_payload(s, consecutive_failures=runs.get(s.id, 0)) for s in rows],
         next_cursor=next_cursor,
+        circuit_breaker_threshold=threshold,
+    )
+
+
+@router.get("/runs", response_model=ScheduleRunsPublic)
+async def list_schedule_runs(
+    slug: str,
+    ids: list[uuid.UUID] = Query(default=[], alias="id"),
+    limit: int = Query(default=20, ge=1, le=50),
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> ScheduleRunsPublic:
+    """Last ``limit`` fires for each requested schedule, newest first.
+
+    Declared before the ``/{schedule_id}`` routes on purpose: FastAPI matches
+    in declaration order, and after them the literal ``runs`` would be parsed
+    as a schedule id and refused with a 422.
+
+    ``id`` repeats (``?id=...&id=...``) and is capped at one list page. Ids
+    from another project are dropped silently rather than refused: this is a
+    read of history the caller can already list, and a 403 on a stale id from
+    a cached page would turn a routine refresh into an error.
+    """
+    from sqlalchemy import select as _select
+
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.persistence.models import Schedule as _Schedule
+    from z4j_brain.persistence.repositories import ScheduleFireRepository
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.VIEWER,
+    )
+    threshold = int(getattr(settings, "schedule_circuit_breaker_threshold", 0) or 0)
+    if not ids:
+        return ScheduleRunsPublic(items=[], limit=limit, circuit_breaker_threshold=threshold)
+    if len(ids) > 500:
+        raise HTTPException(status_code=422, detail="at most 500 schedule ids per request")
+
+    # Project scoping. The bulk fire query is keyed by schedule id alone, so
+    # the ids are narrowed to this project's schedules first or a guessed id
+    # would read another tenant's history.
+    owned = (
+        (
+            await db_session.execute(
+                _select(_Schedule.id).where(
+                    _Schedule.project_id == project.id,
+                    _Schedule.id.in_(ids),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not owned:
+        return ScheduleRunsPublic(items=[], limit=limit, circuit_breaker_threshold=threshold)
+
+    fires = await ScheduleFireRepository(db_session).recent_failures_for_many(
+        schedule_ids=list(owned),
+        per_schedule_limit=limit,
+        fired_at_floor=retention_floor(settings),
+    )
+    return ScheduleRunsPublic(
+        items=[
+            ScheduleRunsRow(
+                schedule_id=sid,
+                runs=[
+                    ScheduleRunCell(
+                        fire_id=f.fire_id,
+                        status=f.status,
+                        scheduled_for=f.scheduled_for,
+                        fired_at=f.fired_at,
+                        latency_ms=f.latency_ms,
+                    )
+                    for f in fires.get(sid, [])
+                ],
+            )
+            for sid in owned
+        ],
+        limit=limit,
+        circuit_breaker_threshold=threshold,
     )
 
 
@@ -612,6 +830,7 @@ async def get_schedule(
     memberships: MembershipRepository = Depends(get_membership_repo),
     projects: ProjectRepository = Depends(get_project_repo),
     db_session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> SchedulePublic:
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import ScheduleRepository
@@ -633,7 +852,10 @@ async def get_schedule(
             "schedule not found",
             details={"schedule_id": str(schedule_id)},
         )
-    return _payload(schedule)
+    # The single read reports the same count as the list, from the same rows,
+    # so a client reading one schedule is not told a false-healthy 0.
+    runs = await _consecutive_failures_for(db_session, schedules=[schedule], settings=settings)
+    return _payload(schedule, consecutive_failures=runs.get(schedule.id, 0))
 
 
 # ---------------------------------------------------------------------------

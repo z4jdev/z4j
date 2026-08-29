@@ -791,7 +791,7 @@ function useTaskColumns(slug: string): DataTableColumnDef<TaskPublic>[] {
         accessorKey: "started_at",
         header: "Started",
         cell: ({ row }: { row: { original: TaskPublic } }) => (
-          <DateCell value={row.original.started_at} />
+          <DateCell value={row.original.started_at} compact />
         ),
         enableSorting: true,
       },

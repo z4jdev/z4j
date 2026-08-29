@@ -40,6 +40,7 @@ vi.mock("lucide-react", async () => {
     ChevronLeft: Icon,
     ChevronRight: Icon,
     ChevronsLeft: Icon,
+    Columns3: Icon,
     ClipboardList: Icon,
     Download: Icon,
     FileJson: Icon,
@@ -142,6 +143,11 @@ vi.mock("@/hooks/use-schedules", () => ({
     isFetching: false,
     refetch: vi.fn(),
   }),
+  // Auto-disable threshold from the list envelope; the route reads it to
+  // render the Health column. 0 keeps these tests on capabilities rather
+  // than on breaker state.
+  useCircuitBreakerThreshold: () => ({ data: 0 }),
+  useScheduleRuns: () => ({ data: undefined }),
   useToggleSchedule: () => ({
     mutateAsync: mutations.toggle,
     isPending: false,
@@ -194,6 +200,10 @@ vi.mock("@/components/domain/filter-toolbar", async () => {
   };
 });
 
+vi.mock("@/components/domain/schedule-run-strip", () => ({
+  ScheduleRunStrip: () => null,
+}));
+
 vi.mock("@/components/domain/refresh-button", () => ({
   RefreshButton: () => null,
 }));
@@ -202,6 +212,9 @@ vi.mock("@/components/domain/state-badges", async () => {
   const React = await import("react");
   const Badge = () => React.createElement("span");
   return {
+    // Renders null for a healthy schedule, which is every fixture row
+    // here, so the Health column stays out of these assertions.
+    ScheduleHealthBadge: () => null,
     TaskPriorityBadge: Badge,
     TaskStateBadge: Badge,
     SchedulePausedBadge: Badge,

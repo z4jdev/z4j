@@ -1,0 +1,735 @@
+{
+  "items": [
+    {
+      "schedule_id": "30000000-0000-4000-c000-000000000001",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -73200,
+          "fired_at_offset_s": -73200,
+          "latency_ms": 740
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -94803,
+          "fired_at_offset_s": -94800,
+          "latency_ms": 595
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -116402,
+          "fired_at_offset_s": -116400,
+          "latency_ms": 52
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -138002,
+          "fired_at_offset_s": -138000,
+          "latency_ms": 617
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -159602,
+          "fired_at_offset_s": -159600,
+          "latency_ms": 732
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -181201,
+          "fired_at_offset_s": -181200,
+          "latency_ms": 186
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -202800,
+          "fired_at_offset_s": -202800,
+          "latency_ms": 629
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -224401,
+          "fired_at_offset_s": -224400,
+          "latency_ms": 710
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -246000,
+          "fired_at_offset_s": -246000,
+          "latency_ms": 656
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -267602,
+          "fired_at_offset_s": -267600,
+          "latency_ms": 883
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -289203,
+          "fired_at_offset_s": -289200,
+          "latency_ms": 128
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-00000000000b",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -310803,
+          "fired_at_offset_s": -310800,
+          "latency_ms": 974,
+          "error_code": "task_failed",
+          "error_message": "psycopg.errors.SerializationFailure: could not serialize access due to concurrent update"
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -332400,
+          "fired_at_offset_s": -332400,
+          "latency_ms": 535
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -354003,
+          "fired_at_offset_s": -354000,
+          "latency_ms": 882
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -375602,
+          "fired_at_offset_s": -375600,
+          "latency_ms": 456
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -397202,
+          "fired_at_offset_s": -397200,
+          "latency_ms": 552
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -418801,
+          "fired_at_offset_s": -418800,
+          "latency_ms": 493
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -440401,
+          "fired_at_offset_s": -440400,
+          "latency_ms": 561
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -462003,
+          "fired_at_offset_s": -462000,
+          "latency_ms": 840
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c001-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -483601,
+          "fired_at_offset_s": -483600,
+          "latency_ms": 696
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4000-c000-000000000002",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -93,
+          "fired_at_offset_s": -90,
+          "latency_ms": 485
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3693,
+          "fired_at_offset_s": -3690,
+          "latency_ms": 401
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -7292,
+          "fired_at_offset_s": -7290,
+          "latency_ms": 253
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -10890,
+          "fired_at_offset_s": -10890,
+          "latency_ms": 171
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -14490,
+          "fired_at_offset_s": -14490,
+          "latency_ms": 95
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -18091,
+          "fired_at_offset_s": -18090,
+          "latency_ms": 282
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -21691,
+          "fired_at_offset_s": -21690,
+          "latency_ms": 780
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -25293,
+          "fired_at_offset_s": -25290,
+          "latency_ms": 788
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -28891,
+          "fired_at_offset_s": -28890,
+          "latency_ms": 361
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -32492,
+          "fired_at_offset_s": -32490,
+          "latency_ms": 167
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -36092,
+          "fired_at_offset_s": -36090,
+          "latency_ms": 464
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -39692,
+          "fired_at_offset_s": -39690,
+          "latency_ms": 482
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -43290,
+          "fired_at_offset_s": -43290,
+          "latency_ms": 319
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -46893,
+          "fired_at_offset_s": -46890,
+          "latency_ms": 888
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -50490,
+          "fired_at_offset_s": -50490,
+          "latency_ms": 295
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -54092,
+          "fired_at_offset_s": -54090,
+          "latency_ms": 577
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -57691,
+          "fired_at_offset_s": -57690,
+          "latency_ms": 253
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -61291,
+          "fired_at_offset_s": -61290,
+          "latency_ms": 847
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -64893,
+          "fired_at_offset_s": -64890,
+          "latency_ms": 546
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c002-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -68490,
+          "fired_at_offset_s": -68490,
+          "latency_ms": 840
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4000-c000-000000000003",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -63,
+          "fired_at_offset_s": -60,
+          "latency_ms": 45
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -963,
+          "fired_at_offset_s": -960,
+          "latency_ms": 376
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -1862,
+          "fired_at_offset_s": -1860,
+          "latency_ms": 886
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -2761,
+          "fired_at_offset_s": -2760,
+          "latency_ms": 208
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -3660,
+          "fired_at_offset_s": -3660,
+          "latency_ms": 600
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -4561,
+          "fired_at_offset_s": -4560,
+          "latency_ms": 111
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -5463,
+          "fired_at_offset_s": -5460,
+          "latency_ms": 716
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -6360,
+          "fired_at_offset_s": -6360,
+          "latency_ms": 575
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -7263,
+          "fired_at_offset_s": -7260,
+          "latency_ms": 253
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -8163,
+          "fired_at_offset_s": -8160,
+          "latency_ms": 120
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -9063,
+          "fired_at_offset_s": -9060,
+          "latency_ms": 549
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -9960,
+          "fired_at_offset_s": -9960,
+          "latency_ms": 184
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -10862,
+          "fired_at_offset_s": -10860,
+          "latency_ms": 265
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -11762,
+          "fired_at_offset_s": -11760,
+          "latency_ms": 146
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -12663,
+          "fired_at_offset_s": -12660,
+          "latency_ms": 495
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -13561,
+          "fired_at_offset_s": -13560,
+          "latency_ms": 578
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -14460,
+          "fired_at_offset_s": -14460,
+          "latency_ms": 80
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -15363,
+          "fired_at_offset_s": -15360,
+          "latency_ms": 118
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -16260,
+          "fired_at_offset_s": -16260,
+          "latency_ms": 609
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c003-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -17161,
+          "fired_at_offset_s": -17160,
+          "latency_ms": 889
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4000-c000-000000000004",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -489601,
+          "fired_at_offset_s": -489600,
+          "latency_ms": 208
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -511200,
+          "fired_at_offset_s": -511200,
+          "latency_ms": 549
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -532801,
+          "fired_at_offset_s": -532800,
+          "latency_ms": 632
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -554402,
+          "fired_at_offset_s": -554400,
+          "latency_ms": 380
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -576002,
+          "fired_at_offset_s": -576000,
+          "latency_ms": 269
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -597601,
+          "fired_at_offset_s": -597600,
+          "latency_ms": 813
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -619203,
+          "fired_at_offset_s": -619200,
+          "latency_ms": 749
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -640802,
+          "fired_at_offset_s": -640800,
+          "latency_ms": 302
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -662402,
+          "fired_at_offset_s": -662400,
+          "latency_ms": 81
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -684001,
+          "fired_at_offset_s": -684000,
+          "latency_ms": 652
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -705601,
+          "fired_at_offset_s": -705600,
+          "latency_ms": 624
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -727203,
+          "fired_at_offset_s": -727200,
+          "latency_ms": 740
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-00000000000c",
+          "status": "acked_failed",
+          "scheduled_for_offset_s": -748802,
+          "fired_at_offset_s": -748800,
+          "latency_ms": 666,
+          "error_code": "task_failed",
+          "error_message": "botocore.exceptions.ReadTimeoutError: Read timeout on endpoint URL: s3.eu-west-1.amazonaws.com"
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -770403,
+          "fired_at_offset_s": -770400,
+          "latency_ms": 131
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -792003,
+          "fired_at_offset_s": -792000,
+          "latency_ms": 601
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -813600,
+          "fired_at_offset_s": -813600,
+          "latency_ms": 300
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -835202,
+          "fired_at_offset_s": -835200,
+          "latency_ms": 305
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -856802,
+          "fired_at_offset_s": -856800,
+          "latency_ms": 127
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -878401,
+          "fired_at_offset_s": -878400,
+          "latency_ms": 321
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c004-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -900001,
+          "fired_at_offset_s": -900000,
+          "latency_ms": 541
+        }
+      ]
+    },
+    {
+      "schedule_id": "30000000-0000-4000-c000-000000000005",
+      "runs": [
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000000",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -65522,
+          "fired_at_offset_s": -65520,
+          "latency_ms": 824
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000001",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -87120,
+          "fired_at_offset_s": -87120,
+          "latency_ms": 67
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000002",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -108721,
+          "fired_at_offset_s": -108720,
+          "latency_ms": 847
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000003",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -130321,
+          "fired_at_offset_s": -130320,
+          "latency_ms": 644
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000004",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -151921,
+          "fired_at_offset_s": -151920,
+          "latency_ms": 235
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000005",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -173520,
+          "fired_at_offset_s": -173520,
+          "latency_ms": 167
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000006",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -195120,
+          "fired_at_offset_s": -195120,
+          "latency_ms": 104
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000007",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -216722,
+          "fired_at_offset_s": -216720,
+          "latency_ms": 321
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000008",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -238320,
+          "fired_at_offset_s": -238320,
+          "latency_ms": 861
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000009",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -259921,
+          "fired_at_offset_s": -259920,
+          "latency_ms": 532
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-00000000000a",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -281521,
+          "fired_at_offset_s": -281520,
+          "latency_ms": 695
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-00000000000b",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -303120,
+          "fired_at_offset_s": -303120,
+          "latency_ms": 306
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-00000000000c",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -324723,
+          "fired_at_offset_s": -324720,
+          "latency_ms": 67
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-00000000000d",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -346320,
+          "fired_at_offset_s": -346320,
+          "latency_ms": 215
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-00000000000e",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -367923,
+          "fired_at_offset_s": -367920,
+          "latency_ms": 694
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-00000000000f",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -389523,
+          "fired_at_offset_s": -389520,
+          "latency_ms": 43
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000010",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -411123,
+          "fired_at_offset_s": -411120,
+          "latency_ms": 895
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000011",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -432720,
+          "fired_at_offset_s": -432720,
+          "latency_ms": 436
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000012",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -454320,
+          "fired_at_offset_s": -454320,
+          "latency_ms": 217
+        },
+        {
+          "fire_id": "30000000-0000-4f00-c005-000000000013",
+          "status": "acked_success",
+          "scheduled_for_offset_s": -475922,
+          "fired_at_offset_s": -475920,
+          "latency_ms": 225
+        }
+      ]
+    }
+  ],
+  "limit": 20,
+  "circuit_breaker_threshold": 5
+}

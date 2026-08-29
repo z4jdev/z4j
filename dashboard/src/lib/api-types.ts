@@ -301,6 +301,19 @@ export interface SchedulePublic {
   last_run_at: string | null;
   next_run_at: string | null;
   total_runs: number;
+  /**
+   * How many of this schedule's most recent fires failed in an unbroken run,
+   * newest first. 0 means the newest fire is not a failure: a success, or a
+   * fire still pending, buffered or in flight. null means this response did
+   * not count it: only the list and the single-schedule read report a
+   * number, responses to mutations do not recount.
+   *
+   * This is the signal the circuit breaker acts on, surfaced before it acts:
+   * a schedule sitting at 3 with a threshold of 5 is failing chronically and
+   * is still enabled. Saturates at the threshold, which the list envelope
+   * carries as `circuit_breaker_threshold`.
+   */
+  consecutive_failures: number | null;
   external_id: string | null;
   created_at: string;
   updated_at: string;
@@ -326,13 +339,26 @@ export interface SchedulePublic {
 
 // Status enum matches the schedule_fires table's status column.
 // Mirrors backend Phase 4 ScheduleFire.status values.
+/**
+ * Every status the brain writes to a fire row. Stored as extensible text on
+ * the brain side, so a client must treat an unknown value as "undecided",
+ * never as a success.
+ */
 export type ScheduleFireStatus =
   | "pending"
+  | "accepted"
   | "delivered"
   | "buffered"
+  | "buffer_expired"
+  | "buffer_stale"
+  | "operator_skipped"
   | "acked_success"
   | "acked_failed"
-  | "failed";
+  | "failed"
+  | "terminal_completed"
+  | "terminal_failed"
+  | "terminal_cancelled"
+  | "terminal_timeout";
 
 export interface ScheduleFirePublic {
   id: string;

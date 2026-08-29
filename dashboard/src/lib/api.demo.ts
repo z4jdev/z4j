@@ -314,6 +314,47 @@ const ROUTES: RouteHandler[] = [
   // demo serves the same canned page regardless; the dashboard's
   // filter UI still renders, just not predictively.
   {
+    // Canvas tree, built from tasks.json by root_task_id. Declared ahead of
+    // the task detail route: that route's pattern is anchored, so it would
+    // not match .../tree today, but the order is what the comment below
+    // relies on and it must not depend on someone keeping the anchor.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/tasks\/([^/]+)\/([^/?]+)\/tree/,
+    handler: async (_req, match) => {
+      const res = await serveJson(`projects/${match[1]}/tasks.json`)();
+      if (!res.ok) return res;
+      const doc = (await res.json()) as {
+        items: {
+          task_id: string; engine: string; name: string; state: string;
+          parent_task_id: string | null; root_task_id: string | null;
+          received_at: string | null; started_at: string | null; finished_at: string | null;
+        }[];
+      };
+      const me = doc.items.find((x) => x.task_id === match[3] && x.engine === match[2]);
+      if (!me) {
+        return new Response(
+          JSON.stringify({
+            error: "demo_record_not_found",
+            message: `No demo task ${match[3]} for engine ${match[2]}`,
+          }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      const root = me.root_task_id ?? me.task_id;
+      const nodes = doc.items
+        .filter((x) => x.engine === match[2] && (x.task_id === root || x.root_task_id === root))
+        .map((x) => ({
+          task_id: x.task_id, name: x.name, state: x.state,
+          parent_task_id: x.parent_task_id, root_task_id: x.root_task_id,
+          received_at: x.received_at, started_at: x.started_at, finished_at: x.finished_at,
+        }));
+      return new Response(
+        JSON.stringify({ root_task_id: root, node_count: nodes.length, truncated: false, nodes }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  },
+  {
     // MUST precede the general /tasks route (first match wins) so a task
     // DETAIL request resolves to a single record rather than the paged list
     // envelope, which the detail page cannot render.
@@ -330,12 +371,49 @@ const ROUTES: RouteHandler[] = [
     // deeper /tasks/... request and answered it with the list envelope.
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/tasks(?:\?|$)/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/tasks.json`)(),
+    // Honour ?limit=. The overview asks for five recent tasks; serving the
+    // whole fixture made that card sixty rows tall on the public demo while a
+    // real install showed five.
+    handler: async (req, match) => {
+      const res = await serveJson(`projects/${match[1]}/tasks.json`)();
+      if (!res.ok) return res;
+      const limit = Number(new URL(req.url, "http://demo").searchParams.get("limit") ?? "0");
+      const doc = (await res.json()) as { items?: unknown[] };
+      if (Array.isArray(doc.items) && Number.isFinite(limit) && limit > 0) {
+        doc.items = doc.items.slice(0, limit);
+      }
+      return new Response(JSON.stringify(doc), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
   },
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/issues/,
     handler: (req, match) => serveIssues(req, match[1]),
+  },
+  {
+    // MUST precede the /schedules/{id} route below: first match wins, and
+    // the literal "runs" would otherwise be looked up as a schedule id and
+    // hand the cross-run grid a single schedule. The fixture carries every
+    // schedule; the handler narrows to the ids the request asked for, the
+    // way the real endpoint does.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/schedules\/runs(?:\?|$)/,
+    handler: async (req, match) => {
+      const wanted = new Set(new URL(req.url, "http://demo").searchParams.getAll("id"));
+      const res = await serveJson(`projects/${match[1]}/schedule-runs.json`)();
+      if (!res.ok) return res;
+      const doc = (await res.json()) as { items: { schedule_id: string }[] };
+      const items = wanted.size
+        ? doc.items.filter((row) => wanted.has(row.schedule_id))
+        : [];
+      return new Response(JSON.stringify({ ...doc, items }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
   },
   {
     // MUST precede the general /schedules route (first match wins) so
@@ -345,16 +423,74 @@ const ROUTES: RouteHandler[] = [
     handler: (_req, match) => serveJson(`projects/${match[1]}/misfires.json`)(),
   },
   {
-    // Fire history has no seed. An explicit empty page is the honest answer
-    // and renders as an empty state; falling through to the list route below
-    // would hand the fire-history table a list of schedules instead.
+    // Fire history is derived from the same schedule-runs.json the cross-run
+    // grid reads, so the detail page and the grid can never disagree about a
+    // schedule's past. Shaped as the bare list the real route returns: the
+    // previous {items: []} envelope was not the real shape, and the hook's
+    // .length on an object rendered neither rows nor the empty state, so
+    // every demo detail page showed a blank card.
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/schedules\/([^/?]+)\/fires/,
-    handler: () =>
-      new Response(JSON.stringify({ items: [], next_cursor: null }), {
+    handler: async (req, match) => {
+      const res = await serveJson(`projects/${match[1]}/schedule-runs.json`)();
+      if (!res.ok) {
+        return new Response("[]", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const doc = (await res.json()) as {
+        items: {
+          schedule_id: string;
+          runs: {
+            fire_id: string;
+            status: string;
+            scheduled_for: string;
+            fired_at: string;
+            latency_ms: number | null;
+            error_code?: string | null;
+            error_message?: string | null;
+          }[];
+        }[];
+      };
+      const row = doc.items.find((r) => r.schedule_id === match[2]);
+      if (!row) {
+        return new Response(
+          JSON.stringify({
+            error: "demo_record_not_found",
+            message: `No demo fire history for schedule ${match[2]}`,
+          }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      const limitParam = /[?&]limit=(\d+)/.exec(req.url);
+      const limit = limitParam ? Math.max(1, Number(limitParam[1])) : 100;
+      const unresolved = new Set(["pending", "accepted", "delivered", "buffered", "buffer_stale"]);
+      const fires = row.runs.slice(0, limit).map((c) => {
+        const acked =
+          unresolved.has(c.status) || c.latency_ms === null
+            ? null
+            : new Date(Date.parse(c.fired_at) + c.latency_ms).toISOString();
+        return {
+          id: c.fire_id,
+          fire_id: c.fire_id,
+          schedule_id: match[2],
+          command_id: null,
+          status: c.status,
+          scheduled_for: c.scheduled_for,
+          fired_at: c.fired_at,
+          acked_at: acked,
+          latency_ms: c.latency_ms,
+          error_code: c.error_code ?? null,
+          error_message: c.error_message ?? null,
+          triggered_by_user_id: null,
+        };
+      });
+      return new Response(JSON.stringify(fires), {
         status: 200,
         headers: { "content-type": "application/json" },
-      }),
+      });
+    },
   },
   {
     // MUST follow /schedules/misfires and precede the general /schedules
@@ -399,8 +535,46 @@ const ROUTES: RouteHandler[] = [
     handler: (_req, match) => serveJson(`projects/${match[1]}/queues.json`)(),
   },
   {
+    // Precedes the worker detail route below, or "lint" would be read as a
+    // worker id. The collection route used to be unanchored and answered
+    // this path with the workers list, which crashed the lint panel.
     method: "GET",
-    pattern: /^\/api\/v1\/projects\/([^/]+)\/workers/,
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/workers\/lint(?:\?|$)/,
+    handler: (_req, match) => serveJson(`projects/${match[1]}/workers-lint.json`)(),
+  },
+  {
+    // Worker detail: the same record the list serves, plus the metadata
+    // block the detail page reads. Unanchored, the collection route below
+    // answered this path with the whole list and the page rendered blank.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/workers\/([^/?]+)(?:\?|$)/,
+    handler: async (_req, match) => {
+      const raw = await serveJson(`projects/${match[1]}/workers.json`)();
+      if (!raw.ok) return raw;
+      const doc = (await raw.json()) as
+        | Record<string, unknown>[]
+        | { items?: Record<string, unknown>[] };
+      const items = Array.isArray(doc) ? doc : (doc.items ?? []);
+      const found = items.find((w) => w.id === match[2]);
+      if (!found) {
+        return new Response(
+          JSON.stringify({
+            error: "demo_record_not_found",
+            message: `No demo worker ${match[2]}`,
+          }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ metadata: {}, ...found }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  },
+  {
+    // Anchored to the collection path, as with /tasks and /schedules.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/workers(?:\?|$)/,
     handler: (_req, match) => serveJson(`projects/${match[1]}/workers.json`)(),
   },
   // Project overview stats (the big card grid on /projects/<slug>/).
