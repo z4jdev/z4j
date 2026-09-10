@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 from uuid import UUID
+from weakref import WeakKeyDictionary
 
-from sqlalchemy import ColumnElement, and_, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, func, or_, select, tuple_, update
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain.persistence.models import AuditChainState, AuditLog, Z4JMeta
@@ -35,6 +38,14 @@ AUDIT_PRUNE_WATERMARK_KEY = "audit_prune_watermark"
 # Boundary-F ceremonies.  A signer must never silently continue after this
 # lock fails.
 AUDIT_CHAIN_ADVISORY_LOCK_KEY = 0x7A_34_6A_DA
+
+# Process-local evidence only, never loaded from database-controlled state.
+# A cold engine, changed DDL identity, or expired evidence requires a physical
+# recount before trusting maintenance again. Catalog xmin/ctid expose even a
+# disable/delete/re-enable sequence whose final trigger definition is identical.
+_TALLY_CATALOG_CHECKS: WeakKeyDictionary[Engine, tuple[str, float]] = WeakKeyDictionary()
+_TALLY_RECOUNT_SECONDS = 300.0
+
 
 #: Domain-separation label for the watermark MAC (see below).
 _WATERMARK_MAC_LABEL = b"audit_prune_watermark|"
@@ -431,6 +442,82 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         )
         return int(result.scalar_one())
 
+    async def count_active_rows_for_append(self, *, generation: UUID) -> int:
+        """Read PostgreSQL's exact transactional tally, retaining full recounts.
+
+        Full verification and retention use count_active_generation. The hot
+        append path compares this separately maintained tally with the signed
+        count while holding the chain/state locks. Direct tally writes are
+        refused by an ALWAYS trigger, and ordinary row mutations (including
+        replica-mode writes) maintain it in the same transaction. Missing or
+        disabled maintenance must fail closed, never trust an inert counter.
+        Cold engines, catalog changes (including restored trigger definitions),
+        and five-minute expiration require an independent physical recount.
+        This baseline is process-local, not writable through database DML.
+        """
+        if self.session.get_bind().dialect.name != "postgresql":
+            return await self.count_active_generation(generation=generation)
+        from sqlalchemy import text
+
+        from z4j_brain.domain.audit_chain import AuditChainIntegrityError
+
+        result = await self.session.execute(
+            text(
+                """
+                SELECT observed_active_row_count, (
+                SELECT pg_catalog.string_agg(identity, ',' ORDER BY identity) FROM (
+                  SELECT 'trigger:' || oid::text || ':' || xmin::text || ':' || ctid::text AS identity
+                    FROM pg_catalog.pg_trigger WHERE NOT tgisinternal
+                  UNION ALL
+                  SELECT 'function:' || p.oid::text || ':' || p.xmin::text || ':' || p.ctid::text
+                    FROM pg_catalog.pg_proc p
+                    JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                   WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+                  UNION ALL
+                  SELECT 'rule:' || r.oid::text || ':' || r.xmin::text || ':' || r.ctid::text
+                    FROM pg_catalog.pg_rewrite r
+                    JOIN pg_catalog.pg_class c ON c.oid = r.ev_class
+                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                   WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+                ) AS identities
+                ) AS catalog_identity FROM audit_chain_state
+                WHERE singleton_id = :singleton AND generation = :generation
+                AND (SELECT count(*) FROM pg_trigger WHERE tgenabled = 'A'
+                 AND NOT tgisinternal AND tgqual IS NULL AND tgnargs = 0
+                 AND tgattr = ''::int2vector AND NOT tgdeferrable AND (
+                 (tgrelid = 'audit_log'::regclass AND tgname = 'audit_log_tally_rows'
+                  AND tgtype = 29 AND tgfoid = to_regprocedure('z4j_audit_tally_rows_v1()')) OR
+                 (tgrelid = 'audit_log'::regclass AND tgname = 'audit_log_tally_truncate'
+                  AND tgtype = 32 AND tgfoid = to_regprocedure('z4j_audit_tally_rows_v1()')) OR
+                 (tgrelid = 'audit_chain_state'::regclass
+                  AND tgname = 'audit_chain_state_protect_tally' AND tgtype = 23
+                  AND tgfoid = to_regprocedure('z4j_audit_protect_tally_v1()')))) = 3
+                """,
+            ),
+            {"singleton": AUDIT_CHAIN_SINGLETON_ID, "generation": generation},
+        )
+        row = result.one_or_none()
+        if row is None or row[0] < 0 or row[1] is None:
+            raise AuditChainIntegrityError(
+                "audit row tally or its maintenance guards are unavailable",
+            )
+        count, catalog_identity = row
+        engine = self.session.get_bind().engine
+        previous = _TALLY_CATALOG_CHECKS.get(engine)
+        now = time.monotonic()
+        if (
+            previous is None
+            or previous[0] != catalog_identity
+            or now - previous[1] >= _TALLY_RECOUNT_SECONDS
+        ):
+            physical = await self.count_active_generation(generation=generation)
+            if physical != count:
+                raise AuditChainIntegrityError(
+                    "maintained audit row count does not match physical rows",
+                )
+            _TALLY_CATALOG_CHECKS[engine] = (catalog_identity, now)
+        return int(count)
+
     async def count_frozen_rows(self) -> int:
         result = await self.session.execute(
             select(func.count()).select_from(AuditLog).where(AuditLog.legacy_frozen.is_(True)),
@@ -536,11 +623,13 @@ class AuditLogRepository(BaseRepository[AuditLog]):
             AuditLog.id.asc(),
         )
         if after_occurred_at is not None and after_id is not None:
-            # Row-value keyset "strictly after (occurred_at, id)",
-            # written as an OR rather than a tuple comparison so it is
-            # portable across Postgres and SQLite.
+            # PostgreSQL's row comparison seeks into the occurred_at index;
+            # OR can rescan the whole preceding history for every page.
+            # Keep the existing SQLite representation.
             stmt = stmt.where(
-                or_(
+                tuple_(AuditLog.occurred_at, AuditLog.id) > tuple_(after_occurred_at, after_id)
+                if self.session.get_bind().dialect.name == "postgresql"
+                else or_(
                     AuditLog.occurred_at > after_occurred_at,
                     and_(
                         AuditLog.occurred_at == after_occurred_at,

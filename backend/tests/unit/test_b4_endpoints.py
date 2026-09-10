@@ -235,6 +235,149 @@ class TestAgentsRouter:
 
 @pytest.mark.asyncio
 class TestTasksRouter:
+    @pytest.fixture
+    async def counted_history(self, brain_app, seeded):
+        now = datetime.now(UTC)
+        async with brain_app.state.db.session() as s:
+            other = Project(slug="other", name="Other")
+            s.add(other)
+            await s.flush()
+            for project_id in [seeded["project_id"], other.id]:
+                for i, (name, state, priority, queue, worker) in enumerate(
+                    [
+                        ("billing%refund", TaskState.FAILURE, TaskPriority.HIGH, "urgent", "one"),
+                        (
+                            "billingXrefund",
+                            TaskState.SUCCESS,
+                            TaskPriority.NORMAL,
+                            "default",
+                            "two",
+                        ),
+                        (
+                            "billing_refund",
+                            TaskState.FAILURE,
+                            TaskPriority.CRITICAL,
+                            "urgent",
+                            "one",
+                        ),
+                        ("reporting.send", TaskState.FAILURE, TaskPriority.HIGH, "default", "two"),
+                    ]
+                ):
+                    s.add(
+                        Task(
+                            project_id=project_id,
+                            engine="celery",
+                            task_id=f"counted-{i}",
+                            name=name,
+                            state=state,
+                            priority=priority,
+                            queue=queue,
+                            worker_name=worker,
+                            received_at=now - timedelta(days=i),
+                            started_at=now - timedelta(days=i) if i < 2 else None,
+                        )
+                    )
+            await s.commit()
+        return now
+
+    @pytest.mark.parametrize("limit", [1, 2, 4])
+    async def test_total_is_project_scoped_and_independent_of_cursor(
+        self,
+        client,
+        counted_history,
+        limit,
+    ) -> None:
+        params = {"include_total": "true", "limit": limit}
+        seen = []
+        while True:
+            r = await client.get("/api/v1/projects/default/tasks", params=params)
+            assert r.status_code == 200
+            body = r.json()
+            assert body["total_count"] == 4
+            assert len(body["items"]) == limit
+            seen.extend(item["task_id"] for item in body["items"])
+            if body["next_cursor"] is None:
+                break
+            assert len(seen) < 4  # no extra empty page on exact page boundaries
+            params["cursor"] = body["next_cursor"]
+        assert len(seen) == len(set(seen)) == 4
+
+    @pytest.mark.parametrize(
+        ("filters", "total"),
+        [
+            ({"state": "failure"}, 3),
+            ({"priority": "high,critical"}, 3),
+            ({"name": "billing"}, 3),
+            ({"search": "BILLING"}, 3),
+            ({"search": "%"}, 1),
+            ({"search": "_"}, 1),
+            ({"search": "URGENT"}, 2),
+            ({"search": "counted-3"}, 1),
+            ({"search": "ONE"}, 2),
+            ({"queue": "urgent", "worker": "one", "priority": "high", "state": "failure"}, 1),
+            ({"search": "not-present"}, 0),
+        ],
+    )
+    async def test_total_uses_the_list_filters(
+        self,
+        client,
+        counted_history,
+        filters,
+        total,
+    ) -> None:
+        r = await client.get(
+            "/api/v1/projects/default/tasks",
+            params={
+                **filters,
+                "include_total": "true",
+                "limit": 1,
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["total_count"] == total
+        assert len(r.json()["items"]) == min(total, 1)
+
+    async def test_total_uses_received_time_bounds(self, client, counted_history) -> None:
+        r = await client.get(
+            "/api/v1/projects/default/tasks",
+            params={
+                "include_total": "true",
+                "since": (counted_history - timedelta(days=2)).isoformat(),
+                "until": (counted_history - timedelta(days=1)).isoformat(),
+                "limit": 1,
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["total_count"] == 2
+
+    async def test_count_is_opt_in_and_exports_do_not_count(
+        self,
+        client,
+        counted_history,
+        monkeypatch,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        count = AsyncMock(side_effect=AssertionError("unrequested count"))
+        monkeypatch.setattr(
+            "z4j_brain.persistence.repositories.TaskRepository.count_for_project",
+            count,
+        )
+        r = await client.get("/api/v1/projects/default/tasks")
+        assert r.status_code == 200
+        assert r.json()["total_count"] is None
+        r = await client.get("/api/v1/projects/default/tasks?format=json&include_total=true")
+        assert r.status_code == 200
+        count.assert_not_awaited()
+
+    async def test_total_requires_project_access(self, client, seeded, brain_app) -> None:
+        async with brain_app.state.db.session() as s:
+            user = await s.get(User, seeded["user_id"])
+            user.is_admin = False
+            await s.commit()
+        r = await client.get("/api/v1/projects/default/tasks?include_total=true")
+        assert r.status_code == 404  # do not reveal another project's existence
+
     async def test_list_tasks_empty(self, client) -> None:
         r = await client.get("/api/v1/projects/default/tasks")
         assert r.status_code == 200
@@ -671,8 +814,52 @@ class TestCommandsRouter:
             },
         )
         # Local registry returns delivered_locally=False +
-        # notified_cluster=False + agent_was_known=False → 503.
+        # notified_cluster=False + agent_was_known=False, and the agent is
+        # offline → 503.
         assert r.status_code == 503
+
+    async def test_retry_task_live_long_poll_agent_is_accepted_pending(
+        self,
+        brain_app,
+        client,
+        settings: Settings,
+        seeded,
+    ) -> None:
+        # A long-poll agent stays online through its uploads but never
+        # registers a WebSocket session. The local registry cannot push to it,
+        # yet its next poll claims the committed command, so the request is
+        # accepted as pending instead of refused as offline.
+        async with brain_app.state.db.session() as s:
+            agent = Agent(
+                project_id=seeded["project_id"],
+                name="long-poll",
+                token_hash=hash_agent_token(
+                    plaintext="long-poll",
+                    secret=settings.secret.get_secret_value().encode("utf-8"),
+                ),
+                protocol_version="0",
+                framework_adapter="unknown",
+                engine_adapters=[],
+                scheduler_adapters=[],
+                capabilities={},
+                state=AgentState.ONLINE,
+                agent_metadata={"runtime_features": ["retry_by_reference"]},
+            )
+            s.add(agent)
+            await s.commit()
+            agent_id = agent.id
+
+        r = await client.post(
+            "/api/v1/projects/default/commands/retry-task",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={
+                "agent_id": str(agent_id),
+                "engine": "celery",
+                "task_id": "task-001",
+            },
+        )
+        assert r.status_code == 202
+        assert r.json()["status"] == "pending"
 
     async def test_retry_task_refused_when_only_session_is_unattested(
         self,

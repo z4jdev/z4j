@@ -168,7 +168,7 @@ class TestCspOnHtml:
         assert directives["style-src-elem"] == [
             "'self'",
             "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='",
-            "'sha256-CIxDM5jnsGiKqXs2v7NKCY5MzdR9gu6TtiMJrDw29AY='",
+            "'sha256-StEaX+se6YS7pqjzrzMIA0KaX9zF/8zAhvQXZAe5epY='",
         ]
         assert "'unsafe-inline'" not in directives["script-src"]
         assert "'unsafe-inline'" not in directives["style-src-elem"]

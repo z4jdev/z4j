@@ -588,3 +588,85 @@ class TestRetentionSweep:
         async with db_manager.session() as session:
             remaining = (await session.execute(select(AgentStatusHistory))).scalars().all()
             assert remaining == []
+
+
+@pytest.mark.asyncio
+async def test_signed_loss_status_reaches_authorized_health_api(db_manager, project_and_agent):
+    from z4j_brain.api.agents import agent_health
+    from z4j_brain.errors import NotFoundError
+    from z4j_brain.persistence.enums import ProjectRole
+    from z4j_brain.persistence.models import Membership, User
+    from z4j_brain.persistence.repositories import MembershipRepository, ProjectRepository
+    from z4j_core.transport.frames import TelemetryLossPayload
+    from z4j_core.transport.framing import FrameSigner, FrameVerifier
+
+    project_id, agent_id = project_and_agent
+    secret = b"x" * 32
+    identity = {
+        "agent_id": str(agent_id),
+        "project_id": str(project_id),
+        "session_id": str(uuid.uuid4()),
+    }
+    loss = TelemetryLossPayload(
+        buffer_id="buffer",
+        runtime_id="runtime",
+        event_records=7,
+        command_results=2,
+        capacity_evicted_frames=3,
+        adapter_events={"rq": 4},
+    )
+    wire = FrameSigner(secret=secret, **identity).sign_and_serialize(
+        AgentStatusFrame(
+            id=str(uuid.uuid4()),
+            payload=AgentStatusPayload(telemetry_loss=loss),
+        )
+    )
+    frame = FrameVerifier(secret=secret, **identity).parse_and_verify(wire)
+    router = FrameRouter(
+        db=db_manager,
+        ingestor=None,
+        dispatcher=None,
+        project_id=project_id,
+        agent_id=agent_id,
+        worker_id="authenticated-worker",
+        dashboard_hub=None,
+    )
+    assert await router.dispatch(frame) == FrameOutcome.DURABLE
+    async with db_manager.session() as session:
+        viewer = User(email="health@example.com", password_hash="unused", is_admin=False)
+        session.add(viewer)
+        await session.flush()
+        session.add(Membership(user_id=viewer.id, project_id=project_id, role=ProjectRole.VIEWER))
+        await session.commit()
+        kwargs = {
+            "user": viewer,
+            "memberships": MembershipRepository(session),
+            "projects": ProjectRepository(session),
+            "db_session": session,
+        }
+        reports = await agent_health(slug="status-test", agent_id=agent_id, **kwargs)
+        assert len(reports) == 1
+        assert reports[0].telemetry_loss == loss
+        assert reports[0].worker_id == "authenticated-worker"
+        # A project member cannot inspect a foreign agent, even if its ID is known.
+        foreign = Project(slug="foreign-health", name="Foreign")
+        session.add(foreign)
+        await session.flush()
+        foreign_agent = Agent(
+            project_id=foreign.id,
+            name="foreign",
+            token_hash="f" * 64,
+            protocol_version="2",
+            framework_adapter="bare",
+        )
+        session.add(foreign_agent)
+        await session.flush()
+        with pytest.raises(NotFoundError):
+            await agent_health(slug="status-test", agent_id=foreign_agent.id, **kwargs)
+        with pytest.raises(NotFoundError):
+            await agent_health(slug="foreign-health", agent_id=foreign_agent.id, **kwargs)
+        owned_agent = await session.get(Agent, agent_id)
+        owned_agent.revoked_at = datetime.now(UTC)
+        await session.flush()
+        with pytest.raises(NotFoundError):
+            await agent_health(slug="status-test", agent_id=agent_id, **kwargs)

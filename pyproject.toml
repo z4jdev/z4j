@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.10.0"
+version = "1.11.0"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -65,7 +65,7 @@ classifiers = [
 #   pip install z4j-celery            # SDK + Celery adapter only
 #
 dependencies = [
-    "z4j-core>=1.10.0,<2",
+    "z4j-core>=1.11.0,<2",
     # Server runtime (was in z4j-brain pre-1.4.0).
     "fastapi>=0.136",
     # 1.6.5 (audit R4-M1): explicit Starlette floor for
@@ -93,12 +93,12 @@ dependencies = [
     "python-multipart>=0.0.31",
     "itsdangerous>=2.2",
     "aiosqlite>=0.22.1",
-    # Async SMTP client for the email notification channel. Supports
-    # STARTTLS (587, the Gmail app-password path) and implicit TLS
-    # (465). v3.0+ exposes the ``tls_hostname`` kwarg the channel
-    # dispatcher uses so DNS-pinned delivery still verifies the
-    # original hostname against the server cert.
-    "aiosmtplib>=5.1.1",
+    # Async SMTP client for email notifications, invitations and password
+    # resets. 5.1.2 fixes STARTTLS response injection (CVE-2026-55558);
+    # 5.1.3 also rejects address-based ESMTP parameter injection and fixes
+    # command/response desynchronization. Keep this service security floor
+    # separate from the broad framework ranges in the host adapters.
+    "aiosmtplib>=5.1.3",
     # AES-GCM for the v1.6.0 MFA TOTP-secret-at-rest encryption.
     # The brain imports ``z4j_brain.domain.mfa.crypto`` at module
     # load (auth router init), so this is a core dep -- not an
@@ -154,21 +154,21 @@ dependencies = [
 # Engine adapter extras. Each pulls the engine adapter and its
 # companion scheduler (if any) in one shot -- the 95% case.
 # ------------------------------------------------------------------
-celery = ["z4j-celery>=1.10.0,<2", "z4j-celerybeat>=1.10.0,<2"]
-django = ["z4j-django>=1.10.0,<2"]
-flask = ["z4j-flask>=1.10.0,<2"]
-fastapi = ["z4j-fastapi>=1.10.0,<2"]
+celery = ["z4j-celery>=1.11.0,<2", "z4j-celerybeat>=1.11.0,<2"]
+django = ["z4j-django>=1.11.0,<2"]
+flask = ["z4j-flask>=1.11.0,<2"]
+fastapi = ["z4j-fastapi>=1.11.0,<2"]
 # Intra-z4j floor policy: extras track the release-wave version so
 # a mixed-version install cannot be assembled through the umbrella
 # (R9 H-2 precedent: a stale z4j-rq paired with a newer z4j-bare
 # dispatcher re-opened the R8 H-1 pickle RCE).
-rq = ["z4j-rq>=1.10.0,<2", "z4j-rqscheduler>=1.10.0,<2"]
-dramatiq = ["z4j-dramatiq>=1.10.0,<2"]
-huey = ["z4j-huey>=1.10.0,<2", "z4j-hueyperiodic>=1.10.0,<2"]
-arq = ["z4j-arq>=1.10.0,<2", "z4j-arqcron>=1.10.0,<2"]
-taskiq = ["z4j-taskiq>=1.10.0,<2", "z4j-taskiqscheduler>=1.10.0,<2"]
-apscheduler = ["z4j-apscheduler>=1.10.0,<2"]
-bare = ["z4j-bare>=1.10.0,<2"]
+rq = ["z4j-rq>=1.11.0,<2", "z4j-rqscheduler>=1.11.0,<2"]
+dramatiq = ["z4j-dramatiq>=1.11.0,<2"]
+huey = ["z4j-huey>=1.11.0,<2", "z4j-hueyperiodic>=1.11.0,<2"]
+arq = ["z4j-arq>=1.11.0,<2", "z4j-arqcron>=1.11.0,<2"]
+taskiq = ["z4j-taskiq>=1.11.0,<2", "z4j-taskiqscheduler>=1.11.0,<2"]
+apscheduler = ["z4j-apscheduler>=1.11.0,<2"]
+bare = ["z4j-bare>=1.11.0,<2"]
 
 # ------------------------------------------------------------------
 # Postgres backend (asyncpg for the application; psycopg/libpq for

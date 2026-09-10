@@ -1184,6 +1184,29 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/projects/{slug}/agents/{agent_id}/health": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Agent Health
+         * @description Latest 100 retained status samples; cumulative counters, never a sum.
+         *
+         *     Absence means unavailable (old agent, status disabled or retention expiry).
+         *     Samples are agent-reported and can be delayed during a transport outage.
+         */
+        readonly get: operations["agent_health_api_v1_projects__slug__agents__agent_id__health_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/projects/{slug}/audit": {
         readonly parameters: {
             readonly query?: never;
@@ -2001,6 +2024,42 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/projects/{slug}/saved-views": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** List Saved Views */
+        readonly get: operations["list_saved_views_api_v1_projects__slug__saved_views_get"];
+        readonly put?: never;
+        /** Create Saved View */
+        readonly post: operations["create_saved_view_api_v1_projects__slug__saved_views_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/saved-views/{view_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /** Update Saved View */
+        readonly put: operations["update_saved_view_api_v1_projects__slug__saved_views__view_id__put"];
+        readonly post?: never;
+        /** Delete Saved View */
+        readonly delete: operations["delete_saved_view_api_v1_projects__slug__saved_views__view_id__delete"];
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/projects/{slug}/schedules": {
         readonly parameters: {
             readonly query?: never;
@@ -2565,6 +2624,9 @@ export interface paths {
          *     - ``worker`` - exact match on worker_name
          *     - ``until`` - upper bound on received_at (pair with ``since``)
          *     - ``format`` - ``csv``, ``xlsx``, or ``json`` export (overrides pagination)
+         *     - ``include_total`` - opt in to an exact filtered count, independent of
+         *       cursor/limit. Adds a SQL aggregate; exports ignore it. Live data can
+         *       change between reads, so the total is not a sealed bulk-action target.
          */
         readonly get: operations["list_tasks_api_v1_projects__slug__tasks_get"];
         readonly put?: never;
@@ -3319,6 +3381,19 @@ export interface components {
              * @description Resolved ``$Z4J_HOME`` directory the brain is using. Where ``config.env`` and ``secret.env`` live.
              */
             readonly z4j_home: string;
+        };
+        /** AgentHealthSnapshot */
+        readonly AgentHealthSnapshot: {
+            /**
+             * Captured At
+             * Format: date-time
+             */
+            readonly captured_at: string;
+            /** Id */
+            readonly id: number;
+            readonly telemetry_loss?: components["schemas"]["TelemetryLossPayload"] | null;
+            /** Worker Id */
+            readonly worker_id?: string | null;
         };
         /** AgentPublic */
         readonly AgentPublic: {
@@ -5555,6 +5630,44 @@ export interface components {
             /** Window Seconds */
             readonly window_seconds?: number | null;
         };
+        /** SavedTaskFilters */
+        readonly SavedTaskFilters: {
+            /** Priority */
+            readonly priority?: readonly components["schemas"]["TaskPriority"][];
+            /**
+             * Search
+             * @default
+             */
+            readonly search: string;
+            readonly state?: components["schemas"]["TaskState"] | null;
+        };
+        /** SavedViewPublic */
+        readonly SavedViewPublic: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            readonly created_at: string;
+            readonly filters: components["schemas"]["SavedTaskFilters"];
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Name */
+            readonly name: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            readonly updated_at: string;
+        };
+        /** SavedViewWrite */
+        readonly SavedViewWrite: {
+            readonly filters: components["schemas"]["SavedTaskFilters"];
+            /** Name */
+            readonly name: string;
+        };
         /**
          * ScheduleCreateIn
          * @description Body for ``POST /schedules`` - operator-defined schedule.
@@ -6070,6 +6183,11 @@ export interface components {
             readonly items: readonly components["schemas"]["TaskPublic"][];
             /** Next Cursor */
             readonly next_cursor: string | null;
+            /**
+             * Total Count
+             * @description Total matching project tasks before pagination, when include_total=true.
+             */
+            readonly total_count?: number | null;
         };
         /**
          * TaskPriority
@@ -6261,6 +6379,55 @@ export interface components {
             readonly root_task_id: string;
             /** Truncated */
             readonly truncated: boolean;
+        };
+        /**
+         * TelemetryLossPayload
+         * @description Cumulative loss, scoped to one buffer and one adapter runtime.
+         *
+         *     Reason counters count frames; event_records counts records inside valid
+         *     batches. They overlap and must not be added together. Adapter counters
+         *     reset with runtime_id; buffer counters survive reopening the same file.
+         *     None means the agent does not support this accounting.
+         */
+        readonly TelemetryLossPayload: {
+            /** Adapter Events */
+            readonly adapter_events?: {
+                readonly [key: string]: number;
+            };
+            /** Buffer Id */
+            readonly buffer_id: string;
+            /**
+             * Capacity Evicted Frames
+             * @default 0
+             */
+            readonly capacity_evicted_frames: number;
+            /**
+             * Command Results
+             * @default 0
+             */
+            readonly command_results: number;
+            /**
+             * Content Rejected Frames
+             * @default 0
+             */
+            readonly content_rejected_frames: number;
+            /**
+             * Event Records
+             * @default 0
+             */
+            readonly event_records: number;
+            /**
+             * Other Frames
+             * @default 0
+             */
+            readonly other_frames: number;
+            /** Runtime Id */
+            readonly runtime_id: string;
+            /**
+             * Unclassified Frames
+             * @default 0
+             */
+            readonly unclassified_frames: number;
         };
         /** TrendBucket */
         readonly TrendBucket: {
@@ -8404,6 +8571,38 @@ export interface operations {
             };
         };
     };
+    readonly agent_health_api_v1_projects__slug__agents__agent_id__health_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly agent_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["AgentHealthSnapshot"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     readonly list_audit_api_v1_projects__slug__audit_get: {
         readonly parameters: {
             readonly query?: {
@@ -10024,6 +10223,138 @@ export interface operations {
             };
         };
     };
+    readonly list_saved_views_api_v1_projects__slug__saved_views_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": readonly components["schemas"]["SavedViewPublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly create_saved_view_api_v1_projects__slug__saved_views_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SavedViewWrite"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SavedViewPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly update_saved_view_api_v1_projects__slug__saved_views__view_id__put: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly view_id: string;
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SavedViewWrite"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SavedViewPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly delete_saved_view_api_v1_projects__slug__saved_views__view_id__delete: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly view_id: string;
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     readonly list_schedules_api_v1_projects__slug__schedules_get: {
         readonly parameters: {
             readonly query?: {
@@ -10773,6 +11104,7 @@ export interface operations {
                 readonly until?: string | null;
                 readonly cursor?: string | null;
                 readonly limit?: number | null;
+                readonly include_total?: boolean;
                 readonly format?: string | null;
                 readonly fields?: string | null;
             };

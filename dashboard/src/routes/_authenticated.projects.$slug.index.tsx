@@ -1,22 +1,10 @@
-import { useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
-import {
-  Activity,
-  AlertTriangle,
-  CheckCircle2,
-  ClipboardList,
-  Clock,
-  Cpu,
-  LayoutDashboard,
-  Network,
-  Terminal,
-} from "lucide-react";
 import { PageHeader } from "@/components/domain/page-header";
-import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageShell } from "@/components/domain/page-shell";
+import { ProjectOnboarding } from "@/components/domain/project-onboarding";
 import { QueryError } from "@/components/domain/query-error";
-import { StatCard } from "@/components/domain/stat-card";
+import { RefreshButton } from "@/components/domain/refresh-button";
 import { ScheduleRunStrip } from "@/components/domain/schedule-run-strip";
+import { StatCard } from "@/components/domain/stat-card";
 import {
   ScheduleHealthBadge,
   TaskStateBadge,
@@ -31,18 +19,27 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  useStats,
-  TIME_RANGE_LABELS,
-  type TimeRange,
-} from "@/hooks/use-stats";
-import {
   useCircuitBreakerThreshold,
   useScheduleRuns,
   useSchedules,
 } from "@/hooks/use-schedules";
+import { TIME_RANGE_LABELS, useStats, type TimeRange } from "@/hooks/use-stats";
 import { useTasks } from "@/hooks/use-tasks";
-import { formatCompact, formatPercent, formatRelative } from "@/lib/format";
 import type { TaskState } from "@/lib/api-types";
+import { formatCompact, formatPercent, formatRelative } from "@/lib/format";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  ClipboardList,
+  Clock,
+  Cpu,
+  LayoutDashboard,
+  Network,
+  Terminal,
+} from "lucide-react";
+import { useMemo, useState } from "react";
 
 export const Route = createFileRoute("/_authenticated/projects/$slug/")({
   component: OverviewPage,
@@ -51,7 +48,12 @@ export const Route = createFileRoute("/_authenticated/projects/$slug/")({
 function OverviewPage() {
   const { slug } = Route.useParams();
   const [timeRange, setTimeRange] = useState<TimeRange>("24");
-  const { data: stats, isFetching, isError, refetch } = useStats(slug, timeRange);
+  const {
+    data: stats,
+    isFetching,
+    isError,
+    refetch,
+  } = useStats(slug, timeRange);
   const { data: recent } = useTasks(slug, { limit: 5 });
 
   const rangeLabel = TIME_RANGE_LABELS[timeRange]
@@ -63,21 +65,18 @@ function OverviewPage() {
       <PageHeader
         title="Overview"
         icon={LayoutDashboard}
-        description={`live state of project ${slug}`}
+        description="Health, recent activity and the work that needs attention."
         actions={
           <div className="flex items-center gap-2">
             <TimeRangeSelect
               value={timeRange}
               onValueChange={setTimeRange}
-              options={(Object.entries(TIME_RANGE_LABELS) as [TimeRange, string][]).map(
-                ([value, label]) => ({ value, label }),
-              )}
+              options={(
+                Object.entries(TIME_RANGE_LABELS) as [TimeRange, string][]
+              ).map(([value, label]) => ({ value, label }))}
               aria-label="Time range"
             />
-            <RefreshButton
-              onRefresh={() => refetch()}
-              pending={isFetching}
-            />
+            <RefreshButton onRefresh={() => refetch()} pending={isFetching} />
           </div>
         }
       />
@@ -87,6 +86,10 @@ function OverviewPage() {
           message="Failed to load project stats"
           onRetry={() => refetch()}
         />
+      )}
+
+      {stats && stats.agents_online + stats.agents_offline === 0 && (
+        <ProjectOnboarding slug={slug} />
       )}
 
       {/* Stat cards row */}
@@ -125,12 +128,22 @@ function OverviewPage() {
               ? `${stats.agents_online}/${stats.agents_online + stats.agents_offline}`
               : "-"
           }
-          hint="connected to the brain"
+          hint={
+            !stats
+              ? "Checking connection"
+              : stats.agents_online + stats.agents_offline === 0
+                ? "Connect your first agent"
+                : stats.agents_offline > 0
+                  ? `${stats.agents_offline} offline · check connectivity`
+                  : "All registered agents connected"
+          }
           icon={Network}
           accent={
-            stats && stats.agents_online === 0 && stats.agents_offline > 0
-              ? "warning"
-              : "success"
+            !stats || stats.agents_online + stats.agents_offline === 0
+              ? "default"
+              : stats.agents_offline > 0
+                ? "warning"
+                : "success"
           }
           href={`/projects/${slug}/agents`}
         />
@@ -145,41 +158,9 @@ function OverviewPage() {
           icon={Cpu}
           href={`/projects/${slug}/workers`}
         />
-        <StatCard
-          label="Pending commands"
-          value={stats ? formatCompact(stats.commands_pending) : "-"}
-          hint="awaiting agent ack"
-          icon={Terminal}
-          accent={
-            stats && stats.commands_pending > 5 ? "warning" : "default"
-          }
-          href={`/projects/${slug}/commands`}
-        />
-        <StatCard
-          label={`Commands done (${rangeLabel})`}
-          value={stats ? formatCompact(stats.commands_completed_24h) : "-"}
-          icon={CheckCircle2}
-          accent="success"
-          href={`/projects/${slug}/commands`}
-        />
-        <StatCard
-          label={`Commands failed (${rangeLabel})`}
-          value={stats ? formatCompact(stats.commands_failed_24h) : "-"}
-          icon={AlertTriangle}
-          accent={
-            stats && stats.commands_failed_24h > 0 ? "destructive" : "default"
-          }
-          href={`/projects/${slug}/commands`}
-        />
-        <StatCard
-          label={`Commands timed out (${rangeLabel})`}
-          value={stats ? formatCompact(stats.commands_timeout_24h) : "-"}
-          icon={Clock}
-          href={`/projects/${slug}/commands`}
-        />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3 lg:items-start">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 lg:items-start">
         {/* Task state breakdown */}
         <Card className="lg:col-span-2">
           <CardHeader>
@@ -188,7 +169,7 @@ function OverviewPage() {
               Live counts across the entire project history.
             </CardDescription>
           </CardHeader>
-          <CardContent className="grid grid-cols-3 gap-3 sm:grid-cols-5">
+          <CardContent className="grid grid-cols-2 gap-3 min-[480px]:grid-cols-3 sm:grid-cols-5">
             {stats &&
               (Object.keys(stats.tasks_by_state) as TaskState[]).map(
                 (state) => (
@@ -251,7 +232,8 @@ function OverviewPage() {
             ))}
             {recent && recent.items.length === 0 && (
               <p className="py-6 text-center text-sm text-muted-foreground">
-                no tasks yet - start a z4j-connected worker (Celery, RQ, or Dramatiq)
+                no tasks yet - start a z4j-connected worker (Celery, RQ, or
+                Dramatiq)
               </p>
             )}
             {!recent &&
@@ -266,6 +248,41 @@ function OverviewPage() {
             always says "fine" trains the eye to skip it. */}
         <ScheduleAttentionCard slug={slug} className="lg:col-span-2" />
       </div>
+      <section aria-label="Command delivery" className="space-y-3">
+        <h2 className="text-lg font-semibold">Command delivery</h2>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard
+            label="Pending commands"
+            value={stats ? formatCompact(stats.commands_pending) : "-"}
+            hint="awaiting agent ack"
+            icon={Terminal}
+            accent={stats && stats.commands_pending > 5 ? "warning" : "default"}
+            href={`/projects/${slug}/commands`}
+          />
+          <StatCard
+            label={`Commands done (${rangeLabel})`}
+            value={stats ? formatCompact(stats.commands_completed_24h) : "-"}
+            icon={CheckCircle2}
+            accent="success"
+            href={`/projects/${slug}/commands`}
+          />
+          <StatCard
+            label={`Commands failed (${rangeLabel})`}
+            value={stats ? formatCompact(stats.commands_failed_24h) : "-"}
+            icon={AlertTriangle}
+            accent={
+              stats && stats.commands_failed_24h > 0 ? "destructive" : "default"
+            }
+            href={`/projects/${slug}/commands`}
+          />
+          <StatCard
+            label={`Commands timed out (${rangeLabel})`}
+            value={stats ? formatCompact(stats.commands_timeout_24h) : "-"}
+            icon={Clock}
+            href={`/projects/${slug}/commands`}
+          />
+        </div>
+      </section>
     </PageShell>
   );
 }
@@ -293,7 +310,10 @@ export function ScheduleAttentionCard({
     () =>
       (schedules ?? [])
         .filter((s) => (s.consecutive_failures ?? 0) > 0)
-        .sort((a, b) => (b.consecutive_failures ?? 0) - (a.consecutive_failures ?? 0))
+        .sort(
+          (a, b) =>
+            (b.consecutive_failures ?? 0) - (a.consecutive_failures ?? 0),
+        )
         .slice(0, 8),
     [schedules],
   );
@@ -342,7 +362,9 @@ export function ScheduleAttentionCard({
               <div className="truncate text-sm font-medium">{s.name}</div>
               <div className="truncate text-xs text-muted-foreground">
                 {s.task_name}
-                {s.last_run_at ? ` · last fired ${formatRelative(s.last_run_at)}` : ""}
+                {s.last_run_at
+                  ? ` · last fired ${formatRelative(s.last_run_at)}`
+                  : ""}
               </div>
             </div>
             <ScheduleRunStrip runs={runsById?.get(s.id)} error={runsError} />

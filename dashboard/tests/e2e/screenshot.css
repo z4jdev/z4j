@@ -1,0 +1,4 @@
+/* The animated query-devtools launcher exists only in the development server. */
+.tsqd-open-btn-container {
+  display: none !important;
+}

@@ -5,11 +5,9 @@
  * grouped by project. Each row = one (project, trigger) subscription
  * with filters, channel set, mute state, and active toggle.
  */
-import { useMemo, useState } from "react";
-import { Bell, BellOff, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { toast } from "sonner";
 import { useConfirm } from "@/components/domain/confirm-dialog";
 import { EmptyState } from "@/components/domain/empty-state";
+import { PageHeader } from "@/components/domain/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -33,7 +31,6 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { PageHeader } from "@/components/domain/page-header";
 import {
   Table,
   TableBody,
@@ -55,6 +52,9 @@ import {
 import { useProjects } from "@/hooks/use-projects";
 import type { ProjectPublic } from "@/lib/api-types";
 import { parseTimestamp } from "@/lib/format";
+import { Bell, BellOff, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 const TRIGGERS: { value: TriggerType; label: string }[] = [
   { value: "task.failed", label: "Task failed" },
@@ -116,6 +116,7 @@ export function MySubscriptionsTab() {
     <div className="space-y-6">
       {confirmDialog}
       <PageHeader
+        level="section"
         title={
           <>
             Notifications
@@ -187,17 +188,30 @@ export function MySubscriptionsTab() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Trigger</TableHead>
-                      <TableHead>Channels</TableHead>
-                      <TableHead>Filters</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Active</TableHead>
+                      <TableHead sortKey="c0">Trigger</TableHead>
+                      <TableHead sortKey="c1">Channels</TableHead>
+                      <TableHead sortKey="c2">Filters</TableHead>
+                      <TableHead sortKey="c3">Status</TableHead>
+                      <TableHead sortKey="c4">Active</TableHead>
                       <TableHead className="w-10" />
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {projectSubs.map((sub) => (
-                      <TableRow key={sub.id}>
+                      <TableRow
+                        sortValues={{
+                          c0: triggerLabel(sub.trigger),
+                          c1: channelSummary(sub),
+                          c2: filterSummary(sub.filters),
+                          c3: Boolean(
+                            sub.muted_until &&
+                            parseTimestamp(sub.muted_until).getTime() >
+                              Date.now(),
+                          ),
+                          c4: sub.is_active,
+                        }}
+                        key={sub.id}
+                      >
                         <TableCell>
                           <Badge variant="outline">
                             {triggerLabel(sub.trigger)}
@@ -225,6 +239,7 @@ export function MySubscriptionsTab() {
                         </TableCell>
                         <TableCell>
                           <Switch
+                            aria-label={`Enable ${triggerLabel(sub.trigger)} subscription`}
                             checked={sub.is_active}
                             onCheckedChange={(checked) => {
                               updateSub.mutate(
@@ -267,34 +282,34 @@ export function MySubscriptionsTab() {
                               size="icon"
                               aria-label={`Delete ${triggerLabel(sub.trigger)} subscription`}
                               className="text-muted-foreground hover:text-destructive"
-                            onClick={() =>
-                              confirm({
-                                title: "Delete subscription",
-                                description: (
-                                  <>
-                                    Stop receiving the{" "}
-                                    <code>{triggerLabel(sub.trigger)}</code>{" "}
-                                    notification for this project?
-                                  </>
-                                ),
-                                confirmLabel: "Delete",
-                                onConfirm: () =>
-                                  deleteSub.mutate(sub.id, {
-                                    onSuccess: () =>
-                                      toast.success("Subscription deleted"),
-                                    onError: (err) => {
-                                      const msg =
-                                        err instanceof Error
-                                          ? err.message
-                                          : "Request failed";
-                                      toast.error(msg);
-                                    },
-                                  }),
-                              })
-                            }
-                          >
-                            <Trash2 className="size-4" />
-                          </Button>
+                              onClick={() =>
+                                confirm({
+                                  title: "Delete subscription",
+                                  description: (
+                                    <>
+                                      Stop receiving the{" "}
+                                      <code>{triggerLabel(sub.trigger)}</code>{" "}
+                                      notification for this project?
+                                    </>
+                                  ),
+                                  confirmLabel: "Delete",
+                                  onConfirm: () =>
+                                    deleteSub.mutate(sub.id, {
+                                      onSuccess: () =>
+                                        toast.success("Subscription deleted"),
+                                      onError: (err) => {
+                                        const msg =
+                                          err instanceof Error
+                                            ? err.message
+                                            : "Request failed";
+                                        toast.error(msg);
+                                      },
+                                    }),
+                                })
+                              }
+                            >
+                              <Trash2 className="size-4" />
+                            </Button>
                           </div>
                         </TableCell>
                       </TableRow>
@@ -313,8 +328,7 @@ export function MySubscriptionsTab() {
 function channelSummary(sub: UserSubscription): string {
   const parts: string[] = [];
   if (sub.in_app) parts.push("In-app");
-  const extra =
-    sub.project_channel_ids.length + sub.user_channel_ids.length;
+  const extra = sub.project_channel_ids.length + sub.user_channel_ids.length;
   if (extra > 0) {
     parts.push(`${extra} channel${extra === 1 ? "" : "s"}`);
   }
@@ -522,8 +536,8 @@ function SubscriptionDialog({
           </Select>
           {isEdit && (
             <p className="text-xs text-muted-foreground">
-              Project can&apos;t be changed. Delete and recreate to move
-              this subscription to a different project.
+              Project can&apos;t be changed. Delete and recreate to move this
+              subscription to a different project.
             </p>
           )}
         </div>

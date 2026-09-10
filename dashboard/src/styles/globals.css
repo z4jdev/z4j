@@ -10,16 +10,16 @@
 
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./design-tokens.css";
+@import "./palettes.css";
 
 @custom-variant dark (&:is(.dark *));
 
 /* ---------------------------------------------------------------
  * Theme tokens - light + dark.
  *
- * Built around OKLCH so the palette stays perceptually uniform
- * when we add accent colors. The base palette is intentionally
- * a cool slate-blue - distinct from "yet another generic gray"
- * shadcn templates.
+ * Semantic roles are shared across navigation, controls and content.
+ * Palettes coordinate surfaces and accents in both display modes.
  * ------------------------------------------------------------ */
 @theme inline {
   --color-background: var(--background);
@@ -29,6 +29,7 @@
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
+  --color-primary-hover: var(--z4j-primary-hover);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
@@ -59,6 +60,8 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
+  --shadow-overlay: var(--z4j-overlay-shadow);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -73,109 +76,52 @@
 }
 
 :root {
-  --radius: 0.625rem;
-
-  /* ----------------------------------------------------------------
-   * Light mode - refined neutral slate.
-   *
-   * Layering: sidebar (slightly tinted) → background (paper) →
-   * card (pure white). Borders are crisper than the previous
-   * pass for better card definition on a light canvas.
-   * ------------------------------------------------------------- */
-  --background: oklch(0.985 0.004 250);
-  --foreground: oklch(0.16 0.024 270);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.16 0.024 270);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.16 0.024 270);
-  --primary: oklch(0.55 0.18 250);
-  --primary-foreground: oklch(0.99 0.005 250);
-  --secondary: oklch(0.965 0.012 250);
-  --secondary-foreground: oklch(0.20 0.018 250);
-  --muted: oklch(0.965 0.012 250);
-  --muted-foreground: oklch(0.48 0.022 250);
-  --accent: oklch(0.945 0.018 250);
-  --accent-foreground: oklch(0.20 0.018 250);
-  --destructive: oklch(0.59 0.22 28);
-  --destructive-foreground: oklch(0.99 0 0);
-  --success: oklch(0.66 0.18 150);
-  --success-foreground: oklch(0.99 0 0);
-  --warning: oklch(0.78 0.16 75);
-  --warning-foreground: oklch(0.16 0.05 75);
-  --border: oklch(0.905 0.014 250);
-  --input: oklch(0.905 0.014 250);
-  --ring: oklch(0.55 0.18 250);
-  --chart-1: oklch(0.62 0.18 250);
-  --chart-2: oklch(0.66 0.18 150);
-  --chart-3: oklch(0.78 0.16 75);
-  --chart-4: oklch(0.59 0.22 28);
-  --chart-5: oklch(0.55 0.16 310);
-
-  --sidebar: oklch(0.972 0.010 250);
-  --sidebar-foreground: oklch(0.16 0.024 270);
-  --sidebar-primary: oklch(0.55 0.18 250);
-  --sidebar-primary-foreground: oklch(0.99 0.005 250);
-  --sidebar-accent: oklch(0.945 0.018 250);
-  --sidebar-accent-foreground: oklch(0.20 0.018 250);
-  --sidebar-border: oklch(0.905 0.014 250);
-  --sidebar-ring: oklch(0.55 0.18 250);
+  --radius: var(--z4j-radius);
+  --background: var(--z4j-canvas);
+  --foreground: var(--z4j-ink);
+  --card: var(--z4j-surface);
+  --card-foreground: var(--z4j-ink);
+  --popover: var(--z4j-surface);
+  --popover-foreground: var(--z4j-ink);
+  --primary: var(--z4j-blue);
+  --primary-foreground: var(--z4j-primary-foreground);
+  --secondary: var(--z4j-hover);
+  --secondary-foreground: var(--z4j-ink);
+  --muted: var(--z4j-hover);
+  --muted-foreground: var(--z4j-muted);
+  --accent: var(--z4j-tint);
+  --accent-foreground: var(--z4j-tint-ink);
+  --destructive: #c22e3b;
+  --destructive-foreground: #ffffff;
+  --success: #187341;
+  --success-foreground: #ffffff;
+  --warning: #895b08;
+  --warning-foreground: #ffffff;
+  --border: var(--z4j-line);
+  --input: var(--z4j-line);
+  --ring: var(--z4j-blue);
+  --chart-1: var(--z4j-blue);
+  --chart-2: var(--z4j-secondary-accent);
+  --chart-3: var(--z4j-tertiary-accent);
+  --chart-4: var(--warning);
+  --chart-5: var(--destructive);
+  --sidebar: var(--z4j-rail);
+  --sidebar-foreground: var(--z4j-ink);
+  --sidebar-primary: var(--z4j-blue);
+  --sidebar-primary-foreground: var(--z4j-primary-foreground);
+  --sidebar-accent: var(--z4j-nav-selected);
+  --sidebar-accent-foreground: var(--z4j-blue);
+  --sidebar-border: var(--z4j-line);
+  --sidebar-ring: var(--z4j-blue);
 }
 
 .dark {
-  /* ----------------------------------------------------------------
-   * Dark mode - Linear-style layered canvas.
-   *
-   * Each layer is clearly stepped in lightness so cards visibly
-   * lift off the background instead of fading into it. Reference
-   * dashboards (Linear, GitHub, Grafana, Vercel) all use ~0.04
-   * steps between layers PLUS a visible border. The previous pass
-   * had cards only 0.04 above the bg with a near-invisible border
-   * - both fixes are applied here.
-   *
-   * Layer ladder:
-   *   sidebar     0.155  ← rail (deepest)
-   *   background  0.180  ← canvas
-   *   card        0.220  ← cards / panels (lifted)
-   *   popover     0.255  ← dropdowns / dialogs (above cards)
-   *   border      0.320  ← visible at the canvas/card boundary
-   * ------------------------------------------------------------- */
-  --background: oklch(0.180 0.008 260);
-  --foreground: oklch(0.972 0.005 250);
-  --card: oklch(0.220 0.010 260);
-  --card-foreground: oklch(0.972 0.005 250);
-  --popover: oklch(0.255 0.012 260);
-  --popover-foreground: oklch(0.972 0.005 250);
-  --primary: oklch(0.72 0.16 250);
-  --primary-foreground: oklch(0.155 0.010 260);
-  --secondary: oklch(0.245 0.012 260);
-  --secondary-foreground: oklch(0.972 0.005 250);
-  --muted: oklch(0.245 0.012 260);
-  --muted-foreground: oklch(0.72 0.014 250);
-  --accent: oklch(0.270 0.014 260);
-  --accent-foreground: oklch(0.972 0.005 250);
-  --destructive: oklch(0.66 0.22 28);
-  --destructive-foreground: oklch(0.99 0 0);
-  --success: oklch(0.74 0.18 150);
-  --success-foreground: oklch(0.155 0.010 260);
-  --warning: oklch(0.82 0.16 75);
-  --warning-foreground: oklch(0.155 0.010 260);
-  --border: oklch(0.320 0.014 260);
-  --input: oklch(0.255 0.012 260);
-  --ring: oklch(0.72 0.16 250);
-  --chart-1: oklch(0.72 0.16 250);
-  --chart-2: oklch(0.74 0.18 150);
-  --chart-3: oklch(0.82 0.16 75);
-  --chart-4: oklch(0.66 0.22 28);
-  --chart-5: oklch(0.72 0.16 310);
-
-  --sidebar: oklch(0.155 0.008 260);
-  --sidebar-foreground: oklch(0.972 0.005 250);
-  --sidebar-primary: oklch(0.72 0.16 250);
-  --sidebar-primary-foreground: oklch(0.155 0.010 260);
-  --sidebar-accent: oklch(0.255 0.014 260);
-  --sidebar-accent-foreground: oklch(0.972 0.005 250);
-  --sidebar-border: oklch(0.295 0.014 260);
-  --sidebar-ring: oklch(0.72 0.16 250);
+  --destructive: #ff8e98;
+  --destructive-foreground: #281015;
+  --success: #72d79b;
+  --success-foreground: #102719;
+  --warning: #ffc069;
+  --warning-foreground: #30210c;
 }
 
 @layer base {
@@ -215,4 +161,91 @@
     background-clip: padding-box;
     border: 2px solid transparent;
   }
+}
+
+/* Navigation inherits the active palette and display mode. */
+.z4j-navigation {
+  border-color: var(--sidebar-border);
+}
+@layer base {
+  body {
+    font-family: var(--z4j-font-sans);
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 3px;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 22%, transparent);
+  }
+  [data-slot="badge"] {
+    border-radius: 999px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Status badges are quiet labels; the action button remains the strongest fill. */
+[data-slot="badge"].bg-success {
+  background: color-mix(in srgb, var(--success) 10%, var(--card));
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 22%, transparent);
+}
+[data-slot="badge"].bg-destructive {
+  background: color-mix(in srgb, var(--destructive) 9%, var(--card));
+  color: var(--destructive);
+  border-color: color-mix(in srgb, var(--destructive) 20%, transparent);
+}
+[data-slot="badge"].bg-warning {
+  background: color-mix(in srgb, var(--warning) 10%, var(--card));
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 22%, transparent);
+}
+
+/* One surface treatment for cards, data collections and standalone panels.
+ * Only elements floating above the page use shadow-overlay. */
+@layer components {
+  .panel-surface {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    color: var(--card-foreground);
+  }
+  .navigation-link {
+    display: flex;
+    min-height: 2.25rem;
+    align-items: center;
+    gap: 0.75rem;
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    color: var(--foreground);
+    transition: background-color var(--z4j-duration);
+  }
+  .navigation-link:hover {
+    background: var(--z4j-nav-hover);
+  }
+  .navigation-link-active,
+  .navigation-link[aria-current="page"] {
+    background: var(--z4j-nav-selected);
+    color: var(--primary);
+    font-weight: 600;
+  }
+}
+.app-shell {
+  padding-bottom: var(--demo-footer-height, 0px);
+}
+.app-sidebar {
+  height: calc(100dvh - var(--demo-footer-height, 0px));
+}
+
+.toaster [data-sonner-toast][data-styled="true"] {
+  box-shadow: var(--z4j-overlay-shadow);
 }

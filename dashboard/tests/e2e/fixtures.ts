@@ -18,10 +18,14 @@
  *   Z4J_E2E_ADMIN_EMAIL defaults to e2e@example.com
  *   Z4J_E2E_ADMIN_PW    defaults to e2e-admin-pw-2026!
  */
-import { test as base, expect, type Page } from "@playwright/test";
+import {
+  test as base,
+  expect,
+  type Page,
+  type APIRequestContext,
+} from "@playwright/test";
 
-export const ADMIN_EMAIL =
-  process.env.Z4J_E2E_ADMIN_EMAIL ?? "e2e@example.com";
+export const ADMIN_EMAIL = process.env.Z4J_E2E_ADMIN_EMAIL ?? "e2e@example.com";
 export const ADMIN_PASSWORD =
   process.env.Z4J_E2E_ADMIN_PW ?? "e2e-admin-pw-2026!";
 
@@ -38,7 +42,11 @@ interface ApiClient {
   raw(
     method: string,
     path: string,
-    opts?: { body?: unknown; headers?: Record<string, string>; noCookie?: boolean },
+    opts?: {
+      body?: unknown;
+      headers?: Record<string, string>;
+      noCookie?: boolean;
+    },
   ): Promise<import("@playwright/test").APIResponse>;
 }
 
@@ -62,14 +70,21 @@ async function authHeaders(page: Page): Promise<Record<string, string>> {
   };
 }
 
-function apiFactory(page: Page): ApiClient {
+function apiFactory(page: Page, bearerRequest: APIRequestContext): ApiClient {
   const raw = async (
     method: string,
     path: string,
-    opts: { body?: unknown; headers?: Record<string, string>; noCookie?: boolean } = {},
+    opts: {
+      body?: unknown;
+      headers?: Record<string, string>;
+      noCookie?: boolean;
+    } = {},
   ) => {
     const auth = opts.noCookie ? {} : await authHeaders(page);
-    return page.request.fetch(`/api/v1${path}`, {
+    // page.request shares the browser's cookie jar even when Cookie is omitted.
+    // The separate request fixture keeps bearer-only checks truly session-free.
+    const client = opts.noCookie ? bearerRequest : page.request;
+    return client.fetch(`/api/v1${path}`, {
       method,
       headers: {
         "Content-Type": "application/json",
@@ -79,11 +94,17 @@ function apiFactory(page: Page): ApiClient {
       data: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });
   };
-  const base = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
+  const base = async <T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> => {
     const response = await raw(method, path, { body });
     if (!response.ok()) {
       const text = await response.text();
-      throw new Error(`API ${method} ${path} failed: ${response.status()} ${text}`);
+      throw new Error(
+        `API ${method} ${path} failed: ${response.status()} ${text}`,
+      );
     }
     const text = await response.text();
     return (text ? JSON.parse(text) : (undefined as T)) as T;
@@ -111,9 +132,7 @@ export const test = base.extend<{
     // button whose aria-label also matches /password/i, so the
     // looser ``getByLabel`` matcher trips strict-mode and fails
     // every E2E test. Anchor on the textbox role.
-    await page
-      .getByRole("textbox", { name: /password/i })
-      .fill(ADMIN_PASSWORD);
+    await page.getByRole("textbox", { name: /password/i }).fill(ADMIN_PASSWORD);
     await page.getByRole("button", { name: /sign in/i }).click();
     // Post-login the router lands somewhere authenticated - either
     // /home (multi-project) or /projects/{slug} (single-project).
@@ -126,8 +145,8 @@ export const test = base.extend<{
   // always runs the login first -- otherwise a test that asks for ``api``
   // but not ``adminPage`` would issue requests from an unauthenticated
   // page and every mutation would 401 on the CSRF/auth check.
-  api: async ({ adminPage }, use) => {
-    await use(apiFactory(adminPage));
+  api: async ({ adminPage, request }, use) => {
+    await use(apiFactory(adminPage, request));
   },
 });
 

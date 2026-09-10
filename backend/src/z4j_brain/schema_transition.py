@@ -7,5 +7,5 @@ serialize catalog changes.
 
 from __future__ import annotations
 
-RELEASE_MIGRATION_HEAD = "v1_9_audit_action_pattern"
+RELEASE_MIGRATION_HEAD = "v1_11_audit_append_tally"
 SCHEMA_TRANSITION_ADVISORY_LOCK_KEY = 0x7A_34_6A_DD

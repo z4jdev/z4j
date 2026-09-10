@@ -1,12 +1,10 @@
-import { useMemo, useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
-import { Terminal } from "lucide-react";
+import { DateCell } from "@/components/domain/date-cell";
+import { EmptyState } from "@/components/domain/empty-state";
 import { FilterToolbar } from "@/components/domain/filter-toolbar";
-import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
 import { PageShell } from "@/components/domain/page-shell";
+import { RefreshButton } from "@/components/domain/refresh-button";
 import { CommandStatusBadge } from "@/components/domain/state-badges";
-import { EmptyState } from "@/components/domain/empty-state";
 import { DataTable, type DataTableColumnDef } from "@/components/ui/data-table";
 import {
   Select,
@@ -15,10 +13,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { useCommands } from "@/hooks/use-commands";
-import { DateCell } from "@/components/domain/date-cell";
 import type { CommandPublic, CommandStatus } from "@/lib/api-types";
+import { sortTimestamp } from "@/lib/table-sorting";
+import { createFileRoute } from "@tanstack/react-router";
+import { Terminal } from "lucide-react";
+import { useMemo, useState } from "react";
 
 export const Route = createFileRoute("/_authenticated/projects/$slug/commands")(
   {
@@ -42,7 +42,7 @@ function CommandsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [cursor, setCursor] = useState<string | null>(null);
 
-  const { data, isLoading, isFetching, refetch } = useCommands(slug, {
+  const { data, isLoading, isError, isFetching, refetch } = useCommands(slug, {
     status: status === "all" ? "" : status,
     cursor,
   });
@@ -75,11 +75,8 @@ function CommandsPage() {
   const filterToolbar = (
     <FilterToolbar
       searchValue={searchQuery}
-      onSearchChange={(v) => {
-        setSearchQuery(v);
-        setCursor(null);
-      }}
-      searchPlaceholder="Search commands..."
+      onSearchChange={setSearchQuery}
+      searchPlaceholder="Search this page…"
       activeFilterCount={activeFilterCount}
       onClear={clearFilters}
       filters={
@@ -90,7 +87,7 @@ function CommandsPage() {
             setCursor(null);
           }}
         >
-          <SelectTrigger className="w-36 shrink-0">
+          <SelectTrigger aria-label="Command status" className="w-36 shrink-0">
             <SelectValue placeholder="Status" />
           </SelectTrigger>
           <SelectContent>
@@ -111,22 +108,19 @@ function CommandsPage() {
       <PageHeader
         title="Commands"
         icon={Terminal}
-        description="trail of all operator-initiated actions"
+        description="Review operator actions and their delivery status."
         actions={
           <RefreshButton onRefresh={() => refetch()} pending={isFetching} />
         }
       />
 
-      {isLoading && (
-        <div className="space-y-2">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-12 w-full" />
-          ))}
-        </div>
-      )}
-      {data && filteredItems.length === 0 && (
-        <>
-          {filterToolbar}
+      <DataTable
+        searchScope="page"
+        isFetching={isFetching}
+        isLoading={isLoading}
+        error={isError ? "Unable to load commands. Try again." : null}
+        onRetry={() => refetch()}
+        emptyState={
           <EmptyState
             icon={Terminal}
             title="no commands yet"
@@ -136,21 +130,17 @@ function CommandsPage() {
                 : "commands appear here when an operator clicks retry / cancel / restart"
             }
           />
-        </>
-      )}
-      {data && filteredItems.length > 0 && (
-        <DataTable
-          columns={columns}
-          data={filteredItems}
-          enableSorting
-          hasNextPage={!!data.next_cursor}
-          hasPreviousPage={!!cursor}
-          onNextPage={() => setCursor(data.next_cursor)}
-          onFirstPage={() => setCursor(null)}
-          totalLabel={`${filteredItems.length} command${filteredItems.length === 1 ? "" : "s"}`}
-          toolbar={() => filterToolbar}
-        />
-      )}
+        }
+        columns={columns}
+        data={filteredItems}
+        enableSorting
+        hasNextPage={!!data?.next_cursor}
+        hasPreviousPage={!!cursor}
+        onNextPage={() => setCursor(data?.next_cursor ?? null)}
+        onFirstPage={() => setCursor(null)}
+        totalLabel={`${filteredItems.length} command${filteredItems.length === 1 ? "" : "s"}`}
+        toolbar={() => filterToolbar}
+      />
     </PageShell>
   );
 }
@@ -169,7 +159,9 @@ function useCommandColumns(): DataTableColumnDef<CommandPublic>[] {
           const cmd = row.original;
           return (
             <div>
-              <div className="font-mono text-sm">{cmd.action}</div>
+              <div className="whitespace-nowrap font-mono text-sm">
+                {cmd.action}
+              </div>
               {cmd.error && (
                 <div className="mt-1 max-w-md truncate text-xs text-destructive">
                   {cmd.error}
@@ -181,7 +173,9 @@ function useCommandColumns(): DataTableColumnDef<CommandPublic>[] {
         enableSorting: true,
       },
       {
-        accessorKey: "target_type",
+        id: "target_type",
+        accessorFn: (row) =>
+          [row.target_type, row.target_id].filter(Boolean).join(" "),
         header: "Target",
         cell: ({ row }: { row: { original: CommandPublic } }) => {
           const cmd = row.original;
@@ -191,7 +185,9 @@ function useCommandColumns(): DataTableColumnDef<CommandPublic>[] {
                 {cmd.target_type}
               </span>
               {cmd.target_id && (
-                <div className="font-mono text-xs">{cmd.target_id}</div>
+                <div className="whitespace-nowrap font-mono text-xs">
+                  {cmd.target_id}
+                </div>
               )}
             </div>
           );
@@ -207,7 +203,8 @@ function useCommandColumns(): DataTableColumnDef<CommandPublic>[] {
         enableSorting: true,
       },
       {
-        accessorKey: "issued_at",
+        id: "issued_at",
+        accessorFn: (row) => sortTimestamp(row.issued_at),
         header: "Issued",
         cell: ({ row }: { row: { original: CommandPublic } }) => (
           <DateCell value={row.original.issued_at} compact />
@@ -215,7 +212,8 @@ function useCommandColumns(): DataTableColumnDef<CommandPublic>[] {
         enableSorting: true,
       },
       {
-        accessorKey: "completed_at",
+        id: "completed_at",
+        accessorFn: (row) => sortTimestamp(row.completed_at),
         header: "Completed",
         cell: ({ row }: { row: { original: CommandPublic } }) => (
           <DateCell value={row.original.completed_at} compact />

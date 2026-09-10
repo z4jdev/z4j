@@ -48,9 +48,9 @@ class AgentStatusHistoryRepository(BaseRepository[AgentStatusHistory]):
         Caller controls the transaction; this method flushes so the
         auto-generated ``id`` populates before the caller reads it
         back. ``captured_at`` is the frame's ``ts`` field, NOT
-        ``datetime.now()`` - we keep the agent's snapshot timestamp
-        so the dashboard timeline reflects when the agent saw the
-        state, not when the brain finished writing it.
+        ``datetime.now()``: the agent's signer stamps it when the frame
+        is sent, so the timeline follows the agent's clock rather than
+        when the brain finished writing the row.
         """
         row = AgentStatusHistory(
             project_id=project_id,
@@ -89,7 +89,7 @@ class AgentStatusHistoryRepository(BaseRepository[AgentStatusHistory]):
         stmt = (
             select(AgentStatusHistory)
             .where(AgentStatusHistory.agent_id == agent_id)
-            .order_by(AgentStatusHistory.captured_at.desc())
+            .order_by(AgentStatusHistory.captured_at.desc(), AgentStatusHistory.id.desc())
             .limit(limit)
         )
         result = await self.session.execute(stmt)

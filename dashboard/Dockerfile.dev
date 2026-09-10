@@ -15,7 +15,7 @@ ENV CI=true \
     PATH=/root/.local/share/pnpm:$PATH \
     HOST=0.0.0.0
 
-RUN corepack enable && corepack prepare pnpm@11.24.0 --activate
+RUN corepack enable && corepack prepare pnpm@12.3.4 --activate
 
 WORKDIR /dashboard
 
@@ -42,7 +42,7 @@ EXPOSE 5173
 
 # --config.verify-deps-before-run=false: at runtime corepack resolves the
 # node user's pnpm to its latest known release (the root-user `corepack
-# prepare pnpm@11.24.0` above does not apply to USER node), and pnpm 11's
+# prepare pnpm@12.3.4` above does not apply to USER node), and pnpm 11's
 # pre-run deps reconcile aborts `pnpm dev` against the image-installed
 # node_modules volume. Skipping only that check keeps HMR working on any
 # pnpm; it does NOT enable dependency install scripts (same posture as

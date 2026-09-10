@@ -20,6 +20,9 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
+import { projectNavigation } from "@/components/layout/project-navigation";
+import { useCurrentUserRole } from "@/hooks/use-memberships";
+import { useMe } from "@/hooks/use-auth";
 import { useQueryClient } from "@tanstack/react-query";
 
 export interface KeyboardShortcutsState {
@@ -30,7 +33,9 @@ export interface KeyboardShortcutsState {
 export function useKeyboardShortcuts(): KeyboardShortcutsState {
   const navigate = useNavigate();
   const params = useParams({ strict: false });
-  const slug = (params as { slug?: string }).slug ?? "default";
+  const slug = (params as { slug?: string }).slug;
+  const role = useCurrentUserRole(slug);
+  const { data: me } = useMe();
   const qc = useQueryClient();
   const [helpOpen, setHelpOpen] = useState(false);
   const pendingG = useRef(false);
@@ -50,7 +55,14 @@ export function useKeyboardShortcuts(): KeyboardShortcutsState {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (isInputFocused()) return;
+      if (
+        isInputFocused() ||
+        document.querySelector('[role="dialog"]') ||
+        e.altKey ||
+        e.metaKey ||
+        e.ctrlKey
+      )
+        return;
       const key = e.key.toLowerCase();
 
       // Two-key navigation: g + <letter>
@@ -59,14 +71,13 @@ export function useKeyboardShortcuts(): KeyboardShortcutsState {
         if (gTimer.current) clearTimeout(gTimer.current);
 
         const routes: Record<string, string> = {
-          o: `/projects/${slug}`,
-          t: `/projects/${slug}/tasks`,
-          w: `/projects/${slug}/workers`,
-          q: `/projects/${slug}/queues`,
-          a: `/projects/${slug}/agents`,
-          s: `/projects/${slug}/settings`,
-          u: "/admin/users",
+          h: "/home",
+          s: "/settings/account",
         };
+        for (const item of projectNavigation(slug, role)) {
+          if (item.shortcut) routes[item.shortcut] = item.to;
+        }
+        if (me?.is_admin) routes.u = "/settings/users";
         const target = routes[key];
         if (target) {
           e.preventDefault();
@@ -99,15 +110,19 @@ export function useKeyboardShortcuts(): KeyboardShortcutsState {
       if (key === "/" && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
         const searchInput = document.querySelector<HTMLInputElement>(
-          'input[type="search"], input[placeholder*="search"]',
+          'input[type="search"], input[placeholder*="search" i]',
         );
         searchInput?.focus();
       }
     };
 
     document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [isInputFocused, navigate, slug, qc]);
+    return () => {
+      document.removeEventListener("keydown", handler);
+      if (gTimer.current) clearTimeout(gTimer.current);
+      pendingG.current = false;
+    };
+  }, [isInputFocused, navigate, slug, role, me?.is_admin, qc]);
 
   return { helpOpen, setHelpOpen };
 }
@@ -116,6 +131,8 @@ export const SHORTCUT_GROUPS = [
   {
     title: "Navigation",
     shortcuts: [
+      { keys: "g h", description: "Go to workspace Home" },
+      { keys: "g i", description: "Go to Issues" },
       { keys: "g o", description: "Go to Overview" },
       { keys: "g t", description: "Go to Tasks" },
       { keys: "g w", description: "Go to Workers" },

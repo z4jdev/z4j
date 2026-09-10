@@ -1,3 +1,4 @@
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * Schedule detail page (docs/SCHEDULER.md §13.1).
  *
@@ -10,6 +11,39 @@
  * on the list page where they batch naturally; the detail page is
  * where operators come to investigate "why did this fire fail at 03:00?"
  */
+import { DateCell } from "@/components/domain/date-cell";
+import { EmptyState } from "@/components/domain/empty-state";
+import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
+import { ScheduleRunStrip } from "@/components/domain/schedule-run-strip";
+import { TaskPriorityBadge } from "@/components/domain/state-badges";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { useCan } from "@/hooks/use-memberships";
+import {
+  useSchedule,
+  useScheduleFires,
+  useToggleSchedule,
+  useTriggerSchedule,
+} from "@/hooks/use-schedules";
+import { ApiError } from "@/lib/api";
+import type { ScheduleFirePublic, ScheduleFireStatus } from "@/lib/api-types";
+import { cn } from "@/lib/utils";
+import {
+  CatchUpBadge,
+  SourceBadge,
+} from "@/routes/_authenticated.projects.$slug.schedules";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   AlertTriangle,
@@ -24,39 +58,6 @@ import {
   Zap,
 } from "lucide-react";
 import { toast } from "sonner";
-import { PageHeader } from "@/components/domain/page-header";
-import { TaskPriorityBadge } from "@/components/domain/state-badges";
-import { ScheduleRunStrip } from "@/components/domain/schedule-run-strip";
-import { EmptyState } from "@/components/domain/empty-state";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { DateCell } from "@/components/domain/date-cell";
-import { useCan } from "@/hooks/use-memberships";
-import {
-  useSchedule,
-  useScheduleFires,
-  useToggleSchedule,
-  useTriggerSchedule,
-} from "@/hooks/use-schedules";
-import { ApiError } from "@/lib/api";
-import type { ScheduleFirePublic, ScheduleFireStatus } from "@/lib/api-types";
-import { cn } from "@/lib/utils";
-import { PageShell } from "@/components/domain/page-shell";
-import {
-  CatchUpBadge,
-  SourceBadge,
-} from "@/routes/_authenticated.projects.$slug.schedules";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/schedules_/$scheduleId",
@@ -150,6 +151,7 @@ function ScheduleDetailPage() {
               <div className="flex items-center gap-2 px-2 text-xs text-muted-foreground">
                 <span>{schedule.is_enabled ? "enabled" : "disabled"}</span>
                 <Switch
+                  aria-label={`Enable schedule ${schedule.name}`}
                   checked={schedule.is_enabled}
                   onCheckedChange={onToggle}
                   disabled={!canOperate || toggle.isPending}
@@ -261,11 +263,11 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-1">
+    <div className="min-w-0 space-y-1">
       <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">
         {label}
       </dt>
-      <dd>{children}</dd>
+      <dd className="break-words">{children}</dd>
     </div>
   );
 }
@@ -292,9 +294,9 @@ function FireHistoryCard({
         <Button
           size="sm"
           variant="ghost"
+          aria-label="Refresh fire history"
           onClick={onRefresh}
           disabled={fetching}
-          className="h-8"
         >
           <RefreshCw className={cn("size-4", fetching && "animate-spin")} />
         </Button>
@@ -316,25 +318,45 @@ function FireHistoryCard({
         )}
         {fires && fires.length > 0 && (
           <div className="mb-4 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-            <ScheduleRunStrip runs={fires} slots={50} size="md" />
-            <span>oldest on the left, newest on the right; hover a cell for detail</span>
+            <ScheduleRunStrip
+              runs={fires}
+              slots={50}
+              size="md"
+              className="max-w-full"
+            />
+            <span>
+              oldest on the left, newest on the right; hover a cell for detail
+            </span>
           </div>
         )}
         {fires && fires.length > 0 && (
-          <div className="overflow-x-auto rounded-md border">
+          <div className="panel-surface overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-32">Status</TableHead>
-                  <TableHead>Scheduled for</TableHead>
-                  <TableHead>Fired at</TableHead>
-                  <TableHead className="text-right">Latency</TableHead>
-                  <TableHead>Detail</TableHead>
+                  <TableHead sortKey="c0" className="w-32">
+                    Status
+                  </TableHead>
+                  <TableHead sortKey="c1">Scheduled for</TableHead>
+                  <TableHead sortKey="c2">Fired at</TableHead>
+                  <TableHead sortKey="c3" className="text-right">
+                    Latency
+                  </TableHead>
+                  <TableHead sortKey="c4">Detail</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {fires.map((fire) => (
-                  <TableRow key={fire.id}>
+                  <TableRow
+                    sortValues={{
+                      c0: fire.status,
+                      c1: sortTimestamp(fire.scheduled_for),
+                      c2: sortTimestamp(fire.fired_at),
+                      c3: fire.latency_ms,
+                      c4: fire.error_message ?? fire.command_id,
+                    }}
+                    key={fire.id}
+                  >
                     <TableCell>
                       <FireStatusBadge status={fire.status} />
                     </TableCell>

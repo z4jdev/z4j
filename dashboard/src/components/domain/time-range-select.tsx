@@ -40,7 +40,7 @@ export function TimeRangeSelect<T extends string>({
   value,
   onValueChange,
   options,
-  className = "w-40",
+  className = "w-44",
   ...aria
 }: TimeRangeSelectProps<T>) {
   return (

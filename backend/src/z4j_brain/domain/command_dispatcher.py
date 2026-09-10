@@ -55,7 +55,7 @@ import structlog
 
 from z4j_brain.domain.retry_contract import required_retry_engine
 from z4j_brain.errors import AgentOfflineError
-from z4j_brain.persistence.enums import CommandStatus
+from z4j_brain.persistence.enums import AgentState, CommandStatus
 from z4j_brain.persistence.repositories.commands import action_is_redeliverable
 
 if TYPE_CHECKING:
@@ -260,6 +260,9 @@ class CommandDispatcher:
                 "agent is revoked or unavailable",
                 details={"agent_id": str(agent_id)},
             )
+        # Read under the same lock. A live agent with no WebSocket session on
+        # this registry still receives the command (see the delivery below).
+        agent_online = agent.state == AgentState.ONLINE
 
         timeout_at = datetime.now(UTC) + timedelta(
             seconds=self._settings.command_timeout_seconds,
@@ -439,12 +442,19 @@ class CommandDispatcher:
             await commands.session.refresh(command)
             if command.status != CommandStatus.PENDING:
                 return command
-            # The registry treats unknown agents this way. Surface a clean error
-            # to the caller - the row stays pending, the timeout sweeper cleans up.
-            raise AgentOfflineError(
-                "agent is not connected",
-                details={"agent_id": str(agent_id)},
-            )
+            # No WebSocket session holds the agent here, yet the agent is live:
+            # it polls (the long-poll transport claims committed PENDING rows)
+            # or is reconnecting (the reconnect drain delivers them). The
+            # command will run, so it stays pending, as behind a cluster
+            # NOTIFY. Reporting it offline would invite a second attempt.
+            if result.agent_was_known or not agent_online:
+                # Offline, or connected only through sessions that cannot take
+                # this command: surface a clean error to the caller. The row
+                # stays pending; the timeout sweeper cleans up.
+                raise AgentOfflineError(
+                    "agent is not connected",
+                    details={"agent_id": str(agent_id)},
+                )
 
         # Refresh the row from the session - the deliver_local
         # callback may have UPDATEd it to dispatched while the

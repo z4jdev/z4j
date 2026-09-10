@@ -12,7 +12,7 @@
  *      ``tests/e2e/visual-regression.spec.ts-snapshots/``.
  *      Commit them.
  *   2. Subsequent runs compare the live page to the committed
- *      snapshot; any diff above ``maxDiffPixelRatio: 0.005``
+ *      snapshot; any diff above ``maxDiffPixelRatio: 0.0001``
  *      (configured in playwright.config.ts) fails the job.
  *   3. Intentional UI change → run ``pnpm test:e2e -- --update-
  *      snapshots`` locally, commit the new snapshot, push.

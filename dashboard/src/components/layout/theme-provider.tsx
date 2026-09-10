@@ -1,23 +1,8 @@
 /**
- * Dark/light/system theme provider.
- *
- * Inlined replacement for the ``next-themes`` npm package as part
- * of the npm-supply-chain minimisation pass (SECURITY.md §16.1).
- * The package is fine, well-maintained, and 50 KB in npm; we
- * dropped it because the surface we use (three modes, one
- * ``html.dark`` class, ``prefers-color-scheme`` sync,
- * localStorage persistence) is ~60 lines of code we'd rather own
- * directly than accept another publish-path-to-compromise on.
- *
- * Drop-in compatible with the API every consumer used:
- *   - ``<ThemeProvider>{children}</ThemeProvider>`` at app root
- *   - ``const { theme, setTheme, resolvedTheme } = useTheme()``
- *
- * The HTML element is initialised with ``class="dark"`` by the
- * inline boot script in ``index.html`` so the first paint is dark
- * by default for a control plane. The provider then reads
- * ``localStorage.z4j-theme``; if it differs, it swaps the class
- * before React commits its first frame.
+ * Display mode and coordinated palette preferences, shared by every route.
+ * The inline bootstrap applies the same values before first paint. This
+ * provider follows system mode, persists browser choices and synchronizes tabs.
+ * Palette migration and the bootstrap are checked together in unit tests.
  */
 import {
   createContext,
@@ -28,6 +13,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import {
+  isPalette,
+  PALETTE_STORAGE_KEY,
+  readStoredPalette,
+  type PaletteId,
+} from "@/lib/palettes";
 
 type Theme = "light" | "dark" | "system";
 type ResolvedTheme = "light" | "dark";
@@ -36,10 +27,12 @@ interface ThemeContextValue {
   theme: Theme;
   resolvedTheme: ResolvedTheme;
   setTheme: (next: Theme) => void;
+  palette: PaletteId;
+  setPalette: (next: PaletteId) => void;
 }
 
 const STORAGE_KEY = "z4j-theme";
-const DEFAULT_THEME: Theme = "dark";
+const DEFAULT_THEME: Theme = "system";
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
@@ -74,6 +67,7 @@ function applyHtmlClass(resolved: ResolvedTheme): void {
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => readStoredTheme());
+  const [palette, setPaletteState] = useState<PaletteId>(readStoredPalette);
   const [systemDark, setSystemDark] = useState<boolean>(() =>
     systemPrefersDark(),
   );
@@ -100,6 +94,36 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     applyHtmlClass(resolvedTheme);
   }, [resolvedTheme]);
 
+  useEffect(() => {
+    document.documentElement.dataset.palette = palette;
+  }, [palette]);
+
+  // Preferences are local to this browser; keep other open tabs in sync.
+  useEffect(() => {
+    const sync = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY || event.key === null)
+        setThemeState(readStoredTheme());
+      if (
+        event.key === PALETTE_STORAGE_KEY ||
+        event.key === "z4j-primary-hue" ||
+        event.key === null
+      )
+        setPaletteState(readStoredPalette());
+    };
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, []);
+
+  const setPalette = useCallback((next: PaletteId) => {
+    if (!isPalette(next)) return;
+    setPaletteState(next);
+    try {
+      window.localStorage.setItem(PALETTE_STORAGE_KEY, next);
+    } catch {
+      // Applying a palette still works when browser storage is unavailable.
+    }
+  }, []);
+
   const setTheme = useCallback((next: Theme) => {
     setThemeState(next);
     try {
@@ -112,8 +136,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<ThemeContextValue>(
-    () => ({ theme, resolvedTheme, setTheme }),
-    [theme, resolvedTheme, setTheme],
+    () => ({ theme, resolvedTheme, setTheme, palette, setPalette }),
+    [theme, resolvedTheme, setTheme, palette, setPalette],
   );
 
   return (

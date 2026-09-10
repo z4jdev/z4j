@@ -9,9 +9,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.exc import IntegrityError
 from z4j_core.transport import CURRENT_PROTOCOL
+from z4j_core.transport.frames import TelemetryLossPayload
 from z4j_core.transport.hmac import derive_project_secret
 
 from z4j_brain.api.deps import (
@@ -227,6 +228,64 @@ def _agent_payload(
         agent_version=agent_version_raw,
         version_status=version_status,
     )
+
+
+class AgentHealthSnapshot(BaseModel):
+    id: int
+    captured_at: datetime
+    worker_id: str | None = None
+    telemetry_loss: TelemetryLossPayload | None = None
+
+
+@router.get("/{agent_id}/health", response_model=list[AgentHealthSnapshot])
+async def agent_health(
+    slug: str,
+    agent_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+) -> list[AgentHealthSnapshot]:
+    """Latest 100 retained status samples; cumulative counters, never a sum.
+
+    Absence means unavailable (old agent, status disabled or retention expiry).
+    Samples are agent-reported and can be delayed during a transport outage.
+    """
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.errors import NotFoundError
+    from z4j_brain.persistence.repositories import AgentRepository, AgentStatusHistoryRepository
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships, user=user, project=project, min_role=ProjectRole.VIEWER
+    )
+    agent = await AgentRepository(db_session).get_live(agent_id)
+    if agent is None or agent.project_id != project.id:
+        raise NotFoundError("agent not found")
+    rows = await AgentStatusHistoryRepository(db_session).recent_for_agent(agent_id=agent.id)
+    result = []
+    for row in rows:
+        if row.project_id != project.id:
+            continue
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        raw_loss = payload.get("telemetry_loss")
+        try:
+            loss = TelemetryLossPayload.model_validate(raw_loss) if raw_loss is not None else None
+        except ValidationError:
+            loss = None
+        worker_id = payload.get("worker_id")
+        result.append(
+            AgentHealthSnapshot(
+                id=row.id,
+                captured_at=row.captured_at.replace(tzinfo=UTC)
+                if row.captured_at.tzinfo is None
+                else row.captured_at,
+                worker_id=worker_id if isinstance(worker_id, str) else None,
+                telemetry_loss=loss,
+            )
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -1,14 +1,13 @@
-import { useMemo, useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
-import { Copy, Network, Plus, Trash2 } from "lucide-react";
-import { toast } from "sonner";
+import { AgentHealthDialog } from "@/components/domain/agent-health-dialog";
+import { AgentConnectGuide } from "@/components/domain/agent-connect-guide";
 import { useConfirm } from "@/components/domain/confirm-dialog";
+import { DateCell } from "@/components/domain/date-cell";
+import { EmptyState } from "@/components/domain/empty-state";
 import { FilterToolbar } from "@/components/domain/filter-toolbar";
 import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
 import { AgentStateBadge } from "@/components/domain/state-badges";
-import { EmptyState } from "@/components/domain/empty-state";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -34,17 +33,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Skeleton } from "@/components/ui/skeleton";
-import {
-  useAgents,
-  useCreateAgent,
-  useRevokeAgent,
-} from "@/hooks/use-agents";
+import { useAgents, useCreateAgent, useRevokeAgent } from "@/hooks/use-agents";
 import { useCan } from "@/hooks/use-memberships";
-import { DateCell } from "@/components/domain/date-cell";
 import { ApiError } from "@/lib/api";
 import type { AgentState } from "@/lib/api-types";
-import { PageShell } from "@/components/domain/page-shell";
+import { sortTimestamp } from "@/lib/table-sorting";
+import { createFileRoute } from "@tanstack/react-router";
+import { Copy, Network, Plus, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 const AGENT_STATES: AgentState[] = ["online", "offline", "unknown"];
 
@@ -54,11 +51,15 @@ export const Route = createFileRoute("/_authenticated/projects/$slug/agents")({
 
 function AgentsPage() {
   const { slug } = Route.useParams();
-  const { data: agents, isLoading } = useAgents(slug);
+  const { data: agents, isLoading, isError, refetch } = useAgents(slug);
   const createAgent = useCreateAgent(slug);
   const revokeAgent = useRevokeAgent(slug);
   const canManageAgents = useCan(slug, "manage_agents");
 
+  const [healthAgent, setHealthAgent] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [mintedToken, setMintedToken] = useState<string | null>(null);
@@ -156,11 +157,16 @@ function AgentsPage() {
   return (
     <>
       {confirmDialog}
+      <AgentHealthDialog
+        slug={slug}
+        agent={healthAgent}
+        onClose={() => setHealthAgent(null)}
+      />
       <PageShell>
         <PageHeader
           title="Agents"
           icon={Network}
-          description="mint a token here, paste it into your worker's z4j config (Celery, RQ, or Dramatiq), and watch it come online"
+          description="Connect your workers, verify their connection and manage agent credentials."
           actions={
             canManageAgents ? (
               <Button
@@ -178,41 +184,41 @@ function AgentsPage() {
           }
         />
 
-        <FilterToolbar
-          searchValue={searchQuery}
-          onSearchChange={setSearchQuery}
-          searchPlaceholder="Search agents..."
-          activeFilterCount={activeFilterCount}
-          onClear={clearFilters}
-          filters={
-            <Select
-              value={stateFilter}
-              onValueChange={(v) => setStateFilter(v as AgentState | "all")}
-            >
-              <SelectTrigger className="w-36 shrink-0">
-                <SelectValue placeholder="State" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All states</SelectItem>
-                {AGENT_STATES.map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {s}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+        <Table
+          toolbar={
+            <FilterToolbar
+              searchValue={searchQuery}
+              onSearchChange={setSearchQuery}
+              searchPlaceholder="Search agents..."
+              activeFilterCount={activeFilterCount}
+              onClear={clearFilters}
+              filters={
+                <Select
+                  value={stateFilter}
+                  onValueChange={(v) => setStateFilter(v as AgentState | "all")}
+                >
+                  <SelectTrigger
+                    aria-label="Agent state"
+                    className="w-36 shrink-0"
+                  >
+                    <SelectValue placeholder="State" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All states</SelectItem>
+                    {AGENT_STATES.map((s) => (
+                      <SelectItem key={s} value={s}>
+                        {s}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              }
+            />
           }
-        />
-
-        <Card className="overflow-hidden">
-          {isLoading && (
-            <div className="space-y-2 p-4">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <Skeleton key={i} className="h-10 w-full" />
-              ))}
-            </div>
-          )}
-          {agents && filteredAgents.length === 0 && (
+          isLoading={isLoading}
+          error={isError ? "Unable to load agents. Try again." : null}
+          onRetry={() => refetch()}
+          emptyState={
             <EmptyState
               icon={Network}
               title={
@@ -223,97 +229,113 @@ function AgentsPage() {
               description={
                 activeFilterCount > 0
                   ? "try adjusting your filters or search query"
-                  : "click 'new agent' to mint a token, then add it to your worker (Celery, RQ, or Dramatiq)"
+                  : "click 'new agent' to mint a token, then add it to your worker using the integration guide for your engine"
               }
             />
-          )}
-          {agents && filteredAgents.length > 0 && (
-            <>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Host</TableHead>
-                  <TableHead>State</TableHead>
-                  <TableHead>Framework</TableHead>
-                  <TableHead>Engines</TableHead>
-                  <TableHead>Version</TableHead>
-                  <TableHead className="text-right">Last seen</TableHead>
-                  <TableHead className="text-right"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredAgents.map((agent) => (
-                  <TableRow key={agent.id}>
-                    <TableCell>
-                      <div className="font-medium">{agent.name}</div>
-                      <div className="font-mono text-xs text-muted-foreground">
-                        {agent.id.slice(0, 8)}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      {agent.host_name ? (
-                        <span className="font-mono text-sm">{agent.host_name}</span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground/60">-</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <AgentStateBadge state={agent.state} />
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {agent.framework_adapter}
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {agent.engine_adapters.join(", ") || "-"}
-                    </TableCell>
-                    <TableCell>
-                      <AgentVersionCell
-                        version={agent.agent_version ?? null}
-                        status={agent.version_status ?? null}
-                      />
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <DateCell value={agent.last_seen_at} compact />
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {canManageAgents && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => onRevoke(agent.id, agent.name)}
-                          aria-label="revoke agent"
-                        >
-                          <Trash2 className="size-4 text-destructive" />
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-            <div className="border-t px-4 py-2 text-xs text-muted-foreground">
-              {filteredAgents.length} agent
-              {filteredAgents.length === 1 ? "" : "s"}
-              {activeFilterCount > 0 && agents.length !== filteredAgents.length
-                ? ` of ${agents.length}`
-                : ""}
-            </div>
-            </>
-          )}
-        </Card>
+          }
+        >
+          <TableHeader>
+            <TableRow>
+              <TableHead sortKey="c0">Name</TableHead>
+              <TableHead sortKey="c1">Host</TableHead>
+              <TableHead sortKey="c2">State</TableHead>
+              <TableHead sortKey="c3">Framework</TableHead>
+              <TableHead sortKey="c4">Engines</TableHead>
+              <TableHead sortKey="c5">Version</TableHead>
+              <TableHead sortKey="c6" className="text-right">
+                Last seen
+              </TableHead>
+              <TableHead className="text-right"></TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {(filteredAgents ?? []).map((agent) => (
+              <TableRow
+                sortValues={{
+                  c0: agent.name,
+                  c1: agent.host_name,
+                  c2: agent.state,
+                  c3: agent.framework_adapter,
+                  c4: agent.engine_adapters.join(", "),
+                  c5: agent.agent_version,
+                  c6: sortTimestamp(agent.last_seen_at),
+                }}
+                key={agent.id}
+              >
+                <TableCell>
+                  <div className="font-medium">{agent.name}</div>
+                  <div className="font-mono text-xs text-muted-foreground">
+                    {agent.id.slice(0, 8)}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  {agent.host_name ? (
+                    <span className="font-mono text-sm">{agent.host_name}</span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground/60">-</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <AgentStateBadge state={agent.state} />
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {agent.framework_adapter}
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {agent.engine_adapters.join(", ") || "-"}
+                </TableCell>
+                <TableCell>
+                  <AgentVersionCell
+                    version={agent.agent_version ?? null}
+                    status={agent.version_status ?? null}
+                  />
+                </TableCell>
+                <TableCell className="text-right">
+                  <DateCell value={agent.last_seen_at} compact />
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setHealthAgent(agent)}
+                    aria-label={`View health for ${agent.name}`}
+                  >
+                    Health
+                  </Button>
+                  {canManageAgents && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => onRevoke(agent.id, agent.name)}
+                      aria-label="revoke agent"
+                    >
+                      <Trash2 className="size-4 text-destructive" />
+                    </Button>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
       </PageShell>
 
       {/* Mint dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent>
+      <Dialog
+        open={createOpen}
+        onOpenChange={(open) => {
+          if (createAgent.isPending) return;
+          if (open) setCreateOpen(true);
+          else closeMintDialog();
+        }}
+      >
+        <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-xl">
           {mintedToken === null ? (
             <form onSubmit={onCreate}>
               <DialogHeader>
-                <DialogTitle>Mint a new agent token</DialogTitle>
+                <DialogTitle>Connect an agent</DialogTitle>
                 <DialogDescription>
-                  Pick a friendly name. The plaintext token is shown
-                  exactly once on the next screen.
+                  Pick a friendly name. The plaintext token is shown exactly
+                  once on the next screen.
                 </DialogDescription>
               </DialogHeader>
               <div className="my-6 space-y-2">
@@ -342,7 +364,7 @@ function AgentsPage() {
           ) : (
             <>
               <DialogHeader>
-                <DialogTitle>Token minted</DialogTitle>
+                <DialogTitle>Configure your worker</DialogTitle>
                 <DialogDescription>
                   Copy BOTH values now. Neither is shown again.
                 </DialogDescription>
@@ -400,6 +422,7 @@ function AgentsPage() {
                   </div>
                 )}
               </div>
+              <AgentConnectGuide slug={slug} />
               <DialogFooter>
                 <Button type="button" onClick={closeMintDialog}>
                   Done
@@ -412,7 +435,6 @@ function AgentsPage() {
     </>
   );
 }
-
 
 /**
  * Render the agent's z4j-core version string with an "update available"
@@ -447,8 +469,7 @@ function AgentVersionCell({
     case "incompatible":
       badge = {
         label: "incompatible",
-        className:
-          "border-destructive/40 bg-destructive/10 text-destructive",
+        className: "border-destructive/40 bg-destructive/10 text-destructive",
         title:
           "Major version mismatch with z4j's snapshot. Upgrade z4j-bare to a compatible major version.",
       };
@@ -456,8 +477,7 @@ function AgentVersionCell({
     case "newer_than_known":
       badge = {
         label: "newer than known",
-        className:
-          "border-muted-foreground/30 bg-muted text-muted-foreground",
+        className: "border-muted-foreground/30 bg-muted text-muted-foreground",
         title:
           "Agent is newer than z4j's snapshot. z4j itself may be out of date - try Settings → System → Check for updates.",
       };

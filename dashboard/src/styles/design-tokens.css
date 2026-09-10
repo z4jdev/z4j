@@ -1,0 +1,65 @@
+/* Shared z4j foundation. Neutral surfaces, restrained accents, explicit hierarchy.
+ * Palette previews use the same tokens as the application, not approximations. */
+:root {
+  --z4j-font-sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --z4j-font-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  --z4j-radius: 0.5rem;
+  --z4j-duration: 160ms;
+}
+:root,
+[data-palette-preview] {
+  --z4j-canvas: #fafafa;
+  --z4j-surface: #ffffff;
+  --z4j-ink: #202124;
+  --z4j-muted: #60646c;
+  --z4j-line: #dedee3;
+  --z4j-blue: #0969da;
+  --z4j-primary-hover: color-mix(in srgb, var(--z4j-blue) 90%, #000000);
+  --z4j-nav-selected: color-mix(
+    in srgb,
+    var(--z4j-blue) 8%,
+    var(--z4j-surface)
+  );
+  --z4j-nav-hover: #e9e9ec;
+  --z4j-overlay-shadow: 0 8px 24px rgb(20 25 35 / 14%);
+  --z4j-rail: #f2f2f2;
+  --z4j-tint: color-mix(in srgb, var(--z4j-blue) 6%, var(--z4j-surface));
+  --z4j-tint-ink: var(--z4j-blue);
+  --z4j-hover: #efeff1;
+  --z4j-primary-foreground: #ffffff;
+  --z4j-secondary-accent: #087a6e;
+  --z4j-tertiary-accent: #635bce;
+}
+.dark,
+[data-theme="dark"],
+.dark [data-palette-preview] {
+  --z4j-canvas: #1c1d20;
+  --z4j-surface: #242529;
+  --z4j-ink: #ededf0;
+  --z4j-muted: #b0b1b8;
+  --z4j-line: #3b3d44;
+  --z4j-blue: #79b8ff;
+  --z4j-primary-hover: color-mix(in srgb, var(--z4j-blue) 90%, #ffffff);
+  --z4j-nav-selected: color-mix(
+    in srgb,
+    var(--z4j-blue) 14%,
+    var(--z4j-surface)
+  );
+  --z4j-nav-hover: #2b2c31;
+  --z4j-overlay-shadow: 0 8px 24px rgb(0 0 0 / 32%);
+  --z4j-rail: #151619;
+  --z4j-tint: color-mix(in srgb, var(--z4j-blue) 10%, var(--z4j-surface));
+  --z4j-tint-ink: var(--z4j-blue);
+  --z4j-hover: #2e3035;
+  --z4j-primary-foreground: #12243a;
+  --z4j-secondary-accent: #66c9b6;
+  --z4j-tertiary-accent: #b3a4ff;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --z4j-duration: 0ms;
+  }
+}

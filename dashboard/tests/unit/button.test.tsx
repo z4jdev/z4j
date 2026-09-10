@@ -52,7 +52,7 @@ describe("Button", () => {
 
   it.each([
     ["default", "h-9"],
-    ["sm", "h-8"],
+    ["sm", "h-9"],
     ["lg", "h-10"],
     ["icon", "size-9"],
   ] as const)("size '%s' applies the right dimension", (size, expected) => {

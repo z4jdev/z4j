@@ -1,13 +1,38 @@
 /**
  * Enterprise data table built on TanStack Table.
  *
- * Layout-shift-free design: the toolbar strip between filters and
- * the table has a fixed height. When rows are selected the bulk
- * action bar replaces the toolbar IN-PLACE - the table rows never
- * move. This follows the Shopify admin pattern used by enterprise
- * dashboards where power users rely on muscle memory.
+ * Shares rendering, sorting controls and request states with the compound
+ * Table primitives. Bulk actions occupy the same control area as filters
+ * and wrap on small screens. Selection is scoped to stable entity IDs.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { PaginationControls } from "@/components/ui/pagination-controls";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { compareTableValues, type TableSortValue } from "@/lib/table-sorting";
+import { cn } from "@/lib/utils";
 import {
   columnSizingFeature,
   columnVisibilityFeature,
@@ -25,41 +50,8 @@ import {
   type RowSelectionState,
   type SortingState,
 } from "@tanstack/react-table";
-import {
-  ArrowDown,
-  ArrowUp,
-  ArrowUpDown,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  Columns3,
-} from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { cn } from "@/lib/utils";
+import { Columns3 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export interface BulkActionContext<TData> {
   selectedRows: TData[];
@@ -94,6 +86,15 @@ interface DataTableBaseProps<TData extends RowData> {
   columns: DataTableColumnDef<TData>[];
   data: TData[];
   enableSorting?: boolean;
+  isLoading?: boolean;
+  isFetching?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
+  emptyState?: React.ReactNode;
+  /** Cursor APIs return bounded windows. Sorting never silently fetches history. */
+  sortingScope?: "all" | "page";
+  searchScope?: "all" | "page";
+  notice?: React.ReactNode;
   pageSize?: number;
   pageSizeOptions?: number[];
   onPageSizeChange?: (size: number) => void;
@@ -128,7 +129,7 @@ type DataTableSelectionProps<TData extends RowData> =
       getRowId: (row: TData) => string;
       /**
        * Identity of the exact selection scope (project + filters + page).
-       * Changing it remounts the controlled selection state before another
+       * Changing it resets the controlled selection state before another
        * destructive action can observe stale intent.
        */
       selectionScopeKey: string;
@@ -144,18 +145,15 @@ type DataTableProps<TData extends RowData> = DataTableBaseProps<TData> &
 
 /**
  * Keep non-selectable tables source-compatible while making stable identity
- * mandatory for every selectable table. The keyed inner component resets both
- * explicit and all-pages selection synchronously when the caller's selection
- * scope changes.
+ * mandatory for every selectable table. Scope changes reset selection without
+ * remounting the search controls, so typing never loses focus.
  */
 export function DataTable<TData extends RowData>(props: DataTableProps<TData>) {
   const [sorting, setSorting] = useState<SortingState>([]);
-  // Hoisted beside sorting: the keyed inner table remounts on every filter
-  // or search change, and a reader who revealed a column must not watch it
-  // vanish on the next keystroke.
-  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>(
-    () => props.initialColumnVisibility ?? {},
-  );
+  // Sorting and column choices persist independently of selection scope.
+  const [columnVisibility, setColumnVisibility] = useState<
+    Record<string, boolean>
+  >(() => props.initialColumnVisibility ?? {});
 
   if (
     props.enableSelection &&
@@ -168,10 +166,8 @@ export function DataTable<TData extends RowData>(props: DataTableProps<TData>) {
 
   return (
     <DataTableInner
-      key={
-        props.enableSelection ? props.selectionScopeKey : "selection-disabled"
-      }
       {...props}
+      data={props.error || props.isLoading ? [] : props.data}
       sorting={sorting}
       setSorting={setSorting}
       columnVisibility={columnVisibility}
@@ -184,8 +180,17 @@ function DataTableInner<TData extends RowData>({
   columns,
   data,
   enableSelection = false,
+  selectionScopeKey,
   getRowId,
   enableSorting = true,
+  isLoading = false,
+  isFetching = false,
+  error,
+  onRetry,
+  emptyState,
+  sortingScope = "all",
+  searchScope = "all",
+  notice,
   pageSize = 50,
   pageSizeOptions = [10, 25, 50, 100],
   onPageSizeChange,
@@ -207,11 +212,28 @@ function DataTableInner<TData extends RowData>({
   sorting: SortingState;
   setSorting: React.Dispatch<React.SetStateAction<SortingState>>;
   columnVisibility: Record<string, boolean>;
-  setColumnVisibility: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  setColumnVisibility: React.Dispatch<
+    React.SetStateAction<Record<string, boolean>>
+  >;
 }) {
   const [storedRowSelection, setStoredRowSelection] =
     useState<RowSelectionState>({});
   const [allPagesSelected, setAllPagesSelected] = useState(false);
+  const selectionResetKey = JSON.stringify([
+    enableSelection,
+    selectionScopeKey,
+    Boolean(isLoading || error),
+  ]);
+  const [previousSelectionKey, setPreviousSelectionKey] =
+    useState(selectionResetKey);
+  // React retries this component before committing descendants. Resetting
+  // during render keeps stale bulk intent out of the DOM; unlike keying the
+  // entire table, it preserves search focus and other control identities.
+  if (previousSelectionKey !== selectionResetKey) {
+    setPreviousSelectionKey(selectionResetKey);
+    setStoredRowSelection({});
+    setAllPagesSelected(false);
+  }
 
   const rowById = useMemo(() => {
     const rows = new Map<string, TData>();
@@ -276,6 +298,23 @@ function DataTableInner<TData extends RowData>({
     features: dataTableFeatures,
     data,
     columns: allColumns,
+    defaultColumn: {
+      sortDescFirst: false,
+      sortUndefined: "last",
+      sortFn: (a, b, id) => {
+        const left = a.getValue(id) as TableSortValue;
+        const right = b.getValue(id) as TableSortValue;
+        const missing = (v: TableSortValue) =>
+          v == null || (typeof v === "number" && !Number.isFinite(v));
+        // TanStack reverses comparator results for descending. Compensate
+        // only for missing values so they stay last in either direction.
+        const missingPair = missing(left) !== missing(right);
+        const descending = a.table.getColumn(id)?.getIsSorted() === "desc";
+        return (
+          compareTableValues(left, right) * (missingPair && descending ? -1 : 1)
+        );
+      },
+    },
     state: { sorting, rowSelection, columnVisibility },
     onColumnVisibilityChange: (updater) =>
       setColumnVisibility((prev) =>
@@ -372,90 +411,93 @@ function DataTableInner<TData extends RowData>({
   };
 
   return (
-    <div className="space-y-0">
-      {/* Toolbar strip - fixed height, never causes layout shift.
-          Both filter bar and bulk action bar render inside this
-          same-height box so the table Y position is stable. */}
+    <div data-slot="data-table" className="space-y-4" aria-busy={isLoading}>
       {toolbar && (
-        <div className="flex h-[52px] items-center">
-          <div className="w-full">{toolbar(bulkCtx)}</div>
+        <div data-slot="collection-controls" className="min-h-9">
+          {toolbar(bulkCtx)}
         </div>
       )}
+      {notice}
 
       {/* Table */}
       {/* overflow-x-auto, not hidden: a table wider than the viewport must
           scroll, not silently lose its rightmost columns. The schedules table
           lost Last run, Next run, Enabled and its actions at 1440px this way. */}
-      <div className="mt-2 overflow-x-auto rounded-lg border bg-card">
-        <Table>
+      <div className="panel-surface overflow-hidden">
+        <Table
+          isLoading={isLoading}
+          error={error}
+          onRetry={onRetry}
+          emptyState={emptyState}
+        >
           <TableHeader>
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id}>
                 {hg.headers.map((header) => (
                   <TableHead
                     key={header.id}
-                    className={cn(
-                      header.column.getCanSort() &&
-                        "cursor-pointer select-none",
-                    )}
-                    onClick={header.column.getToggleSortingHandler()}
+                    sortDirection={header.column.getIsSorted()}
+                    onSort={
+                      header.column.getCanSort()
+                        ? () => header.column.toggleSorting()
+                        : undefined
+                    }
                   >
-                    <div className="flex items-center gap-1 whitespace-nowrap">
-                      {header.isPlaceholder
-                        ? null
-                        : flexRender(
-                            header.column.columnDef.header,
-                            header.getContext(),
-                          )}
-                      {header.column.getCanSort() && (
-                        <SortIcon sorted={header.column.getIsSorted()} />
-                      )}
-                    </div>
+                    {header.isPlaceholder
+                      ? null
+                      : flexRender(
+                          header.column.columnDef.header,
+                          header.getContext(),
+                        )}
                   </TableHead>
                 ))}
               </TableRow>
             ))}
           </TableHeader>
           <TableBody>
-            {table.getRowModel().rows.length === 0 ? (
-              <TableRow>
-                <TableCell
-                  colSpan={table.getVisibleLeafColumns().length}
-                  className="h-24 text-center text-muted-foreground"
-                >
-                  No results.
-                </TableCell>
+            {table.getRowModel().rows.map((row) => (
+              <TableRow
+                key={row.id}
+                data-state={row.getIsSelected() && "selected"}
+                className={cn(row.getIsSelected() && "bg-primary/5")}
+              >
+                {row.getVisibleCells().map((cell) => (
+                  <TableCell key={cell.id}>
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </TableCell>
+                ))}
               </TableRow>
-            ) : (
-              table.getRowModel().rows.map((row) => (
-                <TableRow
-                  key={row.id}
-                  data-state={row.getIsSelected() && "selected"}
-                  className={cn(row.getIsSelected() && "bg-primary/5")}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
-                      {flexRender(
-                        cell.column.columnDef.cell,
-                        cell.getContext(),
-                      )}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))
-            )}
+            ))}
           </TableBody>
         </Table>
       </div>
 
       {/* Pagination footer */}
-      <div className="flex items-center justify-between px-1 pt-3">
-        <div className="flex items-center gap-4 text-sm text-muted-foreground">
-          {totalLabel && <span>{totalLabel}</span>}
+      <div
+        data-slot="table-pagination"
+        className="flex min-h-9 flex-wrap items-center justify-between gap-3 text-sm"
+      >
+        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground">
+          {totalLabel && (
+            <span role="status">
+              {isLoading
+                ? "Loading records…"
+                : error
+                  ? "Records unavailable"
+                  : totalLabel}
+            </span>
+          )}
+          {(sortingScope === "page" || onNextPage) && (
+            <span className="text-xs text-muted-foreground">
+              {searchScope === "page"
+                ? "Search and sorting apply to this page"
+                : "Sorting applies to this page"}
+            </span>
+          )}
           {enableColumnChooser && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="h-7 gap-1.5 px-2">
+                <Button variant="ghost" size="sm">
                   <Columns3 className="size-3.5" />
                   Columns
                 </Button>
@@ -496,7 +538,7 @@ function DataTableInner<TData extends RowData>({
                 value={String(pageSize)}
                 onValueChange={(v) => onPageSizeChange(parseInt(v, 10))}
               >
-                <SelectTrigger className="h-8 w-[70px]">
+                <SelectTrigger aria-label="Rows per page" className="w-20">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -510,44 +552,14 @@ function DataTableInner<TData extends RowData>({
             </div>
           )}
 
-          <div className="flex items-center gap-1">
-            {onFirstPage && (
-              <Button
-                variant="outline"
-                size="icon"
-                className="size-8"
-                disabled={!hasPreviousPage}
-                onClick={onFirstPage}
-                aria-label="Go to first page"
-              >
-                <ChevronsLeft className="size-4" />
-              </Button>
-            )}
-            {onPreviousPage && (
-              <Button
-                variant="outline"
-                size="icon"
-                className="size-8"
-                disabled={!hasPreviousPage}
-                onClick={onPreviousPage}
-                aria-label="Go to previous page"
-              >
-                <ChevronLeft className="size-4" />
-              </Button>
-            )}
-            {onNextPage && (
-              <Button
-                variant="outline"
-                size="icon"
-                className="size-8"
-                disabled={!hasNextPage}
-                onClick={onNextPage}
-                aria-label="Go to next page"
-              >
-                <ChevronRight className="size-4" />
-              </Button>
-            )}
-          </div>
+          <PaginationControls
+            hasPreviousPage={hasPreviousPage}
+            hasNextPage={hasNextPage}
+            onFirstPage={onFirstPage}
+            onPreviousPage={onPreviousPage}
+            onNextPage={onNextPage}
+            pending={isLoading || isFetching}
+          />
         </div>
       </div>
     </div>
@@ -582,14 +594,4 @@ function selectionColumn<TData extends RowData>(): DataTableColumnDef<TData> {
     enableHiding: false,
     size: 40,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Sort icon
-// ---------------------------------------------------------------------------
-
-function SortIcon({ sorted }: { sorted: false | "asc" | "desc" }) {
-  if (sorted === "asc") return <ArrowUp className="size-3.5" />;
-  if (sorted === "desc") return <ArrowDown className="size-3.5" />;
-  return <ArrowUpDown className="size-3.5 opacity-30" />;
 }

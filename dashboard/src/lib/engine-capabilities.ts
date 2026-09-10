@@ -5,8 +5,8 @@
  * capability (no priority field when engine is RQ, etc.)" The form
  * uses this map to:
  *
- * - Filter the ``kind`` dropdown to the kinds that engine actually
- *   supports (no ``solar`` for RQ, no ``one_shot`` for arq, etc.).
+ * - Filter the ``kind`` dropdown to the kinds this map lists for
+ *   that engine (no ``solar`` for RQ, no ``clocked`` for Huey, etc.).
  * - Show inline notes when a field doesn't apply to the chosen
  *   (engine, kind) pair (e.g. queue field disabled for arq, which
  *   addresses tasks by function name with no broker-side queue).
@@ -18,6 +18,11 @@
  * §12). Adding a new engine = adding one entry here. Unknown
  * engines fall back to "everything allowed" so the form doesn't
  * silently restrict schedules for a future engine adapter.
+ *
+ * The map gates what the form offers; it is not a validation rule.
+ * The brain accepts any kind for any engine and z4j-scheduler fires
+ * every kind on every engine, so a saved row can hold a kind its
+ * entry omits. The edit form keeps that kind instead of rewriting it.
  */
 
 export type ScheduleKind = "cron" | "interval" | "clocked" | "solar";

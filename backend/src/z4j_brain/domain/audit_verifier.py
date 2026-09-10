@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import or_, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from z4j_brain.domain.audit_chain import (
@@ -201,6 +201,16 @@ async def verify_active_audit_generation(  # noqa: PLR0912, PLR0915  full verifi
 
     total_count = await repo.count_all_rows()
     active_count = await repo.count_active_generation(generation=state.generation)
+    if session.get_bind().dialect.name == "postgresql":
+        try:
+            observed_count = await repo.count_active_rows_for_append(generation=state.generation)
+        except AuditChainIntegrityError as exc:
+            note_mismatch(str(exc))
+        else:
+            if observed_count != active_count:
+                note_mismatch(
+                    f"maintained audit row count {observed_count} != physical {active_count}",
+                )
     frozen_count = await repo.count_frozen_rows()
     if active_count != state.active_row_count:
         note_mismatch(
@@ -288,8 +298,12 @@ async def verify_active_audit_generation(  # noqa: PLR0912, PLR0915  full verifi
             .limit(page_size)
         )
         if cursor_time is not None and cursor_id is not None:
+            # PostgreSQL can seek its occurred_at index with a row comparison.
+            # The equivalent OR form filters every preceding row on each page.
             stmt = stmt.where(
-                or_(
+                tuple_(AuditLog.occurred_at, AuditLog.id) > tuple_(cursor_time, cursor_id)
+                if dialect == "postgresql"
+                else or_(
                     AuditLog.occurred_at > cursor_time,
                     (AuditLog.occurred_at == cursor_time) & (AuditLog.id > cursor_id),
                 ),

@@ -6,7 +6,7 @@
  * dep-minimisation pass (SECURITY.md §16.1). The contract these
  * tests pin down is the same one every consumer relied on:
  *
- * - default theme is ``"dark"`` for a control plane
+ * - default theme is ``"system"`` and follows the operating system
  * - localStorage persists across reloads under key ``z4j-theme``
  * - ``"system"`` resolves via ``prefers-color-scheme``
  * - the ``html`` element's class swaps in lock-step with the
@@ -16,10 +16,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { act, render, renderHook } from "@testing-library/react";
 
-import {
-  ThemeProvider,
-  useTheme,
-} from "@/components/layout/theme-provider";
+import { ThemeProvider, useTheme } from "@/components/layout/theme-provider";
 
 beforeEach(() => {
   // Wipe persisted theme between tests so the default is honoured.
@@ -34,22 +31,22 @@ beforeEach(() => {
 });
 
 describe("ThemeProvider defaults", () => {
-  it("resolves to dark on first paint", () => {
+  it("follows the system on first paint", () => {
     const { result } = renderHook(() => useTheme(), {
       wrapper: ({ children }) => <ThemeProvider>{children}</ThemeProvider>,
     });
-    expect(result.current.theme).toBe("dark");
-    expect(result.current.resolvedTheme).toBe("dark");
+    expect(result.current.theme).toBe("system");
+    expect(result.current.resolvedTheme).toBe("light");
   });
 
-  it("applies the dark class to <html>", () => {
+  it("applies the resolved system class to <html>", () => {
     render(
       <ThemeProvider>
         <span>x</span>
       </ThemeProvider>,
     );
-    expect(document.documentElement.classList.contains("dark")).toBe(true);
-    expect(document.documentElement.style.colorScheme).toBe("dark");
+    expect(document.documentElement.classList.contains("light")).toBe(true);
+    expect(document.documentElement.style.colorScheme).toBe("light");
   });
 });
 
@@ -90,16 +87,17 @@ describe("setTheme", () => {
 describe("system theme resolution", () => {
   it("reads prefers-color-scheme to resolve 'system'", () => {
     // Stub matchMedia to report "prefers-color-scheme: dark".
-    window.matchMedia = (query: string) => ({
-      matches: query.includes("dark"),
-      media: query,
-      onchange: null,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-      dispatchEvent: () => false,
-    }) as MediaQueryList;
+    window.matchMedia = (query: string) =>
+      ({
+        matches: query.includes("dark"),
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      }) as MediaQueryList;
 
     const { result } = renderHook(() => useTheme(), {
       wrapper: ({ children }) => <ThemeProvider>{children}</ThemeProvider>,
@@ -127,7 +125,7 @@ describe("persistence on first mount", () => {
     const { result } = renderHook(() => useTheme(), {
       wrapper: ({ children }) => <ThemeProvider>{children}</ThemeProvider>,
     });
-    expect(result.current.theme).toBe("dark");
+    expect(result.current.theme).toBe("system");
   });
 });
 

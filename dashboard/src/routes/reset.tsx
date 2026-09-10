@@ -7,7 +7,6 @@
  * The token is never put into router search state, storage, rendered text, or
  * a log message.
  */
-import { useLayoutEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   AlertCircle,
@@ -18,13 +17,14 @@ import {
   Loader2,
   LogIn,
 } from "lucide-react";
+import { useLayoutEffect, useState } from "react";
 
 import { ThemeToggle } from "@/components/layout/theme-toggle";
-import { Z4jMark } from "@/components/z4j-mark";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Z4jMark } from "@/components/z4j-mark";
 import {
   PASSWORD_POLICY_FALLBACK,
   type PasswordPolicy,
@@ -452,7 +452,7 @@ function ResetForm({
 
         <Button
           type="submit"
-          className="h-11 w-full"
+          className="w-full"
           disabled={resetPassword.isPending}
           aria-busy={resetPassword.isPending}
         >
@@ -475,7 +475,7 @@ function ResetShell({ children }: { children: React.ReactNode }) {
 
       <main className="w-full max-w-sm space-y-8">
         <div className="flex items-center justify-center gap-3">
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <Z4jMark className="size-6" />
           </div>
           <div className="flex min-w-0 flex-col leading-tight">
@@ -484,9 +484,7 @@ function ResetShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-8 shadow-sm">
-          {children}
-        </div>
+        <div className="panel-surface p-8">{children}</div>
       </main>
     </div>
   );

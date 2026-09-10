@@ -40,15 +40,14 @@ describe("AutomationRuleFormDialog", () => {
   it("warns a non-admin when the actions include a destructive type", async () => {
     renderDialog(false);
     // The actions textarea starts with a notify-only default (no warning).
-    expect(
-      screen.queryByText(/destructive action/i),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/destructive action/i)).not.toBeInTheDocument();
     // The actions textarea is the only field whose value contains "notify".
     // Set the JSON directly (userEvent.type treats {,[ as key syntax).
-    const actions = screen.getByDisplayValue(/notify/);
+    fireEvent.click(screen.getByRole("button", { name: "Edit advanced JSON" }));
+    const actions = screen.getByRole("textbox", {
+      name: "Actions (JSON array)",
+    });
     fireEvent.change(actions, { target: { value: '[{"type":"retry"}]' } });
-    expect(
-      await screen.findByText(/destructive action/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/destructive action/i)).toBeInTheDocument();
   });
 });

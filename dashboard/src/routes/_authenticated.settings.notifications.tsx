@@ -20,32 +20,16 @@
  * (``_authenticated.projects.$slug.settings.notifications.tsx``) is
  * admin-only and follows the same path-based tab structure.
  */
-import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { Bell } from "lucide-react";
 import { PageHeader } from "@/components/domain/page-header";
-import { cn } from "@/lib/utils";
+import { NotificationNavigation } from "@/components/notifications/notification-navigation";
+import { createFileRoute, Outlet } from "@tanstack/react-router";
+import { Bell } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/settings/notifications")({
   component: GlobalNotificationsLayout,
 });
 
 function GlobalNotificationsLayout() {
-  // Path-driven tab highlight: read the active path segment so the
-  // current child route's tab is visually selected. ``useRouterState``
-  // re-renders on navigation so the highlight stays in sync as the
-  // user clicks between tabs.
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const segments = pathname.split("/").filter(Boolean);
-  const activeSegment = segments[segments.length - 1];
-
-  const tabClass = (isActive: boolean) =>
-    cn(
-      "border-b-2 px-1 py-2 text-sm font-medium transition-colors",
-      isActive
-        ? "border-primary text-foreground"
-        : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
-    );
-
   return (
     <div className="space-y-6">
       <PageHeader
@@ -53,31 +37,7 @@ function GlobalNotificationsLayout() {
         title="Notifications"
         description="Your personal channels, subscriptions, and delivery log across every project."
       />
-      <div className="border-b">
-        <nav className="-mb-px flex gap-4" aria-label="Notification settings">
-          <Link
-            to="/settings/notifications/channels"
-            replace
-            className={tabClass(activeSegment === "channels")}
-          >
-            Global Channels
-          </Link>
-          <Link
-            to="/settings/notifications/subscriptions"
-            replace
-            className={tabClass(activeSegment === "subscriptions")}
-          >
-            Global Subscriptions
-          </Link>
-          <Link
-            to="/settings/notifications/deliveries"
-            replace
-            className={tabClass(activeSegment === "deliveries")}
-          >
-            Global Notification Log
-          </Link>
-        </nav>
-      </div>
+      <NotificationNavigation />
       <div className="mt-4">
         <Outlet />
       </div>

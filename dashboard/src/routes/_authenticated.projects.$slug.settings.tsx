@@ -14,15 +14,14 @@
  */
 import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
 import { BellRing, Users } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { useIsProjectAdmin } from "@/hooks/use-memberships";
 import { PageShell } from "@/components/domain/page-shell";
 
-export const Route = createFileRoute(
-  "/_authenticated/projects/$slug/settings",
-)({
-  component: ProjectSettingsLayout,
-});
+export const Route = createFileRoute("/_authenticated/projects/$slug/settings")(
+  {
+    component: ProjectSettingsLayout,
+  },
+);
 
 interface SettingsNavItem {
   label: string;
@@ -75,54 +74,30 @@ function ProjectSettingsLayout() {
        * provides the navigation. Project scope is conveyed by the
        * project switcher in the workspace sidebar. */}
 
-      {/* Mobile navigation (horizontal scroll) */}
-      <div className="flex gap-1 overflow-x-auto border-b pb-3 md:hidden">
-        {visibleSections
-          .flatMap((s) => s.items)
-          .map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              params={{ slug }}
-              className={cn(
-                "flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-                "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-              )}
-              activeProps={{
-                className: "bg-accent text-accent-foreground",
-              }}
-            >
-              <item.icon className="size-4" />
-              {item.label}
-            </Link>
-          ))}
-      </div>
-
-      <div className="flex gap-8">
-        {/* Left sidebar navigation */}
-        <nav className="hidden w-[220px] shrink-0 md:block">
-          <div className="space-y-6">
+      <div className="flex flex-col gap-6 lg:flex-row">
+        <nav
+          aria-label="Project settings"
+          className="shrink-0 border-b pb-5 lg:w-48 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-4"
+        >
+          <div className="space-y-4 lg:sticky lg:top-24">
             {visibleSections.map((section) => (
-              <div key={section.title}>
-                <h4 className="mb-2 px-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              <div key={section.title} role="group" aria-label={section.title}>
+                <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                   {section.title}
-                </h4>
-                <ul className="space-y-0.5">
+                </p>
+                <ul className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10.5rem),1fr))] gap-1 lg:grid-cols-1 lg:gap-0.5">
                   {section.items.map((item) => (
                     <li key={item.to}>
                       <Link
                         to={item.to}
                         params={{ slug }}
-                        className={cn(
-                          "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium transition-colors",
-                          "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-                        )}
-                        activeProps={{
-                          className:
-                            "bg-accent text-accent-foreground",
-                        }}
+                        className="navigation-link min-h-11 px-2 py-2 lg:min-h-9 lg:py-1.5"
+                        activeProps={{ className: "navigation-link-active" }}
                       >
-                        <item.icon className="size-4 shrink-0" />
+                        <item.icon
+                          className="size-4 shrink-0"
+                          aria-hidden="true"
+                        />
                         <span>{item.label}</span>
                       </Link>
                     </li>

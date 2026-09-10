@@ -51,14 +51,14 @@ _PERMISSIONS_POLICY: str = (
 #
 # * the tiny pre-paint theme bootstrap in dashboard/dist/index.html;
 # * Sonner's empty staging ``<style>`` element; and
-# * Sonner 2.0.7's bundled toast stylesheet.
+# * Sonner 2.0.8's bundled toast stylesheet.
 #
 # These are content hashes, not ``'unsafe-inline'`` exceptions.  A dependency
 # or dashboard change that alters any block must fail the production-browser
 # console gate and be reviewed before this allow-list changes.
-_DASHBOARD_THEME_SCRIPT_HASH = "'sha256-2cJQDKeqj1kRCTjHw3lNQZ7VwMSo8xGux8twgDsEuRs='"
+_DASHBOARD_THEME_SCRIPT_HASH = "'sha256-RFEpINNvPta15f5pE0PyKRovi4m3SdBKevzA8hX1Shg='"
 _DASHBOARD_SONNER_EMPTY_STYLE_HASH = "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='"
-_DASHBOARD_SONNER_STYLE_HASH = "'sha256-CIxDM5jnsGiKqXs2v7NKCY5MzdR9gu6TtiMJrDw29AY='"
+_DASHBOARD_SONNER_STYLE_HASH = "'sha256-StEaX+se6YS7pqjzrzMIA0KaX9zF/8zAhvQXZAe5epY='"
 
 _BASE_CSP: str = (
     "default-src 'self'; "

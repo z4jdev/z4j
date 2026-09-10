@@ -78,6 +78,11 @@ class TaskPublic(BaseModel):
 class TaskListResponse(BaseModel):
     items: list[TaskPublic]
     next_cursor: str | None
+    total_count: int | None = Field(
+        default=None,
+        ge=0,
+        description="Total matching project tasks before pagination, when include_total=true.",
+    )
 
 
 def _task_payload(task: Task) -> TaskPublic:
@@ -128,6 +133,7 @@ async def list_tasks(
     until: datetime | None = Query(default=None),
     cursor: str | None = Query(default=None),
     limit: int | None = Query(default=None, ge=1, le=5000),
+    include_total: bool = Query(default=False),
     format: str | None = Query(default=None, pattern="^(csv|xlsx|json)$"),  # noqa: A002  public query param name
     fields: str | None = Query(default=None, max_length=500),
     user: User = Depends(get_current_user),
@@ -145,6 +151,9 @@ async def list_tasks(
     - ``worker`` - exact match on worker_name
     - ``until`` - upper bound on received_at (pair with ``since``)
     - ``format`` - ``csv``, ``xlsx``, or ``json`` export (overrides pagination)
+    - ``include_total`` - opt in to an exact filtered count, independent of
+      cursor/limit. Adds a SQL aggregate; exports ignore it. Live data can
+      change between reads, so the total is not a sealed bulk-action target.
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import TaskRepository
@@ -222,7 +231,7 @@ async def list_tasks(
         since=since,
         until=until,
         cursor=cursor_pair,
-        limit=page_size,
+        limit=page_size if format else page_size + 1,
     )
 
     # Export path: return file.
@@ -234,13 +243,31 @@ async def list_tasks(
         return _export_xlsx(rows, slug, selected_fields)
 
     next_cursor: str | None = None
-    if len(rows) == page_size:
+    if len(rows) > page_size:
+        rows = rows[:page_size]
         last = rows[-1]
         next_cursor = encode_cursor(last.started_at, last.id)
+
+    total_count = (
+        await tasks.count_for_project(
+            project_id=project.id,
+            state=state_enum,
+            priority=priority_list,
+            name_substring=name,
+            search_query=search,
+            queue=queue,
+            worker=worker,
+            since=since,
+            until=until,
+        )
+        if include_total
+        else None
+    )
 
     return TaskListResponse(
         items=[_task_payload(t) for t in rows],
         next_cursor=next_cursor,
+        total_count=total_count,
     )
 
 

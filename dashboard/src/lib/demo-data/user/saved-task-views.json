@@ -1,0 +1,20 @@
+[
+  {
+    "id": "c0ffee00-0000-4000-8000-000000000001",
+    "name": "Failed tasks",
+    "filters": { "state": "failure", "priority": [], "search": "" },
+    "created_at": "2026-09-01T10:00:00Z",
+    "updated_at": "2026-09-01T10:00:00Z"
+  },
+  {
+    "id": "c0ffee00-0000-4000-8000-000000000002",
+    "name": "Urgent tasks",
+    "filters": {
+      "state": null,
+      "priority": ["critical", "high"],
+      "search": ""
+    },
+    "created_at": "2026-09-01T10:00:00Z",
+    "updated_at": "2026-09-01T10:00:00Z"
+  }
+]

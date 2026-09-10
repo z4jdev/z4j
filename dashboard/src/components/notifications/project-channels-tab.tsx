@@ -31,6 +31,7 @@ import {
 import { toast } from "sonner";
 import { useConfirm } from "@/components/domain/confirm-dialog";
 import { EmptyState } from "@/components/domain/empty-state";
+import { PageHeader } from "@/components/domain/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -87,8 +88,10 @@ function teamsHostSummary(url: string): string {
   try {
     const host = new URL(url).hostname.toLowerCase();
     if (host === "outlook.office.com") return "outlook.office.com (classic)";
-    if (host.endsWith(".webhook.office.com")) return "*.webhook.office.com (workflow)";
-    if (host.endsWith(".logic.azure.com")) return "*.logic.azure.com (power automate)";
+    if (host.endsWith(".webhook.office.com"))
+      return "*.webhook.office.com (workflow)";
+    if (host.endsWith(".logic.azure.com"))
+      return "*.logic.azure.com (power automate)";
     return host;
   } catch {
     return "teams webhook";
@@ -138,75 +141,78 @@ export function ProjectChannelsTab({ slug }: { slug: string }) {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       {confirmDialog}
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-semibold">
+      <PageHeader
+        level="section"
+        title={
+          <>
             Project Channels
             {isFetching && !isLoading && (
               <RefreshCw className="ml-2 inline size-3 animate-spin text-muted-foreground" />
             )}
-          </h3>
-          <p className="text-xs text-muted-foreground">
-            Shared delivery destinations for this project - any member can
-            attach these to their personal subscriptions. For your own
-            private destinations, use Global Settings → Global Channels.
-          </p>
-        </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button size="sm">
-              <Plus className="size-4" />
-              Add Channel
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-72">
-            <DropdownMenuItem
-              onClick={() => setDialogState({ mode: "create" })}
-              className="flex flex-col items-start gap-0.5"
+          </>
+        }
+        description="Shared delivery destinations for this project. Members can attach these to their personal subscriptions. Manage private destinations in Global Settings → Global Channels."
+        actions={
+          <>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm">
+                  <Plus className="size-4" />
+                  Add Channel
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-72">
+                <DropdownMenuItem
+                  onClick={() => setDialogState({ mode: "create" })}
+                  className="flex flex-col items-start gap-0.5"
+                >
+                  <span className="font-medium">From scratch</span>
+                  <span className="text-xs text-muted-foreground">
+                    Create a new channel and enter credentials.
+                  </span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => setDialogState({ mode: "import" })}
+                  className="flex flex-col items-start gap-0.5"
+                >
+                  <span className="font-medium">
+                    Import from Global Channels
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Copy one of your personal destinations into the project.
+                  </span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Dialog
+              open={dialogState.mode !== "closed"}
+              onOpenChange={(open) => {
+                if (!open) closeDialog();
+              }}
             >
-              <span className="font-medium">From scratch</span>
-              <span className="text-xs text-muted-foreground">
-                Create a new channel and enter credentials.
-              </span>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => setDialogState({ mode: "import" })}
-              className="flex flex-col items-start gap-0.5"
-            >
-              <span className="font-medium">Import from Global Channels</span>
-              <span className="text-xs text-muted-foreground">
-                Copy one of your personal destinations into the project.
-              </span>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <Dialog
-          open={dialogState.mode !== "closed"}
-          onOpenChange={(open) => {
-            if (!open) closeDialog();
-          }}
-        >
-          <DialogContent>
-            {dialogState.mode === "create" || dialogState.mode === "edit" ? (
-              <ChannelDialog
-                slug={slug}
-                mode={dialogState.mode}
-                channel={
-                  dialogState.mode === "edit" ? dialogState.channel : undefined
-                }
-                onClose={closeDialog}
-              />
-            ) : dialogState.mode === "import" ? (
-              <ImportFromUserDialog
-                slug={slug}
-                onClose={closeDialog}
-              />
-            ) : null}
-          </DialogContent>
-        </Dialog>
-      </div>
+              <DialogContent>
+                {dialogState.mode === "create" ||
+                dialogState.mode === "edit" ? (
+                  <ChannelDialog
+                    slug={slug}
+                    mode={dialogState.mode}
+                    channel={
+                      dialogState.mode === "edit"
+                        ? dialogState.channel
+                        : undefined
+                    }
+                    onClose={closeDialog}
+                  />
+                ) : dialogState.mode === "import" ? (
+                  <ImportFromUserDialog slug={slug} onClose={closeDialog} />
+                ) : null}
+              </DialogContent>
+            </Dialog>
+          </>
+        }
+      />
 
       {isLoading && <Skeleton className="h-32 w-full" />}
       {channels && channels.length === 0 && (
@@ -217,7 +223,7 @@ export function ProjectChannelsTab({ slug }: { slug: string }) {
         />
       )}
       {channels && channels.length > 0 && (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div data-slot="channel-list" className="grid grid-cols-1 gap-3">
           {channels.map((ch) => {
             const Icon = CHANNEL_ICONS[ch.type] ?? Globe;
             const testingThis =
@@ -226,128 +232,130 @@ export function ProjectChannelsTab({ slug }: { slug: string }) {
             return (
               <Card
                 key={ch.id}
-                className="flex flex-col gap-3 p-4"
+                data-slot="channel-card"
+                className="@container flex flex-col gap-3 p-4"
               >
-                <div className="flex items-start gap-3">
-                <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  <Icon className="size-5" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold">{ch.name}</span>
-                    <Badge variant={ch.is_active ? "success" : "muted"}>
-                      {ch.is_active ? "active" : "disabled"}
-                    </Badge>
+                <div className="grid grid-cols-[2.5rem_minmax(0,1fr)] items-start gap-x-3 gap-y-2 @min-[480px]:grid-cols-[2.5rem_minmax(0,1fr)_auto]">
+                  <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                    <Icon className="size-5" />
                   </div>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    {ch.type}
-                    {ch.type === "webhook" &&
-                      typeof ch.config.url === "string" &&
-                      ` · ${ch.config.url.slice(0, 40)}...`}
-                    {ch.type === "email" &&
-                      typeof ch.config.smtp_host === "string" &&
-                      ` · ${ch.config.smtp_host}`}
-                    {ch.type === "slack" &&
-                      typeof ch.config.webhook_url === "string" &&
-                      ` · hooks.slack.com`}
-                    {ch.type === "telegram" &&
-                      typeof ch.config.chat_id === "string" &&
-                      ` · chat ${ch.config.chat_id}`}
-                    {ch.type === "pagerduty" &&
-                      typeof ch.config.severity_default === "string" &&
-                      ` · default severity: ${ch.config.severity_default}`}
-                    {ch.type === "discord" &&
-                      typeof ch.config.webhook_url === "string" &&
-                      ` · discord.com/api/webhooks/...`}
-                    {ch.type === "teams" &&
-                      typeof ch.config.webhook_url === "string" &&
-                      ` · ${teamsHostSummary(ch.config.webhook_url)}`}
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Test ${ch.name}`}
-                    title="Send a test notification"
-                    disabled={testingThis}
-                    className="text-muted-foreground hover:text-primary"
-                    onClick={() =>
-                      testChannel.mutate(ch.id, {
-                        // Card-level test: inline banner only, no
-                        // toast. The banner is anchored to the
-                        // card being tested, stays until the
-                        // operator dismisses it, and re-running a
-                        // test replaces its predecessor - no
-                        // stacking. A second redundant toast for
-                        // the same event was adding visual noise
-                        // without new information.
-                        onSuccess: (res) => recordTestResult(ch.id, res),
-                        onError: (err) =>
-                          recordTestResult(ch.id, {
-                            success: false,
-                            status_code: null,
-                            response_body: null,
-                            error:
-                              err instanceof Error
-                                ? err.message
-                                : "Test failed",
-                          }),
-                      })
-                    }
-                  >
-                    {testingThis ? (
-                      <RefreshCw className="size-4 animate-spin" />
-                    ) : (
-                      <TestTube className="size-4" />
-                    )}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Edit ${ch.name}`}
-                    title="Edit channel"
-                    className="text-muted-foreground hover:text-primary"
-                    onClick={() =>
-                      setDialogState({ mode: "edit", channel: ch })
-                    }
-                  >
-                    <Pencil className="size-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Delete ${ch.name}`}
-                    title="Delete channel"
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() =>
-                      confirm({
-                        title: "Delete channel",
-                        description: (
-                          <>
-                            This removes <code>{ch.name}</code> and any
-                            subscriptions pointing to it.
-                          </>
-                        ),
-                        confirmLabel: "Delete",
-                        onConfirm: () =>
-                          deleteChannel.mutate(ch.id, {
-                            onSuccess: () =>
-                              toast.success("Channel deleted"),
-                            onError: (err) => {
-                              const msg =
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="min-w-0 break-words text-sm font-semibold [overflow-wrap:anywhere]">
+                        {ch.name}
+                      </span>
+                      <Badge variant={ch.is_active ? "success" : "muted"}>
+                        {ch.is_active ? "active" : "disabled"}
+                      </Badge>
+                    </div>
+                    <p className="mt-0.5 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                      {ch.type}
+                      {ch.type === "webhook" &&
+                        typeof ch.config.url === "string" &&
+                        ` · ${ch.config.url.slice(0, 40)}...`}
+                      {ch.type === "email" &&
+                        typeof ch.config.smtp_host === "string" &&
+                        ` · ${ch.config.smtp_host}`}
+                      {ch.type === "slack" &&
+                        typeof ch.config.webhook_url === "string" &&
+                        ` · hooks.slack.com`}
+                      {ch.type === "telegram" &&
+                        typeof ch.config.chat_id === "string" &&
+                        ` · chat ${ch.config.chat_id}`}
+                      {ch.type === "pagerduty" &&
+                        typeof ch.config.severity_default === "string" &&
+                        ` · default severity: ${ch.config.severity_default}`}
+                      {ch.type === "discord" &&
+                        typeof ch.config.webhook_url === "string" &&
+                        ` · discord.com/api/webhooks/...`}
+                      {ch.type === "teams" &&
+                        typeof ch.config.webhook_url === "string" &&
+                        ` · ${teamsHostSummary(ch.config.webhook_url)}`}
+                    </p>
+                  </div>
+                  <div className="col-start-2 flex flex-wrap items-center @min-[480px]:col-start-auto">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Test ${ch.name}`}
+                      title="Send a test notification"
+                      disabled={testingThis}
+                      className="text-muted-foreground hover:text-primary"
+                      onClick={() =>
+                        testChannel.mutate(ch.id, {
+                          // Card-level test: inline banner only, no
+                          // toast. The banner is anchored to the
+                          // card being tested, stays until the
+                          // operator dismisses it, and re-running a
+                          // test replaces its predecessor - no
+                          // stacking. A second redundant toast for
+                          // the same event was adding visual noise
+                          // without new information.
+                          onSuccess: (res) => recordTestResult(ch.id, res),
+                          onError: (err) =>
+                            recordTestResult(ch.id, {
+                              success: false,
+                              status_code: null,
+                              response_body: null,
+                              error:
                                 err instanceof Error
                                   ? err.message
-                                  : "Request failed";
-                              toast.error(msg);
-                            },
-                          }),
-                      })
-                    }
-                  >
-                    <Trash2 className="size-4" />
-                  </Button>
-                </div>
+                                  : "Test failed",
+                            }),
+                        })
+                      }
+                    >
+                      {testingThis ? (
+                        <RefreshCw className="size-4 animate-spin" />
+                      ) : (
+                        <TestTube className="size-4" />
+                      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Edit ${ch.name}`}
+                      title="Edit channel"
+                      className="text-muted-foreground hover:text-primary"
+                      onClick={() =>
+                        setDialogState({ mode: "edit", channel: ch })
+                      }
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Delete ${ch.name}`}
+                      title="Delete channel"
+                      className="text-muted-foreground hover:text-destructive"
+                      onClick={() =>
+                        confirm({
+                          title: "Delete channel",
+                          description: (
+                            <>
+                              This removes <code>{ch.name}</code> and any
+                              subscriptions pointing to it.
+                            </>
+                          ),
+                          confirmLabel: "Delete",
+                          onConfirm: () =>
+                            deleteChannel.mutate(ch.id, {
+                              onSuccess: () => toast.success("Channel deleted"),
+                              onError: (err) => {
+                                const msg =
+                                  err instanceof Error
+                                    ? err.message
+                                    : "Request failed";
+                                toast.error(msg);
+                              },
+                            }),
+                        })
+                      }
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
                 </div>
                 {testResult && (
                   <div

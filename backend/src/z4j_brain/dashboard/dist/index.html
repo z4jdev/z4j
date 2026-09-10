@@ -7,38 +7,41 @@
     <meta name="color-scheme" content="dark light" />
     <title>z4j</title>
     <script>
-      // Apply the user's theme preference before paint to avoid flash.
+      // Apply display mode and the coordinated palette before first paint.
       (function () {
+        var stored = null, palette = null, hue = null;
         try {
-          var stored = localStorage.getItem("z4j-theme");
-          var prefersDark = window.matchMedia(
-            "(prefers-color-scheme: dark)",
-          ).matches;
-          var theme = stored || (prefersDark ? "dark" : "light");
-          document.documentElement.classList.toggle(
-            "dark",
-            theme === "dark",
-          );
-        } catch (_e) {
-          // ignore - html was rendered with `class="dark"` as the
-          // safe default for an enterprise control plane.
-        }
+          stored = localStorage.getItem("z4j-theme");
+          palette = localStorage.getItem("z4j-palette");
+          hue = localStorage.getItem("z4j-primary-hue");
+        } catch (_e) {}
+        var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        var theme = stored === "light" || stored === "dark" ? stored : (prefersDark ? "dark" : "light");
+        var legacy = {250:"sapphire",280:"iris",310:"iris",350:"sandstone",25:"sandstone",50:"sandstone",150:"jade",180:"jade",210:"sapphire"};
+        var chosen = ["sapphire", "jade", "iris", "sandstone"].indexOf(palette) >= 0
+          ? palette : (Object.prototype.hasOwnProperty.call(legacy, hue) ? legacy[hue] : "sapphire");
+        var root = document.documentElement;
+        root.classList.toggle("dark", theme === "dark");
+        root.classList.toggle("light", theme === "light");
+        root.style.colorScheme = theme;
+        root.setAttribute("data-palette", chosen);
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-gysQDw9T.js"></script>
+    <script type="module" crossorigin src="/assets/index-O-Jzvtc3.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-CbXtAM7H.js">
-    <link rel="modulepreload" crossorigin href="/assets/query-D_HO07SQ.js">
-    <link rel="modulepreload" crossorigin href="/assets/react-mi8H8BoD.js">
+    <link rel="modulepreload" crossorigin href="/assets/query-DRc9Vvgn.js">
+    <link rel="modulepreload" crossorigin href="/assets/react-B5_FSEBL.js">
     <link rel="modulepreload" crossorigin href="/assets/preload-helper-Czpn1I53.js">
-    <link rel="modulepreload" crossorigin href="/assets/router-CgPEbizy.js">
-    <link rel="modulepreload" crossorigin href="/assets/dist-C5KrPrAN.js">
-    <link rel="modulepreload" crossorigin href="/assets/createLucideIcon-XL3-vAM1.js">
-    <link rel="modulepreload" crossorigin href="/assets/dist-0864laVT.js">
-    <link rel="modulepreload" crossorigin href="/assets/button-DxxGrAnK.js">
-    <link rel="modulepreload" crossorigin href="/assets/dist-7Zmuw2FJ.js">
-    <link rel="modulepreload" crossorigin href="/assets/dist-BRYsQnpt.js">
+    <link rel="modulepreload" crossorigin href="/assets/router-sZK6fTgm.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-Brr6UaYa.js">
+    <link rel="modulepreload" crossorigin href="/assets/createLucideIcon-Ye6m-t9q.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-CotXClUd.js">
+    <link rel="modulepreload" crossorigin href="/assets/button-BoSxYzyw.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-CSgHTPRS.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-DcimX_Y9.js">
     <link rel="modulepreload" crossorigin href="/assets/api-Du4bt4dN.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-BFYYYb3u.css">
+    <link rel="modulepreload" crossorigin href="/assets/arrow-up-yGQJ_c71.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-CSQyt192.css">
   </head>
   <body class="bg-background text-foreground antialiased">
     <div id="root"></div>

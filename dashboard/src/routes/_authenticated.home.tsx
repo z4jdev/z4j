@@ -1,3 +1,5 @@
+import { PageHeader } from "@/components/domain/page-header";
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * Home - cross-project landing page for users who operate on
  * multiple z4j projects.
@@ -15,18 +17,6 @@
  * `/projects/{slug}`. Users with zero memberships are sent to
  * `/settings/account`.
  */
-import { useEffect, useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
-import {
-  Activity,
-  AlertTriangle,
-  ChevronRight,
-  ClipboardList,
-  Cpu,
-  Home,
-  Network,
-  Terminal,
-} from "lucide-react";
 import { DateCell } from "@/components/domain/date-cell";
 import { PageShell } from "@/components/domain/page-shell";
 import { QueryError } from "@/components/domain/query-error";
@@ -59,14 +49,26 @@ import {
   type HomeRecentFailure,
   type HomeSummary,
 } from "@/hooks/use-home";
+import type { TaskPriority } from "@/lib/api-types";
 import {
   formatCompact,
   formatPercent,
   formatRelative,
   truncate,
 } from "@/lib/format";
-import type { TaskPriority } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import {
+  Activity,
+  AlertTriangle,
+  ChevronRight,
+  ClipboardList,
+  Cpu,
+  Home,
+  Network,
+  Terminal,
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 export const Route = createFileRoute("/_authenticated/home")({
   component: HomePage,
@@ -163,35 +165,33 @@ function HomePage() {
 
   return (
     <PageShell>
-      {/* Greeting -- matches the canonical PageHeader icon-in-soft-square
-       * shape, but with a larger title since this is a personalized
-       * landing page (the "Good evening, X" copy carries weight). */}
-      <section className="flex items-start gap-3">
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted/60 text-muted-foreground">
-          <Home className="size-5" aria-hidden="true" />
-        </div>
-        <div className="min-w-0 flex-1">
-          {summary ? (
+      <PageHeader
+        icon={Home}
+        title={
+          summary ? (
             <>
-              <h1 className="truncate text-2xl font-semibold leading-tight">
-                {greeting()}, {displayName(summary)}
-              </h1>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                {summary.projects.length}{" "}
-                {summary.projects.length === 1 ? "project" : "projects"} ·{" "}
-                {summary.attention.length > 0
-                  ? `${summary.attention.length} need${summary.attention.length === 1 ? "s" : ""} attention`
-                  : "all healthy"}
-              </p>
+              {greeting()}, {displayName(summary)}
             </>
           ) : (
+            "Home"
+          )
+        }
+        description={
+          summary ? (
             <>
-              <Skeleton className="h-7 w-64" />
-              <Skeleton className="mt-2 h-4 w-40" />
+              {summary.projects.length}{" "}
+              {summary.projects.length === 1 ? "project" : "projects"} ·{" "}
+              {summary.attention.length > 0
+                ? `${new Set(summary.attention.map((item) => item.project_id)).size} with alerts`
+                : summary.aggregate.agents_total === 0
+                  ? "No agents connected yet"
+                  : "No current alerts"}
             </>
-          )}
-        </div>
-      </section>
+          ) : (
+            "Your projects and recent activity."
+          )
+        }
+      />
 
       {summaryQuery.isError && (
         <QueryError
@@ -222,7 +222,7 @@ function HomePage() {
               value={sortBy}
               onValueChange={(v) => setSortBy(v as SortBy)}
             >
-              <SelectTrigger className="h-8 w-48 text-xs">
+              <SelectTrigger aria-label="Sort projects" className="w-48">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -400,10 +400,19 @@ function AttentionList({ items }: { items: HomeAttentionItem[] }) {
             return (
               <li key={`${item.project_id}-${item.kind}-${idx}`}>
                 <Link
-                  to="/projects/$slug"
+                  to={
+                    (
+                      {
+                        agent_offline: "/projects/$slug/workers",
+                        high_failure_rate: "/projects/$slug/issues",
+                        stuck_commands: "/projects/$slug/commands",
+                        workers_missing: "/projects/$slug/workers",
+                      } as const
+                    )[item.kind]
+                  }
                   params={{ slug: item.project_slug }}
                   className={cn(
-                    "flex items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-accent",
+                    "flex flex-wrap items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-accent",
                     "border-l-2",
                     isCritical
                       ? "border-l-destructive/70"
@@ -420,7 +429,7 @@ function AttentionList({ items }: { items: HomeAttentionItem[] }) {
                   <Badge variant="outline" className="font-mono text-[11px]">
                     {item.project_slug}
                   </Badge>
-                  <span className="min-w-0 flex-1 truncate text-foreground">
+                  <span className="min-w-40 flex-1 text-foreground">
                     {item.message}
                   </span>
                   <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
@@ -459,7 +468,7 @@ function ProjectGridCard({ project }: { project: HomeProjectCard }) {
       params={{ slug: project.slug }}
       className="block no-underline focus-visible:outline-none"
     >
-      <Card className="h-full transition-shadow hover:shadow-md focus-visible:ring-2 focus-visible:ring-ring/40">
+      <Card className="h-full transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring/40">
         <CardHeader className="pb-2">
           <div className="flex items-start justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
@@ -586,13 +595,19 @@ function RecentFailuresFeed() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-44">When</TableHead>
-                <TableHead className="w-36">Project</TableHead>
-                <TableHead>Task</TableHead>
-                <TableHead className="hidden lg:table-cell">
+                <TableHead sortKey="c0" className="w-44">
+                  When
+                </TableHead>
+                <TableHead sortKey="c1" className="w-36">
+                  Project
+                </TableHead>
+                <TableHead sortKey="c2">Task</TableHead>
+                <TableHead sortKey="c3" className="hidden lg:table-cell">
                   Exception
                 </TableHead>
-                <TableHead className="w-28">Priority</TableHead>
+                <TableHead sortKey="c4" className="w-28">
+                  Priority
+                </TableHead>
                 <TableHead className="w-8"></TableHead>
               </TableRow>
             </TableHeader>
@@ -611,12 +626,22 @@ function RecentFailuresFeed() {
                     colSpan={6}
                     className="py-8 text-center text-sm text-muted-foreground"
                   >
-                    No failures in the visible window. Nice.
+                    No failures in the visible window.
                   </TableCell>
                 </TableRow>
               ) : (
                 acc.map((f) => (
-                  <FailureRow key={f.id} failure={f} />
+                  <FailureRow
+                    sortValues={{
+                      c0: sortTimestamp(f.occurred_at),
+                      c1: f.project_slug,
+                      c2: f.task_name,
+                      c3: f.exception,
+                      c4: f.priority,
+                    }}
+                    key={f.id}
+                    failure={f}
+                  />
                 ))
               )}
             </TableBody>
@@ -642,7 +667,11 @@ function RecentFailuresFeed() {
   );
 }
 
-function FailureRow({ failure }: { failure: HomeRecentFailure }) {
+function FailureRow({
+  failure,
+}: {
+  failure: HomeRecentFailure;
+} & import("@/components/ui/table").TableRowSortProps) {
   // Multi-engine: the backend stamps the engine onto every failure
   // (see RecentFailurePublic in api/home.py). Deep-linking to
   // /tasks/celery/... for an RQ or Dramatiq failure would 404.

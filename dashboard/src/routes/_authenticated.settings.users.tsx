@@ -1,10 +1,49 @@
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * User management settings page - admin only.
  *
  * List, create, activate/deactivate, and change roles for users.
  * Moved from the standalone admin route into the unified settings hub.
  */
-import { useState } from "react";
+import { useConfirm } from "@/components/domain/confirm-dialog";
+import { DateCell } from "@/components/domain/date-cell";
+import { EmptyState } from "@/components/domain/empty-state";
+import { PageHeader } from "@/components/domain/page-header";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  PASSWORD_POLICY_FALLBACK,
+  useMe,
+  usePasswordPolicy,
+} from "@/hooks/use-auth";
+import {
+  type UserAdmin,
+  useCreateUser,
+  useDeleteUser,
+  useResetUserPassword,
+  useUpdateUser,
+  useUsers,
+} from "@/hooks/use-users";
+import { ApiError } from "@/lib/api";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   KeyRound,
@@ -17,56 +56,15 @@ import {
   UserX,
   Users,
 } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
-import { EmptyState } from "@/components/domain/empty-state";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
-  type UserAdmin,
-  useCreateUser,
-  useDeleteUser,
-  useResetUserPassword,
-  useUpdateUser,
-  useUsers,
-} from "@/hooks/use-users";
-import { useConfirm } from "@/components/domain/confirm-dialog";
-import { QueryError } from "@/components/domain/query-error";
-import {
-  PASSWORD_POLICY_FALLBACK,
-  useMe,
-  usePasswordPolicy,
-} from "@/hooks/use-auth";
-import { DateCell } from "@/components/domain/date-cell";
-import { PageHeader } from "@/components/domain/page-header";
-import { ApiError } from "@/lib/api";
 
 export const Route = createFileRoute("/_authenticated/settings/users")({
   component: UsersPage,
 });
 
 function UsersPage() {
-  const { data: users, isLoading, isError, error, refetch } = useUsers();
+  const { data: users, isLoading, isError, refetch } = useUsers();
   const { data: me } = useMe();
   const updateUser = useUpdateUser();
   const deleteUser = useDeleteUser();
@@ -98,7 +96,9 @@ function UsersPage() {
       { id, is_active: !currentlyActive },
       {
         onSuccess: () =>
-          toast.success(currentlyActive ? "User deactivated" : "User activated"),
+          toast.success(
+            currentlyActive ? "User deactivated" : "User activated",
+          ),
         onError,
       },
     );
@@ -138,217 +138,211 @@ function UsersPage() {
         }
       />
 
-      {isLoading && <Skeleton className="h-64 w-full" />}
-      {isError && (
-        <QueryError
-          message={error instanceof Error ? error.message : "Failed to load users"}
-          onRetry={() => refetch()}
-        />
-      )}
-      {users && users.length === 0 && (
-        <EmptyState
-          icon={Users}
-          title="No users"
-          description="This shouldn't happen - at least the admin user should exist."
-        />
-      )}
-      {users && users.length > 0 && (
-        <Card className="overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>User</TableHead>
-                <TableHead>Role</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Last Login</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {users.map((user) => {
-                const isSelf = me?.id === user.id;
-                // A row is "last-admin protected" when demoting OR
-                // deactivating this user would bring the active-admin
-                // count to zero.
-                const isLastActiveAdmin =
-                  user.is_admin && user.is_active && activeAdminCount <= 1;
-                // Demote is blocked if it's self OR if this is the
-                // last active admin.
-                const demoteBlocked =
-                  user.is_admin && (isSelf || isLastActiveAdmin);
-                // Deactivate is blocked for the same reasons, on an
-                // already-active user only.
-                const deactivateBlocked =
-                  user.is_active &&
-                  ((user.is_admin && isLastActiveAdmin) || isSelf);
+      <Table
+        searchable
+        searchPlaceholder="Search users…"
+        isLoading={isLoading}
+        error={isError ? "Unable to load users. Try again." : null}
+        onRetry={() => refetch()}
+        emptyState={
+          <EmptyState
+            icon={Users}
+            title="No users"
+            description="This shouldn't happen - at least the admin user should exist."
+          />
+        }
+      >
+        <TableHeader>
+          <TableRow>
+            <TableHead sortKey="c0">User</TableHead>
+            <TableHead sortKey="c1">Role</TableHead>
+            <TableHead sortKey="c2">Status</TableHead>
+            <TableHead sortKey="c3">Last Login</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {(users ?? []).map((user) => {
+            const isSelf = me?.id === user.id;
+            // A row is "last-admin protected" when demoting OR
+            // deactivating this user would bring the active-admin
+            // count to zero.
+            const isLastActiveAdmin =
+              user.is_admin && user.is_active && activeAdminCount <= 1;
+            // Demote is blocked if it's self OR if this is the
+            // last active admin.
+            const demoteBlocked =
+              user.is_admin && (isSelf || isLastActiveAdmin);
+            // Deactivate is blocked for the same reasons, on an
+            // already-active user only.
+            const deactivateBlocked =
+              user.is_active &&
+              ((user.is_admin && isLastActiveAdmin) || isSelf);
 
-                let demoteTitle: string;
-                if (!user.is_admin) demoteTitle = "Grant admin role";
-                else if (isSelf) demoteTitle = "Cannot remove your own admin role";
-                else if (isLastActiveAdmin)
-                  demoteTitle =
-                    "Cannot remove the last admin - promote another user first";
-                else demoteTitle = "Remove admin role";
+            let demoteTitle: string;
+            if (!user.is_admin) demoteTitle = "Grant admin role";
+            else if (isSelf) demoteTitle = "Cannot remove your own admin role";
+            else if (isLastActiveAdmin)
+              demoteTitle =
+                "Cannot remove the last admin - promote another user first";
+            else demoteTitle = "Remove admin role";
 
-                let deactivateTitle: string;
-                if (!user.is_active) deactivateTitle = "Activate user";
-                else if (isSelf) deactivateTitle = "Cannot deactivate your own account";
-                else if (user.is_admin && isLastActiveAdmin)
-                  deactivateTitle =
-                    "Cannot deactivate the last admin - promote another user first";
-                else deactivateTitle = "Deactivate user";
+            let deactivateTitle: string;
+            if (!user.is_active) deactivateTitle = "Activate user";
+            else if (isSelf)
+              deactivateTitle = "Cannot deactivate your own account";
+            else if (user.is_admin && isLastActiveAdmin)
+              deactivateTitle =
+                "Cannot deactivate the last admin - promote another user first";
+            else deactivateTitle = "Deactivate user";
 
-                return (
-                  <TableRow key={user.id}>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <div>
-                          <div className="font-medium">
-                            {user.display_name || user.email.split("@")[0]}
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {user.email}
-                          </div>
-                        </div>
-                        {isSelf && (
-                          <Badge variant="muted" className="text-[10px]">
-                            you
-                          </Badge>
-                        )}
+            return (
+              <TableRow
+                sortValues={{
+                  c0: user.display_name || user.email,
+                  c1: user.is_admin ? "admin" : "user",
+                  c2: user.is_active ? "active" : "inactive",
+                  c3: sortTimestamp(user.last_login_at),
+                }}
+                key={user.id}
+              >
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <div>
+                      <div className="font-medium">
+                        {user.display_name || user.email.split("@")[0]}
                       </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <Badge variant={user.is_admin ? "default" : "muted"}>
-                          {user.is_admin ? "admin" : "user"}
-                        </Badge>
-                        {isLastActiveAdmin && (
-                          <span
-                            className="text-[10px] text-muted-foreground"
-                            title="Promote another user to admin before changing this one"
-                          >
-                            last admin
-                          </span>
-                        )}
+                      <div className="text-xs text-muted-foreground">
+                        {user.email}
                       </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={user.is_active ? "success" : "destructive"}
-                      >
-                        {user.is_active ? "active" : "inactive"}
+                    </div>
+                    {isSelf && (
+                      <Badge variant="muted" className="text-[10px]">
+                        you
                       </Badge>
-                    </TableCell>
-                    <TableCell>
-                      {user.last_login_at ? (
-                        <DateCell value={user.last_login_at} />
+                    )}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <Badge variant={user.is_admin ? "default" : "muted"}>
+                      {user.is_admin ? "admin" : "user"}
+                    </Badge>
+                    {isLastActiveAdmin && (
+                      <span
+                        className="text-[10px] text-muted-foreground"
+                        title="Promote another user to admin before changing this one"
+                      >
+                        last admin
+                      </span>
+                    )}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant={user.is_active ? "success" : "destructive"}>
+                    {user.is_active ? "active" : "inactive"}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  {user.last_login_at ? (
+                    <DateCell value={user.last_login_at} />
+                  ) : (
+                    "Never"
+                  )}
+                </TableCell>
+                <TableCell className="text-right">
+                  <div className="flex items-center justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="Edit profile"
+                      aria-label="Edit profile"
+                      onClick={() => setEditUser(user)}
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="Reset password"
+                      aria-label="Reset password"
+                      onClick={() => setResetPwUser(user)}
+                    >
+                      <KeyRound className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title={demoteTitle}
+                      aria-label={demoteTitle}
+                      disabled={demoteBlocked}
+                      className="disabled:opacity-40"
+                      onClick={() => toggleAdmin(user.id, user.is_admin)}
+                    >
+                      {user.is_admin ? (
+                        <ShieldOff className="size-4" />
                       ) : (
-                        "Never"
+                        <Shield className="size-4" />
                       )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title="Edit profile"
-                          aria-label="Edit profile"
-                          onClick={() => setEditUser(user)}
-                        >
-                          <Pencil className="size-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title="Reset password"
-                          aria-label="Reset password"
-                          onClick={() => setResetPwUser(user)}
-                        >
-                          <KeyRound className="size-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title={demoteTitle}
-                          aria-label={demoteTitle}
-                          disabled={demoteBlocked}
-                          className="disabled:opacity-40"
-                          onClick={() =>
-                            toggleAdmin(user.id, user.is_admin)
-                          }
-                        >
-                          {user.is_admin ? (
-                            <ShieldOff className="size-4" />
-                          ) : (
-                            <Shield className="size-4" />
-                          )}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title={deactivateTitle}
-                          aria-label={deactivateTitle}
-                          disabled={deactivateBlocked}
-                          className="disabled:opacity-40"
-                          onClick={() =>
-                            toggleActive(user.id, user.is_active)
-                          }
-                        >
-                          {user.is_active ? (
-                            <UserX className="size-4 text-destructive" />
-                          ) : (
-                            <UserCheck className="size-4 text-success" />
-                          )}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title={
-                            isSelf
-                              ? "Cannot delete your own account"
-                              : user.is_admin && isLastActiveAdmin
-                                ? "Cannot delete the last admin - promote another user first"
-                                : "Delete user"
-                          }
-                          aria-label="Delete user"
-                          disabled={
-                            isSelf || (user.is_admin && isLastActiveAdmin)
-                          }
-                          className="disabled:opacity-40"
-                          onClick={() =>
-                            confirm({
-                              title: "Delete user",
-                              description: (
-                                <>
-                                  Permanently delete{" "}
-                                  <code>{user.email}</code>? Their
-                                  memberships, sessions and personal
-                                  channels are removed; audit rows are
-                                  anonymised. This cannot be undone.
-                                </>
-                              ),
-                              confirmLabel: "Delete",
-                              onConfirm: () => {
-                                deleteUser.mutate(user.id, {
-                                  onSuccess: () =>
-                                    toast.success("User deleted"),
-                                  onError,
-                                });
-                              },
-                            })
-                          }
-                        >
-                          <Trash2 className="size-4 text-destructive" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </Card>
-      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title={deactivateTitle}
+                      aria-label={deactivateTitle}
+                      disabled={deactivateBlocked}
+                      className="disabled:opacity-40"
+                      onClick={() => toggleActive(user.id, user.is_active)}
+                    >
+                      {user.is_active ? (
+                        <UserX className="size-4 text-destructive" />
+                      ) : (
+                        <UserCheck className="size-4 text-success" />
+                      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title={
+                        isSelf
+                          ? "Cannot delete your own account"
+                          : user.is_admin && isLastActiveAdmin
+                            ? "Cannot delete the last admin - promote another user first"
+                            : "Delete user"
+                      }
+                      aria-label="Delete user"
+                      disabled={isSelf || (user.is_admin && isLastActiveAdmin)}
+                      className="disabled:opacity-40"
+                      onClick={() =>
+                        confirm({
+                          title: "Delete user",
+                          description: (
+                            <>
+                              Permanently delete <code>{user.email}</code>?
+                              Their memberships, sessions and personal channels
+                              are removed; audit rows are anonymised. This
+                              cannot be undone.
+                            </>
+                          ),
+                          confirmLabel: "Delete",
+                          onConfirm: () => {
+                            deleteUser.mutate(user.id, {
+                              onSuccess: () => toast.success("User deleted"),
+                              onError,
+                            });
+                          },
+                        })
+                      }
+                    >
+                      <Trash2 className="size-4 text-destructive" />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
 
       {confirmDialog}
 
@@ -360,10 +354,7 @@ function UsersPage() {
       >
         <DialogContent>
           {editUser && (
-            <EditUserDialog
-              user={editUser}
-              onSaved={() => setEditUser(null)}
-            />
+            <EditUserDialog user={editUser} onSaved={() => setEditUser(null)} />
           )}
         </DialogContent>
       </Dialog>
@@ -471,7 +462,9 @@ function CreateUserDialog({ onCreated }: { onCreated: () => void }) {
           <Input
             id="create-user-password"
             type="password"
-            minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
+            minLength={
+              (usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length
+            }
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
@@ -536,12 +529,7 @@ function EditUserDialog({
       <div className="mt-4 space-y-4">
         <div className="space-y-2">
           <Label htmlFor="edit-user-email">Email</Label>
-          <Input
-            id="edit-user-email"
-            value={user.email}
-            readOnly
-            disabled
-          />
+          <Input id="edit-user-email" value={user.email} readOnly disabled />
           <p className="text-xs text-muted-foreground">
             Email is the user's login identity and cannot be changed here.
           </p>
@@ -594,10 +582,7 @@ function EditUserDialog({
         </div>
       </div>
       <DialogFooter className="mt-6">
-        <Button
-          type="submit"
-          disabled={updateUser.isPending}
-        >
+        <Button type="submit" disabled={updateUser.isPending}>
           {updateUser.isPending ? "Saving..." : "Save changes"}
         </Button>
       </DialogFooter>
@@ -616,8 +601,7 @@ function ResetPasswordDialog({
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
 
-  const mismatch =
-    confirmPassword.length > 0 && password !== confirmPassword;
+  const mismatch = confirmPassword.length > 0 && password !== confirmPassword;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -643,16 +627,17 @@ function ResetPasswordDialog({
       </DialogHeader>
       <div className="mt-4 space-y-4">
         <p className="text-xs text-muted-foreground">
-          Sets a new password for <code>{user.email}</code> and
-          signs them out of every active session. Deliver the new
-          password out of band.
+          Sets a new password for <code>{user.email}</code> and signs them out
+          of every active session. Deliver the new password out of band.
         </p>
         <div className="space-y-2">
           <Label htmlFor="reset-pwd-new">New password</Label>
           <Input
             id="reset-pwd-new"
             type="password"
-            minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
+            minLength={
+              (usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length
+            }
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
@@ -663,15 +648,15 @@ function ResetPasswordDialog({
           <Input
             id="reset-pwd-confirm"
             type="password"
-            minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
+            minLength={
+              (usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length
+            }
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
             required
           />
           {mismatch && (
-            <p className="text-xs text-destructive">
-              Passwords do not match.
-            </p>
+            <p className="text-xs text-destructive">Passwords do not match.</p>
           )}
         </div>
       </div>

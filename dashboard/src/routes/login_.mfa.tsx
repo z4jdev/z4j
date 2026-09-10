@@ -8,23 +8,19 @@
  * device for 30 days", the server mints a z4j_mfa_trust cookie and
  * future logins skip this step until the cookie expires.
  */
-import { useState } from "react";
-import { createFileRoute, useNavigate, redirect } from "@tanstack/react-router";
-import { AlertCircle, Loader2 } from "lucide-react";
-import { toast } from "sonner";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
-import { Z4jMark } from "@/components/z4j-mark";
-import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
-} from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Z4jMark } from "@/components/z4j-mark";
 import { useMfaVerify } from "@/hooks/use-mfa";
 import { api, ApiError } from "@/lib/api";
+import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
+import { AlertCircle, Loader2 } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 
 interface MfaSearch {
   /** Path the verify page should send the user back to after a
@@ -39,9 +35,7 @@ interface MfaSearch {
 export const Route = createFileRoute("/login_/mfa")({
   validateSearch: (raw: Record<string, unknown>): MfaSearch => {
     const next = raw.next;
-    return typeof next === "string" && next.length > 0
-      ? { next }
-      : {};
+    return typeof next === "string" && next.length > 0 ? { next } : {};
   },
   // beforeLoad: bounce visitors who have no session to /login. A
   // direct-navigation visitor (bookmark, refresh, copy-pasted URL)
@@ -168,18 +162,16 @@ function MfaPage() {
             teleported between two different apps when the MFA
             second step kicks in. */}
         <div className="flex items-center justify-center gap-3">
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <Z4jMark className="size-6" />
           </div>
           <div className="flex min-w-0 flex-col leading-tight">
             <span className="text-sm font-semibold">z4j</span>
-            <span className="text-xs text-muted-foreground">
-              control plane
-            </span>
+            <span className="text-xs text-muted-foreground">control plane</span>
           </div>
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-8 shadow-sm">
+        <div className="panel-surface p-8">
           <div className="mb-6 space-y-1.5">
             <h1 className="text-xl font-semibold tracking-tight">
               Two-factor verification
@@ -233,20 +225,18 @@ function MfaPage() {
               >
                 Skip the code at sign-in on this browser for 30 days.
                 <span className="block text-xs">
-                  Sensitive actions (change password, mint API key)
-                  will still ask for a fresh code.
+                  Sensitive actions (change password, mint API key) will still
+                  ask for a fresh code.
                 </span>
               </Label>
             </div>
 
             <Button
               type="submit"
-              className="mt-3 h-11 w-full text-sm font-medium"
+              className="mt-3 w-full font-medium"
               disabled={verify.isPending || code.length < 6}
             >
-              {verify.isPending && (
-                <Loader2 className="size-4 animate-spin" />
-              )}
+              {verify.isPending && <Loader2 className="size-4 animate-spin" />}
               Verify
             </Button>
           </form>

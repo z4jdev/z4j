@@ -1,17 +1,13 @@
 /**
- * Two-line date display for table cells.
- *
- * Line 1: Relative time (e.g., "2 minutes ago")
- * Line 2: Absolute datetime (e.g., "2026-04-13 18:01:54")
- *
- * Used across all data tables for consistent date rendering.
+ * Consistent relative dates, with an absolute timestamp on hover.
+ * Set compact=false to also display the absolute datetime on a second line.
  */
-import { formatRelative, formatAbsolute } from "@/lib/format";
+import { formatAbsolute, formatRelative } from "@/lib/format";
 
 export function DateCell({
   value,
   className,
-  compact = false,
+  compact = true,
 }: {
   value: string | Date | null | undefined;
   className?: string;
@@ -27,7 +23,9 @@ export function DateCell({
   if (compact) {
     return (
       <span
-        className={["whitespace-nowrap text-xs", className].filter(Boolean).join(" ")}
+        className={["whitespace-nowrap text-xs", className]
+          .filter(Boolean)
+          .join(" ")}
         title={formatAbsolute(value)}
       >
         {formatRelative(value)}

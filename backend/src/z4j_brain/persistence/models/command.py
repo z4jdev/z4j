@@ -226,6 +226,12 @@ class Command(PKMixin, Base):
         Index("ix_commands_timeout_at", "timeout_at"),
         Index("ix_commands_issued_by_at", "issued_by", "issued_at"),
         Index(
+            "ix_commands_schedule_fire_receipt",
+            "schedule_id",
+            "schedule_fire_id",
+            "schedule_receipt_control_token",
+        ),
+        Index(
             "ux_commands_bulk_retry_child",
             "bulk_retry_child_id",
             unique=True,

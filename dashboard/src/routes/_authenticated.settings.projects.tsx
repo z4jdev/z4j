@@ -1,3 +1,4 @@
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * Project management settings page - admin only.
  *
@@ -5,24 +6,11 @@
  * remaining project - the backend enforces this and the UI disables
  * the button as a hint.
  */
-import { useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { FolderKanban, Pencil, Plus, Trash2 } from "lucide-react";
-import { toast } from "sonner";
+import { DateCell } from "@/components/domain/date-cell";
 import { EmptyState } from "@/components/domain/empty-state";
+import { PageHeader } from "@/components/domain/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
   DialogContent,
@@ -32,6 +20,15 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -46,8 +43,10 @@ import {
   useProjects,
   useUpdateProject,
 } from "@/hooks/use-projects";
-import { DateCell } from "@/components/domain/date-cell";
-import { PageHeader } from "@/components/domain/page-header";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { FolderKanban, Pencil, Plus, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/settings/projects")({
   component: ProjectsPage,
@@ -79,7 +78,7 @@ const ENVIRONMENTS = ["production", "staging", "development", "test"] as const;
 // ---------------------------------------------------------------------------
 
 function ProjectsPage() {
-  const { data: projects, isLoading } = useProjects();
+  const { data: projects, isLoading, isError, refetch } = useProjects();
   const [createOpen, setCreateOpen] = useState(false);
   const [editSlug, setEditSlug] = useState<string | null>(null);
   const [deleteSlug, setDeleteSlug] = useState<string | null>(null);
@@ -109,98 +108,106 @@ function ProjectsPage() {
         }
       />
 
-      {isLoading && <Skeleton className="h-64 w-full" />}
-      {projects && projects.length === 0 && (
-        <EmptyState
-          icon={FolderKanban}
-          title="No projects"
-          description="Create your first project to get started."
-        />
-      )}
-      {projects && projects.length > 0 && (
-        <Card className="overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Slug</TableHead>
-                <TableHead>Environment</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {projects.map((project) => (
-                <TableRow key={project.id}>
-                  <TableCell>
-                    <Link
-                      to="/projects/$slug"
-                      params={{ slug: project.slug }}
-                      className="font-medium hover:underline"
-                    >
-                      {project.name}
-                    </Link>
-                    {project.description && (
-                      <div className="max-w-xs truncate text-xs text-muted-foreground">
-                        {project.description}
-                      </div>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
-                      {project.slug}
-                    </code>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="muted">{project.environment}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={project.is_active ? "success" : "destructive"}
-                    >
-                      {project.is_active ? "active" : "archived"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <DateCell value={project.created_at} />
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        title="Edit project"
-                        aria-label={`Edit project ${project.name}`}
-                        onClick={() => setEditSlug(project.slug)}
-                      >
-                        <Pencil className="size-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        title={
-                          activeCount <= 1 && project.is_active
-                            ? "Cannot archive the last project"
-                            : "Archive project"
-                        }
-                        aria-label={`Archive project ${project.name}`}
-                        disabled={
-                          !project.is_active ||
-                          (activeCount <= 1 && project.is_active)
-                        }
-                        onClick={() => setDeleteSlug(project.slug)}
-                      >
-                        <Trash2 className="size-4 text-destructive" />
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
-      )}
+      <Table
+        searchable
+        searchPlaceholder="Search projects…"
+        isLoading={isLoading}
+        error={isError ? "Unable to load projects. Try again." : null}
+        onRetry={() => refetch()}
+        emptyState={
+          <EmptyState
+            icon={FolderKanban}
+            title="No projects"
+            description="Create your first project to get started."
+          />
+        }
+      >
+        <TableHeader>
+          <TableRow>
+            <TableHead sortKey="c0">Name</TableHead>
+            <TableHead sortKey="c1">Slug</TableHead>
+            <TableHead sortKey="c2">Environment</TableHead>
+            <TableHead sortKey="c3">Status</TableHead>
+            <TableHead sortKey="c4">Created</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {(projects ?? []).map((project) => (
+            <TableRow
+              sortValues={{
+                c0: project.name,
+                c1: project.slug,
+                c2: project.environment,
+                c3: project.is_active ? "active" : "archived",
+                c4: sortTimestamp(project.created_at),
+              }}
+              key={project.id}
+            >
+              <TableCell>
+                <Link
+                  to="/projects/$slug"
+                  params={{ slug: project.slug }}
+                  className="font-medium hover:underline"
+                >
+                  {project.name}
+                </Link>
+                {project.description && (
+                  <div className="max-w-xs truncate text-xs text-muted-foreground">
+                    {project.description}
+                  </div>
+                )}
+              </TableCell>
+              <TableCell>
+                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                  {project.slug}
+                </code>
+              </TableCell>
+              <TableCell>
+                <Badge variant="muted">{project.environment}</Badge>
+              </TableCell>
+              <TableCell>
+                <Badge variant={project.is_active ? "success" : "destructive"}>
+                  {project.is_active ? "active" : "archived"}
+                </Badge>
+              </TableCell>
+              <TableCell>
+                <DateCell value={project.created_at} />
+              </TableCell>
+              <TableCell className="text-right">
+                <div className="flex items-center justify-end gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    title="Edit project"
+                    aria-label={`Edit project ${project.name}`}
+                    onClick={() => setEditSlug(project.slug)}
+                  >
+                    <Pencil className="size-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    title={
+                      activeCount <= 1 && project.is_active
+                        ? "Cannot archive the last project"
+                        : "Archive project"
+                    }
+                    aria-label={`Archive project ${project.name}`}
+                    disabled={
+                      !project.is_active ||
+                      (activeCount <= 1 && project.is_active)
+                    }
+                    onClick={() => setDeleteSlug(project.slug)}
+                  >
+                    <Trash2 className="size-4 text-destructive" />
+                  </Button>
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
 
       {/* Edit dialog */}
       <Dialog
@@ -448,9 +455,9 @@ function EditProjectDialog({
             maxLength={50}
           />
           <p className="text-xs text-muted-foreground">
-            Lowercase letters, numbers, and hyphens. Changing the slug
-            breaks bookmarked URLs and any external integration that
-            references this project by slug.
+            Lowercase letters, numbers, and hyphens. Changing the slug breaks
+            bookmarked URLs and any external integration that references this
+            project by slug.
           </p>
           {slugInput && !slugValid && (
             <p className="text-xs text-destructive">
@@ -532,8 +539,8 @@ function DeleteProjectDialog({
       <DialogHeader>
         <DialogTitle>Archive Project</DialogTitle>
         <DialogDescription>
-          This will archive the project and hide it from all views. The
-          project data and audit history will be preserved.
+          This will archive the project and hide it from all views. The project
+          data and audit history will be preserved.
         </DialogDescription>
       </DialogHeader>
       <div className="mt-4 space-y-4">

@@ -1,3 +1,5 @@
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 /**
  * Live Activity Feed.
  *
@@ -15,7 +17,25 @@
  *      spikes without having to read every timestamp.
  *   3. Load older button (walks ``next_before_id`` backwards).
  */
-import { useMemo, useState } from "react";
+import { DateCell } from "@/components/domain/date-cell";
+import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
+import { QueryError } from "@/components/domain/query-error";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useActivityInfinite, type ActivityItem } from "@/hooks/use-activity";
+import { useMe } from "@/hooks/use-auth";
+import { useProjects } from "@/hooks/use-projects";
+import { projectlessActivityScope } from "@/lib/activity-scope";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   Activity,
@@ -26,27 +46,7 @@ import {
   RefreshCw,
   XCircle,
 } from "lucide-react";
-import { DateCell } from "@/components/domain/date-cell";
-import { PageHeader } from "@/components/domain/page-header";
-import { PageShell } from "@/components/domain/page-shell";
-import { QueryError } from "@/components/domain/query-error";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { useActivityInfinite, type ActivityItem } from "@/hooks/use-activity";
-import { useMe } from "@/hooks/use-auth";
-import { useProjects } from "@/hooks/use-projects";
-import { projectlessActivityScope } from "@/lib/activity-scope";
+import { useMemo, useState } from "react";
 
 export const Route = createFileRoute("/_authenticated/activity")({
   component: ActivityPage,
@@ -60,13 +60,14 @@ function ActivityPage() {
   const [projectSlug, setProjectSlug] = useState<string>(ALL_PROJECTS_VALUE);
   const [actionPrefix, setActionPrefix] = useState("");
 
+  const debouncedPrefix = useDebouncedValue(actionPrefix);
   const filters = useMemo(
     () => ({
       project_slug:
         projectSlug === ALL_PROJECTS_VALUE ? undefined : projectSlug,
-      action_prefix: actionPrefix.trim() || undefined,
+      action_prefix: debouncedPrefix.trim() || undefined,
     }),
-    [projectSlug, actionPrefix],
+    [projectSlug, debouncedPrefix],
   );
 
   const query = useActivityInfinite(filters);
@@ -77,7 +78,6 @@ function ActivityPage() {
     return query.data.pages.flatMap((p) => p.items);
   }, [query.data]);
 
-  const newestCursor = query.data?.pages[0]?.newest_cursor ?? null;
   const hasMore = Boolean(
     query.data?.pages[query.data.pages.length - 1]?.next_before_cursor,
   );
@@ -87,7 +87,7 @@ function ActivityPage() {
       <PageHeader
         icon={History}
         title="Activity"
-        description="Cross-project timeline of audit-log rows. Polls every 5 seconds."
+        description="Follow recent activity across your projects."
         actions={
           <Button
             variant="outline"
@@ -104,44 +104,42 @@ function ActivityPage() {
         }
       />
 
-      <Card>
-        <CardContent className="flex flex-col gap-4 p-4 md:flex-row md:items-end">
-          <div className="flex flex-col gap-2 md:w-64">
-            <Label htmlFor="activity-project">Project</Label>
-            <Select value={projectSlug} onValueChange={setProjectSlug}>
-              <SelectTrigger id="activity-project">
-                <SelectValue placeholder="All projects" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL_PROJECTS_VALUE}>All projects</SelectItem>
-                {(projects.data ?? []).map((p) => (
-                  <SelectItem key={p.slug} value={p.slug}>
-                    {p.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex flex-1 flex-col gap-2">
-            <Label htmlFor="activity-prefix">Action prefix</Label>
-            <Input
-              id="activity-prefix"
-              placeholder="e.g. task. , user. , agent."
-              value={actionPrefix}
-              onChange={(e) => setActionPrefix(e.target.value)}
-            />
-          </div>
-          <div className="flex items-center gap-3 text-sm text-muted-foreground md:pb-2">
-            <span className="inline-flex size-2 rounded-full bg-primary" />
-            Live
-            <span className="text-xs">
-              {newestCursor
-                ? `up to ${newestCursor.split("|")[0]?.slice(11, 19) ?? newestCursor.slice(0, 12)}`
-                : "no rows yet"}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
+      <FilterToolbar
+        searchValue={actionPrefix}
+        onSearchChange={setActionPrefix}
+        searchPlaceholder="Search action prefix…"
+        activeFilterCount={
+          (actionPrefix ? 1 : 0) + (projectSlug === ALL_PROJECTS_VALUE ? 0 : 1)
+        }
+        onClear={() => {
+          setActionPrefix("");
+          setProjectSlug(ALL_PROJECTS_VALUE);
+        }}
+        filters={
+          <Select value={projectSlug} onValueChange={setProjectSlug}>
+            <SelectTrigger
+              id="activity-project"
+              aria-label="Project"
+              className="w-44"
+            >
+              <SelectValue placeholder="All projects" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_PROJECTS_VALUE}>All projects</SelectItem>
+              {(projects.data ?? []).map((p) => (
+                <SelectItem key={p.slug} value={p.slug}>
+                  {p.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        }
+        trailing={
+          <span className="ml-auto flex items-center gap-2 text-sm text-muted-foreground">
+            <span className="size-2 rounded-full bg-primary" /> Live
+          </span>
+        }
+      />
 
       {query.isError && (
         <QueryError

@@ -496,6 +496,42 @@ def test_existing_sqlite_without_store_refuses_replacement_keys(
         cli._capture_serve_configuration()
 
 
+@pytest.mark.parametrize(
+    "missing_key",
+    [None, "Z4J_SECRET", "Z4J_SESSION_SECRET", "Z4J_METRICS_AUTH_TOKEN", "Z4J_AUDIT_CHAIN_SECRET"],
+)
+def test_existing_sqlite_with_external_secrets_needs_no_local_store(
+    private_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_key: str | None,
+) -> None:
+    """Externally configured installations can restart without minting keys."""
+    _clear_z4j_environment(monkeypatch)
+    database = private_home / "z4j.db"
+    database.touch()
+    monkeypatch.setenv("Z4J_HOME", str(private_home))
+    monkeypatch.setenv("Z4J_DATABASE_URL", f"sqlite+aiosqlite:///{database}")
+    monkeypatch.chdir(private_home)
+    values = {
+        "Z4J_SECRET": "m" * 48,
+        "Z4J_SESSION_SECRET": "s" * 48,
+        "Z4J_METRICS_AUTH_TOKEN": "t" * 32,
+        "Z4J_AUDIT_CHAIN_SECRET": "a" * 48,
+    }
+    for key, value in values.items():
+        if key != missing_key:
+            monkeypatch.setenv(key, value)
+    if missing_key is not None:
+        with pytest.raises(RuntimeError, match="no verified"):
+            cli._capture_serve_configuration()
+    else:
+        for _ in range(2):
+            snapshot = cli._capture_serve_configuration()
+            assert {key: snapshot.values[key] for key in values} == values
+            assert all(snapshot.source_for_env_key(key) == f"env ({key})" for key in values)
+        assert not (private_home / "secret.env").exists()
+
+
 def test_pre_1_8_store_upgrade_adds_only_missing_audit_key(
     private_home: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -748,7 +748,7 @@ async def test_terminal_hold_resolution_rotates_token_and_carries_exact_grant(
     assert row.schedule_revision == 5
     assert row.total_runs == 1
     fire = (await session.execute(select(ScheduleFire))).scalar_one()
-    assert fire.status == "operator_skipped"
+    assert fire.status == "terminal_failed"
 
     replay = await ScheduleControlRepository(
         session,

@@ -1,5 +1,83 @@
 # Changelog
 
+## 1.11.0 (2026-09-10)
+
+- Require `aiosmtplib>=5.1.3` for email delivery. This excludes STARTTLS
+  response injection (CVE-2026-55558) and includes the additional ESMTP
+  address-validation fixes in 5.1.3. The tested release already uses 5.1.3;
+  the change prevents constrained installations from retaining an older SMTP
+  client while continuing to allow newer versions.
+
+- Keep PostgreSQL audit append cost stable as history grows with exact
+  transactional accounting, independent full audit verification, and indexed
+  schedule-receipt lookups. Preserve signed history through migration,
+  downgrade and supported backup restoration.
+
+- This release changes the schema. Migration `v1_11_audit_append_tally` runs
+  on the first `z4j serve` after upgrading, or through
+  `z4j migrate upgrade head` when `Z4J_AUTO_MIGRATE=false`. It adds
+  `audit_chain_state.observed_active_row_count` and the
+  `ix_commands_schedule_fire_receipt` index on `commands`. On PostgreSQL it
+  also takes the audit signing lock and an `EXCLUSIVE` lock on `audit_log` and
+  `audit_chain_state`, counts the existing active audit history to seed the
+  tally, installs the tally triggers, and builds the index without
+  `CONCURRENTLY`. Until it commits, the starting Brain does not serve, and
+  audited actions and command writes from any other process wait. The
+  duration grows with audit history and command volume, so schedule the
+  upgrade for a quiet window. On SQLite it only adds the column and the index.
+
+- Add the Agent Health API,
+  `GET /api/v1/projects/{slug}/agents/{agent_id}/health`, and a Health dialog
+  on the dashboard's Agents page. Project viewers can read an agent's latest
+  100 retained status samples, each with its structured telemetry-loss
+  counters and authenticated worker identity; revoked or foreign agents
+  return 404. A sample's time is when the agent sent it, so a report buffered
+  through an outage carries its delivery time. Missing reports, older agents
+  and disabled status history show as unavailable accounting, never as zero
+  loss. A heartbeat that reports changed, positive loss also produces a
+  rate-bounded Brain warning.
+
+- Keep Celery and RQ task submission responsive during broker stalls by moving
+  blocking publishes to the dedicated broker pool. A publish timeout retains
+  an explicit indeterminate outcome because the task may still be enqueued.
+
+- Preserve a failed or timed-out fire's original outcome when an operator
+  resolves its hold. Resolution is recorded separately, resumes the selected
+  cadence safely, and no longer raises a database transition error.
+
+- Synchronize timeout sweeps through the database, avoiding an ORM timestamp
+  comparison crash after a SQLite command refresh.
+
+- Canonicalize PostgreSQL network-address values when preparing restore/reset
+  manifests, so backups containing real IPv4 or IPv6 login sessions restore
+  successfully without relaxing the manifest type checks.
+
+- Keep PostgreSQL reset and restore available after a supported downgrade and
+  re-upgrade. PostgreSQL never reuses a dropped column's number, so the schema
+  signature binds the order of live columns instead of physical column numbers;
+  databases without dropped-column slots keep their existing signatures.
+
+- Preserve externally configured SQLite authority across restarts and upgrades:
+  a complete set of supplied secrets no longer requires a local secret store.
+  Existing databases with missing keys still refuse replacement keys.
+
+- Refresh locked scheduler delivery commands before claiming them, so concurrent
+  registry delivery paths cannot reuse a stale pending state or replace another
+  claim. PostgreSQL regression coverage reproduces the competing-reader race.
+
+- Accept a command for a live long-poll agent as pending on brains that use the
+  local command registry (SQLite and other single-process installations). The
+  request reported "agent is not connected" while the agent still claimed and
+  ran the command, inviting a second attempt that could run it twice.
+
+* Align runtime version metadata and sibling dependency floors with the coordinated 1.11.0 release.
+* Refresh the dashboard with consistent page controls, sortable record columns, restrained light/dark palettes, clearer settings navigation and responsive layouts.
+* Add personal Saved Views for task-history filters with membership, CSRF, uniqueness and quota checks.
+* Show filtered result totals and correct all-matching bulk selection; improve search, tooltip and dialog keyboard behavior.
+* Keep long-poll agents as task command targets: they report no engine inventory, so the task detail page and bulk retry treat an unreported inventory as unknown rather than empty, while a token that never connected is not offered. Bulk retry and revoke send each task to an agent that can act on its engine (revoke no longer uses the project's first agent) and send nothing when a selected task has no such agent.
+* Recognize canonical PyPI prerelease versions in agent freshness and compatibility warnings.
+* Keep a saved schedule's kind and expression in the schedule Edit dialog. A run-once (`clocked`) or `solar` schedule that the form does not offer for its engine no longer opens as a cron schedule whose save the Brain refuses.
+
 ## 1.10.0 (2026-08-28)
 
 * The dashboard shows a schedule's recent history as a picture. Each row of

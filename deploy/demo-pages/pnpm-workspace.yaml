@@ -1,4 +1,4 @@
-# pnpm 11.22 project authority. pnpm 11 reads project settings here;
+# pnpm 12 project authority. pnpm reads project settings here;
 # .npmrc is retained only for npm-compatible script blocking and registry TLS.
 packages:
   - "."
@@ -31,3 +31,12 @@ allowBuilds:
   # Version selection stays with Wrangler's lock graph; this is script policy,
   # not a workerd dependency override.
   workerd: false
+
+overrides:
+  "sharp@>=0.35.0 <0.35.4": ">=0.35.4 <0.36"
+
+# Keep one dependency document so GitHub, Trivy and the independent age gate
+# inspect the complete graph. pnpm is provisioned explicitly by CI/release tools.
+# engineStrict enforces the exact package-manager version in package.json.
+pmOnFail: ignore
+engineStrict: true

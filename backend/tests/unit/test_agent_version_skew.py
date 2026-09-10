@@ -134,3 +134,11 @@ def test_close_code_is_reserved_for_future_enforcement() -> None:
     """Pin the protocol allocation without claiming universal control flow."""
     assert CLOSE_VERSION_SKEW == 4427
     assert _MAX_AGENT_MINOR_LAG == 1
+
+
+def test_release_candidates_keep_the_existing_minor_skew_contract() -> None:
+    assert _skew("1.11.0rc1", "1.11.0rc1") == []
+    assert _skew("1.10.0", "1.11.0rc1") == []
+    logs = _skew("1.9.0", "1.11.0rc1")
+    assert len(logs) == 1
+    assert "trails the brain by 2 minors" in logs[0]["reason"]

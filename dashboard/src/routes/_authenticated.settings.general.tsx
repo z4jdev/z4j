@@ -5,16 +5,15 @@
  * running brain.
  * Values are read-only for now - editable in a future phase.
  */
-import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { ExternalLink, Info, Settings } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
-import { SectionCard } from "@/components/domain/section-card";
-import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/domain/page-header";
 import { QueryError } from "@/components/domain/query-error";
+import { SectionCard } from "@/components/domain/section-card";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { api } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { ExternalLink, Info, Settings } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/settings/general")({
   component: GeneralSettingsPage,
@@ -56,18 +55,17 @@ interface AdminSettingsResponse {
 
 function SettingsTable({ rows }: { rows: [string, string][] }) {
   return (
-    <Table>
-      <TableBody>
-        {rows.map(([key, value]) => (
-          <TableRow key={key}>
-            <TableCell className="w-1/2 py-2.5 font-medium text-muted-foreground">
-              {key}
-            </TableCell>
-            <TableCell className="py-2.5 font-mono text-sm">{value}</TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <dl className="divide-y">
+      {rows.map(([key, value]) => (
+        <div
+          className="grid gap-1 px-4 py-3 sm:grid-cols-[minmax(10rem,1fr)_2fr] sm:gap-4"
+          key={key}
+        >
+          <dt className="text-sm font-medium text-muted-foreground">{key}</dt>
+          <dd className="min-w-0 break-words font-mono text-sm">{value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 

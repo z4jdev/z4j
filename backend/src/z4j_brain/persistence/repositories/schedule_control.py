@@ -2100,7 +2100,10 @@ class ScheduleControlRepository:
             )
             resolution_evidence_id = resolution.id
 
-        if fire is not None:
+        # Current receipts retain their immutable terminal outcome. The hold
+        # (or occurrence resolution) records the operator's decision separately;
+        # only migrated receipt-NULL history permits an operator_skipped status.
+        if fire is not None and fire.receipt_control_token is None:
             fire.status = "operator_skipped"
             fire.error_code = "operator_skipped"
             fire.error_message = (

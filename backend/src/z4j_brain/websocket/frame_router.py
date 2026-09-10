@@ -397,6 +397,8 @@ class FrameRouter:
         # the burst was.
         self._agent_status_overflow_active: bool = False
         self._agent_status_overflow_dropped: int = 0
+        self._next_loss_warning_at = 0.0
+        self._last_loss_warning: object = None
 
     def aclose(self) -> None:
         """Cancel pending background tasks and clear strong references.
@@ -1209,6 +1211,32 @@ class FrameRouter:
                         )
 
             await session.commit()
+        loss = frame.payload.telemetry_loss
+        has_loss = frame.payload.dropped_events > 0 or (
+            loss is not None
+            and (
+                loss.capacity_evicted_frames
+                or loss.content_rejected_frames
+                or any(loss.adapter_events.values())
+            )
+        )
+        now_mono = time.monotonic()
+        warning_state = (frame.payload.dropped_events, loss)
+        if (
+            has_loss
+            and warning_state != self._last_loss_warning
+            and now_mono >= self._next_loss_warning_at
+        ):
+            self._next_loss_warning_at = now_mono + 60.0
+            self._last_loss_warning = warning_state
+            logger.warning(
+                "z4j agent reports telemetry loss; inspect agent health",
+                project_id=str(self._project_id),
+                agent_id=str(self._agent_id),
+                worker_id=self._worker_id,
+                dropped_events=frame.payload.dropped_events,
+                telemetry_loss=loss.model_dump(mode="json") if loss is not None else None,
+            )
         return True
 
     # ------------------------------------------------------------------
@@ -1220,9 +1248,10 @@ class FrameRouter:
 
         The frame's ``payload`` is dumped to a JSON-friendly dict and
         stored as JSONB on Postgres / JSON on SQLite. ``captured_at``
-        is the frame's ``ts`` field (when the agent built the
-        snapshot), NOT ``datetime.now()`` - the dashboard timeline
-        should reflect the agent's clock, not the brain's.
+        is the frame's ``ts`` field, NOT ``datetime.now()`` - the
+        dashboard timeline follows the agent's clock, not the brain's.
+        The agent's signer stamps ``ts`` when it sends the frame, so a
+        snapshot buffered through an outage carries its delivery time.
 
         Rate-capped per audit M-6: a misbehaving (or compromised
         post-handshake) agent shipping frames at line rate would
@@ -1284,6 +1313,9 @@ class FrameRouter:
         # SQLAlchemy's JSON serialiser hits a ``datetime is not JSON
         # serializable`` TypeError on the SQLite path.
         payload_dict = frame.payload.model_dump(mode="json")
+        if self._worker_id is not None:
+            # The authenticated session owns identity, never the reported JSON.
+            payload_dict["worker_id"] = self._worker_id
 
         try:
             async with self._db.session(write=True) as session:

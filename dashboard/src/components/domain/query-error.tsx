@@ -1,6 +1,6 @@
-import { AlertCircle, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { AlertCircle, RefreshCw } from "lucide-react";
 
 export interface QueryErrorProps {
   message?: string;
@@ -15,8 +15,9 @@ export function QueryError({
 }: QueryErrorProps) {
   return (
     <div
+      role="alert"
       className={cn(
-        "flex min-h-[200px] flex-col items-center justify-center gap-3 rounded-lg border bg-card p-8 text-center",
+        "flex min-h-[200px] flex-col items-center justify-center gap-3 panel-surface p-8 text-center",
         className,
       )}
     >
@@ -25,8 +26,8 @@ export function QueryError({
       </div>
       <p className="text-sm font-medium">{message}</p>
       <p className="max-w-sm text-xs text-muted-foreground">
-        Check your connection and try again. If the problem persists,
-        contact your administrator.
+        Check your connection and try again. If the problem persists, contact
+        your administrator.
       </p>
       {onRetry && (
         <Button variant="outline" size="sm" onClick={onRetry} className="mt-1">

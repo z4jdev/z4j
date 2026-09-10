@@ -122,8 +122,7 @@ export function TrendChart({
 
         {/* Hover overlay - one invisible rect per bucket */}
         {xs.map((x, i) => {
-          const leftEdge =
-            i === 0 ? padding.left : (xs[i - 1]! + x) / 2;
+          const leftEdge = i === 0 ? padding.left : (xs[i - 1]! + x) / 2;
           const rightEdge =
             i === xs.length - 1 ? width - padding.right : (x + xs[i + 1]!) / 2;
           return (
@@ -155,26 +154,25 @@ export function TrendChart({
         {/* X-axis labels - first, middle, last */}
         {Array.from(
           new Set([0, Math.floor(series.length / 2), series.length - 1]),
-        )
-          .map((i) => (
-            <text
-              key={i}
-              x={xs[i]}
-              y={height - 10}
-              // The edge labels anchor inward so the last one is not cut off
-              // at the chart's right edge.
-              textAnchor={i === 0 ? "start" : i === series.length - 1 ? "end" : "middle"}
-              className="fill-muted-foreground text-[10px]"
-            >
-              {formatTick(series[i]!.t)}
-            </text>
-          ))}
+        ).map((i) => (
+          <text
+            key={i}
+            x={xs[i]}
+            y={height - 10}
+            // The edge labels anchor inward so the last one is not cut off
+            // at the chart's right edge.
+            textAnchor={
+              i === 0 ? "start" : i === series.length - 1 ? "end" : "middle"
+            }
+            className="fill-muted-foreground text-[10px]"
+          >
+            {formatTick(series[i]!.t)}
+          </text>
+        ))}
       </svg>
 
       {/* Tooltip */}
-      {hover !== null && (
-        <TrendTooltip bucket={series[hover]!} />
-      )}
+      {hover !== null && <TrendTooltip bucket={series[hover]!} />}
 
       {/* Legend */}
       <div className="mt-2 flex items-center justify-center gap-4 text-xs text-muted-foreground">
@@ -212,7 +210,8 @@ export function niceCeiling(v: number): number {
 }
 
 export function compactTick(v: number): string {
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(v % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (v >= 1_000_000)
+    return `${(v / 1_000_000).toFixed(v % 1_000_000 === 0 ? 0 : 1)}M`;
   if (v >= 1_000) return `${(v / 1_000).toFixed(v % 1_000 === 0 ? 0 : 1)}k`;
   return String(v);
 }
@@ -228,7 +227,7 @@ function LegendDot({ className, label }: { className: string; label: string }) {
 
 function TrendTooltip({ bucket }: { bucket: TrendBucket }) {
   return (
-    <div className="pointer-events-none absolute left-1/2 top-0 -translate-x-1/2 rounded-md border bg-popover px-3 py-2 text-xs shadow-sm">
+    <div className="pointer-events-none absolute left-1/2 top-0 -translate-x-1/2 rounded-md border bg-popover px-3 py-2 text-xs shadow-overlay">
       <div className="font-mono text-muted-foreground">
         {formatTooltipTime(bucket.t)}
       </div>

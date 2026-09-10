@@ -29,7 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { FormField as Field } from "./form-field";
 import {
   Select,
   SelectContent,
@@ -46,6 +46,8 @@ import {
   type AutomationRulePublic,
   type AutomationRuleUpdateBody,
 } from "@/hooks/use-automation-rules";
+import { AutomationBuilder } from "./automation-builder";
+import { guidedConditions, guidedAction } from "@/lib/automation-builder";
 import { ApiError } from "@/lib/api";
 
 // Triggers the backend actually dispatches (DISPATCHED_TRIGGERS).
@@ -106,7 +108,9 @@ function fromExisting(r: AutomationRulePublic): FormState {
   };
 }
 
-function actionsAreDestructive(actions: Array<Record<string, unknown>>): boolean {
+function actionsAreDestructive(
+  actions: Array<Record<string, unknown>>,
+): boolean {
   return actions.some(
     (a) => typeof a.type === "string" && DESTRUCTIVE_ACTION_TYPES.has(a.type),
   );
@@ -129,17 +133,26 @@ export function AutomationRuleFormDialog({
 }: Props) {
   const mode = existing ? "edit" : "create";
   const [form, setForm] = useState<FormState>(EMPTY);
-  const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>(
-    {},
-  );
+  const [errors, setErrors] = useState<
+    Partial<Record<keyof FormState, string>>
+  >({});
 
+  const [advanced, setAdvanced] = useState(false);
+  const conditionsForBuilder = guidedConditions(form.conditions);
+  const actionForBuilder = guidedAction(form.actions);
+  const canGuide = conditionsForBuilder !== null && actionForBuilder !== null;
   const create = useCreateAutomationRule(slug);
   const update = useUpdateAutomationRule(slug);
   const pending = create.isPending || update.isPending;
 
   useEffect(() => {
     if (open) {
-      setForm(existing ? fromExisting(existing) : EMPTY);
+      const initial = existing ? fromExisting(existing) : EMPTY;
+      setForm(initial);
+      setAdvanced(
+        guidedConditions(initial.conditions) === null ||
+          guidedAction(initial.actions) === null,
+      );
       setErrors({});
     }
   }, [open, existing]);
@@ -178,7 +191,11 @@ export function AutomationRuleFormDialog({
     let conditions: Record<string, unknown> = {};
     try {
       const parsed = JSON.parse(form.conditions || "{}");
-      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+      if (
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        parsed === null
+      ) {
         next.conditions = "must be a JSON object";
       } else {
         conditions = parsed as Record<string, unknown>;
@@ -192,7 +209,9 @@ export function AutomationRuleFormDialog({
       const parsed = JSON.parse(form.actions || "[]");
       if (!Array.isArray(parsed) || parsed.length === 0) {
         next.actions = "must be a non-empty JSON array";
-      } else if (!parsed.every((a) => a && typeof a === "object" && "type" in a)) {
+      } else if (
+        !parsed.every((a) => a && typeof a === "object" && "type" in a)
+      ) {
         next.actions = 'each action must be an object with a "type"';
       } else {
         actions = parsed as Array<Record<string, unknown>>;
@@ -206,7 +225,11 @@ export function AutomationRuleFormDialog({
       next.max_executions_per_window = "integer 1..100000";
     }
     const windowSeconds = Number(form.window_seconds);
-    if (!Number.isInteger(windowSeconds) || windowSeconds < 1 || windowSeconds > 604_800) {
+    if (
+      !Number.isInteger(windowSeconds) ||
+      windowSeconds < 1 ||
+      windowSeconds > 604_800
+    ) {
       next.window_seconds = "integer 1..604800";
     }
 
@@ -264,7 +287,9 @@ export function AutomationRuleFormDialog({
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            {mode === "create" ? "New automation rule" : `Edit “${existing?.name}”`}
+            {mode === "create"
+              ? "New automation rule"
+              : `Edit “${existing?.name}”`}
           </DialogTitle>
           <DialogDescription>
             {mode === "create"
@@ -272,7 +297,10 @@ export function AutomationRuleFormDialog({
               : "Updates write through to brain immediately and apply to the next matching event."}
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={onSubmit} className="space-y-4">
+        <form onSubmit={onSubmit} className="space-y-5">
+          <p className="rounded-lg border bg-muted/30 px-3 py-2 text-sm">
+            Project <strong>{slug}</strong>
+          </p>
           <div className="grid gap-3 md:grid-cols-2">
             <Field label="Name" error={errors.name}>
               <Input
@@ -300,40 +328,71 @@ export function AutomationRuleFormDialog({
             </Field>
           </div>
 
-          <Field
-            label="Conditions (JSON object)"
-            error={errors.conditions}
-            hint='Flat AND-ed filters, e.g. {"engine": "celery", "task_name": "send_email"}. Empty {} matches every event of the trigger.'
-          >
-            <Textarea
-              value={form.conditions}
-              onChange={(e) => set("conditions", e.target.value)}
-              className="font-mono text-xs"
-              rows={3}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold">Conditions and actions</h3>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={advanced && !canGuide}
+              onClick={() => setAdvanced((v) => !v)}
+            >
+              {advanced ? "Use guided editor" : "Edit advanced JSON"}
+            </Button>
+          </div>
+          {advanced && !canGuide && (
+            <p className="text-sm text-muted-foreground">
+              This configuration uses advanced conditions or actions. Edit its
+              JSON to preserve the complete rule.
+            </p>
+          )}
+          {!advanced &&
+          conditionsForBuilder !== null &&
+          actionForBuilder !== null ? (
+            <AutomationBuilder
+              conditions={conditionsForBuilder}
+              action={actionForBuilder}
+              onConditionsChange={(value) => set("conditions", value)}
+              onActionChange={(value) => set("actions", value)}
             />
-          </Field>
+          ) : (
+            <>
+              <Field
+                label="Conditions (JSON object)"
+                error={errors.conditions}
+                hint='Flat AND-ed filters, e.g. {"engine": "celery", "task_name": "send_email"}. Empty {} matches every event of the trigger.'
+              >
+                <Textarea
+                  value={form.conditions}
+                  onChange={(e) => set("conditions", e.target.value)}
+                  className="font-mono text-xs"
+                  rows={3}
+                />
+              </Field>
 
-          <Field
-            label="Actions (JSON array)"
-            error={errors.actions}
-            hint='Each is {"type": ...}. Supported today: notify, retry, cancel.'
-          >
-            <Textarea
-              value={form.actions}
-              onChange={(e) => set("actions", e.target.value)}
-              className="font-mono text-xs"
-              rows={4}
-            />
-          </Field>
+              <Field
+                label="Actions (JSON array)"
+                error={errors.actions}
+                hint='Each is {"type": ...}. Supported today: notify, retry, cancel.'
+              >
+                <Textarea
+                  value={form.actions}
+                  onChange={(e) => set("actions", e.target.value)}
+                  className="font-mono text-xs"
+                  rows={4}
+                />
+              </Field>
+            </>
+          )}
 
-          {isDestructive && !isAdmin && (
+          {isDestructive && (
             <div className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
               <AlertTriangle className="size-4 shrink-0" />
               <div>
                 This rule includes a destructive action (retry / cancel).
-                Arming it requires the admin role and a fresh MFA check, which
-                you do not currently have. You can still save a notify-only
-                rule.
+                {isAdmin
+                  ? "Saving requires fresh MFA. When armed, the rule can change task state; validate it in dry run first."
+                  : "Saving requires an administrator with fresh MFA. Choose notify to save a rule with your current role."}
               </div>
             </div>
           )}
@@ -346,7 +405,9 @@ export function AutomationRuleFormDialog({
             >
               <Input
                 value={form.max_executions_per_window}
-                onChange={(e) => set("max_executions_per_window", e.target.value)}
+                onChange={(e) =>
+                  set("max_executions_per_window", e.target.value)
+                }
                 inputMode="numeric"
                 className="font-mono text-xs"
               />
@@ -373,6 +434,7 @@ export function AutomationRuleFormDialog({
               </div>
             </div>
             <Switch
+              aria-label="Dry run"
               checked={form.dry_run}
               onCheckedChange={(v) => set("dry_run", v)}
             />
@@ -386,6 +448,7 @@ export function AutomationRuleFormDialog({
               </div>
             </div>
             <Switch
+              aria-label="Enabled"
               checked={form.is_enabled}
               onCheckedChange={(v) => set("is_enabled", v)}
             />
@@ -411,26 +474,5 @@ export function AutomationRuleFormDialog({
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function Field({
-  label,
-  error,
-  hint,
-  children,
-}: {
-  label: string;
-  error?: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <Label>{label}</Label>
-      {children}
-      {error && <p className="text-xs text-destructive">{error}</p>}
-      {!error && hint && <p className="text-xs text-muted-foreground">{hint}</p>}
-    </div>
   );
 }

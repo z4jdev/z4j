@@ -10,20 +10,9 @@
  * The two pages share the same test-payload + result shape so the
  * dashboard toast renderer works against either.
  */
-import { useEffect, useState } from "react";
-import {
-  CheckCircle2,
-  Globe,
-  Mail,
-  Pencil,
-  Plus,
-  RefreshCw,
-  TestTube,
-  Trash2,
-  Webhook,
-  X,
-  XCircle,
-} from "lucide-react";
+import { useConfirm } from "@/components/domain/confirm-dialog";
+import { EmptyState } from "@/components/domain/empty-state";
+import { PageHeader } from "@/components/domain/page-header";
 import {
   DiscordIcon,
   MicrosoftTeamsIcon,
@@ -31,9 +20,6 @@ import {
   SlackIcon,
   TelegramIcon,
 } from "@/components/icons/brand-icons";
-import { toast } from "sonner";
-import { useConfirm } from "@/components/domain/confirm-dialog";
-import { EmptyState } from "@/components/domain/empty-state";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -61,8 +47,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { PageHeader } from "@/components/domain/page-header";
-import { api } from "@/lib/api";
 import {
   useChannels,
   useCreateUserChannel,
@@ -77,6 +61,22 @@ import {
   type UserChannel,
 } from "@/hooks/use-notifications";
 import { useProjects } from "@/hooks/use-projects";
+import { api } from "@/lib/api";
+import {
+  CheckCircle2,
+  Globe,
+  Mail,
+  Pencil,
+  Plus,
+  RefreshCw,
+  TestTube,
+  Trash2,
+  Webhook,
+  X,
+  XCircle,
+} from "lucide-react";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 const CHANNEL_ICONS = {
   webhook: Webhook,
@@ -94,8 +94,10 @@ function teamsHostSummary(url: string): string {
   try {
     const host = new URL(url).hostname.toLowerCase();
     if (host === "outlook.office.com") return "outlook.office.com (classic)";
-    if (host.endsWith(".webhook.office.com")) return "*.webhook.office.com (workflow)";
-    if (host.endsWith(".logic.azure.com")) return "*.logic.azure.com (power automate)";
+    if (host.endsWith(".webhook.office.com"))
+      return "*.webhook.office.com (workflow)";
+    if (host.endsWith(".logic.azure.com"))
+      return "*.logic.azure.com (power automate)";
     return host;
   } catch {
     return "teams webhook";
@@ -139,6 +141,7 @@ export function MyChannelsTab() {
     <div className="space-y-6">
       {confirmDialog}
       <PageHeader
+        level="section"
         title={
           <>
             Global Channels
@@ -185,7 +188,8 @@ export function MyChannelsTab() {
               }}
             >
               <DialogContent>
-                {dialogState.mode === "create" || dialogState.mode === "edit" ? (
+                {dialogState.mode === "create" ||
+                dialogState.mode === "edit" ? (
                   <UserChannelDialog
                     mode={dialogState.mode}
                     channel={
@@ -213,130 +217,135 @@ export function MyChannelsTab() {
         />
       )}
       {channels && channels.length > 0 && (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div data-slot="channel-list" className="grid grid-cols-1 gap-3">
           {channels.map((ch) => {
             const Icon = CHANNEL_ICONS[ch.type] ?? Globe;
             const testingThis =
               testChannel.isPending && testChannel.variables === ch.id;
             const testResult = testResults[ch.id];
             return (
-              <Card key={ch.id} className="flex flex-col gap-3 p-4">
-                <div className="flex items-start gap-3">
-                <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  <Icon className="size-5" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold">{ch.name}</span>
-                    <Badge variant={ch.is_active ? "success" : "muted"}>
-                      {ch.is_active ? "active" : "disabled"}
-                    </Badge>
+              <Card
+                key={ch.id}
+                data-slot="channel-card"
+                className="@container flex flex-col gap-3 p-4"
+              >
+                <div className="grid grid-cols-[2.5rem_minmax(0,1fr)] items-start gap-x-3 gap-y-2 @min-[480px]:grid-cols-[2.5rem_minmax(0,1fr)_auto]">
+                  <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                    <Icon className="size-5" />
                   </div>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    {ch.type}
-                    {ch.type === "webhook" &&
-                      typeof ch.config.url === "string" &&
-                      ` · ${ch.config.url.slice(0, 40)}...`}
-                    {ch.type === "email" &&
-                      typeof ch.config.smtp_host === "string" &&
-                      ` · ${ch.config.smtp_host}`}
-                    {ch.type === "slack" &&
-                      typeof ch.config.webhook_url === "string" &&
-                      ` · hooks.slack.com`}
-                    {ch.type === "telegram" &&
-                      typeof ch.config.chat_id === "string" &&
-                      ` · chat ${ch.config.chat_id}`}
-                    {ch.type === "pagerduty" &&
-                      typeof ch.config.severity_default === "string" &&
-                      ` · default severity: ${ch.config.severity_default}`}
-                    {ch.type === "discord" &&
-                      typeof ch.config.webhook_url === "string" &&
-                      ` · discord.com/api/webhooks/...`}
-                    {ch.type === "teams" &&
-                      typeof ch.config.webhook_url === "string" &&
-                      ` · ${teamsHostSummary(ch.config.webhook_url)}`}
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Test ${ch.name}`}
-                    title="Send a test notification"
-                    disabled={testingThis}
-                    className="text-muted-foreground hover:text-primary"
-                    onClick={() =>
-                      testChannel.mutate(ch.id, {
-                        // Card-level test: inline banner only, no
-                        // toast. See providers.tsx for rationale -
-                        // the card anchors the result, so a
-                        // duplicate toast was pure visual noise.
-                        onSuccess: (res) => recordTestResult(ch.id, res),
-                        onError: (err) =>
-                          recordTestResult(ch.id, {
-                            success: false,
-                            status_code: null,
-                            response_body: null,
-                            error:
-                              err instanceof Error
-                                ? err.message
-                                : "Test failed",
-                          }),
-                      })
-                    }
-                  >
-                    {testingThis ? (
-                      <RefreshCw className="size-4 animate-spin" />
-                    ) : (
-                      <TestTube className="size-4" />
-                    )}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Edit ${ch.name}`}
-                    title="Edit channel"
-                    className="text-muted-foreground hover:text-primary"
-                    onClick={() =>
-                      setDialogState({ mode: "edit", channel: ch })
-                    }
-                  >
-                    <Pencil className="size-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Delete ${ch.name}`}
-                    title="Delete channel"
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() =>
-                      confirm({
-                        title: "Delete channel",
-                        description: (
-                          <>
-                            This removes <code>{ch.name}</code> and any
-                            subscriptions pointing to it.
-                          </>
-                        ),
-                        confirmLabel: "Delete",
-                        onConfirm: () =>
-                          deleteChannel.mutate(ch.id, {
-                            onSuccess: () =>
-                              toast.success("Channel deleted"),
-                            onError: (err) => {
-                              const msg =
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="min-w-0 break-words text-sm font-semibold [overflow-wrap:anywhere]">
+                        {ch.name}
+                      </span>
+                      <Badge variant={ch.is_active ? "success" : "muted"}>
+                        {ch.is_active ? "active" : "disabled"}
+                      </Badge>
+                    </div>
+                    <p className="mt-0.5 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                      {ch.type}
+                      {ch.type === "webhook" &&
+                        typeof ch.config.url === "string" &&
+                        ` · ${ch.config.url.slice(0, 40)}...`}
+                      {ch.type === "email" &&
+                        typeof ch.config.smtp_host === "string" &&
+                        ` · ${ch.config.smtp_host}`}
+                      {ch.type === "slack" &&
+                        typeof ch.config.webhook_url === "string" &&
+                        ` · hooks.slack.com`}
+                      {ch.type === "telegram" &&
+                        typeof ch.config.chat_id === "string" &&
+                        ` · chat ${ch.config.chat_id}`}
+                      {ch.type === "pagerduty" &&
+                        typeof ch.config.severity_default === "string" &&
+                        ` · default severity: ${ch.config.severity_default}`}
+                      {ch.type === "discord" &&
+                        typeof ch.config.webhook_url === "string" &&
+                        ` · discord.com/api/webhooks/...`}
+                      {ch.type === "teams" &&
+                        typeof ch.config.webhook_url === "string" &&
+                        ` · ${teamsHostSummary(ch.config.webhook_url)}`}
+                    </p>
+                  </div>
+                  <div className="col-start-2 flex flex-wrap items-center @min-[480px]:col-start-auto">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Test ${ch.name}`}
+                      title="Send a test notification"
+                      disabled={testingThis}
+                      className="text-muted-foreground hover:text-primary"
+                      onClick={() =>
+                        testChannel.mutate(ch.id, {
+                          // Card-level test: inline banner only, no
+                          // toast. See providers.tsx for rationale -
+                          // the card anchors the result, so a
+                          // duplicate toast was pure visual noise.
+                          onSuccess: (res) => recordTestResult(ch.id, res),
+                          onError: (err) =>
+                            recordTestResult(ch.id, {
+                              success: false,
+                              status_code: null,
+                              response_body: null,
+                              error:
                                 err instanceof Error
                                   ? err.message
-                                  : "Request failed";
-                              toast.error(msg);
-                            },
-                          }),
-                      })
-                    }
-                  >
-                    <Trash2 className="size-4" />
-                  </Button>
-                </div>
+                                  : "Test failed",
+                            }),
+                        })
+                      }
+                    >
+                      {testingThis ? (
+                        <RefreshCw className="size-4 animate-spin" />
+                      ) : (
+                        <TestTube className="size-4" />
+                      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Edit ${ch.name}`}
+                      title="Edit channel"
+                      className="text-muted-foreground hover:text-primary"
+                      onClick={() =>
+                        setDialogState({ mode: "edit", channel: ch })
+                      }
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Delete ${ch.name}`}
+                      title="Delete channel"
+                      className="text-muted-foreground hover:text-destructive"
+                      onClick={() =>
+                        confirm({
+                          title: "Delete channel",
+                          description: (
+                            <>
+                              This removes <code>{ch.name}</code> and any
+                              subscriptions pointing to it.
+                            </>
+                          ),
+                          confirmLabel: "Delete",
+                          onConfirm: () =>
+                            deleteChannel.mutate(ch.id, {
+                              onSuccess: () => toast.success("Channel deleted"),
+                              onError: (err) => {
+                                const msg =
+                                  err instanceof Error
+                                    ? err.message
+                                    : "Request failed";
+                                toast.error(msg);
+                              },
+                            }),
+                        })
+                      }
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
                 </div>
                 {testResult && (
                   <div
@@ -457,9 +466,7 @@ function ImportFromProjectDialog({ onClose }: ImportFromProjectDialogProps) {
     setSubmitting(false);
     if (okCount > 0) {
       toast.success(
-        okCount === 1
-          ? "Imported 1 channel"
-          : `Imported ${okCount} channels`,
+        okCount === 1 ? "Imported 1 channel" : `Imported ${okCount} channels`,
       );
     }
     if (failures.length > 0) {
@@ -479,10 +486,9 @@ function ImportFromProjectDialog({ onClose }: ImportFromProjectDialogProps) {
       </DialogHeader>
       <div className="mt-4 space-y-4">
         <p className="text-sm text-muted-foreground">
-          Pick one or more channels from a project to copy into your
-          personal channels. Secrets are copied server-side and never
-          displayed. Each imported channel is named &quot;Copy of
-          {" "}{"{name}"}&quot;.
+          Pick one or more channels from a project to copy into your personal
+          channels. Secrets are copied server-side and never displayed. Each
+          imported channel is named &quot;Copy of {"{name}"}&quot;.
         </p>
 
         <div className="space-y-2">
@@ -586,9 +592,7 @@ function ImportFromProjectDialog({ onClose }: ImportFromProjectDialogProps) {
         <Button
           type="button"
           onClick={handleImport}
-          disabled={
-            !selectedProject || selectedIds.size === 0 || submitting
-          }
+          disabled={!selectedProject || selectedIds.size === 0 || submitting}
         >
           {submitting
             ? `Importing ${selectedIds.size}...`
@@ -687,7 +691,10 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
           smtp_user: smtpUser,
           smtp_tls: true,
           from_addr: fromAddr || smtpUser,
-          to_addrs: toAddrs.split(",").map((s) => s.trim()).filter(Boolean),
+          to_addrs: toAddrs
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean),
         };
         const pass = keepIfBlank(smtpPass);
         if (pass !== undefined) cfg.smtp_pass = pass;
@@ -816,8 +823,8 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
           </Select>
           {mode === "edit" && (
             <p className="text-xs text-muted-foreground">
-              Channel type is locked after creation. To switch type, delete
-              and re-create.
+              Channel type is locked after creation. To switch type, delete and
+              re-create.
             </p>
           )}
         </div>
@@ -1060,15 +1067,13 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
                 required={mode === "create"}
               />
               <p className="text-xs text-muted-foreground">
-                In PagerDuty: Service → Integrations → +Add Integration →
-                Events API v2. Copy the{" "}
+                In PagerDuty: Service → Integrations → +Add Integration → Events
+                API v2. Copy the{" "}
                 <span className="font-mono">Integration Key</span>.
               </p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="user-channel-pd-severity">
-                Default severity
-              </Label>
+              <Label htmlFor="user-channel-pd-severity">Default severity</Label>
               <Select
                 value={pdSeverity}
                 onValueChange={(v) => setPdSeverity(v)}
@@ -1088,8 +1093,8 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
                 <span className="font-mono">agent.offline</span> →{" "}
                 <span className="font-mono">critical</span>,{" "}
                 <span className="font-mono">task.failed</span> →{" "}
-                <span className="font-mono">error</span>). This default
-                applies to anything else.
+                <span className="font-mono">error</span>). This default applies
+                to anything else.
               </p>
             </div>
           </>
@@ -1137,11 +1142,11 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
               In Teams: open a channel, click ··· → Workflows → Post to a
               channel when a webhook request is received. Accepts classic
               outlook.office.com connectors, the current{" "}
-              <span className="font-mono">*.webhook.office.com</span>{" "}
-              workflow webhooks, and Power Automate{" "}
-              <span className="font-mono">*.logic.azure.com</span> URLs.
-              z4j sends an Adaptive Card with the task name, state, and
-              priority colour.
+              <span className="font-mono">*.webhook.office.com</span> workflow
+              webhooks, and Power Automate{" "}
+              <span className="font-mono">*.logic.azure.com</span> URLs. z4j
+              sends an Adaptive Card with the task name, state, and priority
+              colour.
             </p>
           </div>
         )}
@@ -1151,11 +1156,7 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
           variant={testResult.success ? "success" : "destructive"}
           className="mt-4"
         >
-          {testResult.success ? (
-            <CheckCircle2 />
-          ) : (
-            <XCircle />
-          )}
+          {testResult.success ? <CheckCircle2 /> : <XCircle />}
           <AlertTitle>
             {testResult.success
               ? testResult.status_code
@@ -1166,9 +1167,9 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
           <AlertDescription>
             {testResult.success ? (
               <p>
-                Check the destination inbox / channel for the z4j test
-                message. If it doesn&apos;t arrive, verify spam folder and
-                the recipient list before saving.
+                Check the destination inbox / channel for the z4j test message.
+                If it doesn&apos;t arrive, verify spam folder and the recipient
+                list before saving.
               </p>
             ) : (
               <>

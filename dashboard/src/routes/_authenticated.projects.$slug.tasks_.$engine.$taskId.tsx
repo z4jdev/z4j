@@ -1,17 +1,8 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState } from "react";
-import {
-  AlertCircle,
-  ArrowLeft,
-  Ban,
-  CheckCircle2,
-  Clock,
-  Gauge,
-  RefreshCw,
-  XCircle,
-} from "lucide-react";
-import { toast } from "sonner";
+import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
+import { QueryError } from "@/components/domain/query-error";
 import { TaskStateBadge } from "@/components/domain/state-badges";
+import { TaskTree } from "@/components/domain/task-tree";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -30,33 +21,84 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { useTask, useTaskTree } from "@/hooks/use-tasks";
-import { useEventsForTask } from "@/hooks/use-events";
-import { TaskTree } from "@/components/domain/task-tree";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useAgents } from "@/hooks/use-agents";
 import {
   useCancelTask,
   useRateLimit,
   useRetryTask,
 } from "@/hooks/use-commands";
+import { useEventsForTask } from "@/hooks/use-events";
 import { useCan } from "@/hooks/use-memberships";
-import { formatAbsolute, formatDuration, formatRelative } from "@/lib/format";
+import { useTask, useTaskTree } from "@/hooks/use-tasks";
+import {
+  agentsForEngine,
+  reportsAdapterInventory,
+  supportsAgentAction,
+} from "@/lib/agent-capabilities";
 import { ApiError } from "@/lib/api";
-import { PageShell } from "@/components/domain/page-shell";
+import { formatAbsolute, formatDuration, formatRelative } from "@/lib/format";
+import {
+  parseTaskListSearch,
+  type TaskListSearch,
+} from "@/lib/task-list-search";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import {
+  AlertCircle,
+  ArrowLeft,
+  Ban,
+  CheckCircle2,
+  Clock,
+  Gauge,
+  RefreshCw,
+  XCircle,
+} from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/tasks_/$engine/$taskId",
 )({
   component: TaskDetailPage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { list?: TaskListSearch } => ({
+    list:
+      search.list &&
+      typeof search.list === "object" &&
+      !Array.isArray(search.list)
+        ? parseTaskListSearch(search.list as Record<string, unknown>)
+        : undefined,
+  }),
 });
 
 function TaskDetailPage() {
   const { slug, engine, taskId } = Route.useParams();
-  const { data: task, isLoading } = useTask(slug, engine, taskId);
-  const { data: events } = useEventsForTask(slug, engine, taskId);
-  const { data: tree } = useTaskTree(slug, engine, taskId);
+  const { list } = Route.useSearch();
+  const {
+    data: task,
+    isLoading,
+    isError,
+    refetch,
+  } = useTask(slug, engine, taskId);
+  const {
+    data: events,
+    isError: eventsError,
+    refetch: refetchEvents,
+  } = useEventsForTask(slug, engine, taskId);
+  const {
+    data: tree,
+    isError: treeError,
+    refetch: refetchTree,
+  } = useTaskTree(slug, engine, taskId);
   const { data: agents } = useAgents(slug);
   const retry = useRetryTask(slug);
   const cancel = useCancelTask(slug);
@@ -72,23 +114,30 @@ function TaskDetailPage() {
   const [rateOpen, setRateOpen] = useState(false);
   const [rateValue, setRateValue] = useState("");
 
-  // Pick the first agent - v1 is single-agent-per-project in
-  // practice. The dispatcher rejects cross-project agent ids
-  // server-side anyway.
-  const agent = agents?.[0];
+  const [selectedAgentId, setSelectedAgentId] = useState("");
+  // A long-poll agent never reports its engines, so it stays a candidate for
+  // this task; an agent whose hello listed only other engines does not.
+  const eligibleAgents = agentsForEngine(agents, engine);
+  // With several candidates, preselect the only one whose hello listed this
+  // engine; a long-poll agent stays in the list for the operator to choose.
+  const reportingAgents = eligibleAgents.filter(reportsAdapterInventory);
+  const defaultAgent =
+    eligibleAgents.length === 1
+      ? eligibleAgents[0]
+      : reportingAgents.length === 1
+        ? reportingAgents[0]
+        : undefined;
+  const agent =
+    eligibleAgents.find((candidate) => candidate.id === selectedAgentId) ??
+    defaultAgent;
   const agentId = agent?.id;
-  // ``agent.state`` is one of ``online`` | ``offline`` |
-  // ``unknown``. Anything other than ``online`` means a command
-  // we issue right now will queue as ``pending delivery`` and
-  // sit there until the agent reconnects. We surface that on
-  // every action button so the operator isn't confused by a
-  // command that "succeeded" but never ran.
-  const agentOnline = agent?.state === "online";
   const agentTooltip = !agent
-    ? "no agent registered for this project"
-    : agentOnline
+    ? agents !== undefined && eligibleAgents.length === 0
+      ? `No agent in this project runs ${engine} tasks.`
+      : "Select the agent that owns this task before issuing a command."
+    : agent.state === "online"
       ? undefined
-      : `agent is ${agent.state}; command will queue until it reconnects`;
+      : `Agent is ${agent.state}; commands wait for it to reconnect.`;
 
   async function onRetry() {
     if (!agentId) {
@@ -155,225 +204,293 @@ function TaskDetailPage() {
 
   return (
     <PageShell>
-        <div className="flex items-center gap-2">
-          <Button asChild variant="ghost" size="sm">
-            <Link
-              to="/projects/$slug/tasks"
-              params={{ slug }}
-              className="flex items-center gap-1"
-            >
-              <ArrowLeft className="size-4" />
-              All tasks
-            </Link>
-          </Button>
-        </div>
+      <div className="flex items-center gap-2">
+        <Button asChild variant="ghost" size="sm">
+          <Link
+            to="/projects/$slug/tasks"
+            params={{ slug }}
+            search={list ?? {}}
+            className="flex items-center gap-1"
+          >
+            <ArrowLeft className="size-4" />
+            Back to tasks
+          </Link>
+        </Button>
+      </div>
 
-        {isLoading && <Skeleton className="h-64 w-full" />}
+      {isError && (
+        <QueryError
+          message="Task details could not be loaded"
+          onRetry={() => refetch()}
+        />
+      )}
+      {isLoading && <Skeleton className="h-64 w-full" />}
 
-        {task && (
-          <>
-            {/* Header card with actions */}
-            <Card>
-              <CardHeader className="!grid-rows-1 flex-row items-start justify-between">
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <TaskStateBadge state={task.state} />
-                    {task.queue && (
-                      <span className="font-mono text-xs text-muted-foreground">
-                        queue: {task.queue}
-                      </span>
-                    )}
-                    {task.worker_name && (
-                      <span className="font-mono text-xs text-muted-foreground">
-                        worker: {task.worker_name}
-                      </span>
-                    )}
-                  </div>
-                  <CardTitle className="text-xl">{task.name}</CardTitle>
-                  <CardDescription className="font-mono">
-                    {task.task_id}
-                  </CardDescription>
-                </div>
-                <div className="flex shrink-0 flex-col items-end gap-2">
-                  {agentTooltip && (
-                    <p
-                      className="text-xs italic text-warning"
-                      role="status"
-                      aria-live="polite"
+      {task && (
+        <>
+          {/* Header card with actions */}
+          <PageHeader
+            title={task.name}
+            description={
+              <span className="break-all font-mono">{task.task_id}</span>
+            }
+            badges={
+              <div className="flex flex-wrap items-center gap-2">
+                <TaskStateBadge state={task.state} />
+                {task.queue && (
+                  <span className="font-mono text-xs text-muted-foreground">
+                    queue: {task.queue}
+                  </span>
+                )}
+                {task.worker_name && (
+                  <span className="font-mono text-xs text-muted-foreground">
+                    worker: {task.worker_name}
+                  </span>
+                )}
+              </div>
+            }
+            actions={
+              <div className="flex max-w-full shrink-0 flex-col gap-2 xl:max-w-sm xl:items-end">
+                {(canRetry || canCancel || canRateLimit) &&
+                  eligibleAgents.length > 1 && (
+                    <Select
+                      value={agentId ?? ""}
+                      onValueChange={setSelectedAgentId}
                     >
-                      {agentTooltip}
-                    </p>
+                      <SelectTrigger
+                        aria-label="Command target agent"
+                        className="w-full xl:w-72"
+                      >
+                        <SelectValue placeholder="Select the task’s agent" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {eligibleAgents.map((candidate) => (
+                          <SelectItem key={candidate.id} value={candidate.id}>
+                            {candidate.name} · {candidate.state}
+                            {!reportsAdapterInventory(candidate) &&
+                              " · engines not reported"}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   )}
-                  <div className="flex gap-2">
-                    {canRateLimit && engine === "celery" && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setRateOpen(true)}
-                        disabled={rateLimit.isPending || !agentId}
-                        title={agentTooltip}
-                        aria-label={`Set rate limit for ${task.name}`}
-                      >
-                        <Gauge className="size-4" />
-                        Rate limit
-                      </Button>
-                    )}
-                    {canCancel && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={onCancel}
-                        disabled={cancel.isPending}
-                        title={agentTooltip}
-                      >
-                        <Ban className="size-4" />
-                        Cancel
-                      </Button>
-                    )}
-                    {canRetry && (
-                      <Button
-                        size="sm"
-                        onClick={onRetry}
-                        disabled={retry.isPending}
-                        title={agentTooltip}
-                      >
-                        <RefreshCw
-                          className={
-                            retry.isPending ? "size-4 animate-spin" : "size-4"
-                          }
-                        />
-                        Retry
-                      </Button>
-                    )}
-                  </div>
+                {agentTooltip && (
+                  <p
+                    className="text-xs italic text-warning"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {agentTooltip}
+                  </p>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  {canRateLimit && engine === "celery" && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setRateOpen(true)}
+                      disabled={rateLimit.isPending || !agentId}
+                      title={agentTooltip}
+                      aria-label={`Set rate limit for ${task.name}`}
+                    >
+                      <Gauge className="size-4" />
+                      Rate limit
+                    </Button>
+                  )}
+                  {canCancel && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={onCancel}
+                      disabled={
+                        cancel.isPending ||
+                        !agentId ||
+                        !supportsAgentAction(agent, engine, "cancel_task")
+                      }
+                      title={agentTooltip}
+                    >
+                      <Ban className="size-4" />
+                      Cancel
+                    </Button>
+                  )}
+                  {canRetry && (
+                    <Button
+                      size="sm"
+                      onClick={onRetry}
+                      disabled={
+                        retry.isPending ||
+                        !agentId ||
+                        !supportsAgentAction(agent, engine, "retry_task")
+                      }
+                      title={agentTooltip}
+                    >
+                      <RefreshCw
+                        className={
+                          retry.isPending ? "size-4 animate-spin" : "size-4"
+                        }
+                      />
+                      Retry
+                    </Button>
+                  )}
                 </div>
+              </div>
+            }
+          />
+          <Card>
+            <CardContent className="pt-6">
+              <div className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+                <DetailField
+                  label="Started"
+                  value={formatAbsolute(task.started_at)}
+                />
+                <DetailField
+                  label="Finished"
+                  value={formatAbsolute(task.finished_at)}
+                />
+                <DetailField
+                  label="Runtime"
+                  value={formatDuration(task.runtime_ms)}
+                />
+                <DetailField label="Retries" value={String(task.retry_count)} />
+              </div>
+            </CardContent>
+          </Card>
+
+          {task.exception && (
+            <Card className="border-destructive/30">
+              <CardHeader>
+                <CardTitle className="flex items-start gap-2 break-words text-destructive">
+                  <XCircle className="mt-0.5 size-4 shrink-0" />
+                  {task.exception}
+                </CardTitle>
+                <CardDescription>Recorded failure · {engine}</CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-                  <DetailField
-                    label="Started"
-                    value={formatAbsolute(task.started_at)}
-                  />
-                  <DetailField
-                    label="Finished"
-                    value={formatAbsolute(task.finished_at)}
-                  />
-                  <DetailField
-                    label="Runtime"
-                    value={formatDuration(task.runtime_ms)}
-                  />
-                  <DetailField
-                    label="Retries"
-                    value={String(task.retry_count)}
-                  />
-                </div>
+                <pre className="max-h-80 overflow-auto rounded-lg border bg-background p-4 text-xs leading-relaxed">
+                  {task.traceback ?? "No traceback recorded"}
+                </pre>
+                <Button asChild variant="ghost" size="sm" className="mt-3">
+                  <Link to="/projects/$slug/issues" params={{ slug }}>
+                    View recurring issues
+                  </Link>
+                </Button>
               </CardContent>
             </Card>
-
-            {/* args / kwargs / result panels */}
-            <div className="grid gap-4 lg:grid-cols-2">
-              <PayloadCard title="args" value={task.args} />
-              <PayloadCard title="kwargs" value={task.kwargs} />
+          )}
+          <details className="panel-surface p-5">
+            <summary className="cursor-pointer text-sm font-semibold">
+              Arguments and result
+            </summary>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Captured payloads are redacted observations. They are not a replay
+              recipe.
+            </p>
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <PayloadCard title="Arguments" value={task.args} />
+              <PayloadCard title="Keyword arguments" value={task.kwargs} />
               {task.state === "success" && (
-                <PayloadCard title="result" value={task.result} />
-              )}
-              {task.exception && (
-                <Card className="lg:col-span-2 border-destructive/40">
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-destructive">
-                      <XCircle className="size-4" /> {task.exception}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <pre className="overflow-auto rounded-md border bg-card p-3 text-xs">
-                      {task.traceback ?? "no traceback recorded"}
-                    </pre>
-                  </CardContent>
-                </Card>
+                <PayloadCard title="Result" value={task.result} />
               )}
             </div>
+          </details>
+          {treeError && (
+            <QueryError
+              message="Related tasks could not be loaded"
+              onRetry={() => refetchTree()}
+            />
+          )}
 
-            {/* Canvas tree (chains / groups / chords). Rendered
+          {/* Canvas tree (chains / groups / chords). Rendered
                 only when the task is part of a multi-node canvas -
                 a standalone task returns a single-node tree which
                 we hide to keep the page tidy. */}
-            {tree && tree.node_count > 1 && (
-              <Card>
-                <CardHeader>
-                  <CardTitle>Canvas tree</CardTitle>
-                  <CardDescription>
-                    Every task spawned from the same chain / group /
-                    chord. The currently-viewed task is ringed; click
-                    any node to navigate.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <TaskTree
-                    slug={slug}
-                    engine={engine}
-                    activeTaskId={taskId}
-                    data={tree}
-                  />
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Events timeline */}
+          {tree && tree.node_count > 1 && (
             <Card>
               <CardHeader>
-                <CardTitle>Events</CardTitle>
+                <CardTitle>Canvas tree</CardTitle>
                 <CardDescription>
-                  Raw lifecycle events from the agent in reverse chronological order.
+                  Every task spawned from the same chain / group / chord. The
+                  currently-viewed task is ringed; click any node to navigate.
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-2">
-                {events?.items.length === 0 && (
-                  <p className="text-sm text-muted-foreground">
-                    no events recorded yet
-                  </p>
-                )}
-                {events?.items.map((event, idx) => (
-                  <div
-                    key={event.id}
-                    className="flex items-start gap-3 rounded-md border bg-card/40 p-3"
-                  >
-                    <EventIcon kind={event.kind} />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-mono text-sm font-medium">
-                          {event.kind}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          {formatRelative(event.occurred_at)}
-                        </span>
-                      </div>
-                      {Object.keys(event.payload).length > 0 && (
-                        <pre className="mt-1 overflow-auto rounded bg-muted/40 p-2 text-xs">
-                          {JSON.stringify(event.payload, null, 2)}
-                        </pre>
-                      )}
-                    </div>
-                    {idx < (events?.items.length ?? 0) - 1 && (
-                      <Separator orientation="vertical" />
-                    )}
-                  </div>
-                ))}
+              <CardContent>
+                <TaskTree
+                  slug={slug}
+                  engine={engine}
+                  activeTaskId={taskId}
+                  data={tree}
+                />
               </CardContent>
             </Card>
-          </>
-        )}
+          )}
+
+          {/* Events timeline */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Execution timeline</CardTitle>
+              <CardDescription>
+                Raw lifecycle events from the agent in reverse chronological
+                order.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {eventsError && (
+                <QueryError
+                  message="Timeline could not be loaded"
+                  onRetry={() => refetchEvents()}
+                />
+              )}
+              {events?.items.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  no events recorded yet
+                </p>
+              )}
+              {events?.items.map((event, idx) => (
+                <div
+                  key={event.id}
+                  className="flex items-start gap-3 rounded-md border bg-card/40 p-3"
+                >
+                  <EventIcon kind={event.kind} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-mono text-sm font-medium">
+                        {event.kind}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {formatRelative(event.occurred_at)}
+                      </span>
+                    </div>
+                    {Object.keys(event.payload).length > 0 && (
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs text-muted-foreground">
+                          Event payload
+                        </summary>
+                        <pre className="mt-2 overflow-auto rounded bg-muted/40 p-3 text-xs">
+                          {JSON.stringify(event.payload, null, 2)}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
+                  {idx < (events?.items.length ?? 0) - 1 && (
+                    <Separator orientation="vertical" />
+                  )}
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </>
+      )}
 
       <Dialog open={rateOpen} onOpenChange={setRateOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Set rate limit</DialogTitle>
             <DialogDescription>
-              Throttle <span className="font-mono">{task?.name}</span>{" "}
-              across every worker on this project. The rate grammar
-              is Celery's - <code>0</code> clears the limit,{" "}
-              <code>5/s</code> caps the task to 5 executions per
-              second. (Rate-limiting is only exposed for engines that
-              advertise the <code>rate_limit</code> capability.)
+              Throttle <span className="font-mono">{task?.name}</span> across
+              every worker on this project. The rate grammar is Celery's -{" "}
+              <code>0</code> clears the limit, <code>5/s</code> caps the task to
+              5 executions per second. (Rate-limiting is only exposed for
+              engines that advertise the <code>rate_limit</code> capability.)
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">

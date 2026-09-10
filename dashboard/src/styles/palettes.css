@@ -1,0 +1,60 @@
+/* Palettes share neutral surfaces. Selection and small tonal accents follow the
+ * primary color; success, warning and failure colors keep their meaning. */
+.appearance-settings {
+  container-type: inline-size;
+  container-name: appearance;
+}
+.appearance-settings [data-slot="page-header"] {
+  flex-direction: column;
+}
+@container appearance (min-width: 600px) {
+  .appearance-settings [data-slot="page-header"] {
+    flex-direction: row;
+  }
+  .appearance-palette-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+:root[data-palette="jade"],
+[data-palette-preview="jade"] {
+  --z4j-blue: #087a6e;
+  --z4j-primary-foreground: #ffffff;
+  --z4j-secondary-accent: #0969da;
+  --z4j-tertiary-accent: #91613a;
+}
+:root.dark[data-palette="jade"],
+.dark [data-palette-preview="jade"] {
+  --z4j-blue: #66c9b6;
+  --z4j-primary-foreground: #10372f;
+  --z4j-secondary-accent: #79b8ff;
+  --z4j-tertiary-accent: #deb990;
+}
+:root[data-palette="iris"],
+[data-palette-preview="iris"] {
+  --z4j-blue: #635bce;
+  --z4j-primary-foreground: #ffffff;
+  --z4j-secondary-accent: #087a6e;
+  --z4j-tertiary-accent: #0969da;
+}
+:root.dark[data-palette="iris"],
+.dark [data-palette-preview="iris"] {
+  --z4j-blue: #b3a4ff;
+  --z4j-primary-foreground: #282044;
+  --z4j-secondary-accent: #66c9b6;
+  --z4j-tertiary-accent: #79b8ff;
+}
+:root[data-palette="sandstone"],
+[data-palette-preview="sandstone"] {
+  --z4j-blue: #91613a;
+  --z4j-primary-foreground: #ffffff;
+  --z4j-secondary-accent: #087a6e;
+  --z4j-tertiary-accent: #635bce;
+}
+:root.dark[data-palette="sandstone"],
+.dark [data-palette-preview="sandstone"] {
+  --z4j-blue: #deb990;
+  --z4j-primary-foreground: #332619;
+  --z4j-secondary-accent: #66c9b6;
+  --z4j-tertiary-accent: #b3a4ff;
+}

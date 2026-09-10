@@ -1,3 +1,4 @@
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * API Keys settings page - standalone entry point.
  *
@@ -5,14 +6,39 @@
  * UI available in the Account page's "API Keys" tab, but as a dedicated
  * page accessible from the settings sidebar.
  */
-import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { useConfirm } from "@/components/domain/confirm-dialog";
+import { DateCell } from "@/components/domain/date-cell";
+import { EmptyState } from "@/components/domain/empty-state";
+import { PageHeader } from "@/components/domain/page-header";
+import { Button } from "@/components/ui/button";
 import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { api } from "@/lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
 import {
   Check,
   Copy,
@@ -24,40 +50,8 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
-import { EmptyState } from "@/components/domain/empty-state";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import { DateCell } from "@/components/domain/date-cell";
-import { PageHeader } from "@/components/domain/page-header";
-import { useConfirm } from "@/components/domain/confirm-dialog";
-import { QueryError } from "@/components/domain/query-error";
 
 export const Route = createFileRoute("/_authenticated/settings/api-keys")({
   component: ApiKeysPage,
@@ -106,7 +100,12 @@ function ApiKeysPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
 
-  const { data: keys, isLoading, isError, error, refetch } = useQuery<ApiKey[]>({
+  const {
+    data: keys,
+    isLoading,
+    isError,
+    refetch,
+  } = useQuery<ApiKey[]>({
     queryKey: ["api-keys"],
     queryFn: () => api.get<ApiKey[]>("/api-keys"),
     staleTime: 30_000,
@@ -144,117 +143,123 @@ function ApiKeysPage() {
 
       {confirmDialog}
 
-      {isLoading && <Skeleton className="h-32 w-full" />}
-
-      {isError && (
-        <QueryError
-          message={error instanceof Error ? error.message : "Failed to load API keys"}
-          onRetry={() => refetch()}
-        />
-      )}
-
-      {keys && keys.length === 0 && (
-        <EmptyState
-          icon={Key}
-          title="No API keys"
-          description="Create a personal API key to authenticate with the z4j API programmatically."
-        />
-      )}
-
-      {keys && keys.length > 0 && (
-        <Card className="overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Scope</TableHead>
-                <TableHead>Project</TableHead>
-                <TableHead>Prefix</TableHead>
-                <TableHead>Last used</TableHead>
-                <TableHead>Expires</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead className="w-10" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {keys.map((key) => (
-                <TableRow key={key.id}>
-                  <TableCell className="font-medium">{key.name}</TableCell>
-                  <TableCell>
-                    {key.scopes.length === 0 ? (
-                      <span className="text-xs text-muted-foreground">
-                        none
-                      </span>
-                    ) : key.scopes.includes("admin:*") ? (
-                      <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-destructive">
-                        admin
-                      </span>
-                    ) : (
-                      <span
-                        className="text-xs text-muted-foreground"
-                        title={key.scopes.join(", ")}
-                      >
-                        {key.scopes.length} scope{key.scopes.length === 1 ? "" : "s"}
-                      </span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {key.project_slug ? (
-                      <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
-                        {key.project_slug}
-                      </code>
-                    ) : (
-                      <span className="text-muted-foreground">global</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
-                    {key.prefix}...
-                  </TableCell>
-                  <TableCell>
-                    {key.last_used_at
-                      ? <DateCell value={key.last_used_at} />
-                      : "Never"}
-                  </TableCell>
-                  <TableCell>
-                    {key.expires_at
-                      ? <DateCell value={key.expires_at} />
-                      : <span className="text-xs text-muted-foreground">Never</span>}
-                  </TableCell>
-                  <TableCell>
-                    <DateCell value={key.created_at} />
-                  </TableCell>
-                  <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label={`Revoke ${key.name}`}
-                      title={`Revoke ${key.name}`}
-                      className="text-muted-foreground hover:text-destructive"
-                      disabled={revokeKey.isPending}
-                      onClick={() =>
-                        confirm({
-                          title: "Revoke API key",
-                          description: (
-                            <>
-                              Revoke <code>{key.name}</code>? Any client
-                              using it will start receiving 401s
-                              immediately. This cannot be undone.
-                            </>
-                          ),
-                          confirmLabel: "Revoke",
-                          onConfirm: () => revokeKey.mutate(key.id),
-                        })
-                      }
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
-      )}
+      <Table
+        searchable
+        searchPlaceholder="Search api keys…"
+        isLoading={isLoading}
+        error={isError ? "Unable to load api keys. Try again." : null}
+        onRetry={() => refetch()}
+        emptyState={
+          <EmptyState
+            icon={Key}
+            title="No API keys"
+            description="Create a personal API key to authenticate with the z4j API programmatically."
+          />
+        }
+      >
+        <TableHeader>
+          <TableRow>
+            <TableHead sortKey="c0">Name</TableHead>
+            <TableHead sortKey="c1">Scope</TableHead>
+            <TableHead sortKey="c2">Project</TableHead>
+            <TableHead sortKey="c3">Prefix</TableHead>
+            <TableHead sortKey="c4">Last used</TableHead>
+            <TableHead sortKey="c5">Expires</TableHead>
+            <TableHead sortKey="c6">Created</TableHead>
+            <TableHead className="w-10" />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {(keys ?? []).map((key) => (
+            <TableRow
+              sortValues={{
+                c0: key.name,
+                c1: key.scopes.join(", "),
+                c2: key.project_slug ?? "global",
+                c3: key.prefix,
+                c4: sortTimestamp(key.last_used_at),
+                c5: sortTimestamp(key.expires_at),
+                c6: sortTimestamp(key.created_at),
+              }}
+              key={key.id}
+            >
+              <TableCell className="font-medium">{key.name}</TableCell>
+              <TableCell>
+                {key.scopes.length === 0 ? (
+                  <span className="text-xs text-muted-foreground">none</span>
+                ) : key.scopes.includes("admin:*") ? (
+                  <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-destructive">
+                    admin
+                  </span>
+                ) : (
+                  <span
+                    className="text-xs text-muted-foreground"
+                    title={key.scopes.join(", ")}
+                  >
+                    {key.scopes.length} scope
+                    {key.scopes.length === 1 ? "" : "s"}
+                  </span>
+                )}
+              </TableCell>
+              <TableCell className="text-xs">
+                {key.project_slug ? (
+                  <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                    {key.project_slug}
+                  </code>
+                ) : (
+                  <span className="text-muted-foreground">global</span>
+                )}
+              </TableCell>
+              <TableCell className="font-mono text-xs text-muted-foreground">
+                {key.prefix}...
+              </TableCell>
+              <TableCell>
+                {key.last_used_at ? (
+                  <DateCell value={key.last_used_at} />
+                ) : (
+                  "Never"
+                )}
+              </TableCell>
+              <TableCell>
+                {key.expires_at ? (
+                  <DateCell value={key.expires_at} />
+                ) : (
+                  <span className="text-xs text-muted-foreground">Never</span>
+                )}
+              </TableCell>
+              <TableCell>
+                <DateCell value={key.created_at} />
+              </TableCell>
+              <TableCell>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Revoke ${key.name}`}
+                  title={`Revoke ${key.name}`}
+                  className="text-muted-foreground hover:text-destructive"
+                  disabled={revokeKey.isPending}
+                  onClick={() =>
+                    confirm({
+                      title: "Revoke API key",
+                      description: (
+                        <>
+                          Revoke <code>{key.name}</code>? Any client using it
+                          will start receiving 401s immediately. This cannot be
+                          undone.
+                        </>
+                      ),
+                      confirmLabel: "Revoke",
+                      onConfirm: () => revokeKey.mutate(key.id),
+                    })
+                  }
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -442,10 +447,7 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
                 // Pick the first project as a sane default the
                 // moment the user clicks "One project only", so
                 // the dropdown is never left in an empty state.
-                if (
-                  projectId === "__global__" &&
-                  (projects ?? []).length > 0
-                ) {
+                if (projectId === "__global__" && (projects ?? []).length > 0) {
                   setProjectId(projects![0].id);
                 }
               }}
@@ -486,10 +488,7 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
                 ({scopes.size} of {catalogue?.scopes.length ?? 0} selected)
               </span>
             </span>
-            <ScopePresetBar
-              catalogue={catalogue}
-              setScopes={setScopes}
-            />
+            <ScopePresetBar catalogue={catalogue} setScopes={setScopes} />
           </div>
           <div className="max-h-64 space-y-1 overflow-y-auto rounded-md border p-3">
             {(catalogue?.scopes ?? []).map((s) => {
@@ -518,8 +517,8 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
           </div>
           <p className="text-xs text-muted-foreground">
             Grant the least privilege needed. A token with{" "}
-            <code className="font-mono">tasks:write</code> automatically
-            gets <code className="font-mono">tasks:read</code>.
+            <code className="font-mono">tasks:write</code> automatically gets{" "}
+            <code className="font-mono">tasks:read</code>.
           </p>
         </div>
         <div className="space-y-2">
@@ -593,14 +592,11 @@ function ScopeRadioCard({
       <div className="flex w-full items-center gap-2">
         <Icon
           className={
-            "size-4 " +
-            (checked ? "text-primary" : "text-muted-foreground")
+            "size-4 " + (checked ? "text-primary" : "text-muted-foreground")
           }
         />
         <span className="text-sm font-medium">{title}</span>
-        {checked && (
-          <Check className="ml-auto size-4 text-primary" />
-        )}
+        {checked && <Check className="ml-auto size-4 text-primary" />}
       </div>
       <p className="text-xs text-muted-foreground">{description}</p>
     </button>
@@ -637,9 +633,7 @@ function ScopePresetBar({
         onClick={() =>
           setScopes(
             new Set(
-              (catalogue?.scopes ?? []).filter((s) =>
-                s.endsWith(":read"),
-              ),
+              (catalogue?.scopes ?? []).filter((s) => s.endsWith(":read")),
             ),
           )
         }
@@ -651,9 +645,7 @@ function ScopePresetBar({
         className="rounded border border-border bg-background px-2 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
         onClick={() =>
           setScopes(
-            new Set(
-              (catalogue?.scopes ?? []).filter((s) => !adminSet.has(s)),
-            ),
+            new Set((catalogue?.scopes ?? []).filter((s) => !adminSet.has(s))),
           )
         }
       >

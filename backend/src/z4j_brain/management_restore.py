@@ -100,6 +100,8 @@ _LEGACY_SOURCE_HEAD = "v1_7_security_hardening"
 #: The head shipped by the previous release. Kept restorable so a backup
 #: taken before this upgrade can still be restored after it.
 _PREVIOUS_RELEASE_HEAD = "v1_8_schedule_cursor_repair"
+# Published 1.9/1.10 schema, before the 1.11 append-tally migration.
+_PRE_TALLY_RELEASE_HEAD = "v1_9_audit_action_pattern"
 _AUDIT_PREPARATION_HEAD = "v1_8_audit_chain_prepare"
 # The legacy value is an external oracle captured from the immutable 6b12719c
 # release baseline.  It must never be derived by running current migrations.
@@ -114,6 +116,7 @@ _AUDIT_PREPARATION_HEAD = "v1_8_audit_chain_prepare"
 #: silently invalidate every existing backup.
 _SQLITE_SOURCE_SCHEMA_DIGESTS = {
     RELEASE_MIGRATION_HEAD: SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST,
+    _PRE_TALLY_RELEASE_HEAD: ("0c22ea7e3680cc7620ee582a1212157e9999be106c6cb8e99179448e91a75911"),
     _PREVIOUS_RELEASE_HEAD: ("0778f20252e9b32f7a859d85e2de29c446409e40b602fa63cd2ec143ac537640"),
     _LEGACY_SOURCE_HEAD: ("f41f542e03cf81562c1eb3167041549fff0623eca9de919c1d0ffd91619933c8"),
 }
@@ -1333,6 +1336,7 @@ _SQLITE_SOURCE_MANIFEST_BUILDERS: dict[
 ] = {
     _LEGACY_SOURCE_HEAD: _legacy_source_boundary_authority,
     _PREVIOUS_RELEASE_HEAD: _activated_source_boundary_authority,
+    _PRE_TALLY_RELEASE_HEAD: _activated_source_boundary_authority,
 }
 
 #: How a candidate staged at each pre-current head reaches the current head.
@@ -1344,6 +1348,7 @@ _SQLITE_SOURCE_MANIFEST_BUILDERS: dict[
 _SQLITE_SOURCE_UPGRADE_MODES = {
     _LEGACY_SOURCE_HEAD: "audit_preparation",
     _PREVIOUS_RELEASE_HEAD: "direct",
+    _PRE_TALLY_RELEASE_HEAD: "direct",
 }
 
 

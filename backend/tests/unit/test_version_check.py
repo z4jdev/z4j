@@ -37,6 +37,9 @@ class TestParsedVersion:
             ("1.3.0-alpha", (1, 3, 0, "alpha", "")),
             ("1.3.0-rc.2", (1, 3, 0, "rc.2", "")),
             ("1.3.0-pre.4+build.07", (1, 3, 0, "pre.4", "build.07")),
+            ("1.11.0a1", (1, 11, 0, "alpha.1", "")),
+            ("1.11.0b2", (1, 11, 0, "beta.2", "")),
+            ("1.11.0rc1", (1, 11, 0, "rc.1", "")),
         ],
     )
     def test_parses_well_formed(
@@ -65,7 +68,8 @@ class TestParsedVersion:
             "01.3.0",  # leading zero in core
             "1.03.0",
             "1.3.00",
-            "1.3.0rc1",  # prerelease marker requires '-'
+            "1.3.0rc",  # canonical PyPA prereleases need a numeric suffix
+            "1.3.0rc01",  # canonical spellings have no leading zeroes
             "1.3.0-01",  # numeric prerelease identifiers reject leading zero
             "1.3.0-",
             "1.3.0+",
@@ -101,6 +105,19 @@ class TestParsedVersion:
         right = ParsedVersion.parse("1.3.0+build.2")
         assert left is not None and right is not None
         assert left.compare_precedence(right) == 0
+
+    def test_pypa_candidates_sort_numerically_before_stable(self) -> None:
+        ordered = ["1.11.0a1", "1.11.0b1", "1.11.0rc2", "1.11.0rc10", "1.11.0"]
+        for left_raw, right_raw in pairwise(ordered):
+            left = ParsedVersion.parse(left_raw)
+            right = ParsedVersion.parse(right_raw)
+            assert left is not None and right is not None
+            assert left.compare_precedence(right) == -1
+            assert right.compare_precedence(left) == 1
+        candidate = ParsedVersion.parse("1.11.0rc2")
+        semver = ParsedVersion.parse("1.11.0-rc.2")
+        assert candidate is not None and semver is not None
+        assert candidate.compare_precedence(semver) == 0
 
 
 class TestVersionsSnapshotFromDict:

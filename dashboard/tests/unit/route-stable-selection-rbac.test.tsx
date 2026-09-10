@@ -6,7 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { Suspense, type ComponentType, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SchedulePublic, TaskPublic } from "@/lib/api-types";
 
 const routeState = vi.hoisted(() => ({
@@ -349,6 +349,13 @@ const SchedulesPage = (
 type PreloadableRouteComponent = ComponentType & {
   preload?: () => Promise<void>;
 };
+
+// Resolve code-split modules before timing individual UI assertions. Mounted
+// filesystems can make a cold transform slower than the interaction timeout.
+beforeAll(async () => {
+  await (TasksPage as PreloadableRouteComponent).preload?.();
+  await (SchedulesPage as PreloadableRouteComponent).preload?.();
+}, 30_000);
 
 async function renderRoute(Page: PreloadableRouteComponent) {
   await Page.preload?.();

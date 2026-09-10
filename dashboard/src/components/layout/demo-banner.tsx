@@ -1,46 +1,14 @@
-/**
- * DemoBanner -- inline page-content banner + mutation-toast
- * listener for the demo.z4j.dev build.
- *
- * Mounted by _authenticated.tsx INSIDE the dashboard's <main>
- * element, between the Topbar and the page Outlet. That puts it
- * right above each page's own title header and lets it scroll
- * with the page content like any normal element -- no fixed
- * positioning, no sticky, no z-index. Sidebar + Topbar are
- * unaffected; in production this component returns null and the
- * layout is byte-identical to non-demo.
- *
- * Two earlier iterations: position: sticky top-0 (broke inside
- * the auth layout's stacking context) and position: fixed +
- * spacer sibling (caused the page to be 100vh + banner_height
- * tall, producing an extra scrollbar at the bottom). Sliding
- * the banner into the page content itself is the cleanest
- * answer: the page is already scrollable, no layout containers
- * need to change.
- *
- * Two jobs:
- *
- * 1. Render the yellow "DEMO MODE" strip with the reset, first-
- *    boot, and install-for-real CTAs. The user sees it on first
- *    paint, scrolls past it like any other top-of-page content,
- *    then sees it again on every page navigation that re-renders
- *    the layout above the fold.
- * 2. Listen for `demo:blocked-mutation` window events fired by the
- *    mock-fetch interceptor (src/lib/api.demo.ts) and surface them
- *    as a single sonner toast. The toast is throttled so a burst
- *    of blocked mutations (e.g. clicking Save then immediately
- *    Save again) shows only once. The toast IS the persistent
- *    reminder once the banner has scrolled out of view.
- *
- * The window.location.reload() in "Reset demo" is purely
- * client-side -- no server request is issued. Combined with the
- * mock-fetch interceptor and the strict CSP emitted by
- * scripts/build-demo.mjs, no UI control in the demo can produce
- * more than a static-asset GET to demo.z4j.dev's own origin.
- *
- * See DEMO-Z4J-DEV-DESIGN.md for the design rationale.
- */
-import { useEffect, useRef } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { RotateCcw } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
 const IS_DEMO = import.meta.env.VITE_Z4J_DEMO_MODE === "true";
@@ -55,7 +23,41 @@ export function DemoBanner() {
 }
 
 function DemoBannerInner() {
+  const footer = useRef<HTMLElement>(null);
   const lastToastAt = useRef(0);
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const scenarios = [
+    { path: "/projects/example.com", label: "Healthy project" },
+    {
+      path: "/projects/django.example.com/issues",
+      label: "Investigate an incident",
+    },
+    { path: "/projects/django.example.com/schedules", label: "Scheduled work" },
+    { path: "/projects/tasks.example.com/tasks", label: "Mixed task engines" },
+  ];
+  const active =
+    scenarios.find((scenario) => pathname === scenario.path)?.path ?? "";
+
+  // Reserve the actual footer height, including wrapping and browser zoom.
+  // Content and the sidebar remain reachable above this demo-only overlay.
+  useLayoutEffect(() => {
+    const element = footer.current;
+    if (!element) return;
+    const root = document.documentElement;
+    const measure = () =>
+      root.style.setProperty(
+        "--demo-footer-height",
+        `${element.getBoundingClientRect().height}px`,
+      );
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      root.style.removeProperty("--demo-footer-height");
+    };
+  }, []);
 
   useEffect(() => {
     const handler = () => {
@@ -73,35 +75,51 @@ function DemoBannerInner() {
   }, []);
 
   return (
-    <div
-      role="banner"
+    <footer
+      ref={footer}
+      data-slot="demo-footer"
       aria-label="Demo mode"
-      className="flex items-center justify-center gap-3 bg-yellow-300 px-4 py-1.5 text-xs font-medium text-yellow-950 sm:text-sm"
+      className="fixed inset-x-0 bottom-0 z-40 flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-t bg-card px-4 py-2 md:px-6"
     >
-      <span>
-        <strong className="font-bold">DEMO MODE</strong>
-        <span className="ml-1 hidden sm:inline">
-          {" "}
-          -- data is fake, no services connected.
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <span className="font-semibold tracking-wide text-foreground">
+          DEMO
         </span>
-      </span>
-      <span className="hidden h-3 w-px bg-yellow-900/30 sm:inline-block" />
-      <button
-        type="button"
-        onClick={() => window.location.reload()}
-        className="underline decoration-1 underline-offset-2 hover:decoration-2"
-      >
-        Reset demo
-      </button>
-      <span className="h-3 w-px bg-yellow-900/30" />
-      <a
-        href="https://z4j.com/install/"
-        target="_blank"
-        rel="noopener"
-        className="underline decoration-1 underline-offset-2 hover:decoration-2"
-      >
-        Install z4j for real
-      </a>
-    </div>
+        <span className="text-muted-foreground">
+          Sample data · changes are disabled
+        </span>
+      </div>
+      <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
+        <Select value={active} onValueChange={(path) => navigate({ to: path })}>
+          <SelectTrigger
+            aria-label="Explore a demo scenario"
+            className="min-w-0 flex-1 sm:w-52 sm:flex-none"
+          >
+            <SelectValue placeholder="Explore a scenario" />
+          </SelectTrigger>
+          <SelectContent>
+            {scenarios.map((scenario) => (
+              <SelectItem key={scenario.path} value={scenario.path}>
+                {scenario.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Reset demo"
+          title="Reset demo"
+          onClick={() => window.location.reload()}
+        >
+          <RotateCcw className="size-4" />
+        </Button>
+        <Button asChild variant="outline">
+          <a href="https://z4j.com/install/" target="_blank" rel="noopener">
+            Install z4j
+          </a>
+        </Button>
+      </div>
+    </footer>
   );
 }

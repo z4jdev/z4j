@@ -1,3 +1,4 @@
+import { PageHeader } from "@/components/domain/page-header";
 /**
  * Project settings - Default subscriptions (admin onboarding templates).
  *
@@ -5,15 +6,10 @@
  * are copied into each member's personal subscription list when they
  * join; existing members are not retroactively affected.
  */
-import { useState } from "react";
-import { BellRing, Lock, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { toast } from "sonner";
 import { useConfirm } from "@/components/domain/confirm-dialog";
 import { EmptyState } from "@/components/domain/empty-state";
-import { useIsProjectAdmin } from "@/hooks/use-memberships";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -32,7 +28,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -41,6 +36,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useIsProjectAdmin } from "@/hooks/use-memberships";
 import {
   useChannels,
   useCreateDefaultSubscription,
@@ -51,6 +47,9 @@ import {
   type ProjectDefaultSubscription,
   type TriggerType,
 } from "@/hooks/use-notifications";
+import { BellRing, Lock, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 
 const TRIGGERS: { value: TriggerType; label: string }[] = [
   { value: "task.failed", label: "Task failed" },
@@ -68,8 +67,13 @@ function triggerLabel(t: TriggerType | string): string {
 
 export function DefaultSubscriptionsTab({ slug }: { slug: string }) {
   const isAdmin = useIsProjectAdmin(slug);
-  const { data: defaults, isLoading, isFetching } =
-    useDefaultSubscriptions(slug);
+  const {
+    data: defaults,
+    isLoading,
+    isFetching,
+    isError,
+    refetch,
+  } = useDefaultSubscriptions(slug);
   const { data: channels } = useChannels(slug);
   const deleteDefault = useDeleteDefaultSubscription(slug);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -112,147 +116,156 @@ export function DefaultSubscriptionsTab({ slug }: { slug: string }) {
   return (
     <div className="space-y-4">
       {confirmDialog}
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-semibold">
+      <PageHeader
+        level="section"
+        title={
+          <>
             Project Subscriptions
             {isFetching && !isLoading && (
               <RefreshCw className="ml-2 inline size-3 animate-spin text-muted-foreground" />
             )}
-          </h3>
-          <p className="text-xs text-muted-foreground">
-            What should new members automatically subscribe to?
-          </p>
-        </div>
-        <Dialog
-          open={dialogOpen}
-          onOpenChange={(open) => {
-            if (!open) closeDialog();
-            else setDialogOpen(true);
-          }}
-        >
-          <DialogTrigger asChild>
-            <Button size="sm" onClick={openCreate}>
-              <Plus className="size-4" />
-              New subscription
-            </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DefaultSubscriptionDialog
-              slug={slug}
-              channels={channels ?? []}
-              existing={editing}
-              onSaved={closeDialog}
-            />
-          </DialogContent>
-        </Dialog>
-      </div>
+          </>
+        }
+        description={<>What should new members automatically subscribe to?</>}
+        actions={
+          <>
+            {" "}
+            <Dialog
+              open={dialogOpen}
+              onOpenChange={(open) => {
+                if (!open) closeDialog();
+                else setDialogOpen(true);
+              }}
+            >
+              <DialogTrigger asChild>
+                <Button size="sm" onClick={openCreate}>
+                  <Plus className="size-4" />
+                  New subscription
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DefaultSubscriptionDialog
+                  slug={slug}
+                  channels={channels ?? []}
+                  existing={editing}
+                  onSaved={closeDialog}
+                />
+              </DialogContent>
+            </Dialog>{" "}
+          </>
+        }
+      />
 
       <div className="rounded-md border border-dashed bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
         These templates are copied into each new member&apos;s subscriptions
         when they join. Existing members are not affected.
       </div>
 
-      {isLoading && <Skeleton className="h-32 w-full" />}
-      {defaults && defaults.length === 0 && (
-        <EmptyState
-          icon={BellRing}
-          title="No project subscriptions configured"
-          description="Add a project subscription so new members automatically receive key notifications."
-        />
-      )}
-      {defaults && defaults.length > 0 && (
-        <Card className="overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Trigger</TableHead>
-                <TableHead>In-app</TableHead>
-                <TableHead>Project channels</TableHead>
-                <TableHead>Cooldown</TableHead>
-                <TableHead className="w-20" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {defaults.map((d) => (
-                <TableRow key={d.id}>
-                  <TableCell>
-                    <Badge variant="outline">
-                      {triggerLabel(d.trigger)}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    {d.in_app ? (
-                      <Badge variant="success">yes</Badge>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">no</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {d.project_channel_ids.length === 0
-                      ? "-"
-                      : d.project_channel_ids
-                          .map(
-                            (id) =>
-                              channelMap.get(id)?.name ?? "deleted",
-                          )
-                          .join(", ")}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {d.cooldown_seconds}s
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Edit ${triggerLabel(d.trigger)} project subscription`}
-                        className="text-muted-foreground hover:text-foreground"
-                        onClick={() => openEdit(d)}
-                      >
-                        <Pencil className="size-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Delete ${triggerLabel(d.trigger)} project subscription`}
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() =>
-                          confirm({
-                            title: "Delete project subscription",
-                            description: (
-                              <>
-                                Stop auto-subscribing new members to the{" "}
-                                <code>{triggerLabel(d.trigger)}</code> trigger?
-                                Existing members are not affected.
-                              </>
-                            ),
-                            confirmLabel: "Delete",
-                            onConfirm: () =>
-                              deleteDefault.mutate(d.id, {
-                                onSuccess: () =>
-                                  toast.success("Default deleted"),
-                                onError: (err) => {
-                                  const msg =
-                                    err instanceof Error
-                                      ? err.message
-                                      : "Request failed";
-                                  toast.error(msg);
-                                },
-                              }),
-                          })
-                        }
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
-      )}
+      <Table
+        searchable
+        searchPlaceholder="Search subscriptions…"
+        isLoading={isLoading}
+        error={isError ? "Unable to load defaults. Try again." : null}
+        onRetry={() => refetch()}
+        emptyState={
+          <EmptyState
+            icon={BellRing}
+            title="No project subscriptions configured"
+            description="Add a project subscription so new members automatically receive key notifications."
+          />
+        }
+      >
+        <TableHeader>
+          <TableRow>
+            <TableHead sortKey="c0">Trigger</TableHead>
+            <TableHead sortKey="c1">In-app</TableHead>
+            <TableHead sortKey="c2">Project channels</TableHead>
+            <TableHead sortKey="c3">Cooldown</TableHead>
+            <TableHead className="w-20" />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {(defaults ?? []).map((d) => (
+            <TableRow
+              sortValues={{
+                c0: triggerLabel(d.trigger),
+                c1: d.in_app,
+                c2: d.project_channel_ids
+                  .map((id) => channelMap.get(id)?.name ?? "deleted")
+                  .join(", "),
+                c3: d.cooldown_seconds,
+              }}
+              key={d.id}
+            >
+              <TableCell>
+                <Badge variant="outline">{triggerLabel(d.trigger)}</Badge>
+              </TableCell>
+              <TableCell>
+                {d.in_app ? (
+                  <Badge variant="success">yes</Badge>
+                ) : (
+                  <span className="text-xs text-muted-foreground">no</span>
+                )}
+              </TableCell>
+              <TableCell className="text-xs text-muted-foreground">
+                {d.project_channel_ids.length === 0
+                  ? "-"
+                  : d.project_channel_ids
+                      .map((id) => channelMap.get(id)?.name ?? "deleted")
+                      .join(", ")}
+              </TableCell>
+              <TableCell className="text-muted-foreground">
+                {d.cooldown_seconds}s
+              </TableCell>
+              <TableCell>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Edit ${triggerLabel(d.trigger)} project subscription`}
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={() => openEdit(d)}
+                  >
+                    <Pencil className="size-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Delete ${triggerLabel(d.trigger)} project subscription`}
+                    className="text-muted-foreground hover:text-destructive"
+                    onClick={() =>
+                      confirm({
+                        title: "Delete project subscription",
+                        description: (
+                          <>
+                            Stop auto-subscribing new members to the{" "}
+                            <code>{triggerLabel(d.trigger)}</code> trigger?
+                            Existing members are not affected.
+                          </>
+                        ),
+                        confirmLabel: "Delete",
+                        onConfirm: () =>
+                          deleteDefault.mutate(d.id, {
+                            onSuccess: () => toast.success("Default deleted"),
+                            onError: (err) => {
+                              const msg =
+                                err instanceof Error
+                                  ? err.message
+                                  : "Request failed";
+                              toast.error(msg);
+                            },
+                          }),
+                      })
+                    }
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -436,9 +449,7 @@ function DefaultSubscriptionDialog({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="default-dialog-task-name">
-            Task name pattern
-          </Label>
+          <Label htmlFor="default-dialog-task-name">Task name pattern</Label>
           <Input
             id="default-dialog-task-name"
             type="text"

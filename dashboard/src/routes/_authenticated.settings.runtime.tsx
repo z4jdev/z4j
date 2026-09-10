@@ -1,3 +1,4 @@
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
 /**
  * Global settings - Runtime configuration (admin, read-only).
  *
@@ -13,22 +14,11 @@
  *
  * Backend: GET /api/v1/admin/settings, requires admin (Settings.is_admin).
  */
-import * as React from "react";
-import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import {
-  Copy,
-  ExternalLink,
-  Info,
-  Search,
-  SlidersHorizontal,
-} from "lucide-react";
-import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { PageHeader } from "@/components/domain/page-header";
+import { QueryError } from "@/components/domain/query-error";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -44,8 +34,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { PageHeader } from "@/components/domain/page-header";
-import { QueryError } from "@/components/domain/query-error";
+import { api } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { Copy, ExternalLink, Info, SlidersHorizontal } from "lucide-react";
+import * as React from "react";
+import { toast } from "sonner";
 
 // Docs URLs. Kept inline rather than centralised because there is no
 // dashboard-wide docs registry; the page that needs a link knows
@@ -304,23 +298,26 @@ function SettingsTableCard({ settings }: { settings: SettingItem[] }) {
         model with its current value and where it came from.
       </p>
 
-      <div className="relative mt-4">
-        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          placeholder="Filter by name..."
-          value={filterRaw}
-          onChange={(e) => setFilterRaw(e.target.value)}
-          className="pl-9"
-        />
-      </div>
+      <FilterToolbar
+        className="mt-4"
+        searchValue={filterRaw}
+        onSearchChange={setFilterRaw}
+        searchPlaceholder="Search settings…"
+        activeFilterCount={filterRaw ? 1 : 0}
+        onClear={() => setFilterRaw("")}
+      />
 
       <div className="mt-4 overflow-x-auto">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[28%]">Name</TableHead>
-              <TableHead className="w-[36%]">Value</TableHead>
-              <TableHead className="w-[14%]">
+              <TableHead sortKey="c0" className="w-[28%]">
+                Name
+              </TableHead>
+              <TableHead sortKey="c1" className="w-[36%]">
+                Value
+              </TableHead>
+              <TableHead sortKey="c2" className="w-[14%]">
                 <span className="inline-flex items-center gap-1">
                   Source
                   <Tooltip>
@@ -335,7 +332,7 @@ function SettingsTableCard({ settings }: { settings: SettingItem[] }) {
                   </Tooltip>
                 </span>
               </TableHead>
-              <TableHead className="w-[22%]">
+              <TableHead sortKey="c3" className="w-[22%]">
                 <span className="inline-flex items-center gap-1">
                   Description
                   <Tooltip>
@@ -363,7 +360,18 @@ function SettingsTableCard({ settings }: { settings: SettingItem[] }) {
                 </TableCell>
               </TableRow>
             ) : (
-              filtered.map((row) => <SettingRow key={row.name} row={row} />)
+              filtered.map((row) => (
+                <SettingRow
+                  sortValues={{
+                    c0: row.name,
+                    c1: row.is_secret ? null : row.value,
+                    c2: row.source,
+                    c3: row.description,
+                  }}
+                  key={row.name}
+                  row={row}
+                />
+              ))
             )}
           </TableBody>
         </Table>
@@ -372,7 +380,9 @@ function SettingsTableCard({ settings }: { settings: SettingItem[] }) {
   );
 }
 
-function SettingRow({ row }: { row: SettingItem }) {
+function SettingRow({
+  row,
+}: { row: SettingItem } & import("@/components/ui/table").TableRowSortProps) {
   const sourceMeta = SOURCE_VARIANT[row.source] ?? SOURCE_VARIANT.default;
   return (
     <TableRow>

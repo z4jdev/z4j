@@ -9,6 +9,7 @@ transaction.  Audit history is replaced last by one signed reset genesis.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import math
 import re
 import uuid
@@ -57,15 +58,17 @@ _PRESERVED_POSTGRES_SEQUENCES = frozenset(
     },
 )
 SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST = (
-    "0c22ea7e3680cc7620ee582a1212157e9999be106c6cb8e99179448e91a75911"
+    "e9699a59170cbc24e95d9d700adc8f9037f2dcd0ecb20e4884bdf109be31550b"
 )
 # Derived per major from a clean migration-head database driven by that
 # major's OWN client. 16 and 17 agree because their catalog representation
 # of these objects is identical; 18 differs and is derived separately.
+# Column positions are live-column ranks rather than raw attnums, so a
+# database carrying dropped-column slots derives the same value as a clean one.
 _POSTGRES_SCHEMA_CONTRACT_DIGESTS = {
-    16: "bc24b315fa3b2a674ff1ceb4e9d2e36c82a41ecdba9022d6d8b043f5491058e0",
-    17: "bc24b315fa3b2a674ff1ceb4e9d2e36c82a41ecdba9022d6d8b043f5491058e0",
-    18: "4ec4063c2b62ef121701321d583d4163b4f8af7949d8fd3abd1b9e4babff7e8a",
+    16: "84182859137c63caffc9398178d2246e11862426af4cd9b17f9d322dfc689f99",
+    17: "84182859137c63caffc9398178d2246e11862426af4cd9b17f9d322dfc689f99",
+    18: "f829cde1b62a437972b938439386ae8344d89101482b8fa4059ee001b81bdcee",
 }
 
 # SQLite batch ALTER rebuilt these three tables while removing the post-1.8
@@ -181,7 +184,19 @@ def _normalize_manifest_value(value: Any) -> Any:
         if not math.isfinite(value):
             raise GenerationResetRefused("reset manifest contains non-finite data")
         return value
-    if isinstance(value, (uuid.UUID, datetime)):
+    # PostgreSQL INET values include typed addresses from session records.
+    # Canonical string conversion preserves their address and any netmask.
+    if isinstance(
+        value,
+        (
+            uuid.UUID,
+            datetime,
+            ipaddress.IPv4Address,
+            ipaddress.IPv6Address,
+            ipaddress.IPv4Interface,
+            ipaddress.IPv6Interface,
+        ),
+    ):
         result = str(value)
         if isinstance(value, datetime):
             if value.tzinfo is not None and value.utcoffset() is not None:
@@ -468,6 +483,41 @@ def _normalize_postgres_catalog_rows(
     return normalized
 
 
+def _dense_column_ordinals(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Replace each column's physical ``attnum`` with its live position.
+
+    PostgreSQL never reuses a dropped column's ``attnum``: DROP COLUMN leaves
+    an ``attisdropped`` slot behind and a later ADD COLUMN takes the next
+    number.  A supported downgrade and re-upgrade therefore reaches the head
+    with the same columns in the same order under higher physical numbers,
+    while pg_restore numbers every table densely again.  The contract binds
+    the order of live columns, which a real reordering still changes, not
+    that history.  Without dropped slots the position equals ``attnum``, so
+    such a database keeps exactly the manifest and pinned digest it had.
+    """
+
+    live_attnums: dict[str, list[int]] = {}
+    for row in rows:
+        live_attnums.setdefault(str(row["table_name"]), []).append(int(row["attnum"]))
+    for attnums in live_attnums.values():
+        attnums.sort()
+    dense: list[dict[str, Any]] = []
+    for row in rows:
+        ordered = live_attnums[str(row["table_name"])]
+        # ``ordinal`` takes the place ``attnum`` held, so key order is unchanged.
+        dense.append(
+            {
+                ("ordinal" if key == "attnum" else key): (
+                    ordered.index(int(value)) + 1 if key == "attnum" else value
+                )
+                for key, value in row.items()
+            },
+        )
+    return dense
+
+
 async def _postgres_exact_schema_contract(
     session: AsyncSession,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -477,7 +527,7 @@ async def _postgres_exact_schema_contract(
                 text(
                     """
                     SELECT table_class.relname AS table_name,
-                           attribute.attnum AS ordinal,
+                           attribute.attnum AS attnum,
                            attribute.attname AS column_name,
                            format_type(
                                attribute.atttypid,
@@ -655,7 +705,7 @@ async def _postgres_exact_schema_contract(
         .all()
     )
     return {
-        "columns": _normalize_postgres_catalog_rows(columns),
+        "columns": _dense_column_ordinals(_normalize_postgres_catalog_rows(columns)),
         "constraints": _normalize_postgres_catalog_rows(constraints),
         "indexes": _normalize_postgres_catalog_rows(indexes),
         "triggers": _normalize_postgres_catalog_rows(triggers),

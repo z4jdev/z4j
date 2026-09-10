@@ -5,21 +5,15 @@
  * packages. This is global, not project-scoped: nothing here
  * depends on which project is active.
  */
-import { createFileRoute } from "@tanstack/react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, RefreshCw } from "lucide-react";
-import { toast } from "sonner";
-import { api, ApiError } from "@/lib/api";
+import { PageHeader } from "@/components/domain/page-header";
+import { SectionCard } from "@/components/domain/section-card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { SectionCard } from "@/components/domain/section-card";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableRow,
-} from "@/components/ui/table";
-import { PageHeader } from "@/components/domain/page-header";
+import { api, ApiError } from "@/lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { Activity, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/settings/system")({
   component: SystemPage,
@@ -57,57 +51,70 @@ function SystemPage() {
       {isLoading && <Skeleton className="h-64 w-full" />}
 
       {!isLoading && data && (
-      <>
-      <SectionCard
-        title="Brain Server"
-        description="Core runtime information for z4j process."
-      >
-        <StatusTable
-          rows={[
-            ["z4j version", data.z4j_version],
-            ["Python", `${data.python_version} (${data.python_implementation})`],
-            ["OS", data.os],
-            ["Architecture", data.architecture],
-            ["PID", String(data.pid)],
-          ]}
-        />
-      </SectionCard>
+        <>
+          <SectionCard
+            title="Brain Server"
+            description="Core runtime information for z4j process."
+          >
+            <StatusTable
+              rows={[
+                ["z4j version", data.z4j_version],
+                [
+                  "Python",
+                  `${data.python_version} (${data.python_implementation})`,
+                ],
+                ["OS", data.os],
+                ["Architecture", data.architecture],
+                ["PID", String(data.pid)],
+              ]}
+            />
+          </SectionCard>
 
-      <SectionCard
-        title="Database"
-        description="Connected database information and health."
-      >
-        <StatusTable
-          rows={[
-            ["Type", data.database_type],
-            ...(data.database_version
-              ? [["Version", data.database_version] as [string, string]]
-              : []),
-            ...(data.database_size_mb !== undefined
-              ? [["Size", `${data.database_size_mb} MB`] as [string, string]]
-              : []),
-            ...(data.database_connections !== undefined
-              ? [["Active connections", String(data.database_connections)] as [string, string]]
-              : []),
-          ]}
-        />
-      </SectionCard>
+          <SectionCard
+            title="Database"
+            description="Connected database information and health."
+          >
+            <StatusTable
+              rows={[
+                ["Type", data.database_type],
+                ...(data.database_version
+                  ? [["Version", data.database_version] as [string, string]]
+                  : []),
+                ...(data.database_size_mb !== undefined
+                  ? [
+                      ["Size", `${data.database_size_mb} MB`] as [
+                        string,
+                        string,
+                      ],
+                    ]
+                  : []),
+                ...(data.database_connections !== undefined
+                  ? [
+                      [
+                        "Active connections",
+                        String(data.database_connections),
+                      ] as [string, string],
+                    ]
+                  : []),
+              ]}
+            />
+          </SectionCard>
 
-      {data.packages && Object.keys(data.packages).length > 0 && (
-        <SectionCard
-          title="Installed Packages"
-          description="Key Python package versions in z4j environment."
-        >
-          <StatusTable
-            rows={Object.entries(data.packages)
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([name, version]) => [name, version])}
-          />
-        </SectionCard>
-      )}
+          {data.packages && Object.keys(data.packages).length > 0 && (
+            <SectionCard
+              title="Installed Packages"
+              description="Key Python package versions in z4j environment."
+            >
+              <StatusTable
+                rows={Object.entries(data.packages)
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .map(([name, version]) => [name, version])}
+              />
+            </SectionCard>
+          )}
 
-      <VersionsCheckCard />
-      </>
+          <VersionsCheckCard />
+        </>
       )}
     </div>
   );
@@ -139,8 +146,7 @@ function VersionsCheckCard() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery<VersionsSnapshot>({
     queryKey: ["versions-snapshot"],
-    queryFn: () =>
-      api.get<VersionsSnapshot>("/admin/system/versions"),
+    queryFn: () => api.get<VersionsSnapshot>("/admin/system/versions"),
     staleTime: 60_000,
   });
   const refresh = useMutation<VersionsSnapshot, Error, void>({
@@ -157,8 +163,7 @@ function VersionsCheckCard() {
       );
     },
     onError: (err) => {
-      const msg =
-        err instanceof ApiError ? err.message : "fetch failed";
+      const msg = err instanceof ApiError ? err.message : "fetch failed";
       toast.error(msg);
     },
   });
@@ -208,8 +213,8 @@ function VersionsCheckCard() {
       />
       {!data.check_for_updates_url ? (
         <p className="mt-3 text-xs text-muted-foreground">
-          Remote update checks are disabled (Z4J_VERSION_CHECK_URL is
-          empty). z4j is using the bundled snapshot only.
+          Remote update checks are disabled (Z4J_VERSION_CHECK_URL is empty).
+          z4j is using the bundled snapshot only.
         </p>
       ) : null}
     </SectionCard>
@@ -218,17 +223,16 @@ function VersionsCheckCard() {
 
 function StatusTable({ rows }: { rows: [string, string][] }) {
   return (
-    <Table>
-      <TableBody>
-        {rows.map(([key, value]) => (
-          <TableRow key={key}>
-            <TableCell className="w-1/3 py-2 font-medium text-muted-foreground">
-              {key}
-            </TableCell>
-            <TableCell className="py-2 font-mono text-sm">{value}</TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <dl className="divide-y">
+      {rows.map(([key, value]) => (
+        <div
+          className="grid gap-1 px-4 py-3 sm:grid-cols-[minmax(10rem,1fr)_2fr] sm:gap-4"
+          key={key}
+        >
+          <dt className="text-sm font-medium text-muted-foreground">{key}</dt>
+          <dd className="min-w-0 break-words font-mono text-sm">{value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }

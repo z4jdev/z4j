@@ -208,6 +208,8 @@ export interface TaskPublic {
 export interface TaskListResponse {
   items: TaskPublic[];
   next_cursor: string | null;
+  /** Exact filtered total before pagination, when requested. */
+  total_count?: number | null;
 }
 
 // ---------------------------------------------------------------------------

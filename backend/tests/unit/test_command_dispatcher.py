@@ -351,7 +351,7 @@ class TestIssue:
         ).scalars()
         assert list(rows) == []
 
-    async def test_issue_to_unknown_agent_raises(
+    async def test_issue_to_offline_agent_without_a_session_raises(
         self,
         session: AsyncSession,
         project: Project,
@@ -360,6 +360,10 @@ class TestIssue:
     ) -> None:
         from z4j_brain.errors import AgentOfflineError
 
+        # The brain marked this agent offline and no session holds it, so the
+        # caller hears that it is not connected; the row stays pending.
+        agent.state = AgentState.OFFLINE
+        await session.flush()
         registry = FakeRegistry(
             delivered_locally=False,
             notified_cluster=False,
@@ -370,6 +374,78 @@ class TestIssue:
             settings=settings,
             registry=registry,
             audit=audit,
+        )
+
+        with pytest.raises(AgentOfflineError):
+            await dispatcher.issue(
+                commands=CommandRepository(session),
+                audit_log=AuditLogRepository(session),
+                project_id=project.id,
+                agent_id=agent.id,
+                action="cancel_task",
+                target_type="task",
+                target_id="celery:task-001",
+                payload={},
+                issued_by=None,
+                ip="127.0.0.1",
+                user_agent=None,
+            )
+
+    async def test_issue_to_live_agent_without_a_session_stays_pending(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+        settings: Settings,
+    ) -> None:
+        # A long-poll agent never holds a WebSocket session, so the local
+        # registry reports neither delivery path, yet the agent claims the
+        # committed PENDING row on its next poll. The request must not report
+        # it offline while the command still runs.
+        registry = FakeRegistry(
+            delivered_locally=False,
+            notified_cluster=False,
+            agent_was_known=False,
+        )
+        dispatcher = CommandDispatcher(
+            settings=settings, registry=registry, audit=AuditService(settings)
+        )
+
+        command = await dispatcher.issue(
+            commands=CommandRepository(session),
+            audit_log=AuditLogRepository(session),
+            project_id=project.id,
+            agent_id=agent.id,
+            action="cancel_task",
+            target_type="task",
+            target_id="celery:task-001",
+            payload={},
+            issued_by=None,
+            ip="127.0.0.1",
+            user_agent=None,
+        )
+
+        assert command.status == CommandStatus.PENDING
+        assert registry.calls == [(command.id, agent.id)]
+
+    async def test_issue_to_live_agent_with_only_incapable_sessions_raises(
+        self,
+        session: AsyncSession,
+        project: Project,
+        agent: Agent,
+        settings: Settings,
+    ) -> None:
+        # Sessions hold the agent here but none can take the command, so the
+        # caller still hears that the agent cannot receive it now.
+        from z4j_brain.errors import AgentOfflineError
+
+        registry = FakeRegistry(
+            delivered_locally=False,
+            notified_cluster=False,
+            agent_was_known=True,
+        )
+        dispatcher = CommandDispatcher(
+            settings=settings, registry=registry, audit=AuditService(settings)
         )
 
         with pytest.raises(AgentOfflineError):

@@ -1,0 +1,60 @@
+{
+  "10000000-0000-4000-a000-000000000001": [
+    {
+      "id": 1,
+      "captured_at_offset_s": -20,
+      "worker_id": "web-1.example.com",
+      "telemetry_loss": {
+        "buffer_id": "demo-buffer-10000000-0000-4000-a000-000000000001",
+        "runtime_id": "demo-runtime-10000000-0000-4000-a000-000000000001",
+        "capacity_evicted_frames": 0,
+        "content_rejected_frames": 0,
+        "event_records": 0,
+        "command_results": 0,
+        "other_frames": 0,
+        "unclassified_frames": 0,
+        "adapter_events": {
+          "celery": 0
+        }
+      }
+    }
+  ],
+  "10000000-0000-4000-a000-000000000002": [
+    {
+      "id": 2,
+      "captured_at_offset_s": -20,
+      "worker_id": "worker-1.example.com",
+      "telemetry_loss": {
+        "buffer_id": "demo-buffer-10000000-0000-4000-a000-000000000002",
+        "runtime_id": "demo-runtime-10000000-0000-4000-a000-000000000002",
+        "capacity_evicted_frames": 0,
+        "content_rejected_frames": 0,
+        "event_records": 0,
+        "command_results": 0,
+        "other_frames": 0,
+        "unclassified_frames": 0,
+        "adapter_events": {
+          "celery": 0
+        }
+      }
+    }
+  ],
+  "10000000-0000-4000-a000-000000000003": [
+    {
+      "id": 3,
+      "captured_at_offset_s": -20,
+      "worker_id": "beat-1.example.com",
+      "telemetry_loss": {
+        "buffer_id": "demo-buffer-10000000-0000-4000-a000-000000000003",
+        "runtime_id": "demo-runtime-10000000-0000-4000-a000-000000000003",
+        "capacity_evicted_frames": 0,
+        "content_rejected_frames": 0,
+        "event_records": 0,
+        "command_results": 0,
+        "other_frames": 0,
+        "unclassified_frames": 0,
+        "adapter_events": {}
+      }
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import re
 import shutil
 import sqlite3
@@ -143,6 +144,18 @@ def test_reset_manifest_datetime_is_canonical_across_session_timezones() -> None
     ) == management_reset_module.release_manifest_digest(
         {"observed_at": local_value},
     )
+
+
+@pytest.mark.parametrize("address", ["192.0.2.1", "2001:db8::1", "192.0.2.1/24", "2001:db8::1/64"])
+def test_reset_manifest_preserves_postgres_inet_values(address: str) -> None:
+    value = ipaddress.ip_interface(address) if "/" in address else ipaddress.ip_address(address)
+    assert management_reset_module._normalize_manifest_value(value) == address
+    assert management_reset_module._normalize_manifest_value({"ip": [value]}) == {"ip": [address]}
+
+
+def test_reset_manifest_still_refuses_unknown_objects() -> None:
+    with pytest.raises(management_reset_module.GenerationResetRefused, match="cannot canonicalize"):
+        management_reset_module._normalize_manifest_value(object())
 
 
 def test_postgres_schema_contract_covers_supported_server_majors() -> None:

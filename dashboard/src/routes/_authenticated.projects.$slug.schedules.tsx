@@ -1,3 +1,4 @@
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * Schedules page - sortable schedule list with DataTable.
  *
@@ -8,33 +9,23 @@
  * - Sortable columns (name, kind, task, priority, next_run, last_run, total_runs)
  * - Inline enable/disable switch and trigger button
  */
-import { useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
-import {
-  GitCompare,
-  History,
-  Pencil,
-  Play,
-  Plus,
-  RefreshCcwDot,
-  Trash2,
-  TriangleAlert, Pause,} from "lucide-react";
-import { toast } from "sonner";
+import { useConfirm } from "@/components/domain/confirm-dialog";
+import { DateCell } from "@/components/domain/date-cell";
+import { EmptyState } from "@/components/domain/empty-state";
 import { FilterToolbar } from "@/components/domain/filter-toolbar";
-import { RefreshButton } from "@/components/domain/refresh-button";
 import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
+import { RefreshButton } from "@/components/domain/refresh-button";
+import { ScheduleFormDialog } from "@/components/domain/schedule-form-dialog";
+import { ScheduleRunStrip } from "@/components/domain/schedule-run-strip";
 import {
+  ScheduleHealthBadge,
   SchedulePausedBadge,
   TaskPriorityBadge,
-  ScheduleHealthBadge,
 } from "@/components/domain/state-badges";
-import { EmptyState } from "@/components/domain/empty-state";
-import { useConfirm } from "@/components/domain/confirm-dialog";
-import { ScheduleRunStrip } from "@/components/domain/schedule-run-strip";
-import { ScheduleFormDialog } from "@/components/domain/schedule-form-dialog";
-import { DataTable, type DataTableColumnDef } from "@/components/ui/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DataTable, type DataTableColumnDef } from "@/components/ui/data-table";
 import {
   Select,
   SelectContent,
@@ -42,26 +33,37 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { useCan } from "@/hooks/use-memberships";
 import {
+  useCircuitBreakerThreshold,
   useDeleteSchedule,
+  usePauseSchedule,
   useProjectMisfires,
+  useResumeSchedule,
   useScheduleResync,
+  useScheduleRuns,
   useSchedules,
   useToggleSchedule,
   useTriggerSchedule,
-  usePauseSchedule,
-  useResumeSchedule,
-  useCircuitBreakerThreshold,
-  useScheduleRuns,
   type ScheduleRunCell,
 } from "@/hooks/use-schedules";
-import { DateCell } from "@/components/domain/date-cell";
 import { ApiError } from "@/lib/api";
 import type { ScheduleKind, SchedulePublic } from "@/lib/api-types";
-import { PageShell } from "@/components/domain/page-shell";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import {
+  GitCompare,
+  History,
+  Pause,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCcwDot,
+  Trash2,
+  TriangleAlert,
+} from "lucide-react";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/schedules",
@@ -77,6 +79,7 @@ function SchedulesPage() {
   const {
     data: schedules,
     isLoading,
+    isError,
     isFetching,
     refetch,
   } = useSchedules(slug);
@@ -136,7 +139,10 @@ function SchedulesPage() {
     () => filteredSchedules.map((s) => s.id),
     [filteredSchedules],
   );
-  const { data: runsById, isError: runsError } = useScheduleRuns(slug, visibleIds);
+  const { data: runsById, isError: runsError } = useScheduleRuns(
+    slug,
+    visibleIds,
+  );
 
   async function onToggle(scheduleId: string, enabled: boolean) {
     if (!canOperate) return;
@@ -373,7 +379,7 @@ function SchedulesPage() {
             value={kindFilter}
             onValueChange={(v) => setKindFilter(v as ScheduleKind | "all")}
           >
-            <SelectTrigger className="w-36 shrink-0">
+            <SelectTrigger aria-label="Schedule kind" className="w-36 shrink-0">
               <SelectValue placeholder="Kind" />
             </SelectTrigger>
             <SelectContent>
@@ -391,7 +397,10 @@ function SchedulesPage() {
               setEnabledFilter(v as "all" | "enabled" | "disabled")
             }
           >
-            <SelectTrigger className="w-36 shrink-0">
+            <SelectTrigger
+              aria-label="Schedule enabled state"
+              className="w-36 shrink-0"
+            >
               <SelectValue placeholder="Status" />
             </SelectTrigger>
             <SelectContent>
@@ -410,7 +419,7 @@ function SchedulesPage() {
       <PageHeader
         title="Schedules"
         icon={History}
-        description="manage every schedule the z4j-scheduler ticks for this project"
+        description="Manage scheduled work and review execution health."
         actions={
           <div className="flex items-center gap-2">
             {canAdminister && (
@@ -456,39 +465,40 @@ function SchedulesPage() {
         }
       />
 
-      {misfires && misfires.length > 0 && (
-        <div className="flex items-start gap-3 rounded-md border bg-muted/30 px-4 py-3 text-sm">
-          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
-          <div className="min-w-0">
-            <div className="font-medium">
-              {misfires.length} {misfires.length === 1 ? "misfire" : "misfires"}{" "}
-              in the last 24h
+      <DataTable
+        isFetching={isFetching}
+        notice={
+          misfires &&
+          misfires.length > 0 && (
+            <div className="flex items-start gap-3 rounded-md border bg-muted/30 px-4 py-3 text-sm">
+              <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
+              <div className="min-w-0">
+                <div className="font-medium">
+                  {misfires.length}{" "}
+                  {misfires.length === 1 ? "misfire" : "misfires"} in the last
+                  24h
+                </div>
+                <div className="truncate text-xs text-muted-foreground">
+                  An enabled schedule fired late past its grace window (a dead
+                  or partitioned scheduler is the usual cause):{" "}
+                  {Array.from(
+                    new Set(
+                      misfires
+                        .map((m) => m.name)
+                        .filter((n): n is string => !!n),
+                    ),
+                  )
+                    .slice(0, 6)
+                    .join(", ")}
+                </div>
+              </div>
             </div>
-            <div className="truncate text-xs text-muted-foreground">
-              An enabled schedule fired late past its grace window (a dead or
-              partitioned scheduler is the usual cause):{" "}
-              {Array.from(
-                new Set(
-                  misfires.map((m) => m.name).filter((n): n is string => !!n),
-                ),
-              )
-                .slice(0, 6)
-                .join(", ")}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {isLoading && (
-        <div className="space-y-2">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-12 w-full" />
-          ))}
-        </div>
-      )}
-      {schedules && filteredSchedules.length === 0 && (
-        <>
-          {filterToolbar}
+          )
+        }
+        isLoading={isLoading}
+        error={isError ? "Unable to load schedules. Try again." : null}
+        onRetry={() => refetch()}
+        emptyState={
           <EmptyState
             icon={History}
             title="no schedules match"
@@ -498,56 +508,48 @@ function SchedulesPage() {
                 : "schedules your scheduler has published (celery-beat, rq-scheduler, etc.) will sync here once the agent observes them"
             }
           />
-        </>
-      )}
-      {schedules && filteredSchedules.length > 0 && (
-        <DataTable
-          columns={columns}
-          data={filteredSchedules}
-          // Open on the columns that answer "is it running and is it
-          // healthy". Provenance and tuning columns stay one click away in
-          // the chooser instead of pushing Last run and Enabled off-screen.
-          initialColumnVisibility={{
-            kind: false,
-            task_name: false,
-            source: false,
-            scheduler: false,
-            catch_up: false,
-            priority: false,
-          }}
-          enableColumnChooser
-          enableSelection
-          getRowId={scheduleRowId}
-          selectionScopeKey={scheduleSelectionScopeKey}
-          enableSorting
-          totalLabel={`${filteredSchedules.length} schedule${filteredSchedules.length === 1 ? "" : "s"}`}
-          toolbar={(ctx) =>
-            ctx.selectedCount > 0 ? (
-              <BulkActionToolbar
-                ctx={
-                  ctx as {
-                    selectedRows: SchedulePublic[];
-                    selectedCount: number;
-                    clearSelection: () => void;
-                  }
+        }
+        columns={columns}
+        data={filteredSchedules}
+        // Open on the columns that answer "is it running and is it
+        // healthy". Provenance and tuning columns stay one click away in
+        // the chooser instead of pushing Last run and Enabled off-screen.
+        initialColumnVisibility={{
+          kind: false,
+          task_name: false,
+          source: false,
+          scheduler: false,
+          catch_up: false,
+          priority: false,
+        }}
+        enableColumnChooser
+        enableSelection
+        getRowId={scheduleRowId}
+        selectionScopeKey={scheduleSelectionScopeKey}
+        enableSorting
+        totalLabel={`${filteredSchedules.length} schedule${filteredSchedules.length === 1 ? "" : "s"}`}
+        toolbar={(ctx) =>
+          ctx.selectedCount > 0 ? (
+            <BulkActionToolbar
+              ctx={
+                ctx as {
+                  selectedRows: SchedulePublic[];
+                  selectedCount: number;
+                  clearSelection: () => void;
                 }
-                canOperate={canOperate}
-                canAdminister={canAdminister}
-                onBulkEnable={(rows) => onBulkEnable(rows, ctx.clearSelection)}
-                onBulkDisable={(rows) =>
-                  onBulkDisable(rows, ctx.clearSelection)
-                }
-                onBulkTrigger={(rows) =>
-                  onBulkTrigger(rows, ctx.clearSelection)
-                }
-                onBulkDelete={(rows) => onBulkDelete(rows, ctx.clearSelection)}
-              />
-            ) : (
-              filterToolbar
-            )
-          }
-        />
-      )}
+              }
+              canOperate={canOperate}
+              canAdminister={canAdminister}
+              onBulkEnable={(rows) => onBulkEnable(rows, ctx.clearSelection)}
+              onBulkDisable={(rows) => onBulkDisable(rows, ctx.clearSelection)}
+              onBulkTrigger={(rows) => onBulkTrigger(rows, ctx.clearSelection)}
+              onBulkDelete={(rows) => onBulkDelete(rows, ctx.clearSelection)}
+            />
+          ) : (
+            filterToolbar
+          )
+        }
+      />
 
       {canAdminister && (
         <ScheduleFormDialog
@@ -648,7 +650,7 @@ function useScheduleColumns({
             {row.original.expression}
           </span>
         ),
-        enableSorting: false,
+        enableSorting: true,
       },
       {
         accessorKey: "task_name",
@@ -687,7 +689,11 @@ function useScheduleColumns({
         enableSorting: true,
       },
       {
-        accessorKey: "priority",
+        id: "priority",
+        accessorFn: (row) =>
+          row.priority
+            ? { critical: 0, high: 1, normal: 2, low: 3 }[row.priority]
+            : null,
         header: "Priority",
         cell: ({ row }: { row: { original: SchedulePublic } }) => (
           <TaskPriorityBadge priority={row.original.priority} />
@@ -695,7 +701,8 @@ function useScheduleColumns({
         enableSorting: true,
       },
       {
-        accessorKey: "last_run_at",
+        id: "last_run_at",
+        accessorFn: (row) => sortTimestamp(row.last_run_at),
         header: "Last run",
         cell: ({ row }: { row: { original: SchedulePublic } }) => (
           <DateCell value={row.original.last_run_at} compact />
@@ -703,7 +710,8 @@ function useScheduleColumns({
         enableSorting: true,
       },
       {
-        accessorKey: "next_run_at",
+        id: "next_run_at",
+        accessorFn: (row) => sortTimestamp(row.next_run_at),
         header: "Next run",
         cell: ({ row }: { row: { original: SchedulePublic } }) => (
           <DateCell value={row.original.next_run_at} compact />
@@ -737,6 +745,17 @@ function useScheduleColumns({
       },
       {
         id: "recent_runs",
+        accessorFn: (row) =>
+          runsById
+            ?.get(row.id)
+            ?.filter((run) =>
+              [
+                "failed",
+                "acked_failed",
+                "terminal_failed",
+                "terminal_timeout",
+              ].includes(run.status),
+            ).length ?? null,
         header: "Recent runs",
         // The picture behind the Health number: last twenty fires, oldest on
         // the left. Links to the detail page where each fire has a row.
@@ -747,19 +766,21 @@ function useScheduleColumns({
             href={{ slug, scheduleId: row.original.id }}
           />
         ),
-        enableSorting: false,
+        enableSorting: true,
       },
       {
         id: "enabled",
+        accessorFn: (row) => row.is_enabled,
         header: "Enabled",
         cell: ({ row }: { row: { original: SchedulePublic } }) => (
           <Switch
+            aria-label={`Enable schedule ${row.original.name}`}
             checked={row.original.is_enabled}
             onCheckedChange={(checked) => onToggle(row.original.id, checked)}
             disabled={!canOperate}
           />
         ),
-        enableSorting: false,
+        enableSorting: true,
       },
       {
         id: "actions",
@@ -807,7 +828,7 @@ function useScheduleColumns({
                   <Button
                     size="icon"
                     variant="ghost"
-                    className="h-8 w-8"
+                    className="w-8"
                     onClick={() => onEdit(s)}
                     title="Edit"
                   >
@@ -816,7 +837,7 @@ function useScheduleColumns({
                   <Button
                     size="icon"
                     variant="ghost"
-                    className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    className="w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
                     onClick={() => onDelete(s)}
                     title="Delete"
                   >
@@ -983,7 +1004,7 @@ function BulkActionToolbar({
             <Button
               variant="outline"
               size="sm"
-              className="h-7 gap-1 text-xs"
+              className="gap-1"
               onClick={() => onBulkTrigger(ctx.selectedRows)}
               title="Fire all selected schedules now"
             >
@@ -993,7 +1014,6 @@ function BulkActionToolbar({
             <Button
               variant="outline"
               size="sm"
-              className="h-7 text-xs"
               onClick={() => onBulkEnable(ctx.selectedRows)}
               disabled={enableCount === 0}
               title={
@@ -1007,7 +1027,6 @@ function BulkActionToolbar({
             <Button
               variant="outline"
               size="sm"
-              className="h-7 text-xs"
               onClick={() => onBulkDisable(ctx.selectedRows)}
               disabled={disableCount === 0}
               title={
@@ -1024,7 +1043,7 @@ function BulkActionToolbar({
           <Button
             variant="outline"
             size="sm"
-            className="h-7 gap-1 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+            className="gap-1 text-destructive hover:bg-destructive/10 hover:text-destructive"
             onClick={() => onBulkDelete(ctx.selectedRows)}
             title="Delete all selected schedules"
           >
@@ -1032,12 +1051,7 @@ function BulkActionToolbar({
             Delete
           </Button>
         )}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 text-xs"
-          onClick={ctx.clearSelection}
-        >
+        <Button variant="ghost" size="sm" onClick={ctx.clearSelection}>
           Cancel
         </Button>
       </div>

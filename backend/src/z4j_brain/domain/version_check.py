@@ -59,6 +59,12 @@ _SEMVER_RE = re.compile(
     rf"(?:\+(?P<build>{_SEMVER_BUILD_IDENTIFIER}"
     rf"(?:\.{_SEMVER_BUILD_IDENTIFIER})*))?$",
 )
+_PYPA_PRERELEASE_RE = re.compile(
+    rf"(?P<major>{_SEMVER_NUMERIC_IDENTIFIER})\."
+    rf"(?P<minor>{_SEMVER_NUMERIC_IDENTIFIER})\."
+    rf"(?P<patch>{_SEMVER_NUMERIC_IDENTIFIER})"
+    rf"(?P<phase>a|b|rc)(?P<number>{_SEMVER_NUMERIC_IDENTIFIER})"
+)
 
 
 VersionStatus = Literal[
@@ -72,13 +78,14 @@ VersionStatus = Literal[
 
 @dataclass(frozen=True)
 class ParsedVersion:
-    """SemVer parts extracted from a version string."""
+    """SemVer parts, including canonical PyPA alpha/beta/release candidates."""
 
     major: int
     minor: int
     patch: int
     pre: str = ""
     build: str = ""
+    python_pre: str = ""
 
     @classmethod
     def parse(cls, raw: str) -> ParsedVersion | None:
@@ -87,7 +94,20 @@ class ParsedVersion:
             return None
         m = _SEMVER_RE.fullmatch(raw)
         if m is None:
-            return None
+            python_match = _PYPA_PRERELEASE_RE.fullmatch(raw)
+            if python_match is None:
+                return None
+            phase = python_match.group("phase")
+            number = python_match.group("number")
+            # Normalize the numeric prerelease component for comparisons so
+            # rc2 sorts before rc10, while retaining the PyPI spelling for UI.
+            return cls(
+                major=int(python_match.group("major")),
+                minor=int(python_match.group("minor")),
+                patch=int(python_match.group("patch")),
+                pre=f"{ {'a': 'alpha', 'b': 'beta', 'rc': 'rc'}[phase] }.{number}",
+                python_pre=f"{phase}{number}",
+            )
         return cls(
             major=int(m.group("major")),
             minor=int(m.group("minor")),
@@ -98,7 +118,9 @@ class ParsedVersion:
 
     def __str__(self) -> str:
         rendered = f"{self.major}.{self.minor}.{self.patch}"
-        if self.pre:
+        if self.python_pre:
+            rendered += self.python_pre
+        elif self.pre:
             rendered += f"-{self.pre}"
         if self.build:
             rendered += f"+{self.build}"

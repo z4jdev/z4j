@@ -57,8 +57,8 @@ class AgentStatusHistory(Base):
             a project drops its accumulated status history with it.
         agent_id: Reporting agent. ``ON DELETE CASCADE`` for the
             same reason.
-        captured_at: The frame's ``ts`` field, i.e. when the agent
-            built the snapshot. Indexed alongside agent_id and
+        captured_at: The frame's ``ts`` field, which the agent's signer
+            stamps when it sends the frame. Indexed alongside agent_id and
             project_id for the dashboard's "show last 100 statuses
             for agent X" / "purge older than cutoff" queries.
         payload: The full :class:`AgentStatusPayload` rendered as a

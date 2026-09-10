@@ -16,6 +16,7 @@ from z4j_brain import management_restore as sqlite_restore_module
 from z4j_brain import management_restore_postgres as postgres_restore_module
 from z4j_brain.management_restore import (
     _LEGACY_SOURCE_HEAD,
+    _PRE_TALLY_RELEASE_HEAD,
     _PREVIOUS_RELEASE_HEAD,
     _SQLITE_SOURCE_SCHEMA_DIGESTS,
     DatabaseRestoreRefused,
@@ -300,6 +301,7 @@ def test_configured_prior_head_is_a_supported_postgres_restore_source() -> None:
     assert set(postgres_restore_module._SUPPORTED_SOURCE_HEADS) == {
         RELEASE_MIGRATION_HEAD,
         _PREVIOUS_RELEASE_HEAD,
+        _PRE_TALLY_RELEASE_HEAD,
         _LEGACY_SOURCE_HEAD,
     }
 

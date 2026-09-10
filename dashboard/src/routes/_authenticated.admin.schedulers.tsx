@@ -22,20 +22,11 @@
  * auto-included when ``Z4J_EMBEDDED_SCHEDULER=true`` so the
  * homelab one-container deploy works without operator config.
  */
-import { createFileRoute } from "@tanstack/react-router";
-import {
-  CheckCircle2,
-  Clock,
-  Server,
-  WifiOff,
-  XCircle,
-} from "lucide-react";
-import { PageHeader } from "@/components/domain/page-header";
-import { RefreshButton } from "@/components/domain/refresh-button";
 import { EmptyState } from "@/components/domain/empty-state";
+import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
+import { RefreshButton } from "@/components/domain/refresh-button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -47,14 +38,16 @@ import {
 import { useSchedulersFleet } from "@/hooks/use-schedulers-fleet";
 import type { FleetEntry } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
-import { PageShell } from "@/components/domain/page-shell";
+import { createFileRoute } from "@tanstack/react-router";
+import { CheckCircle2, Clock, Server, WifiOff, XCircle } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/admin/schedulers")({
   component: SchedulersFleetPage,
 });
 
 function SchedulersFleetPage() {
-  const { data, isLoading, isFetching, refetch } = useSchedulersFleet();
+  const { data, isLoading, isFetching, isError, refetch } =
+    useSchedulersFleet();
 
   return (
     <PageShell>
@@ -63,73 +56,80 @@ function SchedulersFleetPage() {
         icon={Server}
         description="Operator-fleet view across every enrolled z4j-scheduler instance"
         actions={
-          <RefreshButton
-              onRefresh={() => refetch()}
-              pending={isFetching}
-            />
+          <RefreshButton onRefresh={() => refetch()} pending={isFetching} />
         }
       />
 
-      {isLoading && (
-        <div className="space-y-2">
-          {[0, 1].map((i) => (
-            <Skeleton key={i} className="h-20 w-full" />
+      <Table
+        searchable
+        searchPlaceholder="Search schedulers…"
+        isLoading={isLoading}
+        error={isError ? "Unable to load scheduler health. Try again." : null}
+        onRetry={() => refetch()}
+        emptyState={
+          <EmptyState
+            icon={Server}
+            title="no schedulers configured"
+            description={
+              "Set Z4J_SCHEDULER_INFO_URLS on brain to a comma-separated " +
+              "list of scheduler /info URLs (e.g. http://scheduler-1:7800," +
+              "http://scheduler-2:7800). Brain fans out to each on dashboard " +
+              "refresh. If you're using the embedded sidecar " +
+              "(Z4J_EMBEDDED_SCHEDULER=true) the local instance will auto-appear here."
+            }
+          />
+        }
+        notice={
+          data && (
+            <SummaryCards
+              total={data.total}
+              healthy={data.healthy}
+              unhealthy={data.total - data.healthy}
+            />
+          )
+        }
+      >
+        <TableHeader>
+          <TableRow>
+            <TableHead sortKey="c0">Reachability</TableHead>
+            <TableHead sortKey="c1">Instance</TableHead>
+            <TableHead sortKey="c2">Version</TableHead>
+            <TableHead sortKey="c3">Uptime</TableHead>
+            <TableHead sortKey="c4">Brain gRPC</TableHead>
+            <TableHead sortKey="c5" className="text-right">
+              Schedules
+            </TableHead>
+            <TableHead sortKey="c6">Subsystems</TableHead>
+            <TableHead sortKey="c7">Detail</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {(data?.schedulers ?? []).map((entry) => (
+            <FleetRow
+              sortValues={{
+                c0:
+                  entry.ok === true
+                    ? "online"
+                    : entry.ok === false
+                      ? "error"
+                      : "unreachable",
+                c1: entry.info?.instance_id ?? entry.url,
+                c2: entry.info?.version,
+                c3: entry.info?.uptime_seconds,
+                c4: entry.info?.brain_grpc_url,
+                c5: entry.info?.schedules_loaded,
+                c6: Object.values(entry.info?.subsystems ?? {}).filter(Boolean)
+                  .length,
+                c7: entry.info?.ready
+                  ? "ready"
+                  : (entry.error ?? "initialising"),
+              }}
+              key={entry.url}
+              entry={entry}
+            />
           ))}
-        </div>
-      )}
-
-      {data && (
-        <SummaryCards
-          total={data.total}
-          healthy={data.healthy}
-          unhealthy={data.total - data.healthy}
-        />
-      )}
-
-      {data && data.schedulers.length === 0 && (
-        <EmptyState
-          icon={Server}
-          title="no schedulers configured"
-          description={
-            "Set Z4J_SCHEDULER_INFO_URLS on brain to a comma-separated " +
-            "list of scheduler /info URLs (e.g. http://scheduler-1:7800," +
-            "http://scheduler-2:7800). Brain fans out to each on dashboard " +
-            "refresh. If you're using the embedded sidecar " +
-            "(Z4J_EMBEDDED_SCHEDULER=true) the local instance will auto-appear here."
-          }
-        />
-      )}
-
-      {data && data.schedulers.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">
-              Instances ({data.schedulers.length})
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12"></TableHead>
-                  <TableHead>Instance</TableHead>
-                  <TableHead>Version</TableHead>
-                  <TableHead>Uptime</TableHead>
-                  <TableHead>Brain gRPC</TableHead>
-                  <TableHead className="text-right">Schedules</TableHead>
-                  <TableHead>Subsystems</TableHead>
-                  <TableHead>Detail</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.schedulers.map((entry) => (
-                  <FleetRow key={entry.url} entry={entry} />
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      )}
+        </TableBody>
+      </Table>
     </PageShell>
   );
 }
@@ -197,7 +197,9 @@ function SummaryCard({
   );
 }
 
-function FleetRow({ entry }: { entry: FleetEntry }) {
+function FleetRow({
+  entry,
+}: { entry: FleetEntry } & import("@/components/ui/table").TableRowSortProps) {
   if (entry.ok !== true) {
     return (
       <TableRow>
@@ -236,9 +238,7 @@ function FleetRow({ entry }: { entry: FleetEntry }) {
       </TableCell>
       <TableCell>
         <div>
-          <div className="font-mono text-sm">
-            {info.instance_id ?? "-"}
-          </div>
+          <div className="font-mono text-sm">{info.instance_id ?? "-"}</div>
           <div className="font-mono text-[10px] text-muted-foreground">
             {entry.url}
           </div>
@@ -341,9 +341,7 @@ function Dot({ label, ok }: { label: string; ok?: boolean }) {
       title={`${label}: ${ok ? "up" : "down"}`}
       className={cn(
         "inline-block size-2 rounded-full",
-        ok
-          ? "bg-green-600 dark:bg-green-500"
-          : "bg-red-600 dark:bg-red-500",
+        ok ? "bg-green-600 dark:bg-green-500" : "bg-red-600 dark:bg-red-500",
       )}
     />
   );

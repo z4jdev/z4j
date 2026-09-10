@@ -18,6 +18,9 @@ import { cn } from "@/lib/utils";
 // so we drop them and land on the sibling's list page instead.
 const PRESERVABLE_SUBPATHS = new Set([
   "tasks",
+  "issues",
+  "trends",
+  "automation",
   "workers",
   "queues",
   "schedules",
@@ -27,7 +30,13 @@ const PRESERVABLE_SUBPATHS = new Set([
   "settings",
 ]);
 
-export function ProjectSwitcher({ currentSlug }: { currentSlug: string }) {
+export function ProjectSwitcher({
+  currentSlug,
+  collapsed = false,
+}: {
+  currentSlug?: string;
+  collapsed?: boolean;
+}) {
   const { data: me, isLoading } = useMe();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -37,27 +46,7 @@ export function ProjectSwitcher({ currentSlug }: { currentSlug: string }) {
   }
 
   const memberships = me?.memberships ?? [];
-  const current =
-    memberships.find((m) => m.project_slug === currentSlug) ?? memberships[0];
-
-  // Single project - show a simple static label instead of a dropdown.
-  if (memberships.length <= 1) {
-    return (
-      <div className="flex items-center gap-2 rounded-md border bg-card p-2">
-        <div className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-          <FolderKanban className="size-4" />
-        </div>
-        <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-sm font-semibold">
-            {current?.project_slug ?? "default"}
-          </span>
-          <span className="truncate text-xs text-muted-foreground">
-            {current ? current.role : "-"}
-          </span>
-        </div>
-      </div>
-    );
-  }
+  const current = memberships.find((m) => m.project_slug === currentSlug);
 
   // Multiple projects - show the dropdown switcher.
   return (
@@ -65,30 +54,36 @@ export function ProjectSwitcher({ currentSlug }: { currentSlug: string }) {
       <DropdownMenuTrigger asChild>
         <button
           type="button"
+          aria-label={`Switch project: ${current?.project_slug ?? "Workspace"}`}
           className={cn(
             "flex w-full items-center gap-2 rounded-md border bg-card p-2 text-left",
-            "shadow-sm transition-colors hover:bg-accent",
+            "transition-colors hover:bg-accent",
+            collapsed && "justify-center border-0 bg-transparent p-1",
           )}
         >
-          <div className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
+          <div className="flex size-8 items-center justify-center rounded-md bg-muted text-muted-foreground">
             <FolderKanban className="size-4" />
           </div>
-          <div className="flex min-w-0 flex-1 flex-col">
-            <span className="truncate text-sm font-semibold">
-              {current?.project_slug ?? "no project"}
-            </span>
-            <span className="truncate text-xs text-muted-foreground">
-              {current ? current.role : "-"}
-            </span>
-          </div>
-          <ChevronsUpDown className="size-4 text-muted-foreground" />
+          {!collapsed && (
+            <div className="flex min-w-0 flex-1 flex-col">
+              <span className="truncate text-sm font-semibold">
+                {current?.project_slug ?? "Workspace"}
+              </span>
+              <span className="truncate text-xs text-muted-foreground">
+                {current ? current.role : `${memberships.length} projects`}
+              </span>
+            </div>
+          )}
+          {!collapsed && (
+            <ChevronsUpDown className="size-4 text-muted-foreground" />
+          )}
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        sideOffset={4}
-        className="w-(--radix-dropdown-menu-trigger-width) min-w-0"
-      >
+      <DropdownMenuContent align="start" sideOffset={4} className="w-64">
+        <DropdownMenuItem onSelect={() => navigate({ to: "/home" })}>
+          Workspace home
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
         <DropdownMenuLabel>Projects</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {memberships.map((m) => (
@@ -119,12 +114,14 @@ export function ProjectSwitcher({ currentSlug }: { currentSlug: string }) {
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={() => navigate({ to: "/settings/projects" })}
-        >
-          <Settings className="size-4 opacity-60" />
-          <span>Manage projects</span>
-        </DropdownMenuItem>
+        {me?.is_admin && (
+          <DropdownMenuItem
+            onSelect={() => navigate({ to: "/settings/projects" })}
+          >
+            <Settings className="size-4 opacity-60" />
+            <span>Manage projects</span>
+          </DropdownMenuItem>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -8,18 +8,13 @@
  * gated to ADMIN + fresh MFA by the backend (the form warns non-admins,
  * and the query client handles the MFA step-up redirect).
  */
-import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
-import { Pencil, Plus, RotateCcw, Trash2, Zap } from "lucide-react";
-import { toast } from "sonner";
+import { AutomationRuleFormDialog } from "@/components/domain/automation-rule-form-dialog";
+import { useConfirm } from "@/components/domain/confirm-dialog";
+import { EmptyState } from "@/components/domain/empty-state";
 import { PageHeader } from "@/components/domain/page-header";
 import { PageShell } from "@/components/domain/page-shell";
-import { EmptyState } from "@/components/domain/empty-state";
-import { useConfirm } from "@/components/domain/confirm-dialog";
-import { AutomationRuleFormDialog } from "@/components/domain/automation-rule-form-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
   Table,
@@ -29,7 +24,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useCan, useIsProjectAdmin } from "@/hooks/use-memberships";
 import {
   useAutomationRules,
   useAutomationSettings,
@@ -38,7 +32,12 @@ import {
   useSetAutomationSettings,
   type AutomationRulePublic,
 } from "@/hooks/use-automation-rules";
+import { useCan, useIsProjectAdmin } from "@/hooks/use-memberships";
 import { ApiError } from "@/lib/api";
+import { createFileRoute } from "@tanstack/react-router";
+import { Pencil, Plus, RotateCcw, Trash2, Zap } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/automation",
@@ -52,7 +51,7 @@ function apiMessage(err: unknown): string {
 
 function AutomationPage() {
   const { slug } = Route.useParams();
-  const { data: rules, isLoading } = useAutomationRules(slug);
+  const { data: rules, isLoading, isError, refetch } = useAutomationRules(slug);
   const settings = useAutomationSettings(slug);
   const setSettings = useSetAutomationSettings(slug);
   const del = useDeleteAutomationRule(slug);
@@ -119,7 +118,7 @@ function AutomationPage() {
       <PageHeader
         title="Automation"
         icon={Zap}
-        description="rules that react to task and scheduler events by notifying an operator or issuing a retry or cancel"
+        description="Respond to task and schedule events with automated actions."
         badges={
           !canManage ? <Badge variant="muted">read-only</Badge> : undefined
         }
@@ -135,121 +134,128 @@ function AutomationPage() {
 
       {/* Per-project kill switch. Disabling stops ALL automation for the
           project instantly; enabling requires admin + fresh MFA. */}
-      <div className="flex items-center justify-between rounded-md border bg-muted/30 px-4 py-3">
-        <div>
-          <div className="text-sm font-medium">Project automation</div>
-          <div className="text-xs text-muted-foreground">
-            {automationEnabled
-              ? "Rules on this project are active."
-              : "The kill switch is OFF - no rule on this project fires."}
-          </div>
-        </div>
-        <Switch
-          checked={automationEnabled}
-          onCheckedChange={onToggleKillSwitch}
-          disabled={!isAdmin || setSettings.isPending || settings.isLoading}
-          aria-label="toggle project automation"
-        />
-      </div>
 
-      {isLoading ? (
-        <div className="space-y-2">
-          <Skeleton className="h-10 w-full" />
-          <Skeleton className="h-10 w-full" />
-          <Skeleton className="h-10 w-full" />
-        </div>
-      ) : !rules || rules.length === 0 ? (
-        <EmptyState
-          icon={Zap}
-          title="no automation rules"
-          description={
-            canManage
-              ? "Create a rule to react automatically to task failures, retries, or a scheduler misfire."
-              : "No rules have been created for this project yet."
-          }
-        />
-      ) : (
-        <div className="overflow-x-auto rounded-md border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Trigger</TableHead>
-                <TableHead>Actions</TableHead>
-                <TableHead>Status</TableHead>
-                {canManage && (
-                  <TableHead className="text-right">Manage</TableHead>
-                )}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rules.map((rule) => (
-                <TableRow key={rule.id}>
-                  <TableCell className="font-medium">{rule.name}</TableCell>
-                  <TableCell>
-                    <code className="font-mono text-xs">{rule.trigger}</code>
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {rule.actions
-                      .map((a) =>
-                        typeof a.type === "string" ? a.type : "?",
-                      )
-                      .join(", ") || "-"}
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap gap-1">
-                      {rule.is_enabled ? (
-                        <Badge variant="success">enabled</Badge>
-                      ) : (
-                        <Badge variant="muted">disabled</Badge>
-                      )}
-                      {rule.dry_run && (
-                        <Badge variant="warning">dry-run</Badge>
-                      )}
-                      {rule.cb_tripped && (
-                        <Badge variant="destructive">breaker tripped</Badge>
-                      )}
-                    </div>
-                  </TableCell>
-                  {canManage && (
-                    <TableCell>
-                      <div className="flex items-center justify-end gap-1">
-                        {rule.cb_tripped && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            title="Reset circuit breaker"
-                            onClick={() => onResetCircuit(rule)}
-                            disabled={resetCircuit.isPending}
-                          >
-                            <RotateCcw className="size-4" />
-                          </Button>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title="Edit"
-                          onClick={() => onEdit(rule)}
-                        >
-                          <Pencil className="size-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title="Delete"
-                          onClick={() => onDelete(rule)}
-                        >
-                          <Trash2 className="size-4" />
-                        </Button>
-                      </div>
-                    </TableCell>
+      <Table
+        notice={
+          <div className="flex items-center justify-between rounded-md border bg-muted/30 px-4 py-3">
+            <div>
+              <div className="text-sm font-medium">Project automation</div>
+              <div className="text-xs text-muted-foreground">
+                {automationEnabled
+                  ? "Rules on this project are active."
+                  : "The kill switch is OFF - no rule on this project fires."}
+              </div>
+            </div>
+            <Switch
+              checked={automationEnabled}
+              onCheckedChange={onToggleKillSwitch}
+              disabled={!isAdmin || setSettings.isPending || settings.isLoading}
+              aria-label="toggle project automation"
+            />
+          </div>
+        }
+        searchable
+        searchPlaceholder="Search automation rules…"
+        isLoading={isLoading}
+        error={isError ? "Unable to load automation rules. Try again." : null}
+        onRetry={() => refetch()}
+        emptyState={
+          <EmptyState
+            icon={Zap}
+            title="no automation rules"
+            description={
+              canManage
+                ? "Create a rule to react automatically to task failures, retries, or a scheduler misfire."
+                : "No rules have been created for this project yet."
+            }
+          />
+        }
+      >
+        <TableHeader>
+          <TableRow>
+            <TableHead sortKey="c0">Name</TableHead>
+            <TableHead sortKey="c1">Trigger</TableHead>
+            <TableHead sortKey="c2">Actions</TableHead>
+            <TableHead sortKey="c3">Status</TableHead>
+            {canManage && <TableHead className="text-right">Manage</TableHead>}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {(rules ?? []).map((rule) => (
+            <TableRow
+              sortValues={{
+                c0: rule.name,
+                c1: rule.trigger,
+                c2: rule.actions
+                  .map((a) => (typeof a.type === "string" ? a.type : "?"))
+                  .join(", "),
+                c3: [
+                  rule.is_enabled ? "enabled" : "disabled",
+                  rule.dry_run ? "dry run" : "",
+                  rule.cb_tripped ? "breaker tripped" : "",
+                ].join(" "),
+              }}
+              key={rule.id}
+            >
+              <TableCell className="font-medium">{rule.name}</TableCell>
+              <TableCell>
+                <code className="font-mono text-xs">{rule.trigger}</code>
+              </TableCell>
+              <TableCell className="font-mono text-xs">
+                {rule.actions
+                  .map((a) => (typeof a.type === "string" ? a.type : "?"))
+                  .join(", ") || "-"}
+              </TableCell>
+              <TableCell>
+                <div className="flex flex-wrap gap-1">
+                  {rule.is_enabled ? (
+                    <Badge variant="success">enabled</Badge>
+                  ) : (
+                    <Badge variant="muted">disabled</Badge>
                   )}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
+                  {rule.dry_run && <Badge variant="warning">dry-run</Badge>}
+                  {rule.cb_tripped && (
+                    <Badge variant="destructive">breaker tripped</Badge>
+                  )}
+                </div>
+              </TableCell>
+              {canManage && (
+                <TableCell>
+                  <div className="flex items-center justify-end gap-1">
+                    {rule.cb_tripped && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="Reset circuit breaker"
+                        onClick={() => onResetCircuit(rule)}
+                        disabled={resetCircuit.isPending}
+                      >
+                        <RotateCcw className="size-4" />
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="Edit"
+                      onClick={() => onEdit(rule)}
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="Delete"
+                      onClick={() => onDelete(rule)}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                </TableCell>
+              )}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
 
       <AutomationRuleFormDialog
         slug={slug}

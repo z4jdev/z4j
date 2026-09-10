@@ -38,6 +38,6 @@ except importlib.metadata.PackageNotFoundError:
     # Source checkout without an installed dist: fall back to the
     # pyproject version literal, which scripts/check-versions.py keeps in
     # sync with [project].version.
-    __version__ = "1.10.0"
+    __version__ = "1.11.0"
 
 __all__ = ["__version__"]

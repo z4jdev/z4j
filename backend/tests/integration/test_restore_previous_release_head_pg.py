@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from z4j_brain import management_restore_postgres as postgres_restore_module
 from z4j_brain.backup import backup_postgres, restore_postgres
 from z4j_brain.main import create_app
-from z4j_brain.management_restore import _PREVIOUS_RELEASE_HEAD
+from z4j_brain.management_restore import _PRE_TALLY_RELEASE_HEAD, _PREVIOUS_RELEASE_HEAD
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.models import AuditLog, Project
 from z4j_brain.schema_transition import RELEASE_MIGRATION_HEAD
@@ -80,7 +80,9 @@ async def _drop_database(admin_url: str, database: str) -> None:
         await admin.close()
 
 
+@pytest.mark.parametrize("prior_release_head", [_PREVIOUS_RELEASE_HEAD, _PRE_TALLY_RELEASE_HEAD])
 async def test_current_checkout_prior_head_archive_restores_upgrades_and_starts(
+    prior_release_head: str,
     migrated_engine: AsyncEngine,
     integration_settings: Settings,
     postgres_admin_url: str,
@@ -122,7 +124,7 @@ async def test_current_checkout_prior_head_archive_restores_upgrades_and_starts(
         await asyncio.to_thread(
             command.upgrade,
             config,
-            _PREVIOUS_RELEASE_HEAD,
+            prior_release_head,
         )
         # Written with explicit SQL, not the ORM: the release models carry
         # columns the previous head's schema does not have yet, and the point
@@ -136,7 +138,7 @@ async def test_current_checkout_prior_head_archive_restores_upgrades_and_starts(
                         text("SELECT version_num FROM alembic_version"),
                     )
                 ).scalar_one()
-                assert head == _PREVIOUS_RELEASE_HEAD
+                assert head == prior_release_head
                 await connection.execute(
                     text(
                         "INSERT INTO projects (id, slug, name) VALUES (:id, :slug, :name)",
@@ -239,7 +241,7 @@ async def test_current_checkout_prior_head_archive_restores_upgrades_and_starts(
                     ),
                 )
             ).scalar_one()
-            assert marker.audit_metadata["source_migration_head"] == (_PREVIOUS_RELEASE_HEAD)
+            assert marker.audit_metadata["source_migration_head"] == (prior_release_head)
             assert marker.audit_metadata["migration_head"] == (RELEASE_MIGRATION_HEAD)
             assert marker.audit_metadata["source_provenance"] == {
                 "kind": "operator_expected_sha256",
@@ -258,7 +260,9 @@ async def test_current_checkout_prior_head_archive_restores_upgrades_and_starts(
         assert ready.json()["status"] == "ready"
 
 
+@pytest.mark.parametrize("prior_release_head", [_PREVIOUS_RELEASE_HEAD, _PRE_TALLY_RELEASE_HEAD])
 async def test_current_checkout_prior_head_archive_derives_boundary_d_authority(
+    prior_release_head: str,
     migrated_engine: AsyncEngine,
     integration_settings: Settings,
     postgres_admin_url: str,
@@ -298,7 +302,7 @@ async def test_current_checkout_prior_head_archive_derives_boundary_d_authority(
         await asyncio.to_thread(
             command.upgrade,
             config,
-            _PREVIOUS_RELEASE_HEAD,
+            prior_release_head,
         )
         source_engine = create_async_engine(source_async_url)
         try:
@@ -340,7 +344,7 @@ async def test_current_checkout_prior_head_archive_derives_boundary_d_authority(
         pg_restore,
         archive,
     )
-    assert source_head == _PREVIOUS_RELEASE_HEAD
+    assert source_head == prior_release_head
 
     _, toc_digest = await asyncio.to_thread(
         postgres_restore_module._inspect_toc,
@@ -369,7 +373,7 @@ async def test_current_checkout_prior_head_archive_derives_boundary_d_authority(
         "schedule_external_epoch_allocator",
     )
     assert len(allocator_rows) == 1
-    assert authority["source_head"] == _PREVIOUS_RELEASE_HEAD
+    assert authority["source_head"] == prior_release_head
     assert authority["revision"] == source_revision
     assert authority["epoch"] == source_epoch
     assert "revision_classification" not in authority
@@ -396,7 +400,9 @@ async def test_current_checkout_prior_head_archive_derives_boundary_d_authority(
     assert repeated["manifest_digest"] == authority["manifest_digest"]
 
 
+@pytest.mark.parametrize("prior_release_head", [_PREVIOUS_RELEASE_HEAD, _PRE_TALLY_RELEASE_HEAD])
 async def test_unactivated_previous_head_archive_leaves_the_target_intact(
+    prior_release_head: str,
     migrated_engine: AsyncEngine,
     integration_settings: Settings,
     postgres_admin_url: str,
@@ -444,7 +450,7 @@ async def test_unactivated_previous_head_archive_leaves_the_target_intact(
         await asyncio.to_thread(
             command.upgrade,
             config,
-            _PREVIOUS_RELEASE_HEAD,
+            prior_release_head,
         )
         source_engine = create_async_engine(source_async_url)
         try:

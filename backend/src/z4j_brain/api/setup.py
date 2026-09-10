@@ -241,15 +241,15 @@ _FORM_HTML = """<!doctype html>
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #f8fafc;
+      --bg: #f5f6f8;
       --card: #ffffff;
       --border: #e2e8f0;
       --border-strong: #cbd5e1;
-      --fg: #0f172a;
+      --fg: #17202d;
       --fg-muted: #475569;
-      --fg-subtle: #94a3b8;
-      --primary: #0f172a;
-      --primary-hover: #1e293b;
+      --fg-subtle: #596579;
+      --primary: #0864d9;
+      --primary-hover: #0755b8;
       --primary-fg: #ffffff;
       --danger: #b91c1c;
       --ring: rgba(15, 23, 42, 0.10);
@@ -260,15 +260,15 @@ _FORM_HTML = """<!doctype html>
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #0b1120;
-        --card: #0f172a;
-        --border: #1e293b;
+        --bg: #11151c;
+        --card: #1b212b;
+        --border: #343f50;
         --border-strong: #334155;
         --fg: #f1f5f9;
         --fg-muted: #94a3b8;
-        --fg-subtle: #64748b;
-        --primary: #f8fafc;
-        --primary-hover: #e2e8f0;
+        --fg-subtle: #aab5c5;
+        --primary: #75b4ff;
+        --primary-hover: #95c6ff;
         --primary-fg: #0f172a;
         --danger: #f87171;
         --ring: rgba(248, 250, 252, 0.16);
@@ -279,7 +279,8 @@ _FORM_HTML = """<!doctype html>
       }
     }
     * { box-sizing: border-box; }
-    html, body { height: 100%; }
+    html, body { min-height: 100%; }
+    body { min-height: 100dvh; }
     body {
       margin: 0;
       font-family:
@@ -297,10 +298,10 @@ _FORM_HTML = """<!doctype html>
     }
     .card {
       width: 100%;
-      max-width: 420px;
+      max-width: 460px;
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 14px;
+      border-radius: 20px;
       padding: 2.25rem 2rem 1.75rem;
       box-shadow: var(--shadow);
     }
@@ -326,7 +327,7 @@ _FORM_HTML = """<!doctype html>
     label {
       display: block;
       margin-top: 1.1rem;
-      font-size: 0.8rem;
+      font-size: 0.875rem;
       font-weight: 600;
       color: var(--fg);
       letter-spacing: 0;
@@ -439,7 +440,7 @@ _FORM_HTML = """<!doctype html>
       margin-top: 1.5rem;
       padding-top: 1.25rem;
       border-top: 1px solid var(--border);
-      font-size: 0.72rem;
+      font-size: 0.8125rem;
       color: var(--fg-subtle);
       text-align: center;
     }
@@ -447,9 +448,9 @@ _FORM_HTML = """<!doctype html>
 </head>
 <body>
   <main class="card">
-    <div class="brand">z4j</div>
-    <h1>First-boot setup</h1>
-    <p class="lead">Create the first administrator account for this brain.</p>
+    <div class="brand">z4j · Control plane</div>
+    <h1>Welcome to your control plane.</h1>
+    <p class="lead">Create your administrator account. Next, connect a worker and verify your first task.</p>
     <form id="setup-form" autocomplete="off">
       <input type="hidden" name="token" id="token-field">
       <label>Email
@@ -460,17 +461,17 @@ _FORM_HTML = """<!doctype html>
       </label>
       <label>Password
         <span class="password-wrap">
-          <input type="password" id="password" name="password" autocomplete="new-password" minlength="8" required>
+          <input type="password" id="password" aria-describedby="password-hint" name="password" autocomplete="new-password" minlength="12" required>
           <button type="button" class="toggle" id="toggle-password" aria-label="Show password" aria-pressed="false">
             <svg class="icon-eye" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
             <svg class="icon-eye-off" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
           </button>
         </span>
       </label>
-      <p class="hint" id="password-hint">At least 8 characters, with letters and digits.</p>
+      <p class="hint" id="password-hint">Use a long passphrase. Minimum 12 characters; shorter than 16 needs three character classes.</p>
       <label>Confirm password
         <span class="password-wrap">
-          <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" minlength="8" required>
+          <input type="password" id="password_confirm" aria-describedby="match-hint" name="password_confirm" autocomplete="new-password" minlength="12" required>
           <button type="button" class="toggle" id="toggle-confirm" aria-label="Show password" aria-pressed="false">
             <svg class="icon-eye" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
             <svg class="icon-eye-off" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
@@ -495,6 +496,18 @@ _FORM_HTML = """<!doctype html>
       var pw = document.getElementById('password');
       var pw2 = document.getElementById('password_confirm');
       var matchHint = document.getElementById('match-hint');
+      fetch('/api/v1/auth/policy').then(function(response) {
+        if (!response.ok) throw new Error('Policy unavailable');
+        return response.json();
+      }).then(function(policy) {
+        if (Number.isInteger(policy.min_length) && policy.min_length > 0) {
+          pw.minLength = policy.min_length;
+          pw2.minLength = policy.min_length;
+          document.getElementById('password-hint').textContent =
+            'Minimum ' + policy.min_length + ' characters. Use a long passphrase; shorter than 16 needs ' +
+            policy.required_character_classes + ' character classes. The server validates your password.';
+        }
+      }).catch(function() { /* Server validation remains authoritative. */ });
 
       if (!tokenFromUrl) {
         err.textContent = 'Setup token missing. Open the URL printed in the z4j logs (docker compose logs z4j).';
@@ -537,13 +550,13 @@ _FORM_HTML = """<!doctype html>
           matchHint.textContent = '';
           matchHint.className = 'hint';
           pw2.removeAttribute('aria-invalid');
-          return pw.value.length >= 8;
+          return pw.value.length >= pw.minLength;
         }
         if (pw.value === pw2.value) {
           matchHint.textContent = 'Passwords match.';
           matchHint.className = 'hint ok';
           pw2.removeAttribute('aria-invalid');
-          return pw.value.length >= 8;
+          return pw.value.length >= pw.minLength;
         }
         matchHint.textContent = 'Passwords do not match.';
         matchHint.className = 'hint bad';

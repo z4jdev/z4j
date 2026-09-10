@@ -1,3 +1,4 @@
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * Security settings page -- two-factor auth, trusted devices, and
  * active sessions. Split out from the Account page in 1.6.0 because
@@ -9,19 +10,21 @@
  * Change-password lives on the Account page (modal). Logging out
  * of other devices lives here, alongside the rest of the auth UI.
  */
-import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
-import { QRCodeSVG } from "qrcode.react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Loader2, Shield, Trash2 } from "lucide-react";
-import { toast } from "sonner";
-import { api } from "@/lib/api";
-import { revokeOtherSessions } from "@/lib/session-actions";
+import { DateCell } from "@/components/domain/date-cell";
+import { PageHeader } from "@/components/domain/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -34,16 +37,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import { DateCell } from "@/components/domain/date-cell";
-import { PageHeader } from "@/components/domain/page-header";
-import {
   useEnrollComplete,
   useEnrollStart,
   useMfaDisable,
@@ -53,6 +46,14 @@ import {
   useTrustCurrentDevice,
   useTrustedDevices,
 } from "@/hooks/use-mfa";
+import { api } from "@/lib/api";
+import { revokeOtherSessions } from "@/lib/session-actions";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { Copy, Loader2, Shield, Trash2 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
+import { useState } from "react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/settings/security")({
   component: SecurityPage,
@@ -537,16 +538,26 @@ function TrustedDevicesList() {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Device</TableHead>
-            <TableHead>Last seen</TableHead>
-            <TableHead>Expires</TableHead>
-            <TableHead className="w-16">Status</TableHead>
+            <TableHead sortKey="c0">Device</TableHead>
+            <TableHead sortKey="c1">Last seen</TableHead>
+            <TableHead sortKey="c2">Expires</TableHead>
+            <TableHead sortKey="c3" className="w-16">
+              Status
+            </TableHead>
             <TableHead className="w-24" />
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.map((d) => (
-            <TableRow key={d.id}>
+            <TableRow
+              sortValues={{
+                c0: d.label,
+                c1: sortTimestamp(d.last_seen_at),
+                c2: sortTimestamp(d.expires_at),
+                c3: d.revoked_at ? "revoked" : "active",
+              }}
+              key={d.id}
+            >
               <TableCell>
                 {d.label}
                 {d.is_current && (
@@ -661,20 +672,26 @@ function SessionsSection() {
       {isLoading && <Skeleton className="mt-4 h-32 w-full" />}
 
       {sessions && sessions.length > 0 && (
-        <div className="mt-4 overflow-hidden rounded-md border">
+        <div className="mt-4 panel-surface overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Device</TableHead>
-                <TableHead>IP</TableHead>
-                <TableHead>Last active</TableHead>
-                <TableHead>Status</TableHead>
+                <TableHead sortKey="c0">Device</TableHead>
+                <TableHead sortKey="c1">IP</TableHead>
+                <TableHead sortKey="c2">Last active</TableHead>
+                <TableHead sortKey="c3">Status</TableHead>
                 <TableHead className="w-10" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {sessions.map((session) => (
                 <TableRow
+                  sortValues={{
+                    c0: session.user_agent_at_issue,
+                    c1: session.ip_at_issue,
+                    c2: sortTimestamp(session.last_seen_at),
+                    c3: session.is_current ? "Current" : "Active",
+                  }}
                   key={session.id}
                   className={session.is_current ? "bg-primary/5" : undefined}
                 >

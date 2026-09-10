@@ -16,27 +16,28 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Command } from "cmdk";
 import {
-  Bell,
   ClipboardList,
-  Cpu,
-  History,
+  Home,
   Keyboard,
-  Layers,
-  LayoutDashboard,
   Moon,
-  Network,
   Search,
   Settings,
-  Shield,
   Sun,
-  Terminal,
   Users,
+  X,
 } from "lucide-react";
+import { projectNavigation } from "@/components/layout/project-navigation";
+import { useCurrentUserRole } from "@/hooks/use-memberships";
+import { useMe } from "@/hooks/use-auth";
 import { useTheme } from "@/components/layout/theme-provider";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
+  DialogTitle,
+  DialogDescription,
 } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { useTasks } from "@/hooks/use-tasks";
 import {
   TaskPriorityBadge,
@@ -46,13 +47,21 @@ import {
 interface CommandPaletteProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onOpenShortcuts: () => void;
 }
 
-export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
+export function CommandPalette({
+  open,
+  onOpenChange,
+  onOpenShortcuts,
+}: CommandPaletteProps) {
   const navigate = useNavigate();
   const params = useParams({ strict: false });
   const activeSlug = (params as { slug?: string }).slug;
-  const slug = activeSlug ?? "default";
+  const slug = activeSlug ?? "";
+  const role = useCurrentUserRole(activeSlug);
+  const { data: me } = useMe();
+  const navigation = projectNavigation(activeSlug, role);
   const { setTheme, resolvedTheme } = useTheme();
   const [search, setSearch] = useState("");
 
@@ -65,9 +74,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     open && Boolean(activeSlug) && debouncedSearch.trim().length >= 2;
   const { data: taskResults } = useTasks(
     taskQueryEnabled ? slug : "",
-    taskQueryEnabled
-      ? { search: debouncedSearch.trim(), limit: 8 }
-      : {},
+    taskQueryEnabled ? { search: debouncedSearch.trim(), limit: 8 } : {},
   );
   const taskMatches = useMemo(() => {
     if (!taskQueryEnabled) return [];
@@ -88,23 +95,54 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   );
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="overflow-hidden p-0 shadow-lg sm:max-w-[520px]">
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => (nextOpen ? onOpenChange(true) : close())}
+    >
+      <DialogContent
+        showCloseButton={false}
+        onCloseAutoFocus={() => setSearch("")}
+        className="overflow-hidden p-0 shadow-overlay sm:max-w-[520px]"
+      >
+        <DialogTitle className="sr-only">Search pages and tasks</DialogTitle>
+        <DialogDescription className="sr-only">
+          {activeSlug
+            ? `Search tasks in ${activeSlug}, navigate or change appearance.`
+            : "Choose a project to search its tasks, or open a workspace page."}
+        </DialogDescription>
         <Command
           className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:text-muted-foreground"
           loop
         >
-          <div className="flex items-center border-b px-3">
-            <Search className="mr-2 size-4 shrink-0 opacity-50" />
+          <div className="flex items-center gap-2 border-b px-3">
+            <Search className="size-4 shrink-0 opacity-50" aria-hidden="true" />
             <Command.Input
-              placeholder="Search commands, pages, tasks..."
+              aria-label="Search pages and tasks"
+              placeholder={
+                activeSlug
+                  ? `Search in ${activeSlug}…`
+                  : "Search pages or choose a project…"
+              }
               value={search}
               onValueChange={setSearch}
-              className="flex h-12 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-12 min-w-0 flex-1 rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
             />
-            <kbd className="pointer-events-none ml-2 hidden h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground sm:inline-flex">
-              ESC
-            </kbd>
+            <DialogClose asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="min-w-9 shrink-0 gap-2 px-2"
+                aria-label="Close search"
+              >
+                <kbd
+                  aria-hidden="true"
+                  className="hidden rounded border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground sm:inline-flex"
+                >
+                  Esc
+                </kbd>
+                <X className="size-4" aria-hidden="true" />
+              </Button>
+            </DialogClose>
           </div>
           <Command.List className="max-h-[360px] overflow-y-auto p-2">
             <Command.Empty className="py-6 text-center text-sm text-muted-foreground">
@@ -123,9 +161,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                     key={t.id}
                     value={`task:${t.engine}:${t.task_id}:${t.name}`}
                     onSelect={() =>
-                      go(
-                        `/projects/${slug}/tasks/${t.engine}/${t.task_id}`,
-                      )
+                      go(`/projects/${slug}/tasks/${t.engine}/${t.task_id}`)
                     }
                     className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 text-sm aria-selected:bg-accent aria-selected:text-accent-foreground"
                   >
@@ -148,63 +184,52 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               </Command.Group>
             )}
 
-            {/* Navigation */}
-            <Command.Group heading="Navigate">
+            <Command.Group
+              heading={activeSlug ? `Project · ${activeSlug}` : "Workspace"}
+            >
               <PaletteItem
-                icon={LayoutDashboard}
-                label="Overview"
-                shortcut="G O"
-                onSelect={() => go(`/projects/${slug}`)}
+                icon={Home}
+                label="Workspace home"
+                shortcut="G H"
+                onSelect={() => go("/home")}
               />
-              <PaletteItem
-                icon={ClipboardList}
-                label="Tasks"
-                shortcut="G T"
-                onSelect={() => go(`/projects/${slug}/tasks`)}
-              />
-              <PaletteItem
-                icon={Cpu}
-                label="Workers"
-                shortcut="G W"
-                onSelect={() => go(`/projects/${slug}/workers`)}
-              />
-              <PaletteItem
-                icon={Layers}
-                label="Queues"
-                shortcut="G Q"
-                onSelect={() => go(`/projects/${slug}/queues`)}
-              />
-              <PaletteItem
-                icon={History}
-                label="Schedules"
-                onSelect={() => go(`/projects/${slug}/schedules`)}
-              />
-              <PaletteItem
-                icon={Terminal}
-                label="Commands"
-                onSelect={() => go(`/projects/${slug}/commands`)}
-              />
-              <PaletteItem
-                icon={Network}
-                label="Agents"
-                shortcut="G A"
-                onSelect={() => go(`/projects/${slug}/agents`)}
-              />
-              <PaletteItem
-                icon={Shield}
-                label="Audit Log"
-                onSelect={() => go(`/projects/${slug}/audit`)}
-              />
+              {navigation.map((item) => (
+                <PaletteItem
+                  key={item.to}
+                  icon={item.icon}
+                  label={item.label}
+                  shortcut={
+                    item.shortcut
+                      ? `G ${item.shortcut.toUpperCase()}`
+                      : undefined
+                  }
+                  onSelect={() => go(item.to)}
+                />
+              ))}
               <PaletteItem
                 icon={Settings}
-                label="Settings & Notifications"
-                onSelect={() => go(`/projects/${slug}/settings`)}
+                label="Account settings"
+                onSelect={() => go("/settings/account")}
               />
-              <PaletteItem
-                icon={Users}
-                label="User Management"
-                onSelect={() => go("/admin/users")}
-              />
+              {me?.is_admin && (
+                <PaletteItem
+                  icon={Users}
+                  label="User Management"
+                  onSelect={() => go("/settings/users")}
+                />
+              )}
+            </Command.Group>
+            <Command.Group heading="Switch project">
+              {me?.memberships?.map((m) => (
+                <PaletteItem
+                  key={m.project_id}
+                  icon={Home}
+                  label={m.project_slug}
+                  onSelect={() =>
+                    go(`/projects/${encodeURIComponent(m.project_slug)}`)
+                  }
+                />
+              ))}
             </Command.Group>
 
             {/* Quick Actions */}
@@ -218,15 +243,13 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 }}
               />
               <PaletteItem
-                icon={Bell}
-                label="Add notification rule"
-                onSelect={() => go(`/projects/${slug}/settings`)}
-              />
-              <PaletteItem
                 icon={Keyboard}
                 label="Keyboard shortcuts"
                 shortcut="?"
-                onSelect={close}
+                onSelect={() => {
+                  close();
+                  onOpenShortcuts();
+                }}
               />
             </Command.Group>
           </Command.List>
@@ -278,7 +301,6 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   }, [value, delay]);
   return debounced;
 }
-
 
 /**
  * Hook to manage command palette open state + global keybinding.

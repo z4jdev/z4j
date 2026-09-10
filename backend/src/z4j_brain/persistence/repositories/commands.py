@@ -524,8 +524,13 @@ class CommandRepository(BaseRepository[Command]):
             agent_id=agent_id,
         ):
             return True, None
+        # The candidate may predate another delivery claim. Locking the row
+        # does not refresh SQLAlchemy's identity map unless explicitly requested.
         command_result = await self.session.execute(
-            select(Command).where(Command.id == command_id).with_for_update(),
+            select(Command)
+            .where(Command.id == command_id)
+            .with_for_update()
+            .execution_options(populate_existing=True),
         )
         command = command_result.scalar_one_or_none()
         if command is None:
@@ -701,7 +706,10 @@ class CommandRepository(BaseRepository[Command]):
             return None
 
         command_result = await self.session.execute(
-            select(Command).where(Command.id == command_id).with_for_update(),
+            select(Command)
+            .where(Command.id == command_id)
+            .with_for_update()
+            .execution_options(populate_existing=True),
         )
         command = command_result.scalar_one_or_none()
         if (
@@ -882,7 +890,10 @@ class CommandRepository(BaseRepository[Command]):
 
         command = (
             await self.session.execute(
-                select(Command).where(Command.id == command_id).with_for_update(),
+                select(Command)
+                .where(Command.id == command_id)
+                .with_for_update()
+                .execution_options(populate_existing=True),
             )
         ).scalar_one_or_none()
         if (
@@ -1331,7 +1342,11 @@ class CommandRepository(BaseRepository[Command]):
         Returns the number of rows transitioned.
         """
         result = await self.session.execute(
+            # Evaluate deadlines in the database. SQLite reloads timestamps
+            # without tzinfo; Python-side ORM synchronization can otherwise
+            # compare them with this aware UTC cutoff, even on excluded rows.
             update(Command)
+            .execution_options(synchronize_session="fetch")
             .where(
                 Command.status.in_(
                     [CommandStatus.PENDING, CommandStatus.DISPATCHED],

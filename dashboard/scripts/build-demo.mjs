@@ -30,6 +30,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  isReleaseVersion,
   requireDemoDataTree,
   stampDemoVersions,
 } from "./stamp-demo-versions.mjs";
@@ -148,7 +149,7 @@ try {
   console.error(`[build:demo] cannot read ${versionFile}: ${err.message}`);
   process.exit(1);
 }
-if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
+if (!isReleaseVersion(version)) {
   console.error(
     `[build:demo] versions.json has no usable z4j version: ${JSON.stringify(version)}`,
   );
@@ -317,3 +318,24 @@ await writeFile(
 
 console.log("[build:demo] wrote _redirects + _headers for Cloudflare Pages");
 console.log("[build:demo] done. Output: dist-demo/");
+
+// Publish the real router paths so cross-site link checks can distinguish a
+// valid SPA deep link from a nonexistent page behind the catch-all rewrite.
+const routeSource = await readFile(
+  join(dashboardRoot, "src/routeTree.gen.ts"),
+  "utf8",
+);
+const routeInterface = routeSource.match(
+  /export interface FileRoutesByFullPath \{([\s\S]*?)\n\}/,
+)?.[1];
+if (!routeInterface)
+  throw new Error("Missing FileRoutesByFullPath in generated router");
+const paths = [...routeInterface.matchAll(/['"](\/[^'"]*)['"]:/g)].map(
+  (match) => match[1],
+);
+if (!paths.includes("/projects/$slug/issues"))
+  throw new Error("Demo route manifest is incomplete");
+await writeFile(
+  join(distDemoPath, "route-manifest.json"),
+  JSON.stringify({ paths }, null, 2) + "\n",
+);

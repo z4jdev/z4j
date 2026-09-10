@@ -20,9 +20,13 @@ export interface TaskFilters {
   limit?: number;
 }
 
-export function useTasks(slug: string, filters: TaskFilters = {}) {
+export function useTasks(
+  slug: string,
+  filters: TaskFilters = {},
+  { includeTotal = false }: { includeTotal?: boolean } = {},
+) {
   return useQuery<TaskListResponse>({
-    queryKey: ["tasks", slug, filters],
+    queryKey: ["tasks", slug, filters, { includeTotal }],
     queryFn: () =>
       api.get<TaskListResponse>(`/projects/${slug}/tasks`, {
         state: filters.state || undefined,
@@ -38,6 +42,7 @@ export function useTasks(slug: string, filters: TaskFilters = {}) {
         until: filters.until || undefined,
         cursor: filters.cursor ?? undefined,
         limit: filters.limit ?? 50,
+        include_total: includeTotal || undefined,
       }),
     enabled: !!slug,
     placeholderData: keepPreviousData,

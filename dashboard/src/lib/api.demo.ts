@@ -79,6 +79,47 @@ function serveJson(file: string) {
   };
 }
 
+/** Filter and page finite demo histories with the same visible API controls. */
+async function serveHistoryPage(req: Request, file: string): Promise<Response> {
+  const response = await serveJson(file)();
+  if (!response.ok) return response;
+  const payload = (await response.json()) as {
+    items: Array<Record<string, unknown>>;
+  };
+  const params = new URL(req.url).searchParams;
+  let items = payload.items ?? [];
+  const prefix = params.get("action_prefix");
+  const outcome = params.get("outcome");
+  const status = params.get("status");
+  if (prefix)
+    items = items.filter((item) =>
+      String(item.action ?? "").startsWith(prefix),
+    );
+  if (outcome)
+    items = items.filter((item) => (item.outcome ?? item.result) === outcome);
+  if (status) items = items.filter((item) => item.status === status);
+  const requestedLimit = Number(params.get("limit"));
+  const limit =
+    Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.min(200, Math.floor(requestedLimit))
+      : 50;
+  const requestedOffset = Number(params.get("cursor"));
+  const offset = Number.isFinite(requestedOffset)
+    ? Math.max(0, Math.floor(requestedOffset))
+    : 0;
+  return new Response(
+    JSON.stringify({
+      items: items.slice(offset, offset + limit),
+      next_cursor:
+        offset + limit < items.length ? String(offset + limit) : null,
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
 /**
  * Events intercept. The task detail panel asks for one task's lifecycle
  * (`engine` + `task_id`), so serving the whole project feed would fill a single
@@ -123,7 +164,9 @@ async function serveItemFromList(
 ): Promise<Response> {
   const raw = await serveJson(file)();
   if (!raw.ok) return raw;
-  const payload = (await raw.json()) as { items?: Array<Record<string, unknown>> };
+  const payload = (await raw.json()) as {
+    items?: Array<Record<string, unknown>>;
+  };
   const found = (payload.items ?? []).find(matches);
   if (!found) {
     return new Response(
@@ -223,29 +266,78 @@ function handleLogout(): Response {
 }
 
 const ROUTES: RouteHandler[] = [
+  ...["POST", "PUT", "DELETE"].map((method) => ({
+    method,
+    pattern: /^\/api\/v1\/projects\/[^/]+\/saved-views(?:\/[^/?]+)?(?:\?|$)/,
+    handler: () =>
+      new Response(
+        JSON.stringify({
+          error: "demo_read_only",
+          message:
+            "Changes are disabled in the demo. Install z4j to save your own views.",
+        }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ),
+  })),
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/saved-views(?:\?|$)/,
+    handler: serveJson("user/saved-task-views.json"),
+  },
   // Auth
   { method: "POST", pattern: /^\/api\/v1\/auth\/login$/, handler: handleLogin },
-  { method: "POST", pattern: /^\/api\/v1\/auth\/logout$/, handler: handleLogout },
-  { method: "GET", pattern: /^\/api\/v1\/auth\/me$/, handler: serveJson("auth/me.json") },
-  { method: "GET", pattern: /^\/api\/v1\/auth\/sessions$/, handler: serveJson("auth/sessions.json") },
+  {
+    method: "POST",
+    pattern: /^\/api\/v1\/auth\/logout$/,
+    handler: handleLogout,
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/auth\/me$/,
+    handler: serveJson("auth/me.json"),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/auth\/sessions$/,
+    handler: serveJson("auth/sessions.json"),
+  },
 
   // MFA / trust shell (Settings > Security). The demo admin is already
   // enrolled, so the Security tab renders the "MFA is on" panel with a
   // recovery-code count and a trusted-devices list rather than the
   // enroll flow. enroll/disable/verify/regenerate are mutations, so
   // they fall through to the demo-toast (no real second factor changes).
-  { method: "GET", pattern: /^\/api\/v1\/auth\/mfa\/status$/, handler: serveJson("auth/mfa-status.json") },
-  { method: "GET", pattern: /^\/api\/v1\/auth\/mfa\/trusted-devices$/, handler: serveJson("auth/mfa-trusted-devices.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/auth\/mfa\/status$/,
+    handler: serveJson("auth/mfa-status.json"),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/auth\/mfa\/trusted-devices$/,
+    handler: serveJson("auth/mfa-trusted-devices.json"),
+  },
 
   // Server health pill in the topbar (refetches every 30s; if this
   // 404s the pill flips to "z4j offline" which makes the demo feel
   // half-broken).
-  { method: "GET", pattern: /^\/api\/v1\/health$/, handler: serveJson("system/health.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/health$/,
+    handler: () =>
+      new Response(JSON.stringify({ status: "ok" }), {
+        headers: { "content-type": "application/json" },
+      }),
+  },
 
   // Settings > System Info page reads /health/system for version,
   // Python, DB type, package versions. Added in 1.6.4 demo polish
   // so the System Info card on the demo doesn't show empty rows.
-  { method: "GET", pattern: /^\/api\/v1\/health\/system$/, handler: serveJson("system/health-system.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/health\/system$/,
+    handler: serveJson("system/health-system.json"),
+  },
 
   // First-boot check used by /login's beforeLoad guard. The demo is
   // never first-boot (a "demo admin" exists), so always return false
@@ -266,29 +358,57 @@ const ROUTES: RouteHandler[] = [
   // z4j-scheduler /info; the demo serves a fixed two-instance fleet
   // (both healthy) so the scheduler-reliability surface renders with
   // content instead of an empty header.
-  { method: "GET", pattern: /^\/api\/v1\/schedulers$/, handler: serveJson("system/schedulers.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/schedulers$/,
+    handler: serveJson("system/schedulers.json"),
+  },
 
   // Settings > Users (admin). Without this the page renders the
   // QueryError card instead of the user table, which is the single
   // most-visited admin surface after Projects.
-  { method: "GET", pattern: /^\/api\/v1\/users$/, handler: serveJson("admin/users.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/users$/,
+    handler: serveJson("admin/users.json"),
+  },
 
   // Settings > API Keys. The scopes catalogue is a separate call made
   // by the create dialog; it is anchored ahead of the list route only
   // for readability - both patterns are `$`-anchored so match order
   // cannot matter.
-  { method: "GET", pattern: /^\/api\/v1\/api-keys\/scopes$/, handler: serveJson("admin/api-keys-scopes.json") },
-  { method: "GET", pattern: /^\/api\/v1\/api-keys$/, handler: serveJson("admin/api-keys.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/api-keys\/scopes$/,
+    handler: serveJson("admin/api-keys-scopes.json"),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/api-keys$/,
+    handler: serveJson("admin/api-keys.json"),
+  },
 
   // Settings > Runtime config. Mirrors `z4j config show`: every
   // effective Settings field with the source it resolved from.
   // Secrets are served pre-masked as "***" exactly as the real
   // endpoint renders them - the demo never carries a secret value.
-  { method: "GET", pattern: /^\/api\/v1\/admin\/settings$/, handler: serveJson("admin/settings.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/admin\/settings$/,
+    handler: serveJson("admin/settings.json"),
+  },
 
   // Home (landing dashboard for the global view)
-  { method: "GET", pattern: /^\/api\/v1\/home\/summary$/, handler: serveJson("home/summary.json") },
-  { method: "GET", pattern: /^\/api\/v1\/home\/recent-failures/, handler: serveJson("home/recent-failures.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/home\/summary$/,
+    handler: serveJson("home/summary.json"),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/home\/recent-failures/,
+    handler: serveJson("home/recent-failures.json"),
+  },
 
   // v1.6: Live Activity Feed. Cross-project audit-log timeline.
   // Demo data is a seeded snapshot; live polling on demo.z4j.dev
@@ -302,7 +422,11 @@ const ROUTES: RouteHandler[] = [
   },
 
   // Projects (collection + per-project detail)
-  { method: "GET", pattern: /^\/api\/v1\/projects$/, handler: serveJson("projects/index.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/projects$/,
+    handler: serveJson("projects/index.json"),
+  },
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)$/,
@@ -325,12 +449,20 @@ const ROUTES: RouteHandler[] = [
       if (!res.ok) return res;
       const doc = (await res.json()) as {
         items: {
-          task_id: string; engine: string; name: string; state: string;
-          parent_task_id: string | null; root_task_id: string | null;
-          received_at: string | null; started_at: string | null; finished_at: string | null;
+          task_id: string;
+          engine: string;
+          name: string;
+          state: string;
+          parent_task_id: string | null;
+          root_task_id: string | null;
+          received_at: string | null;
+          started_at: string | null;
+          finished_at: string | null;
         }[];
       };
-      const me = doc.items.find((x) => x.task_id === match[3] && x.engine === match[2]);
+      const me = doc.items.find(
+        (x) => x.task_id === match[3] && x.engine === match[2],
+      );
       if (!me) {
         return new Response(
           JSON.stringify({
@@ -342,14 +474,28 @@ const ROUTES: RouteHandler[] = [
       }
       const root = me.root_task_id ?? me.task_id;
       const nodes = doc.items
-        .filter((x) => x.engine === match[2] && (x.task_id === root || x.root_task_id === root))
+        .filter(
+          (x) =>
+            x.engine === match[2] &&
+            (x.task_id === root || x.root_task_id === root),
+        )
         .map((x) => ({
-          task_id: x.task_id, name: x.name, state: x.state,
-          parent_task_id: x.parent_task_id, root_task_id: x.root_task_id,
-          received_at: x.received_at, started_at: x.started_at, finished_at: x.finished_at,
+          task_id: x.task_id,
+          name: x.name,
+          state: x.state,
+          parent_task_id: x.parent_task_id,
+          root_task_id: x.root_task_id,
+          received_at: x.received_at,
+          started_at: x.started_at,
+          finished_at: x.finished_at,
         }));
       return new Response(
-        JSON.stringify({ root_task_id: root, node_count: nodes.length, truncated: false, nodes }),
+        JSON.stringify({
+          root_task_id: root,
+          node_count: nodes.length,
+          truncated: false,
+          nodes,
+        }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     },
@@ -377,11 +523,62 @@ const ROUTES: RouteHandler[] = [
     handler: async (req, match) => {
       const res = await serveJson(`projects/${match[1]}/tasks.json`)();
       if (!res.ok) return res;
-      const limit = Number(new URL(req.url, "http://demo").searchParams.get("limit") ?? "0");
-      const doc = (await res.json()) as { items?: unknown[] };
-      if (Array.isArray(doc.items) && Number.isFinite(limit) && limit > 0) {
-        doc.items = doc.items.slice(0, limit);
+      const params = new URL(req.url).searchParams;
+      const limit = Math.max(
+        1,
+        Math.min(200, Number(params.get("limit")) || 50),
+      );
+      const doc = (await res.json()) as {
+        items: Array<Record<string, unknown>>;
+        next_cursor: string | null;
+        total_count?: number | null;
+      };
+      const state = params.get("state");
+      const priorities = params.get("priority")?.split(",");
+      const search = params.get("search")?.toLowerCase();
+      const name = params.get("name");
+      let items = doc.items ?? [];
+      if (state) items = items.filter((item) => item.state === state);
+      if (priorities?.length)
+        items = items.filter((item) =>
+          priorities.includes(String(item.priority)),
+        );
+      if (search)
+        items = items.filter((item) =>
+          [item.name, item.task_id, item.queue, item.worker_name].some(
+            (value) =>
+              String(value ?? "")
+                .toLowerCase()
+                .includes(search),
+          ),
+        );
+      if (name)
+        items = items.filter((item) => String(item.name ?? "").includes(name));
+      for (const [param, field] of [
+        ["queue", "queue"],
+        ["worker", "worker_name"],
+      ]) {
+        const value = params.get(param);
+        if (value) items = items.filter((item) => item[field] === value);
       }
+      const since = params.get("since");
+      const until = params.get("until");
+      if (since || until) {
+        items = items.filter((item) => {
+          if (!item.received_at) return false;
+          const received = Date.parse(String(item.received_at));
+          return (
+            (!since || received >= Date.parse(since)) &&
+            (!until || received <= Date.parse(until))
+          );
+        });
+      }
+      doc.total_count =
+        params.get("include_total") === "true" ? items.length : null;
+      const offset = Math.max(0, Number(params.get("cursor")) || 0);
+      doc.next_cursor =
+        offset + limit < items.length ? String(offset + limit) : null;
+      doc.items = items.slice(offset, offset + limit);
       return new Response(JSON.stringify(doc), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -402,7 +599,9 @@ const ROUTES: RouteHandler[] = [
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/schedules\/runs(?:\?|$)/,
     handler: async (req, match) => {
-      const wanted = new Set(new URL(req.url, "http://demo").searchParams.getAll("id"));
+      const wanted = new Set(
+        new URL(req.url, "http://demo").searchParams.getAll("id"),
+      );
       const res = await serveJson(`projects/${match[1]}/schedule-runs.json`)();
       if (!res.ok) return res;
       const doc = (await res.json()) as { items: { schedule_id: string }[] };
@@ -465,7 +664,13 @@ const ROUTES: RouteHandler[] = [
       }
       const limitParam = /[?&]limit=(\d+)/.exec(req.url);
       const limit = limitParam ? Math.max(1, Number(limitParam[1])) : 100;
-      const unresolved = new Set(["pending", "accepted", "delivered", "buffered", "buffer_stale"]);
+      const unresolved = new Set([
+        "pending",
+        "accepted",
+        "delivered",
+        "buffered",
+        "buffer_stale",
+      ]);
       const fires = row.runs.slice(0, limit).map((c) => {
         const acked =
           unresolved.has(c.status) || c.latency_ms === null
@@ -507,17 +712,31 @@ const ROUTES: RouteHandler[] = [
     // Anchored to the collection path, as with /tasks above.
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/schedules(?:\?|$)/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/schedules.json`)(),
+    handler: (_req, match) =>
+      serveJson(`projects/${match[1]}/schedules.json`)(),
   },
   {
     method: "GET",
-    pattern: /^\/api\/v1\/projects\/([^/]+)\/agents/,
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/agents\/([^/?]+)\/health(?:\?|$)/,
+    handler: async (_req, match) => {
+      const response = await serveJson(
+        `projects/${match[1]}/agent-health.json`,
+      )();
+      if (!response.ok) return response;
+      const reports = await response.json();
+      return Response.json(reports[match[2]] ?? []);
+    },
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/agents(?:\?|$)/,
     handler: (_req, match) => serveJson(`projects/${match[1]}/agents.json`)(),
   },
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/audit/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/audit.json`)(),
+    handler: (req, match) =>
+      serveHistoryPage(req, `projects/${match[1]}/audit.json`),
   },
   {
     method: "GET",
@@ -527,7 +746,8 @@ const ROUTES: RouteHandler[] = [
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/commands/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/commands.json`)(),
+    handler: (req, match) =>
+      serveHistoryPage(req, `projects/${match[1]}/commands.json`),
   },
   {
     method: "GET",
@@ -540,7 +760,8 @@ const ROUTES: RouteHandler[] = [
     // this path with the workers list, which crashed the lint panel.
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/workers\/lint(?:\?|$)/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/workers-lint.json`)(),
+    handler: (_req, match) =>
+      serveJson(`projects/${match[1]}/workers-lint.json`)(),
   },
   {
     // Worker detail: the same record the list serves, plus the metadata
@@ -552,8 +773,7 @@ const ROUTES: RouteHandler[] = [
       const raw = await serveJson(`projects/${match[1]}/workers.json`)();
       if (!raw.ok) return raw;
       const doc = (await raw.json()) as
-        | Record<string, unknown>[]
-        | { items?: Record<string, unknown>[] };
+        Record<string, unknown>[] | { items?: Record<string, unknown>[] };
       const items = Array.isArray(doc) ? doc : (doc.items ?? []);
       const found = items.find((w) => w.id === match[2]);
       if (!found) {
@@ -596,22 +816,29 @@ const ROUTES: RouteHandler[] = [
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/notifications\/channels/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/notifications-channels.json`)(),
+    handler: (_req, match) =>
+      serveJson(`projects/${match[1]}/notifications-channels.json`)(),
   },
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/notifications\/deliveries/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/notifications-deliveries.json`)(),
+    handler: (req, match) =>
+      serveHistoryPage(
+        req,
+        `projects/${match[1]}/notifications-deliveries.json`,
+      ),
   },
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/notifications\/defaults/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/notifications-defaults.json`)(),
+    handler: (_req, match) =>
+      serveJson(`projects/${match[1]}/notifications-defaults.json`)(),
   },
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/memberships/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/memberships.json`)(),
+    handler: (_req, match) =>
+      serveJson(`projects/${match[1]}/memberships.json`)(),
   },
 
   // Automation rule engine (per-project). rules returns a paged
@@ -621,25 +848,48 @@ const ROUTES: RouteHandler[] = [
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/automation\/rules/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/automation-rules.json`)(),
+    handler: (_req, match) =>
+      serveJson(`projects/${match[1]}/automation-rules.json`)(),
   },
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/automation\/settings/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/automation-settings.json`)(),
+    handler: (_req, match) =>
+      serveJson(`projects/${match[1]}/automation-settings.json`)(),
   },
   {
     method: "GET",
     pattern: /^\/api\/v1\/projects\/([^/]+)\/invitations/,
-    handler: (_req, match) => serveJson(`projects/${match[1]}/invitations.json`)(),
+    handler: (_req, match) =>
+      serveJson(`projects/${match[1]}/invitations.json`)(),
   },
 
   // User-scoped endpoints (settings)
-  { method: "GET", pattern: /^\/api\/v1\/user\/channels/, handler: serveJson("user/channels.json") },
-  { method: "GET", pattern: /^\/api\/v1\/user\/subscriptions/, handler: serveJson("user/subscriptions.json") },
-  { method: "GET", pattern: /^\/api\/v1\/user\/deliveries/, handler: serveJson("user/deliveries.json") },
-  { method: "GET", pattern: /^\/api\/v1\/user\/notifications\/unread-count/, handler: serveJson("user/notifications-unread-count.json") },
-  { method: "GET", pattern: /^\/api\/v1\/user\/notifications/, handler: serveJson("user/notifications.json") },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/user\/channels/,
+    handler: serveJson("user/channels.json"),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/user\/subscriptions/,
+    handler: serveJson("user/subscriptions.json"),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/user\/deliveries/,
+    handler: (req) => serveHistoryPage(req, "user/deliveries.json"),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/user\/notifications\/unread-count/,
+    handler: serveJson("user/notifications-unread-count.json"),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/v1\/user\/notifications/,
+    handler: serveJson("user/notifications.json"),
+  },
 
   // Implicit-mutation no-ops: the dashboard fires these on small UI
   // interactions (mark-read, dismiss). Returning 200 with no body keeps
@@ -669,11 +919,12 @@ export async function demoFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
-  const url = typeof input === "string"
-    ? input
-    : input instanceof URL
-      ? input.toString()
-      : input.url;
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
   const path = url.replace(/^https?:\/\/[^/]+/, "");
   const method = (init?.method ?? "GET").toUpperCase();
 
@@ -681,10 +932,7 @@ export async function demoFetch(
   // and any /demo-data/* fetches go through real fetch (the dashboard
   // does not call /metrics or /ws from React Query, but defense in
   // depth never hurts).
-  if (
-    !path.startsWith("/api/v1") &&
-    !path.startsWith("/setup")
-  ) {
+  if (!path.startsWith("/api/v1") && !path.startsWith("/setup")) {
     return fetch(input, init);
   }
 

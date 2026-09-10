@@ -31,9 +31,16 @@ const SPACING: Record<NonNullable<PageShellProps["spacing"]>, string> = {
  * inside those layouts wrap themselves in a plain `<div class="space-y-6">`,
  * not PageShell, so the layout's padding isn't doubled.
  */
-export function PageShell({ children, spacing = "md", className }: PageShellProps) {
+export function PageShell({
+  children,
+  spacing = "md",
+  className,
+}: PageShellProps) {
   return (
-    <div className={cn(SPACING[spacing], "p-4 md:p-6", className)}>
+    <div
+      data-slot="page-shell"
+      className={cn(SPACING[spacing], "p-4 md:p-6", className)}
+    >
       {children}
     </div>
   );

@@ -55,6 +55,7 @@ from z4j_brain.api import metrics as metrics_api
 from z4j_brain.api import notifications as notifications_api
 from z4j_brain.api import projects as projects_api
 from z4j_brain.api import queues as queues_api
+from z4j_brain.api import saved_views as saved_views_api
 from z4j_brain.api import schedulers_fleet as schedulers_fleet_api
 from z4j_brain.api import schedules as schedules_api
 from z4j_brain.api import stats as stats_api
@@ -1453,6 +1454,7 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     app.include_router(agents_api.router, prefix="/api/v1")
     app.include_router(api_keys_api.router, prefix="/api/v1")
     app.include_router(tasks_api.router, prefix="/api/v1")
+    app.include_router(saved_views_api.router, prefix="/api/v1")
     app.include_router(events_api.router, prefix="/api/v1")
     app.include_router(issues_api.router, prefix="/api/v1")
     app.include_router(workers_api.router, prefix="/api/v1")

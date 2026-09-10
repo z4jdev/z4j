@@ -15,11 +15,18 @@ export interface StatCardProps {
   className?: string;
 }
 
-const ACCENT_RING: Record<NonNullable<StatCardProps["accent"]>, string> = {
-  default: "ring-1 ring-border",
-  success: "ring-1 ring-success/40",
-  warning: "ring-1 ring-warning/40",
-  destructive: "ring-1 ring-destructive/40",
+const ACCENT_TEXT: Record<NonNullable<StatCardProps["accent"]>, string> = {
+  default: "text-muted-foreground",
+  success: "text-success",
+  warning: "text-warning",
+  destructive: "text-destructive",
+};
+
+const ACCENT_ICON: Record<NonNullable<StatCardProps["accent"]>, string> = {
+  default: "bg-primary/10 text-primary",
+  success: "bg-success/10 text-success",
+  warning: "bg-warning/10 text-warning",
+  destructive: "bg-destructive/10 text-destructive",
 };
 
 export function StatCard({
@@ -35,20 +42,30 @@ export function StatCard({
     <Card
       className={cn(
         "flex h-full flex-col overflow-hidden",
-        ACCENT_RING[accent],
-        href && "cursor-pointer transition-shadow hover:shadow-md",
+        href && "cursor-pointer transition-colors hover:bg-muted/40",
         className,
       )}
     >
       <CardHeader className="flex flex-row items-center justify-between !grid-rows-1 pb-2">
-        <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        <CardTitle className="text-sm font-medium text-muted-foreground">
           {label}
         </CardTitle>
-        {Icon && <Icon className="size-4 text-muted-foreground" />}
+        {Icon && (
+          <span
+            className={cn(
+              "flex size-8 shrink-0 items-center justify-center rounded-md",
+              ACCENT_ICON[accent],
+            )}
+          >
+            <Icon className="size-4" aria-hidden="true" />
+          </span>
+        )}
       </CardHeader>
       <CardContent className="flex flex-1 flex-col pt-0">
-        <div className="text-3xl font-semibold tracking-tight">{value}</div>
-        <p className="mt-1 min-h-[1rem] text-xs text-muted-foreground">
+        <div className="text-3xl font-semibold tracking-tight tabular-nums">
+          {value}
+        </div>
+        <p className={cn("mt-1 min-h-[1rem] text-xs", ACCENT_TEXT[accent])}>
           {hint ?? "\u00A0"}
         </p>
       </CardContent>

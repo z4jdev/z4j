@@ -856,7 +856,7 @@ class AuditService:
         head = await repo.get_active_head_for_update(
             generation=state.generation,
         )
-        actual_active_count = await repo.count_active_generation(
+        actual_active_count = await repo.count_active_rows_for_append(
             generation=state.generation,
         )
         if actual_active_count != state.active_row_count:

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 
 /**
@@ -68,6 +69,8 @@ export default defineConfig({
   expect: {
     toHaveScreenshot: {
       maxDiffPixelRatio: 0.0001,
+      // The animated development launcher is absent from the shipped app.
+      stylePath: fileURLToPath(new URL("./tests/e2e/screenshot.css", import.meta.url)),
       animations: "disabled",
       caret: "hide",
     },

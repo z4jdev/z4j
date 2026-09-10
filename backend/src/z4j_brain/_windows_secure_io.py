@@ -10,7 +10,7 @@ held handles rather than reopening public pathnames.
 The module is imported only on Windows.
 """
 
-# ruff: noqa: N801, RUF012
+# ruff: noqa: N801
 
 from __future__ import annotations
 

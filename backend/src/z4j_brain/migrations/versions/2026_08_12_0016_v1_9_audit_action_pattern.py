@@ -143,14 +143,23 @@ def upgrade() -> None:
         )
 
 
-def downgrade() -> None:
-    """Remove only the exact index owned by this revision."""
-
-    state = _index_state(op.get_bind())
+def _assert_downgrade_index_is_safe(bind: sa.engine.Connection) -> None:
+    """Refuse the complete downgrade plan before a newer step can commit."""
+    state = _index_state(bind)
     if state == "conflict":
         raise CommandError(
             f"refusing downgrade: index {_INDEX} has an unexpected definition",
         )
+
+
+DOWNGRADE_PREFLIGHT = _assert_downgrade_index_is_safe
+
+
+def downgrade() -> None:
+    """Remove only the exact index owned by this revision."""
+
+    _assert_downgrade_index_is_safe(op.get_bind())
+    state = _index_state(op.get_bind())
     if state == "expected":
         op.drop_index(_INDEX, table_name=_TABLE)
 

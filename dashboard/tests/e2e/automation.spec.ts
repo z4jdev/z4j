@@ -42,11 +42,12 @@ test.describe("automation - rule create", () => {
       dialog.getByRole("heading", { name: /new automation rule/i }),
     ).toBeVisible();
 
-    // The Name field has no associated <label for>; target its
-    // placeholder (the notify action + trigger defaults are already
-    // populated, so name is the only field we need to set). Wait for
-    // it to be editable so we never race the dialog's open transition.
-    const nameField = dialog.getByPlaceholder("retry-flaky-emails");
+    // The guided form's label names the real input. Name is the only
+    // required edit because the trigger and notify action have defaults.
+    const nameField = dialog.getByRole("textbox", {
+      name: "Name",
+      exact: true,
+    });
     await expect(nameField).toBeEditable();
     await nameField.fill(name);
     await dialog.getByRole("button", { name: /create rule/i }).click();

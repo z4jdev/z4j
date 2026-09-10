@@ -212,8 +212,8 @@ export function TaskTree({ slug, engine, activeTaskId, data }: Props) {
     <div className="space-y-2">
       <div className="flex items-baseline gap-3 text-xs text-muted-foreground">
         <span>
-          <strong className="text-foreground">{data.node_count}</strong>{" "}
-          tasks in this canvas
+          <strong className="text-foreground">{data.node_count}</strong> tasks
+          in this canvas
         </span>
         {data.truncated && (
           <span className="text-warning">
@@ -241,7 +241,7 @@ export function TaskTree({ slug, engine, activeTaskId, data }: Props) {
           <span className="ml-1 opacity-70">(wait is approximate)</span>
         </span>
       </div>
-      <div className="overflow-auto rounded-md border bg-card">
+      <div className="panel-surface overflow-auto">
         <svg
           width={width}
           height={height}
@@ -349,7 +349,10 @@ export function TaskTree({ slug, engine, activeTaskId, data }: Props) {
                           wait === null ? 0 : (track * wait) / timings.totalMs;
                         const gapPx = wait !== null && waitWidth > 0 ? 1 : 0;
                         const execX = 10 + waitWidth + gapPx;
-                        const execWidth = Math.max(0, track - waitWidth - gapPx);
+                        const execWidth = Math.max(
+                          0,
+                          track - waitWidth - gapPx,
+                        );
                         return (
                           <>
                             {wait !== null && waitWidth > 0 && (

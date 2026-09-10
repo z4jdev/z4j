@@ -36,6 +36,67 @@ function toolbar(onAction: (rows: Row[]) => void, ctx: BulkActionContext<Row>) {
 }
 
 describe("DataTable stable destructive selection", () => {
+  it.each(["loading", "error"] as const)(
+    "clears all-pages intent during %s and does not restore it after recovery",
+    (state) => {
+      const props = {
+        columns,
+        data: [{ id: "a", label: "A" }],
+        enableSelection: true as const,
+        getRowId: rowId,
+        selectionScopeKey: "project:scope:page-1",
+        totalCount: 1000,
+        toolbar: (ctx: BulkActionContext<Row>) => (
+          <>
+            {toolbar(vi.fn(), ctx)}
+            <output data-testid="selected-count">{ctx.selectedCount}</output>
+          </>
+        ),
+      };
+      const view = render(<DataTable {...props} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Select every page" }),
+      );
+      expect(screen.getByTestId("selected-count")).toHaveTextContent("1000");
+      view.rerender(
+        <DataTable
+          {...props}
+          isLoading={state === "loading"}
+          error={state === "error" ? "Request failed" : null}
+        />,
+      );
+      expect(screen.getByTestId("all-pages")).toHaveTextContent("false");
+      expect(screen.getByTestId("selected-count")).toHaveTextContent("0");
+      expect(screen.getByTestId("selected-ids")).toBeEmptyDOMElement();
+      view.rerender(<DataTable {...props} />);
+      expect(screen.getByTestId("all-pages")).toHaveTextContent("false");
+      expect(screen.getByTestId("selected-count")).toHaveTextContent("0");
+    },
+  );
+
+  it("preserves the search control and focus across scope and loading changes", () => {
+    const props = {
+      columns,
+      data: [{ id: "a", label: "A" }],
+      enableSelection: true as const,
+      getRowId: rowId,
+      toolbar: () => <input aria-label="Search records" />,
+    };
+    const view = render(<DataTable {...props} selectionScopeKey="first" />);
+    const search = screen.getByRole("textbox", { name: "Search records" });
+    search.focus();
+    fireEvent.change(search, { target: { value: "health" } });
+    view.rerender(
+      <DataTable {...props} selectionScopeKey="filtered" isLoading />,
+    );
+    view.rerender(<DataTable {...props} selectionScopeKey="filtered" />);
+    expect(screen.getByRole("textbox", { name: "Search records" })).toBe(
+      search,
+    );
+    expect(search).toHaveFocus();
+    expect(search).toHaveValue("health");
+  });
+
   it("settles with an inline state-writing callback and recreated equivalent data", async () => {
     function InlineParent() {
       const [notificationCount, setNotificationCount] = useState(0);

@@ -539,6 +539,37 @@ class TaskRepository(BaseRepository[Task]):
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def count_for_project(
+        self,
+        *,
+        project_id: UUID,
+        state: TaskState | None = None,
+        priority: list[Any] | None = None,
+        name_substring: str | None = None,
+        search_query: str | None = None,
+        queue: str | None = None,
+        worker: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> int:
+        """Count the filtered project history, independently of cursor/limit.
+
+        Use the same SQL predicates as listing and bulk selection. No task
+        payloads are loaded to count; callers opt in when they need a total.
+        """
+        stmt = self.apply_list_filters(
+            select(func.count()).select_from(Task).where(Task.project_id == project_id),
+            state=state,
+            priority=priority,
+            name_substring=name_substring,
+            search_query=search_query,
+            queue=queue,
+            worker=worker,
+            since=since,
+            until=until,
+        )
+        return int((await self.session.execute(stmt)).scalar_one())
+
     @staticmethod
     def apply_list_filters(
         stmt: Select[Any],

@@ -1,5 +1,5 @@
-import { ShieldCheck, User2, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ShieldCheck, User2, Wrench } from "lucide-react";
 
 export type Role = "admin" | "operator" | "viewer";
 
@@ -26,7 +26,7 @@ export function RoleBadge({
       )}
       aria-label={`role: ${role}`}
     >
-      <Icon className="size-3" />
+      <Icon aria-hidden="true" className="size-3" />
       {role}
     </span>
   );
@@ -35,17 +35,14 @@ export function RoleBadge({
 const ROLE_META: Record<Role, { icon: typeof ShieldCheck; classes: string }> = {
   admin: {
     icon: ShieldCheck,
-    classes:
-      "border-primary/30 bg-primary/10 text-primary",
+    classes: "border-primary/30 bg-primary/10 text-foreground",
   },
   operator: {
     icon: Wrench,
-    classes:
-      "border-warning/30 bg-warning/10 text-warning",
+    classes: "border-warning/30 bg-warning/10 text-foreground",
   },
   viewer: {
     icon: User2,
-    classes:
-      "border-muted-foreground/20 bg-muted text-muted-foreground",
+    classes: "border-muted-foreground/20 bg-muted text-muted-foreground",
   },
 };

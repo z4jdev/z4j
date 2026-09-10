@@ -20,10 +20,10 @@
  * if they URL-jump in directly, the inner tab components render their
  * own admin-only EmptyState.
  */
-import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { BellRing } from "lucide-react";
 import { PageHeader } from "@/components/domain/page-header";
-import { cn } from "@/lib/utils";
+import { NotificationNavigation } from "@/components/notifications/notification-navigation";
+import { createFileRoute, Outlet } from "@tanstack/react-router";
+import { BellRing } from "lucide-react";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/settings/notifications",
@@ -33,18 +33,6 @@ export const Route = createFileRoute(
 
 function ProjectNotificationsLayout() {
   const { slug } = Route.useParams();
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const segments = pathname.split("/").filter(Boolean);
-  const activeSegment = segments[segments.length - 1];
-
-  const tabClass = (isActive: boolean) =>
-    cn(
-      "border-b-2 px-1 py-2 text-sm font-medium transition-colors",
-      isActive
-        ? "border-primary text-foreground"
-        : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
-    );
-
   return (
     <div className="space-y-6">
       <PageHeader
@@ -52,37 +40,7 @@ function ProjectNotificationsLayout() {
         title="Notifications"
         description="What this project announces, through which channels, and to whom by default."
       />
-      <div className="border-b">
-        <nav
-          className="-mb-px flex gap-4"
-          aria-label="Project notification settings"
-        >
-          <Link
-            to="/projects/$slug/settings/notifications/channels"
-            params={{ slug }}
-            replace
-            className={tabClass(activeSegment === "channels")}
-          >
-            Project Channels
-          </Link>
-          <Link
-            to="/projects/$slug/settings/notifications/subscriptions"
-            params={{ slug }}
-            replace
-            className={tabClass(activeSegment === "subscriptions")}
-          >
-            Project Subscriptions
-          </Link>
-          <Link
-            to="/projects/$slug/settings/notifications/deliveries"
-            params={{ slug }}
-            replace
-            className={tabClass(activeSegment === "deliveries")}
-          >
-            Project Notification Log
-          </Link>
-        </nav>
-      </div>
+      <NotificationNavigation slug={slug} />
       <div className="mt-4">
         <Outlet />
       </div>

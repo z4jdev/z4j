@@ -15,6 +15,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  isReleaseVersion,
   requireDemoDataTree,
   stampDemoVersions,
 } from "../../scripts/stamp-demo-versions.mjs";
@@ -238,13 +239,61 @@ describe("requireDemoDataTree", () => {
 });
 
 describe("stampDemoVersions", () => {
+  it("restamps release candidates through promotion without changing unrelated data", async () => {
+    const root = await temporaryDemoData();
+    await cp(fixtureRoot, root, { recursive: true });
+    const before = versionInventory(await jsonSnapshot(root));
+
+    for (const version of [
+      "1.11.0a1",
+      "1.11.0b1",
+      "1.11.0rc1",
+      "1.11.0rc2",
+      "1.11.0",
+    ]) {
+      const changed = await stampDemoVersions(root, version, {
+        files: 7,
+        fields: 24,
+      });
+      expect(changed.changedFields).toBe(24);
+      const after = versionInventory(await jsonSnapshot(root));
+      expect(new Set(Object.values(after.intendedValues))).toEqual(
+        new Set([version]),
+      );
+      expect(after.preservedValues).toEqual(before.preservedValues);
+      const repeated = await stampDemoVersions(root, version, {
+        files: 7,
+        fields: 24,
+      });
+      expect(repeated.changedFields).toBe(0);
+    }
+  });
+
+  it.each([
+    "1.11",
+    "1.11.0rc",
+    "1.11.0rc1+local",
+    "1.11.0\n",
+    "1.11.0;echo bad",
+    "v1.11.0",
+  ])("rejects invalid release data %j before writing", async (version) => {
+    const root = await temporaryDemoData();
+    await cp(fixtureRoot, root, { recursive: true });
+    const before = await jsonSnapshot(root);
+    expect(isReleaseVersion(version)).toBe(false);
+    await expect(stampDemoVersions(root, version)).rejects.toThrow(
+      "not a release number",
+    );
+    expect(await jsonSnapshot(root)).toEqual(before);
+  });
+
   it("stamps the exact 24-field inventory and is byte-idempotent", async () => {
     const root = await temporaryDemoData();
     await cp(fixtureRoot, root, { recursive: true });
     const version = (
       await readFile(resolve(repositoryRoot, "VERSION"), "utf8")
     ).trim();
-    expect(version).toBe("1.10.0");
+    expect(isReleaseVersion(version)).toBe(true);
     const before = await jsonSnapshot(root);
     const {
       intendedValues: beforeIntendedValues,
@@ -303,7 +352,7 @@ describe("stampDemoVersions", () => {
       database_version: string;
       packages: Record<string, string>;
     };
-    expect(system.z4j_version).toBe("1.10.0");
+    expect(system.z4j_version).toBe(version);
     expect(system.python_version).toBe("3.14.0");
     expect(system.database_version).toBe(
       "PostgreSQL 18.3 on x86_64-pc-linux-gnu",

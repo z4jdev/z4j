@@ -11,12 +11,7 @@
  * deserve a top-level destination rather than being hidden one click
  * deeper than Account.
  */
-import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Loader2, UserCircle } from "lucide-react";
-import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { PageHeader } from "@/components/domain/page-header";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -37,19 +32,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableRow,
-} from "@/components/ui/table";
-import { formatAbsolute } from "@/lib/format";
-import {
-  PASSWORD_POLICY_FALLBACK,
-  usePasswordPolicy,
-} from "@/hooks/use-auth";
-import { PageHeader } from "@/components/domain/page-header";
+import { PASSWORD_POLICY_FALLBACK, usePasswordPolicy } from "@/hooks/use-auth";
+import { api } from "@/lib/api";
 import type { UserMePublic } from "@/lib/api-types";
+import { formatAbsolute } from "@/lib/format";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { KeyRound, Loader2, UserCircle } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/settings/account")({
   component: AccountPage,
@@ -195,9 +186,7 @@ function ProfileCard() {
           <div className="space-y-2">
             <Label htmlFor="account-display">
               Display name{" "}
-              <span className="text-xs text-muted-foreground">
-                (optional)
-              </span>
+              <span className="text-xs text-muted-foreground">(optional)</span>
             </Label>
             <Input
               id="account-display"
@@ -245,26 +234,24 @@ function ProfileCard() {
           Read-only information about your account.
         </p>
         <div className="mt-4">
-          <Table>
-            <TableBody>
-              <TableRow>
-                <TableCell className="w-1/3 py-2 font-medium text-muted-foreground">
-                  Email
-                </TableCell>
-                <TableCell className="py-2 font-mono text-sm">
-                  {user.email}
-                </TableCell>
-              </TableRow>
-              <TableRow>
-                <TableCell className="w-1/3 py-2 font-medium text-muted-foreground">
-                  Account created
-                </TableCell>
-                <TableCell className="py-2 text-sm">
-                  {formatAbsolute(user.created_at)}
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
+          <dl className="divide-y">
+            <div className="grid gap-1 px-4 py-3 sm:grid-cols-[minmax(10rem,1fr)_2fr] sm:gap-4">
+              <dt className="text-sm font-medium text-muted-foreground">
+                Email
+              </dt>
+              <dd className="min-w-0 break-words font-mono text-sm">
+                {user.email}
+              </dd>
+            </div>
+            <div className="grid gap-1 px-4 py-3 sm:grid-cols-[minmax(10rem,1fr)_2fr] sm:gap-4">
+              <dt className="text-sm font-medium text-muted-foreground">
+                Account created
+              </dt>
+              <dd className="min-w-0 break-words font-mono text-sm">
+                {formatAbsolute(user.created_at)}
+              </dd>
+            </div>
+          </dl>
         </div>
       </Card>
     </>
@@ -283,8 +270,8 @@ function PasswordCard() {
         <div>
           <h3 className="text-sm font-semibold">Password</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Sign-in password. Changing it revokes every other active
-            session and trusted device.
+            Sign-in password. Changing it revokes every other active session and
+            trusted device.
           </p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
@@ -359,7 +346,9 @@ function ChangePasswordForm({ onDone }: { onDone: () => void }) {
           id="account-pwd-new"
           type="password"
           autoComplete="new-password"
-          minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
+          minLength={
+            (usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length
+          }
           value={newPw}
           onChange={(e) => setNewPw(e.target.value)}
           required
@@ -371,15 +360,15 @@ function ChangePasswordForm({ onDone }: { onDone: () => void }) {
           id="account-pwd-confirm"
           type="password"
           autoComplete="new-password"
-          minLength={(usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length}
+          minLength={
+            (usePasswordPolicy().data ?? PASSWORD_POLICY_FALLBACK).min_length
+          }
           value={confirmPw}
           onChange={(e) => setConfirmPw(e.target.value)}
           required
         />
         {newPw && confirmPw && newPw !== confirmPw && (
-          <p className="text-xs text-destructive">
-            Passwords do not match.
-          </p>
+          <p className="text-xs text-destructive">Passwords do not match.</p>
         )}
       </div>
       <DialogFooter>

@@ -47,6 +47,7 @@ from z4j_brain.management_reset import (
     release_schema_contract_manifest,
 )
 from z4j_brain.management_restore import (
+    _PRE_TALLY_RELEASE_HEAD,
     _PREVIOUS_RELEASE_HEAD,
     _SQLITE_SOURCE_SCHEMA_DIGESTS,
     DatabaseRestoreRefused,
@@ -109,7 +110,7 @@ _RELEASE_TYPES = frozenset(
         "worker_state",
     },
 )
-_RELEASE_FUNCTION_SIGNATURES = frozenset(
+_PRE_TALLY_FUNCTION_SIGNATURES = frozenset(
     {
         "audit_chain_state_forbid_mutation()",
         "audit_log_forbid_mutation()",
@@ -164,7 +165,13 @@ _RELEASE_FUNCTION_SIGNATURES = frozenset(
         "z4j_schedules_notify()",
     },
 )
+_RELEASE_FUNCTION_SIGNATURES = _PRE_TALLY_FUNCTION_SIGNATURES | frozenset(
+    {"z4j_audit_tally_rows_v1()", "z4j_audit_protect_tally_v1()"},
+)
 _RELEASE_FUNCTION_DEFINITIONS_DIGEST = (
+    "07a621a92bc74736fd3f1e8ba5aa6a3521c412469de1c9145d443a3375d263bc"
+)
+_PRE_TALLY_FUNCTION_DEFINITIONS_DIGEST = (
     "46c33b9745272b9cf04b72f17476af102d2915d434d472d77f79c4bffc2745de"
 )
 _LEGACY_SOURCE_HEAD = "v1_7_security_hardening"
@@ -181,6 +188,11 @@ _LEGACY_FUNCTION_DEFINITIONS_DIGEST = (
 # inspected by matching-major client/server pairs.  A converted or cross-major
 # archive is not valid derivation evidence for this fail-closed map.
 _RELEASE_SCHEMA_DEFINITIONS_DIGESTS = {
+    16: "523c60bed9107fd8d8050a5cdbc3fe952c953352cc1b88fe5fa1b4f355c9cd66",
+    17: "523c60bed9107fd8d8050a5cdbc3fe952c953352cc1b88fe5fa1b4f355c9cd66",
+    18: "b33000e55ded396f5172e42f40f57d21ae2b8ecfa0176a7e982bbb6ba8f7192e",
+}
+_PRE_TALLY_SCHEMA_DEFINITIONS_DIGESTS = {
     16: "320359d69d4cea4683da5e37d575d9989ce78b7d9563b3ab63b364d832eb6546",
     17: "320359d69d4cea4683da5e37d575d9989ce78b7d9563b3ab63b364d832eb6546",
     18: "9a77a23a38b979712a5b1650732ff020e5d7ed05c115ca426362f6df4a5d08d0",
@@ -212,10 +224,12 @@ _LEGACY_SCHEMA_DEFINITIONS_DIGESTS = {
 #: invisible, and the Boundary-D set below adopts a head nobody confirmed
 #: shipped D activated.  The literals here turn that into an import failure, so
 #: the commit that bumps the head is the commit that has to re-derive.
-_MEASURED_RELEASE_HEAD = "v1_9_audit_action_pattern"
+_MEASURED_RELEASE_HEAD = "v1_11_audit_append_tally"
+_MEASURED_PRE_TALLY_RELEASE_HEAD = "v1_9_audit_action_pattern"
 _MEASURED_PREVIOUS_RELEASE_HEAD = "v1_8_schedule_cursor_repair"
 _SCHEMA_DEFINITIONS_DIGESTS_BY_HEAD = {
     RELEASE_MIGRATION_HEAD: _RELEASE_SCHEMA_DEFINITIONS_DIGESTS,
+    _PRE_TALLY_RELEASE_HEAD: _PRE_TALLY_SCHEMA_DEFINITIONS_DIGESTS,
     _PREVIOUS_RELEASE_HEAD: _PREVIOUS_SCHEMA_DEFINITIONS_DIGESTS,
     _LEGACY_SOURCE_HEAD: _LEGACY_SCHEMA_DEFINITIONS_DIGESTS,
 }
@@ -229,13 +243,13 @@ _BOUNDARY_D_SOURCE_HEADS = frozenset(
     {
         RELEASE_MIGRATION_HEAD,
         _PREVIOUS_RELEASE_HEAD,
+        _PRE_TALLY_RELEASE_HEAD,
     },
 )
 #: Every head this release can accept as a restore source.  The previous
-#: release head shares the current executable-function contract: the delta
-#: between them is additive table columns and one CHECK, so no function body
-#: or signature moved.  Its static schema text does differ, which is why only
-#: the schema-definitions map above gains a per-major entry.
+#: release heads retain their pre-tally function contract. The current head
+#: adds audit maintenance functions; each source is validated against the
+#: executable functions and static schema actually shipped at that head.
 _SUPPORTED_SOURCE_HEADS = frozenset(_SCHEMA_DEFINITIONS_DIGESTS_BY_HEAD)
 
 
@@ -256,6 +270,7 @@ def _assert_source_head_evidence_is_current() -> None:
 
     for imported, measured, role in (
         (RELEASE_MIGRATION_HEAD, _MEASURED_RELEASE_HEAD, "release"),
+        (_PRE_TALLY_RELEASE_HEAD, _MEASURED_PRE_TALLY_RELEASE_HEAD, "pre-tally release"),
         (
             _PREVIOUS_RELEASE_HEAD,
             _MEASURED_PREVIOUS_RELEASE_HEAD,
@@ -270,7 +285,12 @@ def _assert_source_head_evidence_is_current() -> None:
                 f"real server of every supported major, then pin the new head.",
             )
     unconfirmed = sorted(
-        _BOUNDARY_D_SOURCE_HEADS - {_MEASURED_RELEASE_HEAD, _MEASURED_PREVIOUS_RELEASE_HEAD},
+        _BOUNDARY_D_SOURCE_HEADS
+        - {
+            _MEASURED_RELEASE_HEAD,
+            _MEASURED_PREVIOUS_RELEASE_HEAD,
+            _MEASURED_PRE_TALLY_RELEASE_HEAD,
+        },
     )
     if unconfirmed:
         raise RuntimeError(
@@ -1141,7 +1161,11 @@ def _inspect_toc(  # noqa: PLR0912, PLR0915
         )
     boundary_d_head = source_head in _BOUNDARY_D_SOURCE_HEADS
     expected_functions = (
-        _RELEASE_FUNCTION_SIGNATURES if boundary_d_head else _LEGACY_FUNCTION_SIGNATURES
+        _RELEASE_FUNCTION_SIGNATURES
+        if source_head == RELEASE_MIGRATION_HEAD
+        else _PRE_TALLY_FUNCTION_SIGNATURES
+        if boundary_d_head
+        else _LEGACY_FUNCTION_SIGNATURES
     )
     if functions != expected_functions:
         raise DatabaseRestoreRefused(
@@ -1152,6 +1176,8 @@ def _inspect_toc(  # noqa: PLR0912, PLR0915
         archive,
         expected_digest=(
             _RELEASE_FUNCTION_DEFINITIONS_DIGEST
+            if source_head == RELEASE_MIGRATION_HEAD
+            else _PRE_TALLY_FUNCTION_DEFINITIONS_DIGEST
             if boundary_d_head
             else _LEGACY_FUNCTION_DEFINITIONS_DIGEST
         ),

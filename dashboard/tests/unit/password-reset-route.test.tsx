@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Suspense } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api";
 
@@ -52,6 +52,12 @@ const PasswordResetPage = (
     options: { component: React.ComponentType };
   }
 ).options.component;
+
+beforeAll(async () => {
+  await (
+    PasswordResetPage as React.ComponentType & { preload?: () => Promise<void> }
+  ).preload?.();
+}, 30_000);
 
 const token = "R".repeat(43);
 

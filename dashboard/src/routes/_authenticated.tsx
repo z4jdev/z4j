@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { api, ApiError } from "@/lib/api";
 import type { UserMePublic } from "@/lib/api-types";
@@ -33,44 +32,22 @@ function AuthenticatedLayout() {
   const palette = useCommandPalette();
   const shortcuts = useKeyboardShortcuts();
 
-  // Apply saved primary color on mount.
-  // Round-8 audit fix R8-Dash-LOW (Apr 2026): clamp hue to
-  // [0, 360]. The OKLCH parser silently drops out-of-range
-  // values so this is cosmetic, but bounding here keeps the
-  // CSS valid for any future hue-derived property + protects
-  // against an attacker who can write to localStorage on a
-  // shared kiosk machine.
-  useEffect(() => {
-    const raw = localStorage.getItem("z4j-primary-hue");
-    if (raw === null) return;
-    const parsed = parseInt(raw, 10);
-    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 360) return;
-    const h = parsed;
-    const root = document.documentElement;
-    root.style.setProperty("--primary", `oklch(0.55 0.18 ${h})`);
-    root.style.setProperty("--primary-foreground", `oklch(0.99 0.005 ${h})`);
-    root.style.setProperty("--ring", `oklch(0.55 0.18 ${h})`);
-    root.style.setProperty("--sidebar-primary", `oklch(0.55 0.18 ${h})`);
-    root.style.setProperty("--sidebar-primary-foreground", `oklch(0.99 0.005 ${h})`);
-  }, []);
-
   return (
     <SidebarProvider>
-      <div className="flex min-h-screen w-full bg-background">
+      <div className="app-shell flex min-h-dvh w-full bg-background">
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded-lg focus:bg-card focus:p-3"
+        >
+          Skip to content
+        </a>
         <AppSidebar />
-        <main className="flex min-w-0 flex-1 flex-col">
-          <Topbar />
-          {/* DemoBanner renders nothing in production (gated on
-              VITE_Z4J_DEMO_MODE). In demo builds it sits inside
-              the page content area, just below the Topbar and
-              above each page's own header. It scrolls with the
-              content like any normal page element -- no fixed
-              positioning, no z-index, no extra scrollbar. The
-              once-on-load visibility is intentional: tell the
-              user this is a demo, then get out of the way. The
-              persistent reminder lives in the toast that fires
-              on every blocked mutation. */}
-          <DemoBanner />
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="flex min-w-0 flex-1 flex-col"
+        >
+          <Topbar onOpenSearch={() => palette.setOpen(true)} />
           {/* Enrollment is enforced by the brain on every non-exempt
               route. Without this the user only sees a permission error,
               so it belongs in the shell rather than on one page. */}
@@ -78,9 +55,14 @@ function AuthenticatedLayout() {
           <Outlet />
         </main>
       </div>
+      <DemoBanner />
 
       {/* Global overlays */}
-      <CommandPalette open={palette.open} onOpenChange={palette.setOpen} />
+      <CommandPalette
+        open={palette.open}
+        onOpenChange={palette.setOpen}
+        onOpenShortcuts={() => shortcuts.setHelpOpen(true)}
+      />
       <ShortcutsDialog
         open={shortcuts.helpOpen}
         onOpenChange={shortcuts.setHelpOpen}

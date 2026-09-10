@@ -1,3 +1,4 @@
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * Project settings - Members section.
  *
@@ -15,13 +16,12 @@
  * demote or remove the only remaining admin), and mirrored in this
  * UI so the Save button is disabled before the request even fires.
  */
-import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Trash2, Users, X } from "lucide-react";
-import { toast } from "sonner";
 import { useConfirm } from "@/components/domain/confirm-dialog";
-import { api, ApiError } from "@/lib/api";
+import { DateCell } from "@/components/domain/date-cell";
+import { InviteDialog } from "@/components/domain/invite-dialog";
+import { PageHeader } from "@/components/domain/page-header";
+import { PendingInvitations } from "@/components/domain/pending-invitations";
+import { RoleBadge } from "@/components/domain/role-badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -31,7 +31,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -40,12 +39,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { DateCell } from "@/components/domain/date-cell";
-import { InviteDialog } from "@/components/domain/invite-dialog";
-import { PageHeader } from "@/components/domain/page-header";
-import { PendingInvitations } from "@/components/domain/pending-invitations";
-import { RoleBadge } from "@/components/domain/role-badge";
 import { useCan, useCurrentUserRole } from "@/hooks/use-memberships";
+import { api, ApiError } from "@/lib/api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { Check, Trash2, Users, X } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute(
   "/_authenticated/projects/$slug/settings/members",
@@ -68,7 +68,12 @@ function MembersPage() {
   const queryClient = useQueryClient();
   const canInvite = useCan(slug, "manage_invitations");
   const myRole = useCurrentUserRole(slug);
-  const { data: members, isLoading } = useQuery<MemberPublic[]>({
+  const {
+    data: members,
+    isLoading,
+    isError,
+    refetch,
+  } = useQuery<MemberPublic[]>({
     queryKey: ["memberships", slug],
     queryFn: () => api.get<MemberPublic[]>(`/projects/${slug}/memberships`),
   });
@@ -139,8 +144,8 @@ function MembersPage() {
       title: "Remove member",
       description: (
         <>
-          Remove <code>{member.user_email}</code> from this project? They
-          will lose access immediately.
+          Remove <code>{member.user_email}</code> from this project? They will
+          lose access immediately.
         </>
       ),
       confirmLabel: "Remove",
@@ -181,131 +186,132 @@ function MembersPage() {
         actions={canInvite ? <InviteDialog slug={slug} /> : undefined}
       />
 
-      {isLoading && <Skeleton className="h-32 w-full" />}
-
-      {members && members.length > 0 && (
-        <Card className="overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>User</TableHead>
-                <TableHead>Role</TableHead>
-                <TableHead>Joined</TableHead>
-                <TableHead className="w-28" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {members.map((m) => {
-                const pending = pendingRoles[m.id];
-                const isDirty = pending !== undefined && pending !== m.role;
-                const isLastAdmin = m.role === "admin" && adminCount <= 1;
-                const isSaving = savingId === m.id;
-                return (
-                  <TableRow key={m.id}>
-                    <TableCell>
-                      <div>
-                        <div className="font-medium">
-                          {m.user_display_name || m.user_email.split("@")[0]}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {m.user_email}
-                        </div>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <RoleBadge role={m.role} />
-                        <Select
-                          value={pending ?? m.role}
-                          onValueChange={(v) =>
-                            setPendingRoles((p) => ({ ...p, [m.id]: v }))
-                          }
-                          disabled={isSaving}
-                        >
-                          <SelectTrigger
-                            className="h-7 w-28 text-xs"
-                            aria-label={`Change role for ${m.user_email}`}
-                          >
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="admin">admin</SelectItem>
-                            <SelectItem value="operator">
-                              operator
-                            </SelectItem>
-                            <SelectItem
-                              value="viewer"
-                              disabled={isLastAdmin}
-                            >
-                              viewer
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                        {isDirty && (
-                          <>
-                            <Button
-                              variant="default"
-                              size="sm"
-                              className="h-7 px-2 text-xs"
-                              disabled={
-                                isSaving ||
-                                (isLastAdmin && pending !== "admin")
-                              }
-                              onClick={() => saveRole(m)}
-                              aria-label="Save role change"
-                            >
-                              <Check className="size-3" />
-                              Save
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 px-2 text-xs"
-                              disabled={isSaving}
-                              onClick={() => cancelRole(m.id)}
-                              aria-label="Cancel role change"
-                            >
-                              <X className="size-3" />
-                            </Button>
-                          </>
-                        )}
-                        {isLastAdmin && !isDirty && (
-                          <span
-                            className="text-[10px] text-muted-foreground"
-                            title="Promote another member to admin before changing this one"
-                          >
-                            last admin
-                          </span>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <DateCell value={m.created_at} />
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs text-destructive disabled:opacity-40"
-                        onClick={() => handleRemove(m)}
-                        disabled={isLastAdmin}
-                        aria-label={`Remove ${m.user_email}`}
-                        title={
-                          isLastAdmin
-                            ? "Cannot remove the last admin"
-                            : "Remove member"
-                        }
+      <Table
+        searchable
+        searchPlaceholder="Search members…"
+        isLoading={isLoading}
+        error={isError ? "Unable to load members. Try again." : null}
+        onRetry={() => refetch()}
+      >
+        <TableHeader>
+          <TableRow>
+            <TableHead sortKey="c0">User</TableHead>
+            <TableHead sortKey="c1">Role</TableHead>
+            <TableHead sortKey="c2">Joined</TableHead>
+            <TableHead className="w-28" />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {(members ?? []).map((m) => {
+            const pending = pendingRoles[m.id];
+            const isDirty = pending !== undefined && pending !== m.role;
+            const isLastAdmin = m.role === "admin" && adminCount <= 1;
+            const isSaving = savingId === m.id;
+            return (
+              <TableRow
+                sortValues={{
+                  c0: m.user_display_name || m.user_email,
+                  c1: m.role,
+                  c2: sortTimestamp(m.created_at),
+                }}
+                key={m.id}
+              >
+                <TableCell>
+                  <div>
+                    <div className="font-medium">
+                      {m.user_display_name || m.user_email.split("@")[0]}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {m.user_email}
+                    </div>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <RoleBadge role={m.role} />
+                    <Select
+                      value={pending ?? m.role}
+                      onValueChange={(v) =>
+                        setPendingRoles((p) => ({ ...p, [m.id]: v }))
+                      }
+                      disabled={isSaving}
+                    >
+                      <SelectTrigger
+                        className="w-28"
+                        aria-label={`Change role for ${m.user_email}`}
                       >
-                        <Trash2 className="size-3" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </Card>
-      )}
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="admin">admin</SelectItem>
+                        <SelectItem value="operator">operator</SelectItem>
+                        <SelectItem value="viewer" disabled={isLastAdmin}>
+                          viewer
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {isDirty && (
+                      <>
+                        <Button
+                          variant="default"
+                          size="sm"
+                          className="px-2"
+                          disabled={
+                            isSaving || (isLastAdmin && pending !== "admin")
+                          }
+                          onClick={() => saveRole(m)}
+                          aria-label="Save role change"
+                        >
+                          <Check className="size-3" />
+                          Save
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="px-2"
+                          disabled={isSaving}
+                          onClick={() => cancelRole(m.id)}
+                          aria-label="Cancel role change"
+                        >
+                          <X className="size-3" />
+                        </Button>
+                      </>
+                    )}
+                    {isLastAdmin && !isDirty && (
+                      <span
+                        className="text-[10px] text-muted-foreground"
+                        title="Promote another member to admin before changing this one"
+                      >
+                        last admin
+                      </span>
+                    )}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <DateCell value={m.created_at} />
+                </TableCell>
+                <TableCell>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive disabled:opacity-40"
+                    onClick={() => handleRemove(m)}
+                    disabled={isLastAdmin}
+                    aria-label={`Remove ${m.user_email}`}
+                    title={
+                      isLastAdmin
+                        ? "Cannot remove the last admin"
+                        : "Remove member"
+                    }
+                  >
+                    <Trash2 className="size-3" />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
 
       {members && members.length === 0 && (
         <Card className="p-8 text-center text-sm text-muted-foreground">

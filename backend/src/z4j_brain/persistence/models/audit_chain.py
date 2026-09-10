@@ -92,6 +92,18 @@ class AuditChainState(Base):
         BigInteger,
         nullable=False,
     )
+    # Operational tally maintained by PostgreSQL's ALWAYS triggers. This is
+    # compared with, never substituted for, the signed active_row_count.
+    # SQLite retains the physical COUNT path. Full verification still recounts
+    # the rows independently, including on startup and after restore.
+    # Defer ORM reads and omit a Python default: historical activation revisions
+    # use this model before the later migration has installed the tally column.
+    observed_active_row_count: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default="0",
+        deferred=True,
+    )
     active_key_counts: Mapped[dict[str, int]] = mapped_column(
         jsonb(),
         nullable=False,
@@ -117,6 +129,10 @@ class AuditChainState(Base):
         ),
         CheckConstraint("format_version = 1", name="format_version"),
         CheckConstraint("active_row_count >= 0", name="active_row_count_nonnegative"),
+        CheckConstraint(
+            "observed_active_row_count >= 0",
+            name="observed_active_row_count_nonnegative",
+        ),
         CheckConstraint("frozen_row_count >= 0", name="frozen_row_count_nonnegative"),
     )
 

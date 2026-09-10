@@ -2325,13 +2325,6 @@ def _capture_serve_configuration(*, preliminary: Any | None = None) -> Any:
 
     store = read_secret_store(secret_path)
     database_exists = database_path is not None and database_path.exists()
-    if database_exists and store.file_identity is None:
-        raise RuntimeError(
-            f"existing SQLite database {database_path} has no verified "
-            f"{secret_path}; refusing to mint replacement authentication "
-            "or audit keys",
-        )
-
     snapshot = merge_secret_store_snapshot(preliminary, store.values)
     required = {
         "Z4J_SECRET": 48,
@@ -2340,6 +2333,16 @@ def _capture_serve_configuration(*, preliminary: Any | None = None) -> Any:
         "Z4J_AUDIT_CHAIN_SECRET": 48,
     }
     missing = [key for key in required if not snapshot.values.get(key)]
+    # Complete external configuration needs no packaged secret store. In
+    # particular, a container may have started its database with env secrets
+    # and never created secret.env. Missing authority still fails closed.
+    if database_exists and store.file_identity is None and missing:
+        raise RuntimeError(
+            f"existing SQLite database {database_path} has no verified "
+            f"{secret_path}; refusing to mint replacement authentication "
+            "or audit keys",
+        )
+
     if missing and database_exists:
         non_audit = [key for key in missing if key != "Z4J_AUDIT_CHAIN_SECRET"]
         if non_audit:

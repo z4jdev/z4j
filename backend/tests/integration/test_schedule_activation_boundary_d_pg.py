@@ -56,8 +56,13 @@ from z4j_brain.persistence.models import (
     ScheduleExternalSnapshotFrame,
     ScheduleExternalStream,
     ScheduleExternalStreamEpoch,
+    ScheduleFire,
     ScheduleOwnerCutover,
     ScheduleRevisionState,
+    User,
+)
+from z4j_brain.persistence.models import (
+    Session as DashboardSession,
 )
 from z4j_brain.persistence.repositories import (
     AuditLogRepository,
@@ -455,8 +460,10 @@ async def test_committed_restore_recovery_authenticates_marker_generation(
         marker_id = str(marker.id)
 
     async with migrated_engine.begin() as connection:
+        # Corrupt only the marker; keep the tally guards in their original
+        # ALWAYS mode so recovery must reach row authentication.
         await connection.execute(
-            text("ALTER TABLE audit_log DISABLE TRIGGER USER"),
+            text("ALTER TABLE audit_log DISABLE TRIGGER audit_log_no_update"),
         )
         await connection.execute(
             text(
@@ -468,7 +475,7 @@ async def test_committed_restore_recovery_authenticates_marker_generation(
             },
         )
         await connection.execute(
-            text("ALTER TABLE audit_log ENABLE TRIGGER USER"),
+            text("ALTER TABLE audit_log ENABLE TRIGGER audit_log_no_update"),
         )
 
     target = postgres_restore_module._parse_target(
@@ -807,6 +814,18 @@ async def test_real_pg_restore_rebases_above_target_and_signs_marker(
                 name="PG restore",
             ),
         )
+        user = User(email="restore-session@example.com", password_hash="fixture-only")
+        session.add(user)
+        await session.flush()
+        for address in ("192.0.2.1", "2001:db8::1"):
+            session.add(
+                DashboardSession(
+                    user_id=user.id,
+                    csrf_token=uuid.uuid4().hex,
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                    ip_at_issue=address,
+                )
+            )
         await session.flush()
         source_schedule = await ScheduleControlRepository(
             session,
@@ -873,6 +892,8 @@ async def test_real_pg_restore_rebases_above_target_and_signs_marker(
                 ScheduleExternalEpochAllocator,
                 "schedule-external-epoch",
             )
+            addresses = (await session.scalars(select(DashboardSession.ip_at_issue))).all()
+            assert {str(value) for value in addresses} == {"192.0.2.1", "2001:db8::1"}
             assert restored is not None
             assert state is not None
             assert allocator is not None
@@ -3416,8 +3437,12 @@ async def test_partitioned_generation_uniqueness_and_legacy_insert_fence(
             )
 
 
+@pytest.mark.parametrize("delivery_outcome", ["success", "failed", "timeout"])
+@pytest.mark.parametrize("preloaded_contender", [False, True])
 async def test_activated_current_cadence_writer_lifecycle(
     migrated_engine: AsyncEngine,
+    preloaded_contender: bool,
+    delivery_outcome: str,
 ) -> None:
     """The real repositories can traverse every guarded evidence boundary."""
 
@@ -3544,23 +3569,48 @@ async def test_activated_current_cadence_writer_lifecycle(
 
     owner_id = uuid.uuid4()
     session_generation = uuid.uuid4().hex
+    claim_args = {
+        "project_id": project_id,
+        "agent_id": agent_id,
+        "transport_kind": "websocket",
+        "registry_owner_id": owner_id,
+        "session_generation": session_generation,
+        "timeout_seconds": 30,
+        "occurred_at": slot + timedelta(seconds=10),
+    }
     async with database.session(write=True) as session:
-        is_current, command = await CommandRepository(
-            session,
-        ).claim_current_schedule_delivery(
-            command_id,
-            project_id=project_id,
-            agent_id=agent_id,
-            transport_kind="websocket",
-            registry_owner_id=owner_id,
-            session_generation=session_generation,
-            timeout_seconds=30,
-            occurred_at=slot + timedelta(seconds=10),
-        )
-        assert is_current is True
-        assert command is not None
-        assert command.status == CommandStatus.DISPATCHED
-        claim_token = command.delivery_claim_token
+        repository = CommandRepository(session)
+        if preloaded_contender:
+            # Both delivery paths may read PENDING before either claims it.
+            # A later SELECT FOR UPDATE must refresh this identity-map entry.
+            cached = await repository.get_for_dispatch(command_id)
+            assert cached is not None
+            assert cached.status == CommandStatus.PENDING
+            async with database.session(write=True) as winner:
+                _, won = await CommandRepository(winner).claim_current_schedule_delivery(
+                    command_id,
+                    **claim_args,
+                )
+                assert won is not None
+                claim_token = won.delivery_claim_token
+                await winner.commit()
+            is_current, command = await repository.claim_current_schedule_delivery(
+                command_id,
+                **claim_args,
+            )
+            assert is_current is True
+            assert command is None
+            assert cached.status == CommandStatus.DISPATCHED
+            assert cached.delivery_claim_token == claim_token
+        else:
+            is_current, command = await repository.claim_current_schedule_delivery(
+                command_id,
+                **claim_args,
+            )
+            assert is_current is True
+            assert command is not None
+            assert command.status == CommandStatus.DISPATCHED
+            claim_token = command.delivery_claim_token
         assert claim_token is not None
         await session.commit()
 
@@ -3581,25 +3631,83 @@ async def test_activated_current_cadence_writer_lifecycle(
         await session.commit()
 
     async with database.session(write=True) as session:
-        completed = await ScheduleControlRepository(
-            session,
-        ).apply_current_agent_result(
-            command_id=command_id,
-            project_id=project_id,
-            agent_id=agent_id,
-            status="success",
-            result_payload={"task_id": "pg-lifecycle"},
-            error=None,
-            transport_kind="websocket",
-            registry_owner_id=owner_id,
-            session_generation=session_generation,
-            delivery_claim_token=str(claim_token),
-            occurred_at=slot + timedelta(seconds=30),
+        if delivery_outcome == "timeout":
+            completed = await ScheduleControlRepository(session).expire_current_schedule_delivery(
+                command_id=command_id,
+                occurred_at=slot + timedelta(seconds=61),
+            )
+        else:
+            completed = await ScheduleControlRepository(
+                session,
+            ).apply_current_agent_result(
+                command_id=command_id,
+                project_id=project_id,
+                agent_id=agent_id,
+                status=delivery_outcome,
+                result_payload={"task_id": "pg-lifecycle"},
+                error=("broker refused connection" if delivery_outcome == "failed" else None),
+                transport_kind="websocket",
+                registry_owner_id=owner_id,
+                session_generation=session_generation,
+                delivery_claim_token=str(claim_token),
+                occurred_at=slot + timedelta(seconds=30),
+            )
+        assert completed.disposition == (
+            "completed" if delivery_outcome == "success" else "terminal_quarantined"
         )
-        assert completed.disposition == "completed"
         assert completed.command is not None
-        assert completed.command.status == CommandStatus.COMPLETED
+        assert completed.command.status == (
+            CommandStatus.COMPLETED
+            if delivery_outcome == "success"
+            else CommandStatus(delivery_outcome)
+        )
         await session.commit()
+
+    if delivery_outcome != "success":
+        async with database.session(write=True) as session:
+            actor = User(email="operator@example.com", password_hash="fixture-only")
+            session.add(actor)
+            await session.commit()
+            actor_id = actor.id
+        async with database.session(write=True) as session:
+            repository = ScheduleControlRepository(session)
+            resolution_args = {
+                "project_id": project_id,
+                "schedule_id": schedule_id,
+                "fire_id": fire_id,
+                "command_id": command_id,
+                "expected_status": CommandStatus(delivery_outcome),
+                "observed_control_token": token,
+                "resolved_by": actor_id,
+                "work_may_have_executed": True,
+                "enabled_after_resolution": True,
+                "occurred_at": slot + timedelta(seconds=70),
+            }
+            resolved = await repository.resolve_terminal_occurrence(**resolution_args)
+            assert resolved.disposition == "resolved"
+            assert resolved.hold is not None
+            assert resolved.hold.resolution_disposition == "OPERATOR_SKIPPED"
+            assert resolved.hold.work_may_have_executed is True
+            assert resolved.schedule is not None
+            assert resolved.schedule.is_enabled is True
+            assert resolved.schedule.control_token != token
+            fire = await session.scalar(select(ScheduleFire).where(ScheduleFire.fire_id == fire_id))
+            assert fire is not None
+            assert fire.status == f"terminal_{delivery_outcome}"
+            if delivery_outcome == "failed":
+                assert fire.error_code == "command_failed"
+                assert fire.error_message == "broker refused connection"
+            else:
+                assert fire.error_code == "acknowledged_result_timeout"
+                assert fire.error_message is not None
+                assert "after agent acknowledgement" in fire.error_message
+            await session.commit()
+        async with database.session(write=True) as session:
+            replay = await ScheduleControlRepository(session).resolve_terminal_occurrence(
+                **resolution_args,
+            )
+            assert replay.disposition == "already_resolved"
+            assert replay.changed is False
 
     with pytest.raises(DBAPIError, match="invalid schedule command transition"):
         async with migrated_engine.begin() as connection:
@@ -3853,7 +3961,7 @@ async def test_activated_current_cadence_writer_lifecycle(
             occurred_at=third_slot + timedelta(seconds=6),
         )
         assert deleted.disposition == "deleted"
-        assert deleted.committed_revision == 5
+        assert deleted.committed_revision == (5 if delivery_outcome == "success" else 7)
         assert deleted.evidence_closed == 1
         await session.commit()
 
@@ -3866,14 +3974,14 @@ async def test_activated_current_cadence_writer_lifecycle(
                 " WHERE schedule_id = :schedule_id), "
                 "(SELECT count(*) FROM schedule_change_log "
                 " WHERE schedule_id = :schedule_id "
-                "   AND revision = 5 "
+                "   AND revision = :delete_revision "
                 "   AND change_kind = 'delete' "
                 "   AND snapshot IS NULL), "
                 "(SELECT count(*) FROM schedule_occurrence_resolutions "
                 " WHERE schedule_id = :schedule_id "
                 "   AND resolution_disposition = 'SCHEDULE_DELETED')",
             ),
-            {"schedule_id": schedule_id},
+            {"schedule_id": schedule_id, "delete_revision": deleted.committed_revision},
         )
         assert state.one() == (0, 0, 1, 1)
 

@@ -1,3 +1,4 @@
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * Pending-invitations table - shown on the Members admin page below
  * the active members list. Lets admins revoke outstanding invites
@@ -6,6 +7,8 @@
 import { Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useConfirm } from "@/components/domain/confirm-dialog";
+import { DateCell } from "@/components/domain/date-cell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -17,8 +20,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { DateCell } from "@/components/domain/date-cell";
-import { useConfirm } from "@/components/domain/confirm-dialog";
 import {
   useInvitations,
   useRevokeInvitation,
@@ -46,9 +47,12 @@ export function PendingInvitations({ slug }: { slug: string }) {
           await revoke.mutateAsync(inv.id);
           toast.success("Invitation revoked");
         } catch (err) {
-          const msg = err instanceof ApiError
-            ? err.message
-            : err instanceof Error ? err.message : "Revoke failed";
+          const msg =
+            err instanceof ApiError
+              ? err.message
+              : err instanceof Error
+                ? err.message
+                : "Revoke failed";
           toast.error(msg);
         }
       },
@@ -71,16 +75,24 @@ export function PendingInvitations({ slug }: { slug: string }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Email</TableHead>
-              <TableHead>Role</TableHead>
-              <TableHead>Expires</TableHead>
-              <TableHead>Sent</TableHead>
+              <TableHead sortKey="c0">Email</TableHead>
+              <TableHead sortKey="c1">Role</TableHead>
+              <TableHead sortKey="c2">Expires</TableHead>
+              <TableHead sortKey="c3">Sent</TableHead>
               <TableHead className="text-right w-[80px]">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {pending.map((inv) => (
-              <TableRow key={inv.id}>
+              <TableRow
+                sortValues={{
+                  c0: inv.email,
+                  c1: inv.role,
+                  c2: sortTimestamp(inv.expires_at),
+                  c3: sortTimestamp(inv.created_at),
+                }}
+                key={inv.id}
+              >
                 <TableCell className="font-mono text-sm">{inv.email}</TableCell>
                 <TableCell>
                   <Badge variant="outline">{inv.role}</Badge>

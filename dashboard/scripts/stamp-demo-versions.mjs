@@ -9,7 +9,18 @@ import { constants } from "node:fs";
 import { access, lstat, readFile, readdir, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
-const RELEASE_VERSION = /^\d+\.\d+\.\d+$/;
+// Match the stable and canonical PyPA prerelease forms used by package waves.
+// Do not accept arbitrary suffixes or local build identifiers as release data.
+const RELEASE_VERSION_SOURCE = String.raw`\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?`;
+const RELEASE_VERSION = new RegExp(`^${RELEASE_VERSION_SOURCE}$`);
+
+export function isReleaseVersion(version) {
+  return (
+    typeof version === "string" &&
+    !/[\r\n]/.test(version) &&
+    RELEASE_VERSION.test(version)
+  );
+}
 const REQUIRED_SYSTEM_FILES = new Set([
   "system/health.json",
   "system/health-system.json",
@@ -61,7 +72,7 @@ function requireRecord(value, location) {
 function inspectField(record, key, version, location) {
   const object = requireRecord(record, location);
   const current = object[key];
-  if (typeof current !== "string" || !RELEASE_VERSION.test(current)) {
+  if (!isReleaseVersion(current)) {
     throw new Error(`${location}.${key} must be a bare release number`);
   }
   return current !== version;
@@ -140,7 +151,10 @@ function stampText(before, key, version, expectedFields) {
     );
   }
 
-  const pattern = new RegExp(`("${key}"\\s*:\\s*")\\d+\\.\\d+\\.\\d+(")`, "g");
+  const pattern = new RegExp(
+    `("${key}"\\s*:\\s*")${RELEASE_VERSION_SOURCE}(")`,
+    "g",
+  );
   let fields = 0;
   const after = before.replace(pattern, (_match, head, tail) => {
     fields += 1;
@@ -155,7 +169,7 @@ function stampText(before, key, version, expectedFields) {
 }
 
 export async function stampDemoVersions(root, version, expectedInventory) {
-  if (!RELEASE_VERSION.test(version)) {
+  if (!isReleaseVersion(version)) {
     throw new Error(`VERSION is not a release number: ${version}`);
   }
 

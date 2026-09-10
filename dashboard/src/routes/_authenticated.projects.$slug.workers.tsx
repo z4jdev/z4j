@@ -1,3 +1,4 @@
+import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * Workers list page - Flower-parity worker overview.
  *
@@ -15,14 +16,14 @@
  *
  * Worker name links to the 6-tab detail page.
  */
-import { useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { Cpu } from "lucide-react";
-import { FilterToolbar } from "@/components/domain/filter-toolbar";
-import { RefreshButton } from "@/components/domain/refresh-button";
-import { PageHeader } from "@/components/domain/page-header";
-import { WorkerStateBadge } from "@/components/domain/state-badges";
+import { DateCell } from "@/components/domain/date-cell";
 import { EmptyState } from "@/components/domain/empty-state";
+import { FilterToolbar } from "@/components/domain/filter-toolbar";
+import { PageHeader } from "@/components/domain/page-header";
+import { PageShell } from "@/components/domain/page-shell";
+import { RefreshButton } from "@/components/domain/refresh-button";
+import { WorkerStateBadge } from "@/components/domain/state-badges";
+import { WorkerLintPanel } from "@/components/domain/worker-lint-panel";
 import { DataTable, type DataTableColumnDef } from "@/components/ui/data-table";
 import {
   Select,
@@ -31,13 +32,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkers } from "@/hooks/use-workers";
-import { DateCell } from "@/components/domain/date-cell";
-import { formatCompact } from "@/lib/format";
 import type { WorkerPublic, WorkerState } from "@/lib/api-types";
-import { PageShell } from "@/components/domain/page-shell";
-import { WorkerLintPanel } from "@/components/domain/worker-lint-panel";
+import { formatCompact } from "@/lib/format";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { Cpu } from "lucide-react";
+import { useMemo, useState } from "react";
 
 const WORKER_STATES: WorkerState[] = [
   "online",
@@ -52,7 +52,13 @@ export const Route = createFileRoute("/_authenticated/projects/$slug/workers")({
 
 function WorkersPage() {
   const { slug } = Route.useParams();
-  const { data: workers, isLoading, isFetching, refetch } = useWorkers(slug);
+  const {
+    data: workers,
+    isLoading,
+    isError,
+    isFetching,
+    refetch,
+  } = useWorkers(slug);
 
   const columns = useWorkerColumns(slug);
 
@@ -99,7 +105,7 @@ function WorkersPage() {
       <PageHeader
         title="Workers"
         icon={Cpu}
-        description="every worker process the agent has observed"
+        description="Inspect worker health, capacity, and task activity."
         actions={
           <RefreshButton onRefresh={() => refetch()} pending={isFetching} />
         }
@@ -107,137 +113,113 @@ function WorkersPage() {
 
       {/* Above the table on purpose: a dangerous default is a thing to act on,
           and it should not be something an operator finds only by scrolling. */}
-      <WorkerLintPanel slug={slug} />
 
-      <FilterToolbar
-        searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
-        searchPlaceholder="Search workers..."
-        activeFilterCount={activeFilterCount}
-        onClear={clearFilters}
-        filters={
-          <Select
-            value={stateFilter}
-            onValueChange={(v) => setStateFilter(v as WorkerState | "all")}
-          >
-            <SelectTrigger className="w-36 shrink-0">
-              <SelectValue placeholder="State" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All states</SelectItem>
-              {WORKER_STATES.map((s) => (
-                <SelectItem key={s} value={s}>
-                  {s}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        }
-      />
-
-      {isLoading && (
-        <div className="space-y-2">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-12 w-full" />
-          ))}
-        </div>
-      )}
-      {workers && filteredWorkers.length === 0 && (
-        <EmptyState
-          icon={Cpu}
-          title={
-            activeFilterCount > 0 ? "no workers match" : "no workers seen yet"
-          }
-          description={
-            activeFilterCount > 0
-              ? "try adjusting your filters or search query"
-              : "workers will appear here once they connect through the z4j agent (Celery, RQ, or Dramatiq)"
-          }
-        />
-      )}
-      {workers && filteredWorkers.length > 0 && (
-        <>
-          {/* Summary bar */}
-          {totals && (
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border bg-card px-4 py-3 text-sm">
-              <div>
-                <span className="text-muted-foreground">Workers: </span>
-                <span className="font-semibold">
-                  {totals.online}/{totals.total}
-                </span>
-                <span className="ml-1 text-xs text-muted-foreground">
-                  online
-                </span>
-              </div>
-              <div>
-                <span className="text-muted-foreground">Active: </span>
-                <span className="font-semibold tabular-nums">
-                  {totals.active}
-                </span>
-              </div>
-              <div>
-                <span className="text-muted-foreground">Succeeded: </span>
-                <span className="font-semibold tabular-nums text-success">
-                  {formatCompact(totals.succeeded)}
-                </span>
-              </div>
-              <div>
-                <span className="text-muted-foreground">Failed: </span>
-                <span className="font-semibold tabular-nums text-destructive">
-                  {formatCompact(totals.failed)}
-                </span>
-              </div>
-              <div>
-                <span className="text-muted-foreground">Retried: </span>
-                <span className="font-semibold tabular-nums text-warning">
-                  {formatCompact(totals.retried)}
-                </span>
-              </div>
-              <div>
-                <span className="text-muted-foreground">Processed: </span>
-                <span className="font-semibold tabular-nums">
-                  {formatCompact(totals.processed)}
-                </span>
-              </div>
-            </div>
-          )}
-          <DataTable
-            columns={columns}
-            data={filteredWorkers}
-            enableSorting
-            totalLabel={
-              activeFilterCount > 0 && workers.length !== filteredWorkers.length
-                ? `${filteredWorkers.length} of ${workers.length} workers`
-                : `${filteredWorkers.length} worker${filteredWorkers.length === 1 ? "" : "s"}`
+      <DataTable
+        isFetching={isFetching}
+        isLoading={isLoading}
+        error={isError ? "Unable to load workers. Try again." : null}
+        onRetry={() => refetch()}
+        emptyState={
+          <EmptyState
+            icon={Cpu}
+            title={
+              activeFilterCount > 0 ? "no workers match" : "no workers seen yet"
+            }
+            description={
+              activeFilterCount > 0
+                ? "try adjusting your filters or search query"
+                : "workers will appear here once they connect through the z4j agent (Celery, RQ, or Dramatiq)"
             }
           />
-          {/* In-table Total row. Lives outside <DataTable> so the
-              column layout matches without forcing the table
-              component to grow a footer-row API. */}
-          {totals && workers.length > 1 && (
-            <div className="rounded-md border bg-muted/30 px-4 py-2 text-xs">
-              <span className="font-semibold text-muted-foreground">Total</span>
-              <span className="ml-4 inline-flex gap-4 tabular-nums">
-                <span>
-                  active <strong>{totals.active}</strong>
-                </span>
-                <span className="text-success">
-                  succeeded <strong>{formatCompact(totals.succeeded)}</strong>
-                </span>
-                <span className="text-destructive">
-                  failed <strong>{formatCompact(totals.failed)}</strong>
-                </span>
-                <span className="text-warning">
-                  retried <strong>{formatCompact(totals.retried)}</strong>
-                </span>
-                <span>
-                  processed <strong>{formatCompact(totals.processed)}</strong>
-                </span>
-              </span>
-            </div>
-          )}
-        </>
-      )}
+        }
+        toolbar={() => (
+          <FilterToolbar
+            searchValue={searchQuery}
+            onSearchChange={setSearchQuery}
+            searchPlaceholder="Search workers..."
+            activeFilterCount={activeFilterCount}
+            onClear={clearFilters}
+            filters={
+              <Select
+                value={stateFilter}
+                onValueChange={(v) => setStateFilter(v as WorkerState | "all")}
+              >
+                <SelectTrigger
+                  aria-label="Worker state"
+                  className="w-36 shrink-0"
+                >
+                  <SelectValue placeholder="State" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All states</SelectItem>
+                  {WORKER_STATES.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {s}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            }
+          />
+        )}
+        notice={
+          <>
+            <WorkerLintPanel slug={slug} />
+            {totals && (
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border bg-card px-4 py-3 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Workers: </span>
+                  <span className="font-semibold">
+                    {totals.online}/{totals.total}
+                  </span>
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    online
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Active: </span>
+                  <span className="font-semibold tabular-nums">
+                    {totals.active}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Succeeded: </span>
+                  <span className="font-semibold tabular-nums text-success">
+                    {formatCompact(totals.succeeded)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Failed: </span>
+                  <span className="font-semibold tabular-nums text-destructive">
+                    {formatCompact(totals.failed)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Retried: </span>
+                  <span className="font-semibold tabular-nums text-warning">
+                    {formatCompact(totals.retried)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Processed: </span>
+                  <span className="font-semibold tabular-nums">
+                    {formatCompact(totals.processed)}
+                  </span>
+                </div>
+              </div>
+            )}
+          </>
+        }
+        columns={columns}
+        data={filteredWorkers}
+        enableSorting
+        totalLabel={
+          activeFilterCount > 0 &&
+          (workers?.length ?? 0) !== filteredWorkers.length
+            ? `${filteredWorkers.length} of ${workers?.length ?? 0} workers`
+            : `${filteredWorkers.length} worker${filteredWorkers.length === 1 ? "" : "s"}`
+        }
+      />
     </PageShell>
   );
 }
@@ -271,7 +253,8 @@ function useWorkerColumns(slug: string): DataTableColumnDef<WorkerPublic>[] {
         enableSorting: true,
       },
       {
-        accessorKey: "queues",
+        id: "queues",
+        accessorFn: (row) => row.queues.join(", "),
         header: "Queues",
         cell: ({ row }: { row: { original: WorkerPublic } }) => (
           <span className="text-muted-foreground">
@@ -280,7 +263,7 @@ function useWorkerColumns(slug: string): DataTableColumnDef<WorkerPublic>[] {
               : "-"}
           </span>
         ),
-        enableSorting: false,
+        enableSorting: true,
       },
       {
         accessorKey: "active_tasks",
@@ -359,7 +342,8 @@ function useWorkerColumns(slug: string): DataTableColumnDef<WorkerPublic>[] {
         enableSorting: true,
       },
       {
-        accessorKey: "load_average",
+        id: "load_average",
+        accessorFn: (row) => row.load_average?.[0] ?? null,
         header: "Load",
         cell: ({ row }: { row: { original: WorkerPublic } }) => {
           const la = row.original.load_average;
@@ -373,10 +357,11 @@ function useWorkerColumns(slug: string): DataTableColumnDef<WorkerPublic>[] {
             </span>
           );
         },
-        enableSorting: false,
+        enableSorting: true,
       },
       {
-        accessorKey: "last_heartbeat",
+        id: "last_heartbeat",
+        accessorFn: (row) => sortTimestamp(row.last_heartbeat),
         header: "Heartbeat",
         cell: ({ row }: { row: { original: WorkerPublic } }) => (
           <DateCell value={row.original.last_heartbeat} compact />

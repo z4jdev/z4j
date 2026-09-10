@@ -1,17 +1,17 @@
-import { useState } from "react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { AlertCircle, Eye, EyeOff, Loader2 } from "lucide-react";
-import { Z4jMark } from "@/components/z4j-mark";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
-import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Z4jMark } from "@/components/z4j-mark";
 import { useLogin } from "@/hooks/use-auth";
 import { api, ApiError } from "@/lib/api";
 import type { SetupStatusResponse } from "@/lib/api-types";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { AlertCircle, Eye, EyeOff, Loader2 } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/login")({
   // First-boot guard: if z4j has no admin yet, the login form
@@ -44,7 +44,10 @@ export const Route = createFileRoute("/login")({
  * from "locked out" (wait) from "account disabled" (contact admin)
  * without having to decode status codes.
  */
-function describeLoginError(err: unknown): { title: string; description: string } {
+function describeLoginError(err: unknown): {
+  title: string;
+  description: string;
+} {
   if (err instanceof ApiError) {
     // Rate-limit / lockout - 429 on z4j when login attempts
     // exceed the configured per-identity / per-IP ceiling.
@@ -67,7 +70,8 @@ function describeLoginError(err: unknown): { title: string; description: string 
     if (err.status === 401) {
       return {
         title: "Invalid email or password",
-        description: "Check the address, the capitalisation of the password, and try again.",
+        description:
+          "Check the address, the capitalisation of the password, and try again.",
       };
     }
     if (err.status >= 500) {
@@ -134,12 +138,12 @@ function LoginPage() {
   }
 
   return (
-    <div className="relative grid min-h-screen w-full place-items-center bg-muted/30 p-6">
+    <div className="relative grid min-h-screen w-full place-items-center bg-background p-5">
       <div className="absolute right-4 top-4">
         <ThemeToggle />
       </div>
 
-      <div className="w-full max-w-sm space-y-8">
+      <div className="w-full max-w-md space-y-8">
         {/* Brand mark above the card. Same horizontal layout the
             authenticated sidebar uses (logo box on the left, name
             stacked on the right) so the user does not feel like
@@ -147,24 +151,22 @@ function LoginPage() {
             the dashboard. Size is a step up from the sidebar so
             it has presence on an otherwise empty page. */}
         <div className="flex items-center justify-center gap-3">
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <Z4jMark className="size-6" />
           </div>
           <div className="flex min-w-0 flex-col leading-tight">
             <span className="text-sm font-semibold">z4j</span>
-            <span className="text-xs text-muted-foreground">
-              control plane
-            </span>
+            <span className="text-xs text-muted-foreground">control plane</span>
           </div>
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-8 shadow-sm">
+        <div className="panel-surface p-6 sm:p-9">
           <div className="mb-6 space-y-1.5">
-            <h1 className="text-xl font-semibold tracking-tight">
-              Welcome back
+            <h1 className="text-2xl font-semibold tracking-tight">
+              Sign in to z4j
             </h1>
             <p className="text-sm text-muted-foreground">
-              Sign in to continue to your dashboard.
+              Your projects, workers and background work.
             </p>
           </div>
 
@@ -227,9 +229,7 @@ function LoginPage() {
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                  aria-label={
-                    showPassword ? "Hide password" : "Show password"
-                  }
+                  aria-label={showPassword ? "Hide password" : "Show password"}
                 >
                   {showPassword ? (
                     <EyeOff className="size-4" />
@@ -256,12 +256,10 @@ function LoginPage() {
 
             <Button
               type="submit"
-              className="mt-1 h-11 w-full text-sm font-medium"
+              className="mt-1 w-full font-medium"
               disabled={login.isPending}
             >
-              {login.isPending && (
-                <Loader2 className="size-4 animate-spin" />
-              )}
+              {login.isPending && <Loader2 className="size-4 animate-spin" />}
               Sign in
             </Button>
           </form>
@@ -282,8 +280,7 @@ function LoginPage() {
               <code className="rounded bg-yellow-200/60 px-1 font-mono dark:bg-yellow-400/20">
                 demo
               </code>
-              ). Click Sign in to continue. No real account, no real
-              services.{" "}
+              ). Click Sign in to continue. No real account, no real services.{" "}
               <a
                 href="https://z4j.com/install/"
                 target="_blank"

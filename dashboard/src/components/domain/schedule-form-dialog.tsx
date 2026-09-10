@@ -34,6 +34,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { FormField as Field } from "./form-field";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -50,11 +51,19 @@ import {
   type ScheduleCreateBody,
   type ScheduleUpdateBody,
 } from "@/hooks/use-schedules";
+import {
+  CRON_PRESETS,
+  KIND_LABELS,
+  scheduleSummary,
+} from "@/lib/schedule-presets";
 import { ApiError } from "@/lib/api";
 import type { SchedulePublic } from "@/lib/api-types";
 
 type Kind = "cron" | "interval" | "clocked" | "solar";
 type CatchUp = "skip" | "fire_one_missed" | "fire_all_missed";
+
+// Kinds in the order the Kind dropdown lists them.
+const KINDS: Kind[] = ["cron", "interval", "clocked", "solar"];
 
 interface FormState {
   name: string;
@@ -115,7 +124,9 @@ interface Props {
 export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
   const mode = existing ? "edit" : "create";
   const [form, setForm] = useState<FormState>(EMPTY);
-  const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>({});
+  const [errors, setErrors] = useState<
+    Partial<Record<keyof FormState, string>>
+  >({});
 
   const create = useCreateSchedule(slug);
   const update = useUpdateSchedule(slug);
@@ -136,7 +147,9 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
     if (errors[key]) setErrors((e) => ({ ...e, [key]: undefined }));
   }
 
-  function validate(): { ok: true; args: unknown[]; kwargs: Record<string, unknown> } | { ok: false } {
+  function validate():
+    | { ok: true; args: unknown[]; kwargs: Record<string, unknown> }
+    | { ok: false } {
     const next: typeof errors = {};
     if (!form.name.trim()) next.name = "required";
     if (!form.engine.trim()) next.engine = "required";
@@ -156,7 +169,11 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
     }
     try {
       const parsed = JSON.parse(form.kwargs || "{}");
-      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+      if (
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        parsed === null
+      ) {
         next.kwargs = "must be a JSON object";
       } else {
         kwargs = parsed as Record<string, unknown>;
@@ -210,7 +227,8 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
       }
       onClose();
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : (err as Error).message;
+      const message =
+        err instanceof ApiError ? err.message : (err as Error).message;
       toast.error(`save failed: ${message}`);
     }
   }
@@ -223,15 +241,15 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
   // is hostile UX for a form field.
   const expressionHint = useMemo(() => {
     if (form.kind === "cron") {
-      return "5-field crontab string (or 6-field with seconds), e.g. \"0 3 * * *\"";
+      return '5-field crontab string (or 6-field with seconds), e.g. "0 3 * * *"';
     }
     if (form.kind === "interval") {
-      return "Interval like \"30s\" / \"5m\" / \"2h\" / \"1d\", or a bare integer (seconds)";
+      return 'Interval like "30s" / "5m" / "2h" / "1d", or a bare integer (seconds)';
     }
     if (form.kind === "solar") {
       return "event:lat:lon (use the picker below to fill this in)";
     }
-    return "ISO-8601 timestamp, e.g. \"2026-12-25T09:00:00Z\"";
+    return 'ISO-8601 timestamp, e.g. "2026-12-25T09:00:00Z"';
   }, [form.kind]);
 
   // For solar schedules, parse the current expression string into
@@ -270,19 +288,50 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
   // route on queues / kinds that don't use timezones. Picking an
   // unknown engine falls through to the permissive default so we
   // don't break a future adapter's first dashboard interaction.
-  const engineCaps = useMemo(
-    () => capsForEngine(form.engine),
-    [form.engine],
-  );
+  const engineCaps = useMemo(() => capsForEngine(form.engine), [form.engine]);
 
-  // If the operator switches engines and the current kind is no
-  // longer supported, snap back to "cron" (universal) so the
-  // form never holds an invalid (engine, kind) combo.
-  useEffect(() => {
-    if (!engineCaps.kinds.includes(form.kind)) {
-      setForm((prev) => ({ ...prev, kind: "cron" }));
-    }
-  }, [engineCaps, form.kind]);
+  // The table decides what the form offers, not what the brain
+  // stores: the API, CLI and declarative sync accept any kind for
+  // any engine, and z4j-scheduler fires every kind on every engine.
+  // So a saved row can hold a kind its engine's entry omits (a Huey
+  // clocked or an RQ solar schedule). That kind stays on offer for
+  // the row's own engine, so the dialog shows it and saves it back
+  // as it was.
+  function savedKindFor(engine: string): Kind | null {
+    if (!existing || engine !== existing.engine) return null;
+    const kind = existing.kind as Kind;
+    return capsForEngine(engine).kinds.includes(kind) ? null : kind;
+  }
+
+  function kindOffered(engine: string, kind: Kind): boolean {
+    return (
+      capsForEngine(engine).kinds.includes(kind) ||
+      kind === savedKindFor(engine)
+    );
+  }
+
+  const savedKind = form.kind === savedKindFor(form.engine) ? form.kind : null;
+  const offeredKinds = KINDS.filter((kind) => kindOffered(form.engine, kind));
+
+  // Choosing an engine that does not offer the current kind snaps it
+  // back to "cron" (universal), so the operator never builds an
+  // unsupported (engine, kind) combo. This belongs in the change
+  // handler, not an effect: an effect also runs when the dialog loads
+  // a saved row, and would rewrite a kind the operator never touched.
+  //
+  // Radix Select's hidden form <select> can report "" when the
+  // controlled value changes in the same commit that first renders
+  // its option (opening a solar row right after a row whose engine
+  // offered no solar). Neither select treats that as a choice.
+  function setEngine(engine: string) {
+    if (!engine) return;
+    setForm((prev) =>
+      kindOffered(engine, prev.kind)
+        ? { ...prev, engine }
+        : { ...prev, engine, kind: "cron", expression: "0 * * * *" },
+    );
+    if (errors.engine) setErrors((e) => ({ ...e, engine: undefined }));
+  }
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && !pending && onClose()}>
@@ -293,11 +342,14 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
           </DialogTitle>
           <DialogDescription>
             {mode === "create"
-              ? "Schedules created here are tagged source=\"dashboard\" and survive declarative reconciles."
-              : "Updates write through to brain immediately. The next tick after save uses the new values."}
+              ? "Choose a task and when it should run. Review the timing and recovery behavior before saving."
+              : "Changes apply to the next scheduler tick after saving."}
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={onSubmit} className="space-y-4">
+        <form onSubmit={onSubmit} className="space-y-5">
+          <p className="rounded-lg border bg-muted/30 px-3 py-2 text-sm">
+            Project <strong>{slug}</strong>
+          </p>
           <div className="grid gap-3 md:grid-cols-2">
             <Field label="Name" error={errors.name}>
               <Input
@@ -316,10 +368,7 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
               />
             </Field>
             <Field label="Engine" error={errors.engine}>
-              <Select
-                value={form.engine}
-                onValueChange={(v) => set("engine", v)}
-              >
+              <Select value={form.engine} onValueChange={setEngine}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -343,35 +392,47 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
             <Field
               label="Kind"
               hint={
-                engineCaps.kinds.length < 4
-                  ? `${form.engine} adapter supports: ${engineCaps.kinds.join(", ")}`
-                  : undefined
+                savedKind
+                  ? `Kept as saved. New ${form.engine} schedules can use: ${engineCaps.kinds.join(", ")}.`
+                  : engineCaps.kinds.length < 4
+                    ? `${form.engine} adapter supports: ${engineCaps.kinds.join(", ")}`
+                    : undefined
               }
             >
               <Select
                 value={form.kind}
-                onValueChange={(v) => set("kind", v as Kind)}
+                onValueChange={(v) => {
+                  // Only an offered kind is an operator choice (see
+                  // setEngine for the "" Radix Select can report).
+                  if (!offeredKinds.includes(v as Kind)) return;
+                  const kind = v as Kind;
+                  const expression =
+                    kind === "cron"
+                      ? "0 * * * *"
+                      : kind === "interval"
+                        ? "5m"
+                        : kind === "solar"
+                          ? "sunrise:0:0"
+                          : "";
+                  setForm((prev) => ({ ...prev, kind, expression }));
+                }}
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {engineCaps.kinds.includes("cron") && (
-                    <SelectItem value="cron">cron</SelectItem>
-                  )}
-                  {engineCaps.kinds.includes("interval") && (
-                    <SelectItem value="interval">interval</SelectItem>
-                  )}
-                  {engineCaps.kinds.includes("clocked") && (
-                    <SelectItem value="clocked">clocked</SelectItem>
-                  )}
-                  {engineCaps.kinds.includes("solar") && (
-                    <SelectItem value="solar">solar</SelectItem>
-                  )}
+                  {offeredKinds.map((kind) => (
+                    <SelectItem key={kind} value={kind}>
+                      {KIND_LABELS[kind]}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="Catch-up">
+            <Field
+              label="If a scheduled run was missed"
+              hint="Recovery can enqueue extra work. Choose how much missed work to replay."
+            >
               <Select
                 value={form.catch_up}
                 onValueChange={(v) => set("catch_up", v as CatchUp)}
@@ -380,15 +441,47 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="skip">skip</SelectItem>
-                  <SelectItem value="fire_one_missed">fire_one_missed</SelectItem>
-                  <SelectItem value="fire_all_missed">fire_all_missed</SelectItem>
+                  <SelectItem value="skip">Skip missed runs</SelectItem>
+                  <SelectItem value="fire_one_missed">
+                    Run the most recent missed occurrence
+                  </SelectItem>
+                  <SelectItem value="fire_all_missed">
+                    Replay all missed occurrences
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </Field>
           </div>
 
-          <Field label="Expression" error={errors.expression} hint={expressionHint}>
+          {form.kind === "cron" && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Common timings</p>
+              <div className="flex flex-wrap gap-2">
+                {CRON_PRESETS.map((preset) => (
+                  <Button
+                    type="button"
+                    size="sm"
+                    key={preset.expression}
+                    variant={
+                      form.expression === preset.expression
+                        ? "secondary"
+                        : "outline"
+                    }
+                    aria-pressed={form.expression === preset.expression}
+                    onClick={() => set("expression", preset.expression)}
+                  >
+                    {preset.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <Field
+            label="Expression"
+            error={errors.expression}
+            hint={expressionHint}
+          >
             <Input
               value={form.expression}
               onChange={(e) => set("expression", e.target.value)}
@@ -396,15 +489,28 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
             />
           </Field>
 
+          <div
+            role="status"
+            className="rounded-lg border border-primary/20 bg-primary/5 p-3"
+          >
+            <p className="text-sm font-medium">
+              {scheduleSummary(form.kind, form.expression, form.timezone)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              The server validates this expression when you save. Next-run
+              timing is available on the saved schedule.
+            </p>
+          </div>
+
           {form.kind === "solar" && solarParts && (
             <div className="grid gap-3 md:grid-cols-3 rounded-md border border-amber-500/20 bg-amber-500/5 p-3">
               <div className="space-y-1.5">
-                <Label className="text-xs">Solar event</Label>
+                <Label htmlFor="schedule-solar-event">Solar event</Label>
                 <Select
                   value={solarParts.event}
                   onValueChange={(v) => setSolarPart("event", v)}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id="schedule-solar-event">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -413,15 +519,20 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
                     <SelectItem value="dawn">dawn (astronomical)</SelectItem>
                     <SelectItem value="dusk">dusk (astronomical)</SelectItem>
                     <SelectItem value="noon">noon (solar)</SelectItem>
-                    <SelectItem value="solar_noon">solar_noon (alias)</SelectItem>
+                    <SelectItem value="solar_noon">
+                      solar_noon (alias)
+                    </SelectItem>
                     <SelectItem value="midnight">midnight (solar)</SelectItem>
-                    <SelectItem value="solar_midnight">solar_midnight (alias)</SelectItem>
+                    <SelectItem value="solar_midnight">
+                      solar_midnight (alias)
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs">Latitude</Label>
+                <Label htmlFor="schedule-latitude">Latitude</Label>
                 <Input
+                  id="schedule-latitude"
                   value={solarParts.lat}
                   onChange={(e) => setSolarPart("lat", e.target.value)}
                   placeholder="37.7749"
@@ -429,8 +540,9 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs">Longitude</Label>
+                <Label htmlFor="schedule-longitude">Longitude</Label>
                 <Input
+                  id="schedule-longitude"
                   value={solarParts.lon}
                   onChange={(e) => setSolarPart("lon", e.target.value)}
                   placeholder="-122.4194"
@@ -438,9 +550,9 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
                 />
               </div>
               <div className="md:col-span-3 text-xs text-muted-foreground">
-                Range: latitude [-90, 90], longitude [-180, 180].
-                Polar latitudes (|lat| &gt; ~66.5°) skip days where
-                the chosen event doesn't occur. Resolved expression:{" "}
+                Range: latitude [-90, 90], longitude [-180, 180]. Polar
+                latitudes (|lat| &gt; ~66.5°) skip days where the chosen event
+                doesn't occur. Resolved expression:{" "}
                 <code className="font-mono">{form.expression}</code>
               </div>
             </div>
@@ -497,24 +609,34 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
             </Field>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
-            <Field label="args (JSON array)" error={errors.args}>
-              <Textarea
-                value={form.args}
-                onChange={(e) => set("args", e.target.value)}
-                className="font-mono text-xs"
-                rows={4}
-              />
-            </Field>
-            <Field label="kwargs (JSON object)" error={errors.kwargs}>
-              <Textarea
-                value={form.kwargs}
-                onChange={(e) => set("kwargs", e.target.value)}
-                className="font-mono text-xs"
-                rows={4}
-              />
-            </Field>
-          </div>
+          <details
+            open={!!(errors.args || errors.kwargs) || undefined}
+            className="rounded-lg border p-4"
+          >
+            <summary className="cursor-pointer text-sm font-medium">
+              Task arguments (advanced JSON)
+            </summary>
+            <div className="pt-4">
+              <div className="grid gap-3 md:grid-cols-2">
+                <Field label="args (JSON array)" error={errors.args}>
+                  <Textarea
+                    value={form.args}
+                    onChange={(e) => set("args", e.target.value)}
+                    className="font-mono text-xs"
+                    rows={4}
+                  />
+                </Field>
+                <Field label="kwargs (JSON object)" error={errors.kwargs}>
+                  <Textarea
+                    value={form.kwargs}
+                    onChange={(e) => set("kwargs", e.target.value)}
+                    className="font-mono text-xs"
+                    rows={4}
+                  />
+                </Field>
+              </div>
+            </div>
+          </details>
 
           <div className="flex items-center justify-between rounded-md border bg-muted/30 px-3 py-2">
             <div>
@@ -524,13 +646,19 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
               </div>
             </div>
             <Switch
+              aria-label="Enabled"
               checked={form.is_enabled}
               onCheckedChange={(v) => set("is_enabled", v)}
             />
           </div>
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose} disabled={pending}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onClose}
+              disabled={pending}
+            >
               Cancel
             </Button>
             <Button type="submit" disabled={pending}>
@@ -544,28 +672,5 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function Field({
-  label,
-  error,
-  hint,
-  children,
-}: {
-  label: string;
-  error?: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <Label>{label}</Label>
-      {children}
-      {error && <p className="text-xs text-destructive">{error}</p>}
-      {!error && hint && (
-        <p className="text-xs text-muted-foreground">{hint}</p>
-      )}
-    </div>
   );
 }
