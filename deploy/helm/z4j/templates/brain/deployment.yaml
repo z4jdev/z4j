@@ -1,0 +1,208 @@
+{{- if .Values.brain.enabled -}}
+{{- include "z4j.validateBrain" . -}}
+{{- include "z4j.validatePostgresql" . -}}
+{{- include "z4j.validatePki" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "z4j.fullname" . }}
+  labels:
+    {{- include "z4j.brain.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.brain.replicaCount }}
+  # Recreate by default: the brain migrates the database on boot and must
+  # not overlap an older process doing the same. See values.yaml.
+  strategy:
+    {{- toYaml .Values.brain.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "z4j.brain.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "z4j.brain.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll for chart-rendered ConfigMap and inline-secret changes.
+        # External Secret content is not part of the Helm render: bump
+        # rolloutRevision explicitly after rotating application secrets,
+        # database credentials or the scheduler gRPC TLS Secret.
+        checksum/config: {{ include (print $.Template.BasePath "/brain/configmap.yaml") . | sha256sum }}
+        {{- if and (not .Values.brain.secrets.existingSecret) (include "z4j.brain.inlineSecretsAll" .) }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/brain/secret-inline.yaml") . | sha256sum }}
+        {{- end }}
+        z4j.com/external-secret-rollout-revision: {{ .Values.rolloutRevision | quote }}
+        {{- with .Values.brain.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "z4j.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "z4j.brain.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.brain.podSecurityContext | nindent 8 }}
+      {{- with .Values.brain.affinity }}
+      affinity:
+        {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
+      {{- with .Values.brain.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.brain.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.brain.persistence.fixPermissions.enabled }}
+      {{- $uid := int (.Values.brain.podSecurityContext.runAsUser | default 10001) }}
+      {{- $gid := int (.Values.brain.podSecurityContext.runAsGroup | default $uid) }}
+      # fsGroup is not enough for /data. The brain's secret store refuses a
+      # directory that its own uid does not own or that carries any group
+      # or world permission bit, and fsGroup changes only the group (plus
+      # group bits) of the freshly provisioned root:root directory, so the
+      # brain would exit with "secret-store directory is not owned by the
+      # current uid: /data" and a standalone scheduler would crash-loop on
+      # the refused connection. This is the one root step in the release:
+      # same image, only CHOWN and FOWNER, no change when the owner and the
+      # mode are already right. It runs on every pod start because a
+      # storage driver that applies fsGroup on mount re-adds the group bits
+      # each time. Disabled with brain.persistence.fixPermissions.enabled
+      # (see values.yaml for the manual step that replaces it).
+      initContainers:
+        - name: fix-data-permissions
+          image: {{ include "z4j.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - FOWNER
+            seccompProfile:
+              type: RuntimeDefault
+          # Replaces the image entry point (tini -- z4j) for this one step.
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              dir=/data; uid={{ $uid }}; gid={{ $gid }}
+              if [ "$(stat -c %u:%g "$dir")" != "$uid:$gid" ]; then chown "$uid:$gid" "$dir"; fi
+              if [ "$(stat -c %a "$dir")" != "700" ]; then chmod 0700 "$dir"; fi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.brain.persistence.fixPermissions.resources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: brain
+          image: {{ include "z4j.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.brain.containerSecurityContext | nindent 12 }}
+          # The image entry point is ``tini -- z4j``; ``serve`` is its
+          # default command, restated here so the intent is visible.
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.brain.service.httpPort }}
+              protocol: TCP
+            {{- if .Values.scheduler.enabled }}
+            - name: grpc
+              containerPort: {{ .Values.brain.service.grpcPort }}
+              protocol: TCP
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "z4j.fullname" . }}
+          env:
+            {{- if (include "z4j.brain.hasSecrets" .) }}
+            - name: Z4J_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "z4j.brain.secretName" . }}
+                  key: {{ .Values.brain.secrets.keys.appSecret }}
+            - name: Z4J_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "z4j.brain.secretName" . }}
+                  key: {{ .Values.brain.secrets.keys.sessionSecret }}
+            - name: Z4J_AUDIT_CHAIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "z4j.brain.secretName" . }}
+                  key: {{ .Values.brain.secrets.keys.auditChainSecret }}
+            {{- end }}
+            {{- if .Values.postgresql.enabled }}
+            - name: Z4J_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "z4j.postgresql.secretName" . }}
+                  key: {{ include "z4j.postgresql.passwordKey" . }}
+            {{- else if .Values.brain.database.existingSecret }}
+            - name: Z4J_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.brain.database.existingSecret }}
+                  key: {{ .Values.brain.database.existingSecretKey }}
+            {{- else if .Values.brain.database.url }}
+            # Inline URL (dev/homelab only; prefer the existingSecret branch).
+            - name: Z4J_DATABASE_URL
+              value: {{ .Values.brain.database.url | quote }}
+            {{- end }}
+            {{- if .Values.brain.metrics.authExistingSecret }}
+            - name: Z4J_METRICS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.brain.metrics.authExistingSecret }}
+                  key: {{ .Values.brain.metrics.authExistingSecretKey }}
+            {{- end }}
+            {{- with .Values.brain.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # Writable scratch dir: the root filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.scheduler.enabled }}
+            - name: scheduler-grpc-tls
+              mountPath: /etc/z4j/scheduler-grpc-tls
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.brain.resources | nindent 12 }}
+          startupProbe:
+            {{- toYaml .Values.brain.startupProbe | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.brain.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.brain.readinessProbe | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.brain.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.brain.persistence.existingClaim }}
+          {{- else if .Values.brain.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "z4j.fullname" . }}-data
+          {{- else }}
+          # No persistence: generated secrets and owner-private state are
+          # discarded with the pod. Only valid on PostgreSQL with explicit
+          # brain.secrets, and even then restore-recovery manifests are lost.
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+        {{- if .Values.scheduler.enabled }}
+        - name: scheduler-grpc-tls
+          secret:
+            secretName: {{ include "z4j.brain.schedulerGrpcTlsSecretName" . }}
+        {{- end }}
+{{- end }}

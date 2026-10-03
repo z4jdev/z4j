@@ -78,6 +78,11 @@ from z4j_brain.websocket.registry.postgres_notify import PostgresNotifyRegistry
 from tests.unit.conftest import MIGRATED_AUDIT_CHAIN_SECRET
 
 
+def _EVERY_ENGINE(_engine: str) -> bool:  # noqa: N802  a predicate used as a constant
+    """Plan-level tests that are not about authority: every engine is capable."""
+    return True
+
+
 def _settings() -> Settings:
     return Settings(
         database_url="sqlite+aiosqlite:///:memory:",
@@ -264,7 +269,10 @@ async def boundary_db(
                 framework_adapter="bare",
                 engine_adapters=["celery", "rq"],
                 scheduler_adapters=[],
-                capabilities={},
+                capabilities={
+                    "celery": ["retry_task", "bulk_retry", "retry_by_reference_v1"],
+                    "rq": ["retry_task", "bulk_retry", "retry_by_reference_v1"],
+                },
             )
         )
         await session.commit()
@@ -537,12 +545,14 @@ def test_sealed_child_reserves_worst_case_signed_envelope() -> None:
             effective_filter={"state": "failure"},
             maximum=1,
             max_frame_bytes=exact_cap - 1,
+            engine_authority=_EVERY_ENGINE,
         )
     children, _digest = build_sealed_plan(
         [task],
         effective_filter={"state": "failure"},
         maximum=1,
         max_frame_bytes=exact_cap,
+        engine_authority=_EVERY_ENGINE,
     )
     assert children[0].canonical_payload == expected_unsigned
     assert children[0].payload_size == len(expected_unsigned)
@@ -566,11 +576,17 @@ def test_sealed_plan_refuses_to_truncate_matching_selection() -> None:
             effective_filter={"state": "failure"},
             maximum=1,
             max_frame_bytes=64 * 1024,
+            engine_authority=_EVERY_ENGINE,
         )
 
 
 def test_engine_less_plan_rejects_selected_unknown_engine() -> None:
-    """Forward-compatible ingest names never become retry authority."""
+    """Forward-compatible ingest names never become retry authority.
+
+    The authority is what the candidate agents advertise; a well-formed engine
+    name that none of them advertises fails the plan, and a malformed one
+    fails it before the authority is even asked.
+    """
     task = Task(
         project_id=uuid.uuid4(),
         engine="futurequeue",
@@ -587,6 +603,22 @@ def test_engine_less_plan_rejects_selected_unknown_engine() -> None:
             effective_filter={"state": "failure"},
             maximum=1,
             max_frame_bytes=256 * 1024,
+            engine_authority=frozenset({"celery", "rq"}).__contains__,
+        )
+    malformed = Task(
+        project_id=uuid.uuid4(),
+        engine="not an engine",
+        task_id="malformed-engine-task",
+        name="tasks.future",
+        state=TaskState.FAILURE,
+    )
+    with pytest.raises(UnsupportedRetryEngineError, match="malformed-engine-task"):
+        build_sealed_plan(
+            [malformed],
+            effective_filter={"state": "failure"},
+            maximum=1,
+            max_frame_bytes=256 * 1024,
+            engine_authority=_EVERY_ENGINE,
         )
 
 
@@ -664,7 +696,7 @@ async def test_engine_less_api_refuses_unknown_selected_task_before_seal(
 
 
 @pytest.mark.asyncio
-async def test_stored_unknown_engine_cannot_select_or_claim(
+async def test_stored_well_formed_engine_follows_the_session_contract(
     boundary_db: tuple[
         async_sessionmaker[AsyncSession],
         uuid.UUID,
@@ -673,7 +705,92 @@ async def test_stored_unknown_engine_cannot_select_or_claim(
     ],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every issuer and the irreversible repository edge fail closed."""
+    """A well-formed engine goes only to a session advertising its contract.
+
+    No list in the brain decides it: a ``futurequeue`` child waits while the
+    only session advertises ``celery``, and is delivered to the first session
+    that advertises ``futurequeue``.
+    """
+    sessions, project_id, user_id, agent_id = boundary_db
+    async with sessions() as session:
+        parent = await _seal(
+            session,
+            project_id=project_id,
+            user_id=user_id,
+            key="well-formed-engine-stored-child",
+            children=[_child(0, "futurequeue")],
+        )
+        await session.commit()
+        child_id = await session.scalar(
+            select(BulkRetryRequestChild.id).where(BulkRetryRequestChild.parent_id == parent.id)
+        )
+        assert child_id is not None
+
+    delivered: list[Command] = []
+
+    async def _capture_delivery(**kwargs: Any) -> bool:
+        delivered.append(kwargs["command"])
+        return True
+
+    monkeypatch.setattr(
+        "z4j_brain.websocket.gateway.deliver_command_frame_with_authority",
+        _capture_delivery,
+    )
+
+    celery_only = _FixedRegistry(
+        SessionHandle.create(
+            agent_id=agent_id,
+            worker_id="celery-worker",
+            websocket=object(),  # type: ignore[arg-type]
+            retry_contracts={"celery": 1},
+        )
+    )
+    await BulkRetryCoordinator(
+        db=_SessionDb(sessions),  # type: ignore[arg-type]
+        settings=_settings(),
+        registry=celery_only,  # type: ignore[arg-type]
+    ).tick()
+    assert delivered == []
+    assert celery_only.requested_engines == ["futurequeue"]
+
+    advertising = _FixedRegistry(
+        SessionHandle.create(
+            agent_id=agent_id,
+            worker_id="futurequeue-worker",
+            websocket=object(),  # type: ignore[arg-type]
+            retry_contracts={"futurequeue": 1},
+        )
+    )
+    await BulkRetryCoordinator(
+        db=_SessionDb(sessions),  # type: ignore[arg-type]
+        settings=_settings(),
+        registry=advertising,  # type: ignore[arg-type]
+    ).tick()
+    assert advertising.requested_engines == ["futurequeue"]
+    assert len(delivered) == 1
+    assert delivered[0].payload["filter"]["engine"] == "futurequeue"
+    assert delivered[0].bulk_retry_child_id == child_id
+
+
+@pytest.mark.asyncio
+async def test_stored_unrequirable_engine_cannot_select_or_claim(
+    boundary_db: tuple[
+        async_sessionmaker[AsyncSession],
+        uuid.UUID,
+        uuid.UUID,
+        uuid.UUID,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every issuer and the irreversible repository edge fail closed.
+
+    A stored child whose sealed engine cannot be a session requirement (the
+    name is malformed, so ``required_retry_engine`` is the unsatisfiable empty
+    string) is never selected, claimed or delivered, whatever a session
+    advertises. A well-formed engine is governed by the session contract
+    instead; ``test_stored_well_formed_engine_follows_the_session_contract``
+    proves that in both directions.
+    """
     sessions, project_id, user_id, agent_id = boundary_db
     async with sessions() as session:
         parent = await _seal(
@@ -681,7 +798,7 @@ async def test_stored_unknown_engine_cannot_select_or_claim(
             project_id=project_id,
             user_id=user_id,
             key="unknown-engine-stored-child",
-            children=[_child(0, "futurequeue")],
+            children=[_child(0, "future queue")],
         )
         await session.commit()
         child_id = await session.scalar(
@@ -693,7 +810,7 @@ async def test_stored_unknown_engine_cannot_select_or_claim(
         agent_id=agent_id,
         worker_id="futurequeue-worker",
         websocket=object(),  # type: ignore[arg-type]
-        retry_contracts={"futurequeue": 1},
+        retry_contracts={"future queue": 1},
     )
     registry = _FixedRegistry(handle)
     delivered: list[Command] = []
@@ -2415,7 +2532,10 @@ async def test_refused_filter_and_partial_explicit_resolution_are_audited(
         {"state": "sucess"},
         {"state": False},
         {"status": 0},
-        {"engine": "celrey"},
+        # A malformed engine fails shape validation here. A well-formed typo
+        # such as "celrey" is refused against the live agent rows in
+        # ``_resolve_sealed_plan`` (no agent advertises it), not here.
+        {"engine": "cel rey"},
     ],
 )
 def test_selection_validation_never_silently_widens(

@@ -178,6 +178,7 @@ function ScheduleDetailPage() {
 
       <FireHistoryCard
         fires={fires}
+        skippedSlots24h={schedule?.skipped_slots_24h ?? 0}
         loading={!fires}
         fetching={firesFetching}
         onRefresh={() => refetchFires()}
@@ -278,15 +279,29 @@ function Field({
 
 function FireHistoryCard({
   fires,
+  skippedSlots24h,
   loading,
   fetching,
   onRefresh,
 }: {
   fires: ScheduleFirePublic[] | undefined;
+  // Occurrences the scheduler discarded in the last day because they came
+  // due while it could not reach the brain. These never become fires, so
+  // the run strip cannot show them; this is the only place they appear.
+  skippedSlots24h: number;
   loading: boolean;
   fetching: boolean;
   onRefresh: () => void;
 }) {
+  const skippedNote = skippedSlots24h > 0 && (
+    <Badge
+      variant="outline"
+      className="text-foreground"
+      title="occurrences discarded because they came due while the scheduler could not reach the brain (catch-up policy: skip); they never fired"
+    >
+      Skipped in last 24h: {skippedSlots24h}
+    </Badge>
+  );
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -309,6 +324,11 @@ function FireHistoryCard({
             ))}
           </div>
         )}
+        {fires && fires.length === 0 && skippedNote && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+            {skippedNote}
+          </div>
+        )}
         {fires && fires.length === 0 && (
           <EmptyState
             icon={Inbox}
@@ -327,6 +347,7 @@ function FireHistoryCard({
             <span>
               oldest on the left, newest on the right; hover a cell for detail
             </span>
+            {skippedNote}
           </div>
         )}
         {fires && fires.length > 0 && (

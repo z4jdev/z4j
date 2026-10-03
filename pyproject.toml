@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.11.0"
+version = "1.12.0"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -65,7 +65,7 @@ classifiers = [
 #   pip install z4j-celery            # SDK + Celery adapter only
 #
 dependencies = [
-    "z4j-core>=1.11.0,<2",
+    "z4j-core>=1.12.0,<2",
     # Server runtime (was in z4j-brain pre-1.4.0).
     "fastapi>=0.136",
     # 1.6.5 (audit R4-M1): explicit Starlette floor for
@@ -122,7 +122,10 @@ dependencies = [
     # landed the same day, this one is on a SHIPPED runtime path, so the floor
     # is the fix rather than a build-tooling pin.
     "aiohttp>=3.14.3",
-    "pyjwt>=2.13.0",
+    # 1.11.1: 2.15.0 is the first release that closes the thirteen PYSEC-2026-414x
+    # advisories (CVE-2026-102268 at CVSS 9.1 among them). The brain never
+    # imports jwt; the floor exists because redis-py carries it.
+    "pyjwt>=2.15.0",
     # Boundary D: the Brain validates every prepared successor using an
     # independent implementation.  These exact pins are the complete
     # cadence-affecting closure and intentionally match z4j-scheduler.
@@ -154,21 +157,21 @@ dependencies = [
 # Engine adapter extras. Each pulls the engine adapter and its
 # companion scheduler (if any) in one shot -- the 95% case.
 # ------------------------------------------------------------------
-celery = ["z4j-celery>=1.11.0,<2", "z4j-celerybeat>=1.11.0,<2"]
-django = ["z4j-django>=1.11.0,<2"]
-flask = ["z4j-flask>=1.11.0,<2"]
-fastapi = ["z4j-fastapi>=1.11.0,<2"]
+celery = ["z4j-celery>=1.12.0,<2", "z4j-celerybeat>=1.12.0,<2"]
+django = ["z4j-django>=1.12.0,<2"]
+flask = ["z4j-flask>=1.12.0,<2"]
+fastapi = ["z4j-fastapi>=1.12.0,<2"]
 # Intra-z4j floor policy: extras track the release-wave version so
 # a mixed-version install cannot be assembled through the umbrella
 # (R9 H-2 precedent: a stale z4j-rq paired with a newer z4j-bare
 # dispatcher re-opened the R8 H-1 pickle RCE).
-rq = ["z4j-rq>=1.11.0,<2", "z4j-rqscheduler>=1.11.0,<2"]
-dramatiq = ["z4j-dramatiq>=1.11.0,<2"]
-huey = ["z4j-huey>=1.11.0,<2", "z4j-hueyperiodic>=1.11.0,<2"]
-arq = ["z4j-arq>=1.11.0,<2", "z4j-arqcron>=1.11.0,<2"]
-taskiq = ["z4j-taskiq>=1.11.0,<2", "z4j-taskiqscheduler>=1.11.0,<2"]
-apscheduler = ["z4j-apscheduler>=1.11.0,<2"]
-bare = ["z4j-bare>=1.11.0,<2"]
+rq = ["z4j-rq>=1.12.0,<2", "z4j-rqscheduler>=1.12.0,<2"]
+dramatiq = ["z4j-dramatiq>=1.12.0,<2"]
+huey = ["z4j-huey>=1.12.0,<2", "z4j-hueyperiodic>=1.12.0,<2"]
+arq = ["z4j-arq>=1.12.0,<2", "z4j-arqcron>=1.12.0,<2"]
+taskiq = ["z4j-taskiq>=1.12.0,<2", "z4j-taskiqscheduler>=1.12.0,<2"]
+apscheduler = ["z4j-apscheduler>=1.12.0,<2"]
+bare = ["z4j-bare>=1.12.0,<2"]
 
 # ------------------------------------------------------------------
 # Postgres backend (asyncpg for the application; psycopg/libpq for
@@ -189,7 +192,30 @@ postgres = [
 # Sentry init helper degrades to a no-op (sentry-sdk ImportError
 # is logged at WARNING and discarded).
 # ------------------------------------------------------------------
-sentry = ["sentry-sdk>=2.8.0,<3"]
+sentry = [
+    "sentry-sdk>=2.8.0,<3",
+    # urllib3 is what sentry-sdk, botocore and testcontainers carry; at
+    # the floors an installer could otherwise resolve 2.7.0, three
+    # advisories behind 2.8.0. The brain never imports urllib3; the
+    # floor exists for the same reason as the pyjwt one above.
+    "urllib3>=2.8.0",
+]
+
+# ------------------------------------------------------------------
+# S3-compatible export sink (Z4J_EXPORT_SINK=s3). Background audit
+# exports and the scheduled chain-head export stream to any S3 API
+# (AWS, MinIO, Ceph RGW) through aiobotocore. Imported lazily: without
+# this extra the brain runs unchanged and the s3 sink reports the
+# missing package with the install line when it is first used.
+# The sink uses the session, create_client, put_object and the four
+# multipart calls only, all unchanged across the 2.x and 3.x series;
+# a "<3" cap here held wrapt at 1.x and botocore ten months back.
+# ------------------------------------------------------------------
+s3 = [
+    "aiobotocore>=2.21,<4",
+    # See the urllib3 note on the sentry extra.
+    "urllib3>=2.8.0",
+]
 
 # ------------------------------------------------------------------
 # Optional OpenTelemetry tracing via OTLP. Activate with
@@ -245,6 +271,8 @@ test = [
 test-integration = [
     "testcontainers[postgres]>=4.14.2",
     "psycopg[binary]>=3.3.3",
+    # See the urllib3 note on the sentry extra.
+    "urllib3>=2.8.0",
 ]
 
 # ------------------------------------------------------------------
@@ -266,7 +294,7 @@ z4j = "z4j_brain.cli:main"
 [project.urls]
 Homepage = "https://z4j.com"
 Source = "https://github.com/z4jdev/z4j"
-Documentation = "https://z4j.dev"
+Documentation = "https://docs.z4j.com"
 Issues = "https://github.com/z4jdev/z4j/issues"
 Changelog = "https://github.com/z4jdev/z4j/blob/main/CHANGELOG.md"
 
@@ -333,6 +361,11 @@ include = [
   "/docker-compose.yml",
   "/docker-compose.postgres.yml",
   "/docker-compose.caddy.yml",
+  "docker/scheduler-certs.sh",
+  # The whole deployment kit: the Helm chart (deploy/helm/z4j, also
+  # published to ghcr.io/z4jdev/charts/z4j), the plain Kubernetes manifests
+  # (deploy/kubernetes), the systemd units (deploy/systemd) and the
+  # Caddyfile the compose overlay mounts.
   "deploy",
   "docker/rollback-1.8.2-py3147/Dockerfile",
   "docker/rollback-1.8.2-py3147/README.md",
@@ -341,6 +374,10 @@ include = [
   "docker/rollback-1.8.2-py3147/durable_evidence.py",
   "docker/rollback-1.8.2-py3147/recovery_evidence.py",
   "/.env.example",
+  # The release catalogue the kit and the release tooling read from the
+  # sdist root; the packaged copy under backend/src/z4j_brain/data is the
+  # one the running brain reads.
+  "/versions.json",
 ]
 exclude = [
   "dashboard/**/node_modules/**",

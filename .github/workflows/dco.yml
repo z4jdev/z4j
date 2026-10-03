@@ -1,0 +1,73 @@
+name: DCO
+
+# Every commit in a pull request must carry a Developer Certificate of Origin
+# trailer (`git commit -s`). This is the provenance backstop behind the no-CLA
+# promise in CONTRIBUTING.md, so it is a merge gate rather than a reviewer
+# chore. The check is an inline script on purpose: no third-party action reads
+# the commits, and there is nothing to pin or audit beyond the checkout.
+#
+# Merge commits are skipped (GitHub and `git merge` produce them and they carry
+# no authorship of their own). Every other commit between the base and the head
+# of the pull request must contain a `Signed-off-by: Name <email>` trailer.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: dco-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: Signed-off-by on every commit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
+        with:
+          fetch-depth: 0
+
+      - name: Check every commit for a Signed-off-by trailer
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # fetch-depth 0 brings every branch, and the head commit is a parent
+          # of the merge ref the checkout is on. Fetch either end explicitly if
+          # a force-push between trigger and checkout left it missing.
+          for sha in "${BASE_SHA}" "${HEAD_SHA}"; do
+            if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              git fetch --quiet origin "${sha}"
+            fi
+          done
+          commits=$(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}")
+          if [ -z "${commits}" ]; then
+            echo "no non-merge commits between ${BASE_SHA} and ${HEAD_SHA}"
+            exit 0
+          fi
+          checked=0
+          missing=0
+          for sha in ${commits}; do
+            checked=$((checked + 1))
+            if git log -1 --format=%B "${sha}" \
+                | grep -Eq '^Signed-off-by: .+ <[^<>@ ]+@[^<>@ ]+>$'; then
+              continue
+            fi
+            missing=$((missing + 1))
+            echo "::error::commit ${sha} has no Signed-off-by trailer: $(git log -1 --format=%s "${sha}")"
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo
+            echo "${missing} of ${checked} commit(s) lack a DCO sign-off."
+            echo "Sign every commit with 'git commit -s'. To repair this branch:"
+            echo "  git commit --amend -s --no-edit        # only the last commit"
+            echo "  git rebase --signoff ${BASE_SHA}       # every commit on the branch"
+            echo "then push again."
+            exit 1
+          fi
+          echo "all ${checked} commit(s) carry a Signed-off-by trailer"

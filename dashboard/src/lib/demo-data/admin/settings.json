@@ -10,7 +10,7 @@
     },
     {
       "name": "allowed_hosts",
-      "value": "['demo.z4j.dev']",
+      "value": "['demo.z4j.com']",
       "source": "config.env",
       "is_secret": false,
       "description": "Host header allow-list. Required in production."
@@ -108,7 +108,7 @@
     },
     {
       "name": "public_url",
-      "value": "https://demo.z4j.dev",
+      "value": "https://demo.z4j.com",
       "source": "env",
       "is_secret": false,
       "description": "Externally reachable base URL. Used for setup links and cookie scoping."

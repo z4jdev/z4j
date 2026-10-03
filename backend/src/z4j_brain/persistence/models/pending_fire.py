@@ -10,7 +10,7 @@ idempotency key the dispatcher uses on its retries) so brain treats
 duplicate FireSchedule attempts during the buffering window as
 no-ops.
 
-Per ``docs/SCHEDULER.md §11`` Phase 2.
+Per ``docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §11`` Phase 2.
 """
 
 from __future__ import annotations

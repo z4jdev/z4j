@@ -359,7 +359,7 @@ async def test_fixed_throttle_response_reports_its_actual_retry_window(
     error = exc_info.value
     assert error.status_code == status.HTTP_429_TOO_MANY_REQUESTS
     assert error.detail == f"too many requests; retry in {retry_seconds} seconds ({name})"
-    assert error.headers is None
+    assert error.headers == {"Retry-After": str(retry_seconds)}
 
 
 @pytest.mark.asyncio
@@ -389,4 +389,4 @@ async def test_settings_driven_mfa_throttle_uses_same_retry_response_shape(
     error = exc_info.value
     assert error.status_code == status.HTTP_429_TOO_MANY_REQUESTS
     assert error.detail == "too many requests; retry in 60 seconds (mfa-verify)"
-    assert error.headers is None
+    assert error.headers == {"Retry-After": "60"}

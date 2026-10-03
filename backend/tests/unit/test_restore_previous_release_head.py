@@ -19,6 +19,7 @@ from z4j_brain.management_restore import (
     _PRE_TALLY_RELEASE_HEAD,
     _PREVIOUS_RELEASE_HEAD,
     _SQLITE_SOURCE_SCHEMA_DIGESTS,
+    _TALLY_RELEASE_HEAD,
     DatabaseRestoreRefused,
 )
 from z4j_brain.management_restore import (
@@ -300,10 +301,48 @@ def test_configured_prior_head_is_a_supported_postgres_restore_source() -> None:
     assert _LEGACY_SOURCE_HEAD not in (postgres_restore_module._BOUNDARY_D_SOURCE_HEADS)
     assert set(postgres_restore_module._SUPPORTED_SOURCE_HEADS) == {
         RELEASE_MIGRATION_HEAD,
+        _TALLY_RELEASE_HEAD,
         _PREVIOUS_RELEASE_HEAD,
         _PRE_TALLY_RELEASE_HEAD,
         _LEGACY_SOURCE_HEAD,
     }
+
+
+def test_tally_head_keeps_its_schema_contract_and_shares_the_function_contract() -> None:
+    """The 1.11 head became a prior tier with its evidence carried verbatim.
+
+    Its static schema differs from the 1.12 head (the 1.12 migrations add
+    columns, one table and one enum label), so its per-major digests and its
+    SQLite digest are its own.  Its executable functions did not change, so
+    the 1.12 head shares that contract instead of carrying a copy of it.
+    """
+
+    tally = postgres_restore_module._TALLY_SCHEMA_DEFINITIONS_DIGESTS
+    assert set(tally).issuperset({16, 17, 18})
+    for major, digest in tally.items():
+        assert digest != (postgres_restore_module._RELEASE_SCHEMA_DEFINITIONS_DIGESTS.get(major))
+        assert digest != (postgres_restore_module._PRE_TALLY_SCHEMA_DEFINITIONS_DIGESTS.get(major))
+        assert len(digest) == 64
+        assert set(digest) <= set("0123456789abcdef")
+    assert postgres_restore_module._SCHEMA_DEFINITIONS_DIGESTS_BY_HEAD[_TALLY_RELEASE_HEAD] is (
+        tally
+    )
+    assert _TALLY_RELEASE_HEAD in postgres_restore_module._BOUNDARY_D_SOURCE_HEADS
+    tally_function_heads = {RELEASE_MIGRATION_HEAD, _TALLY_RELEASE_HEAD}
+    assert tally_function_heads == postgres_restore_module._TALLY_FUNCTION_SOURCE_HEADS
+    assert postgres_restore_module._RELEASE_FUNCTION_SIGNATURES == (
+        postgres_restore_module._TALLY_FUNCTION_SIGNATURES
+    )
+    assert postgres_restore_module._RELEASE_FUNCTION_DEFINITIONS_DIGEST == (
+        postgres_restore_module._TALLY_FUNCTION_DEFINITIONS_DIGEST
+    )
+    assert postgres_restore_module._PRE_TALLY_FUNCTION_SIGNATURES < (
+        postgres_restore_module._TALLY_FUNCTION_SIGNATURES
+    )
+    assert (
+        _SQLITE_SOURCE_SCHEMA_DIGESTS[_TALLY_RELEASE_HEAD]
+        != (_SQLITE_SOURCE_SCHEMA_DIGESTS[RELEASE_MIGRATION_HEAD])
+    )
 
 
 def test_previous_release_head_schema_contract_covers_supported_majors() -> None:
@@ -625,7 +664,7 @@ def test_head_evidence_guard_accepts_the_shipped_heads() -> None:
 
 @pytest.mark.parametrize(
     "moving_name",
-    ["RELEASE_MIGRATION_HEAD", "_PREVIOUS_RELEASE_HEAD"],
+    ["RELEASE_MIGRATION_HEAD", "_TALLY_RELEASE_HEAD", "_PREVIOUS_RELEASE_HEAD"],
 )
 def test_a_head_bump_without_re_derived_evidence_fails_at_import(
     monkeypatch: pytest.MonkeyPatch,

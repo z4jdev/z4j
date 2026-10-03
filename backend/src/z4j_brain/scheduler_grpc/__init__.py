@@ -2,7 +2,7 @@
 
 Exposes the ``SchedulerService`` defined in
 ``packages/z4j-scheduler/proto/scheduler.proto``. Bound to a
-separate port (``Z4J_SCHEDULER_GRPC_PORT``, default 7701) so it
+separate port (``Z4J_SCHEDULER_GRPC_BIND_PORT``, default 7701) so it
 does not interfere with the public REST/WebSocket surface on 7700.
 
 The brain implements every declared RPC except the legacy reverse
@@ -14,8 +14,10 @@ with older Brain deployments.
 
 Production authentication is mTLS. An explicit development-only setting
 permits a plaintext channel in the exact ``dev`` environment; there is no
-bearer-token authentication on this gRPC service. See ``docs/SCHEDULER.md
-§22``.
+bearer-token authentication on this gRPC service. The ``Z4J_SCHEDULER_GRPC_*``
+settings are documented in the docs site's environment variable reference
+(``sites/z4j-dev/src/content/docs/reference/env-vars.md``); the original design
+is ``docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md`` §22.
 
 Submodules:
 

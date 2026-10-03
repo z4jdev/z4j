@@ -9,8 +9,10 @@ attached to every log record inside a request via the
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
 from structlog.types import EventDict, Processor
@@ -36,6 +38,7 @@ def configure_logging(*, level: str, json_output: bool) -> None:
         structlog.processors.StackInfoRenderer(),
         timestamper,
         _drop_secrets,
+        _redact_http_request_urls,
     ]
 
     structlog.configure(
@@ -85,6 +88,80 @@ def configure_logging(*, level: str, json_output: bool) -> None:
     # Quiet down libraries that scream by default.
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    # httpx logs ``HTTP Request: POST <full url> "HTTP/1.1 200 OK"`` at
+    # INFO for every response. The brain's outbound URLs carry the
+    # secret: Slack, Teams and Discord webhook paths, the Telegram bot
+    # token, the audit forwarder's SIEM intake URL. Quiet both loggers,
+    # and keep a filter on them so an operator who raises ``httpx`` to
+    # DEBUG still sees scheme and host only.
+    for name in ("httpx", "httpcore"):
+        quiet = logging.getLogger(name)
+        quiet.setLevel(logging.WARNING)
+        quiet.addFilter(_HTTP_REQUEST_URL_FILTER)
+
+
+_HTTP_REQUEST_PREFIX = "HTTP Request:"
+_HTTP_REQUEST_LINE = re.compile(r"^(HTTP Request: \S+ )(\S+)(.*)$", re.DOTALL)
+
+
+def _url_origin(url: object) -> str:
+    """``scheme://host[:port]`` of a URL; the path, query and userinfo are gone."""
+    try:
+        parts = urlsplit(str(url))
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return "[redacted-url]"
+    if not parts.scheme or not host:
+        return "[redacted-url]"
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None:
+        host = f"{host}:{port}"
+    return f"{parts.scheme}://{host}"
+
+
+class _HttpRequestUrlFilter(logging.Filter):
+    """Rewrite httpx's request line to scheme and host before any handler sees it.
+
+    Attached to the ``httpx`` and ``httpcore`` loggers, so it runs even
+    when an operator installs their own handler there.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.msg
+        args = record.args
+        if (
+            isinstance(msg, str)
+            and msg.startswith(_HTTP_REQUEST_PREFIX)
+            and isinstance(args, tuple)
+            and len(args) >= 2
+        ):
+            record.args = (args[0], _url_origin(args[1]), *args[2:])
+        return True
+
+
+_HTTP_REQUEST_URL_FILTER = _HttpRequestUrlFilter()
+
+
+def _redact_http_request_urls(
+    logger: Any,
+    method_name: str,
+    event_dict: EventDict,
+) -> EventDict:
+    """Second line of defence for the httpx request line, at the structlog layer.
+
+    The stdlib filter above rewrites the record's arguments; this
+    processor rewrites the rendered event, so a copy of the line that
+    reaches the formatter through any other logger still carries the
+    scheme and host only.
+    """
+    event = event_dict.get("event")
+    if isinstance(event, str) and event.startswith(_HTTP_REQUEST_PREFIX):
+        match = _HTTP_REQUEST_LINE.match(event)
+        if match is not None:
+            event_dict["event"] = f"{match.group(1)}{_url_origin(match.group(2))}{match.group(3)}"
+    return event_dict
 
 
 def _drop_secrets(

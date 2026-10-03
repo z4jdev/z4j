@@ -1,5 +1,5 @@
 /**
- * api.demo.ts -- in-browser mock-fetch interceptor for demo.z4j.dev.
+ * api.demo.ts -- in-browser mock-fetch interceptor for demo.z4j.com.
  *
  * Loaded ONLY when the SPA was built with VITE_Z4J_DEMO_MODE=true
  * (see scripts/build-demo.mjs and the conditional import in api.ts).
@@ -411,7 +411,7 @@ const ROUTES: RouteHandler[] = [
   },
 
   // v1.6: Live Activity Feed. Cross-project audit-log timeline.
-  // Demo data is a seeded snapshot; live polling on demo.z4j.dev
+  // Demo data is a seeded snapshot; live polling on demo.z4j.com
   // returns the same N rows on every refresh which is fine because
   // the visitor's session is short and the page renders rich content
   // immediately. (Round 4 Frontend H1.)
@@ -733,8 +733,33 @@ const ROUTES: RouteHandler[] = [
     handler: (_req, match) => serveJson(`projects/${match[1]}/agents.json`)(),
   },
   {
+    // The demo queues no exports, so a single job is never found. Precedes
+    // the list route, which would otherwise read the id as a query suffix.
     method: "GET",
-    pattern: /^\/api\/v1\/projects\/([^/]+)\/audit/,
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/audit\/export-jobs\/[^/?]+/,
+    handler: () =>
+      new Response(
+        JSON.stringify({
+          error: "demo_record_not_found",
+          message: "The demo queues no export jobs",
+        }),
+        { status: 404, headers: { "content-type": "application/json" } },
+      ),
+  },
+  {
+    // What a brain without an export sink answers: an empty list and a null
+    // sink, which the Exports panel renders as its documented empty state.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/audit\/export-jobs(?:\?|$)/,
+    handler: () =>
+      Response.json({ items: [], sink: null, sink_location: null }),
+  },
+  {
+    // Anchored to the collection path, as with /tasks above. Unanchored,
+    // this answered /audit/export-jobs with twenty audit rows, which the
+    // Exports panel rendered as twenty empty export jobs.
+    method: "GET",
+    pattern: /^\/api\/v1\/projects\/([^/]+)\/audit(?:\?|$)/,
     handler: (req, match) =>
       serveHistoryPage(req, `projects/${match[1]}/audit.json`),
   },
@@ -944,7 +969,7 @@ export async function demoFetch(
       // read the body have one. URL might be a relative path; that
       // is fine for body-reading purposes.
       const req = new Request(
-        url.startsWith("http") ? url : `http://demo.z4j.dev${url}`,
+        url.startsWith("http") ? url : `http://demo.z4j.com${url}`,
         init,
       );
       return route.handler(req, m);

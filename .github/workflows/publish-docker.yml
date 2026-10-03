@@ -2,7 +2,9 @@
 # z4j Docker publish, from the published sdist
 #
 # Builds and publishes the multi-arch runtime image for a version that is
-# ALREADY on PyPI, signs it keylessly with cosign, and attests its provenance.
+# ALREADY on PyPI, signs it keylessly with cosign, attests its provenance, and
+# attaches a syft SPDX SBOM to the published index as an attestation (the same
+# file is kept as a workflow artifact).
 #
 # Why this exists alongside release-docker.yml
 # --------------------------------------------
@@ -233,6 +235,40 @@ jobs:
           subject-name: docker.io/${{ env.IMAGE }}
           subject-digest: ${{ steps.manifest.outputs.index_digest }}
           push-to-registry: true
+
+      # The SBOM is generated from what the registry serves, by digest, not
+      # from the build context, so it describes the bytes a user pulls. syft
+      # resolves a multi-arch index to the runner's platform, so the document
+      # describes the linux/amd64 manifest; the arm64 manifest is built from the
+      # same sdist with the same locked versions.
+      - name: Generate the image SBOM with syft (SPDX JSON)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3; immutable ref; audited 2026-10-02
+        with:
+          image: docker.io/${{ env.IMAGE }}@${{ steps.manifest.outputs.index_digest }}
+          format: spdx-json
+          output-file: z4j-${{ inputs.version }}.spdx.json
+          # The action's own uploads are off: the artifact goes up through the
+          # same pinned upload-artifact step the digests use, release-asset
+          # upload only acts on release events and this workflow is dispatched
+          # by hand, and the dependency snapshot API is not part of this gate.
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Attest the SBOM to the published index
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0; immutable ref; audited 2026-10-02
+        with:
+          subject-name: docker.io/${{ env.IMAGE }}
+          subject-digest: ${{ steps.manifest.outputs.index_digest }}
+          sbom-path: z4j-${{ inputs.version }}.spdx.json
+          push-to-registry: true
+
+      - name: Upload the SBOM as a workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # immutable ref; audited 2026-08-20
+        with:
+          name: sbom-z4j-${{ inputs.version }}-spdx
+          path: z4j-${{ inputs.version }}.spdx.json
+          if-no-files-found: error
 
       - name: Verify what the registry now serves
         env:

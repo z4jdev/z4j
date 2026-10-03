@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from z4j_brain.auth.passwords import PasswordHasher
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.domain.auth_service import AuthService
+    from z4j_brain.domain.ip_allowlist import IpDenial
     from z4j_brain.domain.setup_service import SetupService
     from z4j_brain.persistence.models import Session as SessionRow
     from z4j_brain.persistence.models import User
@@ -145,6 +146,12 @@ def _release_touch_slot(key_id: UUID) -> None:
 #: ``last_used_at`` bookkeeping for :func:`_drain_api_key_touch` to run once
 #: the request's own session has been closed.
 _TOUCH_STATE_ATTR = "z4j_api_key_touch"
+
+#: ``request.state`` key under which a source-address allowlist refusal
+#: parks its :class:`~z4j_brain.domain.ip_allowlist.IpDenial` (plus the
+#: user agent and path) for :func:`_drain_ip_denial` to write the
+#: ``auth.ip_denied`` row once the request's own session has closed.
+_IP_DENIAL_STATE_ATTR = "z4j_ip_denial"
 
 # Session activity uses the same post-request shape as API-key activity:
 # authentication runs in the handler's request transaction, but the activity
@@ -300,6 +307,46 @@ async def _drain_api_key_touch(request: Request) -> None:
         _release_touch_slot(key_id)
 
 
+async def _drain_ip_denial(request: Request) -> None:
+    """Write the ``auth.ip_denied`` row for a request an allowlist refused.
+
+    Runs from :func:`get_session`'s teardown for the same reason the other
+    drains do: the row needs a write session of its own (the request's is
+    read-only on a GET and is being rolled back on the way out with the
+    refusal), and a second connection taken during the request waits behind
+    the one the request holds, which on a pool of one never returns.
+
+    The denial was already counted in ``z4j_auth_ip_denied_total`` at
+    refusal time; a failure here is counted as a swallowed exception so the
+    two series disagreeing is the visible symptom.
+    """
+    pending = getattr(request.state, _IP_DENIAL_STATE_ATTR, None)
+    if pending is None:
+        return
+    setattr(request.state, _IP_DENIAL_STATE_ATTR, None)
+    denial, user_agent, path = pending
+    try:
+        from z4j_brain.domain.ip_allowlist import record_ip_denial
+
+        db_mgr = getattr(request.app.state, "db", None)
+        audit = getattr(request.app.state, "audit_service", None)
+        if db_mgr is None or audit is None:
+            return
+        async with db_mgr.session(write=True) as denial_session:
+            await record_ip_denial(
+                audit,
+                AuditLogRepository(denial_session),
+                denial,
+                user_agent=user_agent,
+                path=path,
+            )
+            await denial_session.commit()
+    except Exception:
+        from z4j_brain.api.metrics import record_swallowed
+
+        record_swallowed("deps.ip_allowlist", "denial_audit")
+
+
 # ---------------------------------------------------------------------------
 # Settings + DB
 # ---------------------------------------------------------------------------
@@ -338,6 +385,7 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
         async with db.session(write=write) as session:
             yield session
     finally:
+        await _drain_ip_denial(request)
         await _drain_session_revoke(request)
         await _drain_session_touch(request)
         await _drain_api_key_touch(request)
@@ -478,6 +526,61 @@ def get_client_ip(request: Request) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Source-address allowlists
+#
+# Evaluated AFTER the credential authenticates and AFTER the trusted-proxy
+# resolution of the client IP (``get_client_ip``). The refusal is parked on
+# the request so ``_drain_ip_denial`` can write the audit row on a session
+# of its own; the metric is bumped at refusal time by the domain module.
+# See ``z4j_brain.domain.ip_allowlist`` for the contract.
+# ---------------------------------------------------------------------------
+
+
+def _refuse_ip(request: Request, denial: IpDenial) -> None:
+    """Park ``denial`` for the audit drain and raise its 403."""
+    user_agent = request.headers.get("user-agent")
+    setattr(
+        request.state,
+        _IP_DENIAL_STATE_ATTR,
+        (denial, user_agent[:256] if user_agent else None, request.url.path),
+    )
+    raise denial.error()
+
+
+def _enforce_dashboard_ip(
+    request: Request,
+    settings: Settings,
+    *,
+    user_id: UUID | None,
+) -> None:
+    """Refuse a session-cookie or login request from outside the dashboard list."""
+    from z4j_brain.domain.ip_allowlist import check_dashboard_ip
+
+    denial = check_dashboard_ip(
+        get_client_ip(request),
+        settings=settings,
+        user_id=user_id,
+    )
+    if denial is not None:
+        _refuse_ip(request, denial)
+
+
+async def require_dashboard_ip(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _db_session: AsyncSession = Depends(get_session),
+) -> None:
+    """Route dependency for the login route: the one pre-credential check.
+
+    There is no user to attribute yet, so this refuses before the password
+    is looked at; a caller outside the list learns nothing about the
+    account. ``get_session`` is a dependency only so its teardown, which
+    writes the audit row, is guaranteed to run.
+    """
+    _enforce_dashboard_ip(request, settings, user_id=None)
+
+
+# ---------------------------------------------------------------------------
 # Current user resolution
 # ---------------------------------------------------------------------------
 
@@ -533,6 +636,11 @@ async def get_optional_session(
     # ``auth_kind == "api_key"``; setting ``"session"`` here makes
     # the contract explicit.
     if resolved is not None:
+        # Source-address allowlist, after the cookie authenticated and
+        # before anything is attributed to it. A refusal here propagates
+        # as 403 through every wrapper, optional auth included: a valid
+        # cookie from outside the list is not "anonymous", it is refused.
+        _enforce_dashboard_ip(request, settings, user_id=resolved[1].id)
         request.state.auth_kind = "session"
         setattr(request.state, _SESSION_TOUCH_STATE_ATTR, resolved[0].id)
     return resolved
@@ -615,6 +723,24 @@ async def _resolve_bearer_user(  # noqa: PLR0912, PLR0915  bearer auth resolutio
             "api key owner is inactive",
             details={"reason": "owner_inactive"},
         )
+
+    # Source-address allowlists: the global API list, then the key's own
+    # ``allowed_cidrs``. After the key authenticated (so the audit row
+    # names it) and before any scope or project check (so a caller
+    # outside the list learns nothing about the key's reach). The
+    # ``last_used`` stamp is parked further down, so a refused request
+    # does not count as a use.
+    from z4j_brain.domain.ip_allowlist import check_api_ip
+
+    denial = check_api_ip(
+        get_client_ip(request),
+        settings=settings,
+        key_cidrs=getattr(key_row, "allowed_cidrs", None),
+        api_key_id=key_row.id,
+        user_id=user.id,
+    )
+    if denial is not None:
+        _refuse_ip(request, denial)
 
     # Scope check against the matched route. FastAPI populates
     # ``request.scope["route"]`` before the endpoint's deps run.

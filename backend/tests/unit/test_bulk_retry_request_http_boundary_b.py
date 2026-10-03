@@ -103,9 +103,12 @@ async def bulk_http(tmp_path: Any) -> dict[str, Any]:
                     ),
                     protocol_version=CURRENT_PROTOCOL,
                     framework_adapter="bare",
-                    engine_adapters=["celery"],
+                    engine_adapters=["celery", "rq"],
                     scheduler_adapters=[],
-                    capabilities={},
+                    capabilities={
+                        "celery": ["retry_task", "bulk_retry", "retry_by_reference_v1"],
+                        "rq": ["retry_task", "bulk_retry", "retry_by_reference_v1"],
+                    },
                     state=AgentState.ONLINE,
                 ),
                 Membership(

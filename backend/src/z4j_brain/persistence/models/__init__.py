@@ -22,6 +22,7 @@ from z4j_brain.persistence.models.audit_chain import (
     AuditChainPreparation,
     AuditChainState,
 )
+from z4j_brain.persistence.models.audit_forward_state import AuditForwardState
 from z4j_brain.persistence.models.audit_log import AuditLog
 from z4j_brain.persistence.models.automation_firing_outbox import (
     AutomationFiringOutbox,
@@ -100,6 +101,7 @@ __all__ = [
     "ApiKey",
     "AuditChainPreparation",
     "AuditChainState",
+    "AuditForwardState",
     "AuditLog",
     "AutomationFiringOutbox",
     "AutomationRule",

@@ -38,6 +38,7 @@ from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.domain.schedule_cadence import (
     CADENCE_SEMANTICS_VERSION,
     cadence_runtime_fingerprint,
+    canonical_next_run_at,
 )
 from z4j_brain.domain.schedule_fire_authority import (
     derive_scheduler_fire_id,
@@ -204,6 +205,8 @@ async def _seed_schedule(
     brain_app,
     project_id: uuid.UUID,
     name: str,
+    *,
+    planning_at: datetime | None = None,
     **overrides,
 ) -> uuid.UUID:
     """Pre-seed one row the way the product creates it, and return its id.
@@ -211,6 +214,10 @@ async def _seed_schedule(
     Through the control repository, because Boundary D refuses a direct
     INSERT into ``schedules``. A hand-built row is a row no operator's
     database contains, so an endpoint tested against one is untested.
+
+    ``planning_at`` is the clock the first ``next_run_at`` is planned from;
+    a time in the past yields a schedule whose slots are already due, which
+    is what a recorded skip needs.
     """
     data: dict[str, object] = {
         "engine": "celery",
@@ -229,10 +236,62 @@ async def _seed_schedule(
         row = await ScheduleControlRepository(s).create_current(
             project_id=project_id,
             data=data,
-            planning_at=datetime.now(UTC),
+            planning_at=planning_at or datetime.now(UTC),
         )
         await s.commit()
         return row.id
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def _record_skip(
+    brain_app,
+    project_id: uuid.UUID,
+    schedule_id: uuid.UUID,
+    *,
+    occurred_at: datetime,
+) -> None:
+    """Record one discarded slot the way the scheduler does.
+
+    The scheduler moves its cursor past a slot it could not fire on time with
+    ``AdvanceScheduleCursor``; the brain lands that as a cursor transition
+    carrying ``skipped_through``. This drives the same repository method the
+    gRPC handler does, with the successor the brain's own cadence authority
+    computes, so the evidence is exactly what a real skip leaves behind.
+    """
+    async with brain_app.state.db.session() as s:
+        row = await s.get(Schedule, schedule_id)
+        assert row is not None
+        assert row.control_token is not None
+        assert row.definition_digest is not None
+        assert row.schedule_revision is not None
+        assert row.next_run_at is not None
+        skipped = _aware(row.next_run_at)
+        prepared = canonical_next_run_at(
+            kind=row.kind.value,
+            expression=row.expression,
+            timezone=row.timezone,
+            last_run_at=skipped,
+            anchor_at=skipped,
+        )
+        transition = await ScheduleControlRepository(s).advance_cursor(
+            project_id=project_id,
+            schedule_id=schedule_id,
+            observed_control_token=row.control_token,
+            definition_digest=row.definition_digest,
+            expected_revision=row.schedule_revision,
+            expected_last_run_at=row.last_run_at,
+            expected_next_run_at=row.next_run_at,
+            skipped_through=skipped,
+            prepared_next_run_at=prepared,
+            cadence_semantics_version=CADENCE_SEMANTICS_VERSION,
+            cadence_fingerprint=cadence_runtime_fingerprint(),
+            occurred_at=occurred_at,
+        )
+        assert transition.disposition == "applied", transition.disposition
+        await s.commit()
 
 
 def _make_client(brain_app, settings: Settings, seed: dict):
@@ -384,6 +443,76 @@ class TestCreateSchedule:
                 .all()
             )
             assert len(rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_create_without_catch_up_stores_fire_one_missed(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        # A body that says nothing about catch-up lands as fire_one_missed:
+        # a slot that comes due during a watch outage is run on recovery
+        # rather than discarded. Both the response and the row say so.
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        body = _create_body("silent-on-catch-up")
+        del body["catch_up"]
+        async with _make_client(brain_app, settings, seed) as client:
+            r = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=body,
+            )
+        assert r.status_code == 201, r.text
+        assert r.json()["catch_up"] == "fire_one_missed"
+
+        async with brain_app.state.db.session() as s:
+            row = (
+                await s.execute(
+                    select(Schedule).where(Schedule.name == "silent-on-catch-up"),
+                )
+            ).scalar_one()
+            assert row.catch_up == "fire_one_missed"
+
+    @pytest.mark.asyncio
+    async def test_create_with_explicit_catch_up_stores_it_as_sent(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        # The default only fills silence. A caller that asks for skip gets
+        # skip; the positive control above proves the default is live.
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        async with _make_client(brain_app, settings, seed) as client:
+            r = await client.post(
+                "/api/v1/projects/default/schedules",
+                json=_create_body("explicit-skip", catch_up="skip"),
+            )
+        assert r.status_code == 201, r.text
+        assert r.json()["catch_up"] == "skip"
+
+        async with brain_app.state.db.session() as s:
+            row = (
+                await s.execute(
+                    select(Schedule).where(Schedule.name == "explicit-skip"),
+                )
+            ).scalar_one()
+            assert row.catch_up == "skip"
+
+    def test_column_default_is_still_skip(self) -> None:
+        # The request model's default moved; the column's did not. Existing
+        # rows and writers that bypass the request model (imports,
+        # declarative reconciliation, raw inserts) keep ``skip``.
+        column = Schedule.__table__.c.catch_up
+        assert column.default is not None and column.default.arg == "skip"
+        assert column.server_default is not None
+        assert str(column.server_default.arg) == "skip"
 
     @pytest.mark.asyncio
     async def test_create_rejects_operator_role(
@@ -1396,3 +1525,110 @@ class TestImportReplaceForSource:
                 .all()
             )
             assert {r.name for r in rows} == {"from-celerybeat"}
+
+
+# =====================================================================
+# SKIPPED SLOTS (last 24h)
+# =====================================================================
+
+
+class TestSkippedSlots24h:
+    """``skipped_slots_24h`` makes a scheduler-side discard visible here.
+
+    With ``catch_up=skip`` the scheduler drops any slot that comes due while
+    its watch of the brain is unhealthy and says so only in its own log and
+    counter. The brain already holds the evidence (every discard is a cursor
+    transition carrying ``skipped_through``); the read surfaces it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reads_count_skips_recorded_in_the_last_day(
+        self,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _make_seed(
+            settings=settings,
+            brain_app=brain_app,
+            is_admin=True,
+        )
+        now = datetime.now(UTC)
+        # Planned 30h ago, so the first slots are long past due and a skip
+        # recorded 26h ago is still inside the brain's clock-skew bound.
+        planned = now - timedelta(hours=30)
+        skipping = await _seed_schedule(
+            brain_app,
+            seed["project_id"],
+            "skipping",
+            planning_at=planned,
+            catch_up="skip",
+        )
+        quiet = await _seed_schedule(
+            brain_app,
+            seed["project_id"],
+            "quiet",
+            planning_at=planned,
+            catch_up="skip",
+        )
+        # One discard older than the window, two inside it.
+        await _record_skip(
+            brain_app,
+            seed["project_id"],
+            skipping,
+            occurred_at=now - timedelta(hours=26),
+        )
+        await _record_skip(brain_app, seed["project_id"], skipping, occurred_at=now)
+        await _record_skip(brain_app, seed["project_id"], skipping, occurred_at=now)
+
+        async with _make_client(brain_app, settings, seed) as client:
+            # A definition edit that touches no cadence field appends an
+            # ordinary upsert envelope with no transition; it must neither
+            # count nor be reported as counted. The queue is asserted to have
+            # changed so the control is a real envelope, not a no-op.
+            requeued = await client.patch(
+                f"/api/v1/projects/default/schedules/{skipping}",
+                json={"queue": "quiet-lane"},
+            )
+            assert requeued.status_code == 200, requeued.text
+            assert requeued.json()["queue"] == "quiet-lane"
+            assert requeued.json()["skipped_slots_24h"] is None
+
+            one = await client.get(
+                f"/api/v1/projects/default/schedules/{skipping}",
+            )
+            none = await client.get(
+                f"/api/v1/projects/default/schedules/{quiet}",
+            )
+            listing = await client.get("/api/v1/projects/default/schedules")
+
+        assert one.status_code == 200, one.text
+        assert one.json()["skipped_slots_24h"] == 2
+        assert none.status_code == 200, none.text
+        assert none.json()["skipped_slots_24h"] == 0
+
+        assert listing.status_code == 200, listing.text
+        by_id = {item["id"]: item["skipped_slots_24h"] for item in listing.json()["items"]}
+        assert by_id[str(skipping)] == 2
+        assert by_id[str(quiet)] == 0
+
+        # The evidence the count is taken from: three skip transitions on
+        # the one schedule, one of them outside the window, plus the requeue.
+        async with brain_app.state.db.session() as s:
+            envelopes = (
+                (
+                    await s.execute(
+                        select(ScheduleChangeLog)
+                        .where(ScheduleChangeLog.schedule_id == skipping)
+                        .order_by(ScheduleChangeLog.revision),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        kinds = [
+            (env.snapshot or {}).get("transition", {}).get("kind")
+            for env in envelopes
+            if env.change_kind == "upsert"
+        ]
+        assert kinds.count("skip_no_work") == 3, kinds
+        assert kinds[-1] is None, kinds  # the requeue carries no transition

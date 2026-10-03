@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from z4j_brain.domain.policy_engine import PolicyEngine, role_rank
+from z4j_brain.domain.policy_engine import Action, PolicyEngine, role_rank
 from z4j_brain.errors import AuthorizationError, NotFoundError
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
@@ -24,8 +24,21 @@ class TestRoleRank:
     def test_admin_outranks_operator(self) -> None:
         assert role_rank(ProjectRole.ADMIN) > role_rank(ProjectRole.OPERATOR)
 
-    def test_operator_outranks_viewer(self) -> None:
-        assert role_rank(ProjectRole.OPERATOR) > role_rank(ProjectRole.VIEWER)
+    def test_operator_outranks_auditor(self) -> None:
+        assert role_rank(ProjectRole.OPERATOR) > role_rank(ProjectRole.AUDITOR)
+
+    def test_auditor_outranks_viewer(self) -> None:
+        assert role_rank(ProjectRole.AUDITOR) > role_rank(ProjectRole.VIEWER)
+
+    def test_rank_is_the_core_table(self) -> None:
+        # D-4: the brain carries no role order of its own.
+        import z4j_brain.domain.policy_engine as brain_policy
+        from z4j_core.policy import ROLE_ORDER
+        from z4j_core.policy import role_rank as core_role_rank
+
+        assert brain_policy.role_rank is core_role_rank
+        assert not hasattr(brain_policy, "_ROLE_RANK")
+        assert {role: role_rank(role) for role in ProjectRole} == ROLE_ORDER
 
 
 @pytest.fixture
@@ -73,6 +86,21 @@ async def operator_user(session: AsyncSession, project: Project) -> User:
     session.add(user)
     await session.flush()
     session.add(Membership(user_id=user.id, project_id=project.id, role=ProjectRole.OPERATOR))
+    await session.commit()
+    return user
+
+
+@pytest.fixture
+async def auditor_user(session: AsyncSession, project: Project) -> User:
+    user = User(
+        email="auditor@example.com",
+        password_hash="x",
+        is_admin=False,
+        is_active=True,
+    )
+    session.add(user)
+    await session.flush()
+    session.add(Membership(user_id=user.id, project_id=project.id, role=ProjectRole.AUDITOR))
     await session.commit()
     return user
 
@@ -190,6 +218,83 @@ class TestRequireMember:
             min_role=ProjectRole.VIEWER,
         )
         assert membership.role == ProjectRole.OPERATOR
+
+    async def test_action_resolves_through_the_core_table(
+        self,
+        session: AsyncSession,
+        project: Project,
+        auditor_user: User,
+        operator_user: User,
+    ) -> None:
+        policy = PolicyEngine()
+        memberships = MembershipRepository(session)
+        membership = await policy.require_member(
+            memberships,
+            user=auditor_user,
+            project=project,
+            action=Action.READ_AUDIT,
+        )
+        assert membership.role == ProjectRole.AUDITOR
+        # The denial names the role the core table requires, so the
+        # 403 envelope's ``need`` is the same vocabulary the docs use.
+        with pytest.raises(AuthorizationError) as denied:
+            await policy.require_member(
+                memberships,
+                user=operator_user,
+                project=project,
+                action=Action.READ_AUDIT,
+            )
+        assert denied.value.details == {"have": "operator", "need": "auditor"}
+        with pytest.raises(AuthorizationError) as denied:
+            await policy.require_member(
+                memberships,
+                user=auditor_user,
+                project=project,
+                action=Action.RETRY_TASK,
+            )
+        assert denied.value.details == {"have": "auditor", "need": "operator"}
+
+    async def test_auditor_is_a_member_for_viewer_floors(
+        self,
+        session: AsyncSession,
+        project: Project,
+        auditor_user: User,
+    ) -> None:
+        policy = PolicyEngine()
+        memberships = MembershipRepository(session)
+        membership = await policy.require_member(
+            memberships,
+            user=auditor_user,
+            project=project,
+            min_role=ProjectRole.VIEWER,
+        )
+        assert membership.role == ProjectRole.AUDITOR
+        with pytest.raises(AuthorizationError):
+            await policy.require_member(
+                memberships,
+                user=auditor_user,
+                project=project,
+                min_role=ProjectRole.OPERATOR,
+            )
+
+    async def test_exactly_one_of_action_or_min_role(
+        self,
+        session: AsyncSession,
+        project: Project,
+        viewer_user: User,
+    ) -> None:
+        policy = PolicyEngine()
+        memberships = MembershipRepository(session)
+        with pytest.raises(TypeError):
+            await policy.require_member(memberships, user=viewer_user, project=project)
+        with pytest.raises(TypeError):
+            await policy.require_member(
+                memberships,
+                user=viewer_user,
+                project=project,
+                min_role=ProjectRole.VIEWER,
+                action=Action.READ_PROJECT,
+            )
 
     async def test_global_admin_bypasses(
         self,

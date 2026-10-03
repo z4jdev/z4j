@@ -74,7 +74,7 @@ class MembershipPublic(BaseModel):
 
 class GrantMembershipRequest(BaseModel):
     user_id: uuid.UUID
-    role: str  # one of "viewer" / "operator" / "admin"
+    role: str  # a ``ProjectRole`` value: "viewer" / "auditor" / "operator" / "admin"
 
 
 class UpdateMembershipRequest(BaseModel):

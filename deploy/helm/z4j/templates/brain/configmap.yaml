@@ -1,0 +1,60 @@
+{{- if .Values.brain.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "z4j.fullname" . }}
+  labels:
+    {{- include "z4j.brain.labels" . | nindent 4 }}
+data:
+  # Every non-secret setting lands here so an operator inspecting the
+  # ConfigMap sees the whole posture in one place. Secrets (application
+  # keys, database credentials, the metrics token) come via dedicated env
+  # entries on the Deployment so they can be sourced from Secret references.
+  Z4J_HOME: /data
+  Z4J_BIND_HOST: "0.0.0.0"
+  Z4J_BIND_PORT: {{ .Values.brain.service.httpPort | quote }}
+  Z4J_ENVIRONMENT: {{ .Values.brain.environment | quote }}
+  Z4J_PUBLIC_URL: {{ .Values.brain.publicUrl | quote }}
+  Z4J_ALLOWED_HOSTS: {{ .Values.brain.allowedHosts | toJson | quote }}
+  Z4J_ALLOW_HTTP_PUBLIC_URL: {{ .Values.brain.allowHttpPublicUrl | quote }}
+  {{- with .Values.brain.trustedProxies }}
+  Z4J_TRUSTED_PROXIES: {{ . | toJson | quote }}
+  {{- end }}
+  Z4J_LOG_LEVEL: {{ .Values.brain.logLevel | quote }}
+  Z4J_LOG_JSON: {{ .Values.brain.logJson | quote }}
+  Z4J_EVENT_RETENTION_DAYS: {{ .Values.brain.eventRetentionDays | quote }}
+  Z4J_AUDIT_RETENTION_DAYS: {{ .Values.brain.auditRetentionDays | quote }}
+  {{- if not (include "z4j.brain.usesSqlite" .) }}
+  # Multi-worker safe registry on PostgreSQL. SQLite forces ``local``.
+  Z4J_REGISTRY_BACKEND: postgres_notify
+  {{- end }}
+  {{- if .Values.postgresql.enabled }}
+  # Structured fields, read by the CLI's configuration capture, so the
+  # password never has to be interpolated into a URL. The bundled database
+  # lives on the cluster network with no TLS, exactly like the compose
+  # stack's private bridge.
+  Z4J_DATABASE_HOST: {{ include "z4j.postgresql.host" . | quote }}
+  Z4J_DATABASE_PORT: "5432"
+  Z4J_DATABASE_USER: {{ .Values.postgresql.auth.username | quote }}
+  Z4J_DATABASE_NAME: {{ .Values.postgresql.auth.database | quote }}
+  Z4J_REQUIRE_DB_SSL: "false"
+  {{- else if or .Values.brain.database.url .Values.brain.database.existingSecret }}
+  Z4J_REQUIRE_DB_SSL: {{ .Values.brain.database.requireSsl | quote }}
+  {{- end }}
+  {{- if .Values.brain.embeddedScheduler }}
+  Z4J_EMBEDDED_SCHEDULER: "true"
+  {{- end }}
+  {{- if .Values.scheduler.enabled }}
+  # mTLS gRPC listener for the standalone scheduler. The server
+  # certificate, key and the CA that signs the scheduler client
+  # certificates are mounted from the Secret named in the Deployment.
+  Z4J_SCHEDULER_GRPC_ENABLED: "true"
+  Z4J_SCHEDULER_GRPC_BIND_HOST: "0.0.0.0"
+  Z4J_SCHEDULER_GRPC_BIND_PORT: {{ .Values.brain.service.grpcPort | quote }}
+  Z4J_SCHEDULER_GRPC_TLS_CERT: /etc/z4j/scheduler-grpc-tls/tls.crt
+  Z4J_SCHEDULER_GRPC_TLS_KEY: /etc/z4j/scheduler-grpc-tls/tls.key
+  Z4J_SCHEDULER_GRPC_TLS_CA: /etc/z4j/scheduler-grpc-tls/ca.crt
+  Z4J_SCHEDULER_GRPC_ALLOWED_CNS: {{ .Values.brain.schedulerGrpc.allowedCNs | toJson | quote }}
+  Z4J_SCHEDULER_GRPC_REQUIRE_ALLOWLIST: {{ .Values.brain.schedulerGrpc.requireAllowlist | quote }}
+  {{- end }}
+{{- end }}

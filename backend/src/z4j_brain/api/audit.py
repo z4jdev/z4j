@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 
@@ -42,19 +42,25 @@ from z4j_brain.api._pagination import (
     encode_cursor,
 )
 from z4j_brain.api.deps import (
+    get_audit_service,
+    get_client_ip,
     get_current_user,
+    get_db,
     get_membership_repo,
     get_project_repo,
     get_session,
     get_settings,
+    resolve_api_key_id,
 )
+from z4j_brain.domain.policy_engine import Action
 from z4j_brain.errors import ValidationError
-from z4j_brain.persistence.enums import ProjectRole
 from z4j_brain.persistence.models import AuditLog
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from z4j_brain.domain.audit_service import AuditService
+    from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.persistence.models import User
     from z4j_brain.persistence.repositories import (
         MembershipRepository,
@@ -148,6 +154,14 @@ _ALL_EXPORT_FIELDS: list[FieldDef] = [
 ]
 
 
+#: Public name for the export columns, so the export-jobs worker writes
+#: the same columns in the same order as the synchronous download.
+AUDIT_EXPORT_FIELDS: list[FieldDef] = _ALL_EXPORT_FIELDS
+
+#: Column names a caller may select, in export order.
+AUDIT_EXPORT_FIELD_NAMES: tuple[str, ...] = tuple(name for name, _ in _ALL_EXPORT_FIELDS)
+
+
 def _resolve_fields(selected: list[str] | None) -> list[FieldDef]:
     """Filter the full field set to a caller-selected subset.
 
@@ -162,9 +176,47 @@ def _resolve_fields(selected: list[str] | None) -> list[FieldDef]:
     return [(name, by_name[name]) for name in selected if name in by_name]
 
 
+#: The worker's name for :func:`_resolve_fields`.
+resolve_audit_export_fields = _resolve_fields
+
+
+def build_audit_export_statement(
+    project_id: uuid.UUID,
+    *,
+    action_prefix: str | None = None,
+    outcome: str | None = None,
+    user_id: uuid.UUID | None = None,
+    since: datetime | None = None,
+) -> Any:
+    """The filtered, unordered ``SELECT`` behind every audit export.
+
+    Shared by the synchronous download and the export-jobs worker so the
+    two cannot disagree about what a filter means. Callers add their own
+    ordering and limit: the download orders newest first and caps, the
+    worker orders the same way and pages.
+    """
+    stmt = select(AuditLog).where(AuditLog.project_id == project_id)
+    if action_prefix:
+        # Escape LIKE metacharacters so a filter like "task.%" or
+        # "audit_" is matched LITERALLY, not as a wildcard. Bare
+        # startswith() left %/_ active (parity gap with activity.py's
+        # M16 fix); autoescape handles %, _ and the escape char.
+        stmt = stmt.where(
+            AuditLog.action.startswith(action_prefix, autoescape=True),
+        )
+    if outcome:
+        stmt = stmt.where(AuditLog.outcome == outcome)
+    if user_id is not None:
+        stmt = stmt.where(AuditLog.user_id == user_id)
+    if since is not None:
+        stmt = stmt.where(AuditLog.occurred_at >= since)
+    return stmt
+
+
 @router.get("")
 async def list_audit(
     slug: str,
+    request: Request,
     action_prefix: str | None = Query(default=None, max_length=80),
     outcome: str | None = Query(default=None, max_length=20),
     user_id: uuid.UUID | None = Query(default=None),
@@ -196,18 +248,31 @@ async def list_audit(
     projects: ProjectRepository = Depends(get_project_repo),
     db_session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
+    db: DatabaseManager = Depends(get_db),
+    audit_service: AuditService = Depends(get_audit_service),
+    ip: str = Depends(get_client_ip),
 ) -> Any:
     """List audit log entries for one project.
 
-    Requires admin role on the project - audit reads are
-    privileged because they can reveal who did what when, which
-    is itself sensitive.
+    Requires the auditor tier on the project (``auditor`` or
+    ``admin``): audit reads are privileged because they reveal who
+    did what when, which is itself sensitive, and they are kept
+    away from the operator tier so the people who review the
+    record are not the people who produce it. The list path is
+    ``Action.READ_AUDIT``; the export path is ``Action.EXPORT_AUDIT``.
+    Both resolve to the same tier through the core table.
 
     When ``format`` is ``csv`` / ``json`` the response is a file
     download containing up to 50 000 matching rows; ``xlsx`` is
     capped at 25 000 because its workbook is built in memory.
     Cursor + limit are ignored on the export path - operators
     narrow via the filter params instead.
+
+    A served export is itself recorded: one ``audit.export`` row through
+    the chained writer naming the format, the filters, the selected
+    columns and the row count, so the trail shows who took a copy of it
+    and how much. The list path writes nothing; a page read is not an
+    extraction.
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
 
@@ -217,24 +282,16 @@ async def list_audit(
         memberships,
         user=user,
         project=project,
-        min_role=ProjectRole.ADMIN,
+        action=Action.EXPORT_AUDIT if format is not None else Action.READ_AUDIT,
     )
 
-    stmt = select(AuditLog).where(AuditLog.project_id == project.id)
-    if action_prefix:
-        # Escape LIKE metacharacters so a filter like "task.%" or
-        # "audit_" is matched LITERALLY, not as a wildcard. Bare
-        # startswith() left %/_ active (parity gap with activity.py's
-        # M16 fix); autoescape handles %, _ and the escape char.
-        stmt = stmt.where(
-            AuditLog.action.startswith(action_prefix, autoescape=True),
-        )
-    if outcome:
-        stmt = stmt.where(AuditLog.outcome == outcome)
-    if user_id is not None:
-        stmt = stmt.where(AuditLog.user_id == user_id)
-    if since is not None:
-        stmt = stmt.where(AuditLog.occurred_at >= since)
+    stmt = build_audit_export_statement(
+        project.id,
+        action_prefix=action_prefix,
+        outcome=outcome,
+        user_id=user_id,
+        since=since,
+    )
 
     # Export path: no pagination, full result (capped).
     if format is not None:
@@ -247,11 +304,44 @@ async def list_audit(
         if len(rows) > export_cap:
             raise ValidationError(
                 f"{format} audit export is capped at {export_cap} rows; "
-                "narrow the filter (action, outcome, since)",
+                "narrow the filter (action, outcome, since), or queue a "
+                "background export job (POST .../audit/export-jobs) when "
+                "an export sink is configured",
                 details={"cap": export_cap, "format": format},
             )
         selected = [f.strip() for f in fields.split(",") if f.strip()] if fields else None
         field_defs = _resolve_fields(selected)
+        # The row goes on a write session of its own, as the dead-letter
+        # listing's does: the request session is a read unit on a GET.
+        from z4j_brain.persistence.repositories import AuditLogRepository
+
+        user_agent = request.headers.get("user-agent")
+        async with db.session(write=True) as write_session:
+            await audit_service.record(
+                AuditLogRepository(write_session),
+                action="audit.export",
+                target_type="audit_log",
+                target_id=slug,
+                result="success",
+                outcome="allow",
+                user_id=user.id,
+                project_id=project.id,
+                api_key_id=resolve_api_key_id(request),
+                source_ip=ip or None,
+                user_agent=user_agent[:256] if user_agent else None,
+                metadata={
+                    "format": format,
+                    "row_count": len(rows),
+                    "fields": [name for name, _ in field_defs],
+                    "filters": {
+                        "action_prefix": action_prefix,
+                        "outcome": outcome,
+                        "user_id": str(user_id) if user_id is not None else None,
+                        "since": since.isoformat() if since is not None else None,
+                    },
+                },
+            )
+            await write_session.commit()
         base = f"z4j-audit-{slug}"
         if format == "csv":
             return export_csv(rows, field_defs, f"{base}.csv")
@@ -295,4 +385,12 @@ async def list_audit(
     )
 
 
-__all__ = ["AuditLogListResponse", "AuditLogPublic", "router"]
+__all__ = [
+    "AUDIT_EXPORT_FIELDS",
+    "AUDIT_EXPORT_FIELD_NAMES",
+    "AuditLogListResponse",
+    "AuditLogPublic",
+    "build_audit_export_statement",
+    "resolve_audit_export_fields",
+    "router",
+]

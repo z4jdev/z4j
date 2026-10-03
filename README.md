@@ -19,14 +19,14 @@ release line, so the floors stay in sync without manual pinning.
 Brain: Python 3.11+, PostgreSQL 18.3+ recommended (minimum 17), or
 bundled SQLite.
 
-Every adapter pulled through the `[django,celery]` / `[fastapi,arq]` / etc. extras carries its own framework / engine version floor. Full per-adapter matrix at <https://z4j.dev/reference/compatibility/>.
+Every adapter pulled through the `[django,celery]` / `[fastapi,arq]` / etc. extras carries its own framework / engine version floor. Full per-adapter matrix at <https://docs.z4j.com/reference/compatibility/>.
 
 ## What is z4j
 
-z4j is one product split into 20 PyPI packages so each piece can be
-installed only where it's needed. The umbrella `z4j` is the
-operator-friendly entry point that wires the right combination
-together for you.
+z4j is one product split into 19 active PyPI packages, plus the frozen
+`z4j-brain` compatibility shim, so each piece can be installed only
+where it's needed. The umbrella `z4j` is the operator-friendly entry
+point that wires the right combination together for you.
 
 The architecture is straightforward:
 
@@ -78,7 +78,7 @@ obligations that apply to your deployment.
 
 ## Try the live demo (no install)
 
-[**demo.z4j.dev**](https://demo.z4j.dev) is the dashboard SPA
+[**demo.z4j.com**](https://demo.z4j.com) is the dashboard SPA
 running in your browser against pre-baked fake data. One click on
 the pre-filled login lands you in a populated control plane with
 four sample projects: Celery + celery-beat (small healthy starter),
@@ -166,8 +166,8 @@ at quarter-end.
 
 ## Documentation
 
-Full docs at [z4j.dev](https://z4j.dev). The install guide at
-[z4j.dev/getting-started/install/](https://z4j.dev/getting-started/install/)
+Full docs at [docs.z4j.com](https://docs.z4j.com). The install guide at
+[docs.z4j.com/getting-started/install/](https://docs.z4j.com/getting-started/install/)
 covers all three paths (pip-SQLite, Docker-SQLite, Docker-Postgres).
 
 ## License
@@ -181,7 +181,7 @@ Commercial licenses available; contact licensing@z4j.com.
 ## Links
 
 - Homepage: https://z4j.com
-- Documentation: https://z4j.dev
+- Documentation: https://docs.z4j.com
 - PyPI: https://pypi.org/project/z4j/
 - Issues: https://github.com/z4jdev/z4j/issues
 - Changelog: [CHANGELOG.md](CHANGELOG.md)

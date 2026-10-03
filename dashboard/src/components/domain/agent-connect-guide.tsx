@@ -93,7 +93,7 @@ export function AgentConnectGuide({ slug }: { slug: string }) {
           Installing the packages is the first step. Add the startup hooks for
           your worker using the{" "}
           <a
-            href={`https://z4j.dev/engines/${engine}/`}
+            href={`https://docs.z4j.com/engines/${engine}/`}
             target="_blank"
             rel="noreferrer"
             className="text-primary underline"
@@ -103,7 +103,7 @@ export function AgentConnectGuide({ slug }: { slug: string }) {
           </a>{" "}
           and{" "}
           <a
-            href={`https://z4j.dev/frameworks/${framework}/`}
+            href={`https://docs.z4j.com/frameworks/${framework}/`}
             target="_blank"
             rel="noreferrer"
             className="text-primary underline"

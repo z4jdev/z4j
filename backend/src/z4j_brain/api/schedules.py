@@ -110,6 +110,25 @@ class SchedulePublic(BaseModel):
     #: mutations (create, update, enable, pause, trigger, ...) do not recount
     #: and carry ``null``, which is "not counted here", never "healthy".
     consecutive_failures: int | None = None
+    #: How many times in the last 24 hours this schedule's scheduler
+    #: discarded work that came due while its watch of the brain was
+    #: unhealthy for longer than the on-time grace. Only a ``skip`` catch-up
+    #: policy produces these; the other two run the missed work instead of
+    #: recording it.
+    #:
+    #: Counted at read time from the cursor transitions the scheduler
+    #: recorded through ``AdvanceScheduleCursor``. One transition covers one
+    #: gap, however many occurrences fell inside it: the scheduler moves past
+    #: the whole backlog at once and records the ``skipped_through`` slot it
+    #: stopped at, not the slots before it. A three-slot gap therefore counts
+    #: 1 here while the scheduler's ``z4j_scheduler_slots_discarded_total``
+    #: counts 3. This is the number of gaps, on the schedule itself, where
+    #: the operator who owns it looks.
+    #:
+    #: Reported by the list and by the single-schedule read. Responses to
+    #: mutations do not recount and carry ``null``, which is "not counted
+    #: here", never "nothing was skipped".
+    skipped_slots_24h: int | None = None
     external_id: str | None
     created_at: datetime
     updated_at: datetime
@@ -172,6 +191,7 @@ def _payload(
     schedule: Schedule,
     *,
     consecutive_failures: int | None = None,
+    skipped_slots_24h: int | None = None,
 ) -> SchedulePublic:
     return SchedulePublic(
         id=schedule.id,
@@ -196,6 +216,7 @@ def _payload(
         next_run_at=schedule.next_run_at,
         total_runs=schedule.total_runs,
         consecutive_failures=consecutive_failures,
+        skipped_slots_24h=skipped_slots_24h,
         external_id=schedule.external_id,
         created_at=schedule.created_at,
         updated_at=schedule.updated_at,
@@ -390,6 +411,66 @@ async def _consecutive_failures_for(
     return out
 
 
+#: The window ``SchedulePublic.skipped_slots_24h`` is counted over.
+SKIPPED_SLOTS_WINDOW = timedelta(hours=24)
+
+
+async def _skipped_slots_24h_for(
+    db_session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    schedules: list[Schedule],
+    now: datetime | None = None,
+) -> dict[uuid.UUID, int]:
+    """Count the gaps each schedule's scheduler discarded in the last 24h.
+
+    A discard is durable. Before the scheduler moves past the slots it could
+    not fire on time it records one transition with the brain
+    (``AdvanceScheduleCursor``), and the control repository appends that
+    transition to ``schedule_change_log`` as an upsert whose snapshot carries
+    ``transition.kind == "skip_no_work"`` and the ``skipped_through`` slot it
+    moved past. Ordinary edits and fire progress append upserts too, so the
+    count is taken on the transition kind, never on the row count.
+
+    This counts transitions, which is gaps, not slots: a three-slot gap is
+    one transition whose ``skipped_through`` is its last slot, and the
+    descriptor carries no slot count (the scheduler's
+    ``z4j_scheduler_slots_discarded_total`` is where the slots are counted).
+
+    One bulk query for the whole page, bounded by project, by the requested
+    schedule ids and by ``occurred_at``, the way the run strip's fire read
+    is bounded by ``fired_at``: it reads a day of one project's envelopes,
+    not the log. The change log is pruned only by the management restore
+    and reset paths, never on a timer, so a day of history is still there
+    to count.
+    """
+    if not schedules:
+        return {}
+
+    from sqlalchemy import func as _func
+    from sqlalchemy import select as _select
+
+    from z4j_brain.persistence.models import ScheduleChangeLog
+
+    floor = (now or datetime.now(UTC)) - SKIPPED_SLOTS_WINDOW
+    stmt = (
+        _select(ScheduleChangeLog.schedule_id, _func.count())
+        .where(
+            ScheduleChangeLog.project_id == project_id,
+            ScheduleChangeLog.schedule_id.in_([s.id for s in schedules]),
+            ScheduleChangeLog.change_kind == "upsert",
+            ScheduleChangeLog.occurred_at >= floor,
+            ScheduleChangeLog.snapshot[("transition", "kind")].as_string() == "skip_no_work",
+            ScheduleChangeLog.snapshot[("transition", "skipped_through")].as_string().is_not(None),
+        )
+        .group_by(ScheduleChangeLog.schedule_id)
+    )
+    out: dict[uuid.UUID, int] = {s.id: 0 for s in schedules}
+    for schedule_id, count in (await db_session.execute(stmt)).all():
+        out[schedule_id] = int(count)
+    return out
+
+
 @router.get("", response_model=SchedulesListPublic)
 async def list_schedules(
     slug: str,
@@ -436,8 +517,16 @@ async def list_schedules(
         next_cursor = _encode_schedules_cursor(last.name, last.id)
     threshold = int(getattr(settings, "schedule_circuit_breaker_threshold", 0) or 0)
     runs = await _consecutive_failures_for(db_session, schedules=rows, settings=settings)
+    skipped = await _skipped_slots_24h_for(db_session, project_id=project.id, schedules=rows)
     return SchedulesListPublic(
-        items=[_payload(s, consecutive_failures=runs.get(s.id, 0)) for s in rows],
+        items=[
+            _payload(
+                s,
+                consecutive_failures=runs.get(s.id, 0),
+                skipped_slots_24h=skipped.get(s.id, 0),
+            )
+            for s in rows
+        ],
         next_cursor=next_cursor,
         circuit_breaker_threshold=threshold,
     )
@@ -852,10 +941,19 @@ async def get_schedule(
             "schedule not found",
             details={"schedule_id": str(schedule_id)},
         )
-    # The single read reports the same count as the list, from the same rows,
+    # The single read reports the same counts as the list, from the same rows,
     # so a client reading one schedule is not told a false-healthy 0.
     runs = await _consecutive_failures_for(db_session, schedules=[schedule], settings=settings)
-    return _payload(schedule, consecutive_failures=runs.get(schedule.id, 0))
+    skipped = await _skipped_slots_24h_for(
+        db_session,
+        project_id=project.id,
+        schedules=[schedule],
+    )
+    return _payload(
+        schedule,
+        consecutive_failures=runs.get(schedule.id, 0),
+        skipped_slots_24h=skipped.get(schedule.id, 0),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1076,7 +1174,17 @@ class ScheduleCreateIn(BaseModel):
     queue: str | None = Field(default=None, max_length=_QUEUE_MAX)
     args: list[Any] = []
     kwargs: dict[str, Any] = {}
-    catch_up: str = Field(default="skip", min_length=1, max_length=20)
+    #: ``fire_one_missed`` when the caller does not say. With ``skip``, an
+    #: occurrence that comes due while the scheduler's watch of the brain is
+    #: unhealthy (any brain restart, or an outage longer than the on-time
+    #: grace) is discarded, and a dashboard-created schedule inherited that
+    #: silently. Running the latest missed occurrence on recovery is the
+    #: behaviour an operator who did not choose otherwise expects. Explicit
+    #: values are stored as sent, existing rows are untouched, and the column
+    #: default in ``z4j_brain.persistence.models.schedule`` stays ``skip`` so
+    #: writers that bypass this request model (imports, declarative
+    #: reconciliation) keep their own contract.
+    catch_up: str = Field(default="fire_one_missed", min_length=1, max_length=20)
     is_enabled: bool = True
     # 1.2.2: when None, the create handler falls back to the
     # project's ``default_scheduler_owner`` (default

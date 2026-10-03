@@ -1,0 +1,75 @@
+{{- if and .Values.brain.enabled .Values.scheduler.enabled .Values.pki.mintJob.enabled -}}
+{{- include "z4j.validatePki" . -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "z4j.fullname" . }}-pki-mint
+  labels:
+    {{- include "z4j.pki.labels" . | nindent 4 }}
+  annotations:
+    # Runs before the release's Deployments are created or updated, so the
+    # Secrets the brain and scheduler mount exist when their pods start.
+    # The RBAC is deleted once the Job succeeds; the completed Job itself
+    # stays until the next hook run so ``kubectl logs job/<name>`` shows
+    # whether it minted, renewed or left the bundle alone. The Secrets it
+    # creates are not Helm-managed and survive ``helm uninstall``.
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "z4j.pki.labels" . | nindent 8 }}
+    spec:
+      {{- include "z4j.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "z4j.fullname" . }}-pki-mint
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        {{- toYaml .Values.brain.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mint
+          image: {{ include "z4j.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.brain.containerSecurityContext | nindent 12 }}
+          # ``command`` replaces the image entry point (tini + z4j); the
+          # script needs only the interpreter and the brain's cryptography
+          # dependency.
+          command: ["python", "/opt/z4j-pki/mint.py"]
+          env:
+            - name: Z4J_PKI_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: Z4J_PKI_BRAIN_SECRET
+              value: {{ include "z4j.brain.schedulerGrpcTlsSecretName" . | quote }}
+            - name: Z4J_PKI_SCHEDULER_SECRET
+              value: {{ include "z4j-scheduler.tlsSecretName" . | quote }}
+            - name: Z4J_PKI_SERVER_DNS_NAMES
+              value: {{ include "z4j.pki.serverDnsNames" . | quote }}
+            - name: Z4J_PKI_SCHEDULER_CN
+              value: {{ .Values.pki.mintJob.schedulerCommonName | quote }}
+            - name: Z4J_PKI_CA_DAYS
+              value: {{ .Values.pki.mintJob.caValidityDays | quote }}
+            - name: Z4J_PKI_LEAF_DAYS
+              value: {{ .Values.pki.mintJob.leafValidityDays | quote }}
+            - name: Z4J_PKI_RENEW_DAYS
+              value: {{ .Values.pki.mintJob.renewDays | quote }}
+            - name: Z4J_PKI_FORCE
+              value: {{ ternary "1" "0" .Values.pki.mintJob.force | quote }}
+            - name: Z4J_PKI_LABELS_JSON
+              value: {{ include "z4j.pki.secretLabelsJson" . | quote }}
+          volumeMounts:
+            - name: script
+              mountPath: /opt/z4j-pki
+              readOnly: true
+          resources:
+            {{- toYaml .Values.pki.mintJob.resources | nindent 12 }}
+      volumes:
+        - name: script
+          configMap:
+            name: {{ include "z4j.fullname" . }}-pki-mint
+            defaultMode: 0444
+{{- end }}

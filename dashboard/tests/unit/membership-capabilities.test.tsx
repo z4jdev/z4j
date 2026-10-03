@@ -21,6 +21,7 @@ import {
 
 const actions: ProjectCapability[] = [
   "view",
+  "read_audit",
   "retry_task",
   "cancel_task",
   "delete_tasks",
@@ -47,18 +48,23 @@ const operatorActions = new Set<ProjectCapability>([
   "manage_automation",
 ]);
 
+// Auditor reads plus the audit trail and nothing else; it is a sibling of
+// operator, neither inherits the other.
+const auditorActions = new Set<ProjectCapability>(["view", "read_audit"]);
+
 describe("project capability role parity", () => {
   beforeEach(() => {
     auth.me = null;
   });
 
-  it.each<ProjectRole | null>([null, "viewer", "operator", "admin"])(
+  it.each<ProjectRole | null>([null, "viewer", "auditor", "operator", "admin"])(
     "matches the complete backend-aligned matrix for %s",
     (role) => {
       for (const action of actions) {
         const expected =
           role === "admin" ||
           (role === "viewer" && action === "view") ||
+          (role === "auditor" && auditorActions.has(action)) ||
           (role === "operator" && operatorActions.has(action));
         expect(canProjectRole(role, action), `${role}:${action}`).toBe(
           expected,
@@ -66,6 +72,23 @@ describe("project capability role parity", () => {
       }
     },
   );
+
+  it("grants the audit trail to auditor and admin only", () => {
+    expect(canProjectRole("auditor", "read_audit")).toBe(true);
+    expect(canProjectRole("admin", "read_audit")).toBe(true);
+    expect(canProjectRole("operator", "read_audit")).toBe(false);
+    expect(canProjectRole("viewer", "read_audit")).toBe(false);
+    expect(canProjectRole(null, "read_audit")).toBe(false);
+  });
+
+  it("keeps auditor off the data plane", () => {
+    for (const action of actions) {
+      if (auditorActions.has(action)) continue;
+      expect(canProjectRole("auditor", action), `auditor:${action}`).toBe(
+        false,
+      );
+    }
+  });
 
   it("treats a global admin without project membership as project admin", () => {
     auth.me = { is_admin: true, memberships: [] };

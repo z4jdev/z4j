@@ -275,7 +275,7 @@ LABEL org.opencontainers.image.title="z4j" \
       org.opencontainers.image.version="${Z4J_VERSION}" \
       org.opencontainers.image.source="https://github.com/z4jdev/z4j" \
       org.opencontainers.image.url="https://pypi.org/project/z4j/" \
-      org.opencontainers.image.documentation="https://z4j.dev" \
+      org.opencontainers.image.documentation="https://docs.z4j.com" \
       org.opencontainers.image.vendor="z4j contributors" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
 

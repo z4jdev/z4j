@@ -42,7 +42,7 @@
 # Persisted cert state lives in the z4j_caddy_data volume; back it up
 # to avoid re-running the ACME challenge on every rebuild.
 #
-# See docs/DEPLOYMENT.md Â§6.1 for the full reverse-proxy matrix
+# See https://docs.z4j.com/guides/docker/ for the full reverse-proxy matrix
 # (Caddy / nginx / Traefik / Cloudflare Tunnel).
 
 services:

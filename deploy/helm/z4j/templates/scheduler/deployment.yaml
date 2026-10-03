@@ -1,0 +1,144 @@
+{{- if .Values.scheduler.enabled -}}
+{{- include "z4j-scheduler.validateBrainUrls" . -}}
+{{- include "z4j-scheduler.validateMetricsToken" . -}}
+{{- include "z4j-scheduler.validateImage" . -}}
+{{- include "z4j-scheduler.validateTls" . -}}
+{{- include "z4j-scheduler.validateLeader" . -}}
+{{- include "z4j-scheduler.validateServiceMonitor" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "z4j-scheduler.fullname" . }}
+  labels:
+    {{- include "z4j-scheduler.labels" . | nindent 4 }}
+spec:
+  # PostgreSQL advisory locks coordinate replicas, so a standard
+  # Deployment is sufficient. RollingUpdate can temporarily overlap
+  # processes; the selected leader backend, not the rollout strategy,
+  # owns duplicate-dispatch prevention.
+  replicas: {{ .Values.scheduler.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "z4j-scheduler.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "z4j-scheduler.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll for chart-rendered ConfigMap and inline-TLS changes. External
+        # Secret content is not part of the Helm render: bump rolloutRevision
+        # explicitly after rotating TLS, leader-DSN, or metrics-token Secrets.
+        checksum/config: {{ include (print $.Template.BasePath "/scheduler/configmap.yaml") . | sha256sum }}
+        z4j.com/external-secret-rollout-revision: {{ .Values.rolloutRevision | quote }}
+        {{- if and (not .Values.scheduler.tls.existingSecret) (not .Values.scheduler.tls.certManager.enabled) (not .Values.pki.mintJob.enabled) }}
+        checksum/tls: {{ include (print $.Template.BasePath "/scheduler/secret-tls-inline.yaml") . | sha256sum }}
+        {{- end }}
+    spec:
+      {{- include "z4j.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "z4j-scheduler.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.scheduler.podSecurityContext | nindent 8 }}
+      {{- with .Values.scheduler.affinity }}
+      affinity:
+        {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
+      {{- with .Values.scheduler.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.scheduler.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: scheduler
+          image: {{ include "z4j.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.scheduler.containerSecurityContext | nindent 12 }}
+          # The published brain image contains this companion entry point.
+          # Kubernetes ``command`` replaces the brain image's normal entry
+          # point, so this container runs only the scheduler.
+          command: ["z4j-scheduler"]
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.scheduler.service.httpPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "z4j-scheduler.fullname" . }}
+          env:
+            # Runtime identity from the downward API so audit log rows
+            # attribute leadership transitions to the actual pod, not a
+            # static "scheduler-1" string.
+            - name: Z4J_SCHEDULER_INSTANCE_ID
+              {{- if .Values.scheduler.config.instanceId }}
+              value: {{ .Values.scheduler.config.instanceId | quote }}
+              {{- else }}
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+              {{- end }}
+            # mTLS material - paths point at the mounted Secret.
+            - name: Z4J_SCHEDULER_TLS_CERT
+              value: /etc/z4j/tls/tls.crt
+            - name: Z4J_SCHEDULER_TLS_KEY
+              value: /etc/z4j/tls/tls.key
+            - name: Z4J_SCHEDULER_TLS_CA
+              value: /etc/z4j/tls/ca.crt
+            {{- if .Values.scheduler.leader.databaseUrl }}
+            # Leader DSN - inline path. For production prefer the
+            # existingSecret branch below.
+            - name: Z4J_SCHEDULER_LEADER_PG_DSN
+              value: {{ .Values.scheduler.leader.databaseUrl | quote }}
+            {{- else if .Values.scheduler.leader.existingSecret }}
+            - name: Z4J_SCHEDULER_LEADER_PG_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.scheduler.leader.existingSecret }}
+                  key: {{ .Values.scheduler.leader.existingSecretKey }}
+            {{- else if (include "z4j-scheduler.leaderDsnFromBundledPostgres" .) }}
+            # Composed by the chart from the bundled postgresql values.
+            - name: Z4J_SCHEDULER_LEADER_PG_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "z4j-scheduler.leaderDsnSecretName" . }}
+                  key: leader-pg-dsn
+            {{- end }}
+            {{- if .Values.scheduler.config.metricsAuthToken }}
+            # Inline /metrics bearer token (dev/homelab only - prefer the
+            # existingSecret branch below in production).
+            - name: Z4J_SCHEDULER_METRICS_AUTH_TOKEN
+              value: {{ .Values.scheduler.config.metricsAuthToken | quote }}
+            {{- else if .Values.scheduler.config.metricsAuthExistingSecret }}
+            - name: Z4J_SCHEDULER_METRICS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.scheduler.config.metricsAuthExistingSecret }}
+                  key: {{ .Values.scheduler.config.metricsAuthExistingSecretKey }}
+            {{- end }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/z4j/tls
+              readOnly: true
+            # Writable scratch dir for tempfiles. The container security
+            # context sets readOnlyRootFilesystem so the scheduler needs an
+            # explicit emptyDir to write into for any transient state.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.scheduler.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.scheduler.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.scheduler.readinessProbe | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "z4j-scheduler.tlsSecretName" . }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+{{- end }}

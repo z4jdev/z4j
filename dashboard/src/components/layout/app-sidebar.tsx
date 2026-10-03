@@ -23,7 +23,10 @@ import {
 import { Z4jMark } from "@/components/z4j-mark";
 import { useCurrentUserRole } from "@/hooks/use-memberships";
 import { ProjectSwitcher } from "./project-switcher";
-import { projectNavigation } from "./project-navigation";
+import {
+  projectNavigation,
+  projectSettingsNavigation,
+} from "./project-navigation";
 import { useSidebar } from "./sidebar-context";
 
 /** Persistent workspace access and a project rail with a focus-trapped mobile drawer. */
@@ -69,6 +72,9 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
   const { slug } = useParams({ strict: false }) as { slug?: string };
   const role = useCurrentUserRole(slug);
   const items = projectNavigation(slug, role);
+  // Every project settings page is admin-only on the server, so the link
+  // exists only for a role that can open at least one of them.
+  const settingsEntry = projectSettingsNavigation(role)[0];
   return (
     <>
       <Link
@@ -145,10 +151,10 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
           collapsed ? "px-2" : "px-3",
         )}
       >
-        {slug && (
+        {slug && settingsEntry && (
           <NavLink
             label="Project Settings"
-            to={`/projects/${encodeURIComponent(slug)}/settings/members`}
+            to={settingsEntry.to.replace("$slug", encodeURIComponent(slug))}
             activePrefix={`/projects/${encodeURIComponent(slug)}/settings`}
             icon={Settings2}
             collapsed={collapsed}

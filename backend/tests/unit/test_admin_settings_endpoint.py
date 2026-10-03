@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-from z4j_brain.api.admin_settings import _normalize_source
+from z4j_brain.api.admin_settings import _normalize_source, _strip_url_userinfo
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
@@ -31,6 +31,23 @@ from z4j_brain.settings import Settings
 
 def test_runtime_cli_source_is_rendered_as_environment() -> None:
     assert _normalize_source("runtime/CLI (Z4J_BIND_HOST)") == "env"
+
+
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        ("https://epuser:R2EENDPOINTPASS@minio.internal:9000", "https://minio.internal:9000"),
+        ("https://epuser@minio.internal:9000/path?x=1", "https://minio.internal:9000/path?x=1"),
+        ("epuser:R2EENDPOINTPASS@minio.internal:9000", "minio.internal:9000"),
+        (
+            "https://minio.internal:9000/path?reply=a@b",
+            "https://minio.internal:9000/path?reply=a@b",
+        ),
+        ("https://z4j.example.com", "https://z4j.example.com"),
+    ],
+)
+def test_strip_url_userinfo(value: str, shown: str) -> None:
+    assert _strip_url_userinfo(value) == shown
 
 
 @pytest.fixture
@@ -237,3 +254,33 @@ class TestAdminSettingsEndpoint:
         # Default is 30 per Settings; test fixture doesn't override.
         assert row["value"] == "30"
         assert row["source"] == "default"
+
+    async def test_url_fields_never_render_userinfo(
+        self,
+        brain_app,
+        settings,
+    ) -> None:
+        """Settings refuses userinfo in the URL fields it knows about; the
+        renderer is the belt for one it does not, so plant a value past
+        validation and read it back through the route.
+        """
+        marker = "R2EENDPOINTPASS"
+        object.__setattr__(
+            settings,
+            "export_sink_s3_endpoint_url",
+            f"https://epuser:{marker}@minio.internal:9000",
+        )
+        seeded = await _seed_user(
+            brain_app,
+            settings,
+            is_admin=True,
+            email="admin3@example.com",
+        )
+        async with _client_for(brain_app, settings, seeded) as ac:
+            r = await ac.get("/api/v1/admin/settings")
+        assert r.status_code == 200
+        assert marker not in r.text
+        by_name = {row["name"]: row for row in r.json()["settings"]}
+        row = by_name["export_sink_s3_endpoint_url"]
+        assert row["is_secret"] is False
+        assert row["value"] == "https://minio.internal:9000"

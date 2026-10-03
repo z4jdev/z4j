@@ -26,7 +26,7 @@
 export interface UserMembershipSummary {
   project_id: string;
   project_slug: string;
-  role: "viewer" | "operator" | "admin";
+  role: "viewer" | "auditor" | "operator" | "admin";
 }
 
 export interface UserPublic {
@@ -316,6 +316,15 @@ export interface SchedulePublic {
    * carries as `circuit_breaker_threshold`.
    */
   consecutive_failures: number | null;
+  /**
+   * How many of this schedule's occurrences the scheduler discarded in the
+   * last 24 hours because they came due while its watch of the brain was
+   * unhealthy (a brain restart, or an outage longer than the on-time
+   * grace). Only a `skip` catch-up policy produces these. null means this
+   * response did not count it: only the list and the single-schedule read
+   * report a number, responses to mutations do not recount.
+   */
+  skipped_slots_24h: number | null;
   external_id: string | null;
   created_at: string;
   updated_at: string;
@@ -471,6 +480,39 @@ export interface CommandPublic {
 export interface CommandListResponse {
   items: CommandPublic[];
   next_cursor: string | null;
+}
+
+export interface RequeueDeadLetterRequest {
+  agent_id: string;
+  engine: string;
+  task_id: string;
+  idempotency_key?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Dead letters
+// ---------------------------------------------------------------------------
+
+/** One parked task as the engine's dead-letter store describes it. Mirrors
+ *  z4j-core's ``DeadLetterEntry``; ``task_id`` is the id the requeue command
+ *  takes. The nullable fields are ones an engine may not record. */
+export interface DeadLetterEntry {
+  task_id: string;
+  task_name: string;
+  queue: string;
+  failed_at?: string | null;
+  error_excerpt: string;
+  attempts?: number | null;
+}
+
+/** One page of dead letters, newest first. ``next_cursor`` is opaque and is
+ *  passed back verbatim; ``total`` is present only when the engine can count
+ *  cheaply (a Dramatiq RabbitMQ broker reports the total with no entries). */
+export interface DeadLetterPage {
+  entries?: DeadLetterEntry[];
+  next_cursor?: string | null;
+  total?: number | null;
+  engine: string;
 }
 
 export interface RetryTaskRequest {

@@ -51,7 +51,10 @@ IMMEDIATE_WRITER_OWNERS = {
     ("scheduler_grpc/handlers.py", "SchedulerServiceImpl.FireSchedule"): 1,
     ("websocket/frame_router.py", "FrameRouter._dispatch_automation"): 1,
     ("websocket/frame_router.py", "FrameRouter._run_control_persist"): 1,
-    ("websocket/gateway.py", "ws_agent"): 1,
+    # The hello path writes four refusal and liveness rows on their own
+    # sessions: source-address denial, bearer failure, inactive project, and
+    # the post-register recheck that marks a revoked or archived agent offline.
+    ("websocket/gateway.py", "ws_agent"): 4,
 }
 
 

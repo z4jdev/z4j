@@ -1,0 +1,20 @@
+{{- if .Values.postgresql.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "z4j.postgresql.fullname" . }}
+  labels:
+    {{- include "z4j.postgresql.labels" . | nindent 4 }}
+spec:
+  # Headless: the StatefulSet has one replica and the brain resolves the
+  # pod directly. Never expose this outside the cluster.
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+      protocol: TCP
+  selector:
+    {{- include "z4j.postgresql.selectorLabels" . | nindent 4 }}
+{{- end }}

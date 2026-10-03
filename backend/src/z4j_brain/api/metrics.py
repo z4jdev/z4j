@@ -119,6 +119,20 @@ z4j_command_late_results_total = Counter(
     registry=registry,
 )
 
+# -- Source-address allowlists --
+
+#: Requests refused by a source-address allowlist, by surface
+#: (``dashboard``, ``api``, ``agent``). Every denial also writes an
+#: ``auth.ip_denied`` audit row, so a count that climbs while the rows do
+#: not means the audit write is failing, not that the denials stopped.
+#: See :mod:`z4j_brain.domain.ip_allowlist`.
+z4j_auth_ip_denied_total = Counter(
+    "z4j_auth_ip_denied_total",
+    "Requests refused by a source-address allowlist, by surface.",
+    labelnames=("surface",),
+    registry=registry,
+)
+
 #: Gauge for in-memory state held by the brain process - sessions
 #: in the long-poll signer registry, throttle entries, dashboard
 #: subscriptions, etc. Lets operators see brain-restart drops
@@ -627,6 +641,29 @@ z4j_audit_chain_rows_verified = Gauge(
     # Multiprocess: only the leader runs this, but "most recent" is still
     # the right blend if replicas rotate leadership between scrapes.
     multiprocess_mode="mostrecent",
+)
+
+# -- Audit webhook forwarder (durable cursor) --
+#
+# Only emitted while Z4J_AUDIT_WEBHOOK_URL is set. The lag is read from
+# the database at the start of every forwarder pass, so it is the
+# brain-wide backlog rather than one process's view; the leader is the
+# only process that sets it.
+
+z4j_audit_forward_lag_rows = Gauge(
+    "z4j_audit_forward_lag_rows",
+    "Audit rows written but not yet acknowledged by the audit webhook "
+    "receiver, as of the most recent forwarder pass.",
+    registry=registry,
+    multiprocess_mode="mostrecent",
+)
+
+z4j_audit_forward_failures_total = Counter(
+    "z4j_audit_forward_failures_total",
+    "Audit webhook delivery attempts that did not get a 2xx, by reason. "
+    "The row is retried from the durable cursor; nothing is dropped.",
+    labelnames=("reason",),
+    registry=registry,
 )
 
 z4j_wal_checkpoint_pages_last = Gauge(

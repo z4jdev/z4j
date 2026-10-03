@@ -15,11 +15,33 @@ export interface paths {
          * List Activity
          * @description List audit rows across every project the caller can see.
          *
-         *     Admins see every row including brain-wide rows (no project_id).
-         *     Non-admins see rows from projects where they hold a membership
-         *     plus their own user-scoped rows whose project_id is null.
+         *     Instance admins see every row including brain-wide rows (no
+         *     project_id). Other users see rows from the projects where their
+         *     membership satisfies ``Action.READ_AUDIT`` (auditor or admin, the
+         *     same tier the per-project audit page requires) plus their own
+         *     user-scoped rows whose project_id is null.
          */
         readonly get: operations["list_activity_api_v1_activity_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/audit-forwarder": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Audit Forwarder Status
+         * @description The forwarder's durable cursor and backlog, for admins.
+         */
+        readonly get: operations["get_audit_forwarder_status_api_v1_admin_audit_forwarder_get"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -245,7 +267,15 @@ export interface paths {
         readonly delete: operations["revoke_api_key_api_v1_api_keys__key_id__delete"];
         readonly options?: never;
         readonly head?: never;
-        readonly patch?: never;
+        /**
+         * Update Api Key
+         * @description Replace a key's per-key source-address allowlist.
+         *
+         *     Only the caller's own active keys are editable. The new list takes
+         *     effect on the next request with the key; ``null`` or ``[]`` clears
+         *     it, after which only ``Z4J_API_IP_ALLOWLIST`` applies.
+         */
+        readonly patch: operations["update_api_key_api_v1_api_keys__key_id__patch"];
         readonly trace?: never;
     };
     readonly "/api/v1/auth/change-password": {
@@ -1086,6 +1116,13 @@ export interface paths {
          *     We never hard-delete projects - that would cascade across the
          *     audit log and break the historical record. The archived
          *     project is hidden from list views but its rows survive.
+         *
+         *     The agents survive too, tokens included, so the archive has to
+         *     disconnect them itself: once the flag commits, every replica
+         *     closes the sockets it holds for the project with the revoked-agent
+         *     close code, and the hello path and the long-poll routes refuse the
+         *     project's agents until it is active again. Reactivation needs
+         *     nothing further; the agents reconnect on their next retry.
          */
         readonly delete: operations["archive_project_api_v1_projects__slug__delete"];
         readonly options?: never;
@@ -1218,17 +1255,105 @@ export interface paths {
          * List Audit
          * @description List audit log entries for one project.
          *
-         *     Requires admin role on the project - audit reads are
-         *     privileged because they can reveal who did what when, which
-         *     is itself sensitive.
+         *     Requires the auditor tier on the project (``auditor`` or
+         *     ``admin``): audit reads are privileged because they reveal who
+         *     did what when, which is itself sensitive, and they are kept
+         *     away from the operator tier so the people who review the
+         *     record are not the people who produce it. The list path is
+         *     ``Action.READ_AUDIT``; the export path is ``Action.EXPORT_AUDIT``.
+         *     Both resolve to the same tier through the core table.
          *
          *     When ``format`` is ``csv`` / ``json`` the response is a file
          *     download containing up to 50 000 matching rows; ``xlsx`` is
          *     capped at 25 000 because its workbook is built in memory.
          *     Cursor + limit are ignored on the export path - operators
          *     narrow via the filter params instead.
+         *
+         *     A served export is itself recorded: one ``audit.export`` row through
+         *     the chained writer naming the format, the filters, the selected
+         *     columns and the row count, so the trail shows who took a copy of it
+         *     and how much. The list path writes nothing; a page read is not an
+         *     extraction.
          */
         readonly get: operations["list_audit_api_v1_projects__slug__audit_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/audit/export-jobs": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Export Jobs
+         * @description Newest export jobs for this project, with the sink in effect.
+         */
+        readonly get: operations["list_export_jobs_api_v1_projects__slug__audit_export_jobs_get"];
+        readonly put?: never;
+        /**
+         * Create Export Job
+         * @description Queue a background export of this project's audit log.
+         *
+         *     Requires ``Action.EXPORT_AUDIT`` on the project (auditor or admin), the
+         *     same as the synchronous export.
+         *     Answers ``409`` when no export sink is configured
+         *     (``Z4J_EXPORT_SINK``), ``422`` for an unknown field name. The job
+         *     starts ``queued``; poll ``GET .../export-jobs/{id}`` for progress.
+         */
+        readonly post: operations["create_export_job_api_v1_projects__slug__audit_export_jobs_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/audit/export-jobs/{job_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Export Job
+         * @description One job: status, progress, sink location, or the failure reason.
+         */
+        readonly get: operations["get_export_job_api_v1_projects__slug__audit_export_jobs__job_id__get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/audit/export-jobs/{job_id}/download": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Download Export Job
+         * @description Stream a finished local-sink export to an auditor or an admin.
+         *
+         *     ``409`` when the job is not done or its sink is not the local
+         *     directory sink; an S3 object is fetched from the bucket at the
+         *     job's ``location`` with the operator's own credentials. ``404`` when
+         *     the row's location does not name a regular file below the configured
+         *     directory: the row is not trusted to name the file, the sink is
+         *     (``LocalDirectorySink.open_download``), and what is served is the
+         *     handle the sink opened.
+         */
+        readonly get: operations["download_export_job_api_v1_projects__slug__audit_export_jobs__job_id__download_get"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -1573,21 +1698,22 @@ export interface paths {
          * Issue Requeue Dead Letter
          * @description Move one dead-lettered task back onto its queue.
          *
-         *     Deliberately not gated on engine support, and the reason is safety rather
-         *     than convenience. Whether a requeue is safe is a property of the engine's
-         *     own dead-letter primitive, which only the adapter knows. RQ has one:
-         *     ``FailedJobRegistry`` IS its dead-letter concept and ``registry.requeue``
-         *     consumes the entry and preserves its original routing. Celery does not, and
-         *     its adapter's implementation was removed as a breaking safety correction
-         *     after it was found to publish a plain retry without consuming the broker
-         *     entry, which could duplicate work; it now refuses without touching the
-         *     broker at all.
+         *     Gated on what the target agent advertises, not on an engine list, and the
+         *     reason is safety rather than convenience. Whether a requeue is safe is a
+         *     property of the engine's own dead-letter primitive, which only the adapter
+         *     knows. RQ has one: ``FailedJobRegistry`` IS its dead-letter concept and
+         *     ``registry.requeue`` consumes the entry and preserves its original routing.
+         *     Celery does not, and its adapter's implementation was removed as a breaking
+         *     safety correction after it was found to publish a plain retry without
+         *     consuming the broker entry, which could duplicate work; it no longer
+         *     advertises ``requeue_dead_letter`` and refuses without touching the broker.
          *
-         *     So an unsupported engine returns a FAILED command naming the reason, which
-         *     is honest. An engine allowlist here would encode today's adapter set into
-         *     the brain, and would go stale in both directions: it would block an adapter
-         *     that gains a safe primitive, and it would keep advertising one whose
-         *     implementation was withdrawn.
+         *     So the adapter decides by advertising the capability in its hello frame,
+         *     and the brain refuses (422) when the agent's session does not. An engine
+         *     allowlist here would encode today's adapter set into the brain and go
+         *     stale in both directions: it would block an adapter that gains a safe
+         *     primitive, and it would keep offering one whose implementation was
+         *     withdrawn.
          */
         readonly post: operations["issue_requeue_dead_letter_api_v1_projects__slug__commands_requeue_dead_letter_post"];
         readonly delete?: never;
@@ -1639,6 +1765,39 @@ export interface paths {
         };
         /** Get Command */
         readonly get: operations["get_command_api_v1_projects__slug__commands__command_id__get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/dead-letters": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Dead Letters
+         * @description One page of the engine's dead letters, newest first.
+         *
+         *     ``engine`` is required and checked for shape only; whether anything can
+         *     serve it is decided by the online agents' advertised capabilities. ``queue``
+         *     narrows the page to one queue; absent, every queue the adapter knows. The
+         *     ``cursor`` is the ``next_cursor`` of the previous page, passed back
+         *     verbatim.
+         *
+         *     Errors: ``409`` when no online agent advertises ``list_dead_letters`` for
+         *     the engine (the response lists the online agents and what each advertises
+         *     for it), ``504`` when the agent does not answer within the wait bound,
+         *     ``422`` for a malformed engine, limit or cursor, ``429`` when the
+         *     caller's address has used up the bulk-action bucket, and ``502`` when
+         *     the agent refused the listing or returned something that is not a page.
+         */
+        readonly get: operations["list_dead_letters_api_v1_projects__slug__dead_letters_get"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -3533,6 +3692,11 @@ export interface components {
          */
         readonly ApiKeyCreated: {
             /**
+             * Allowed Cidrs
+             * @description Per-key source-address allowlist (canonical CIDRs). Null or empty means the key is bound only by Z4J_API_IP_ALLOWLIST.
+             */
+            readonly allowed_cidrs?: readonly string[] | null;
+            /**
              * Created At
              * Format: date-time
              */
@@ -3570,6 +3734,11 @@ export interface components {
          * @description Public representation of an API key (no plaintext).
          */
         readonly ApiKeyPublic: {
+            /**
+             * Allowed Cidrs
+             * @description Per-key source-address allowlist (canonical CIDRs). Null or empty means the key is bound only by Z4J_API_IP_ALLOWLIST.
+             */
+            readonly allowed_cidrs?: readonly string[] | null;
             /**
              * Created At
              * Format: date-time
@@ -3620,6 +3789,81 @@ export interface components {
             readonly project_slug: string;
             /** Severity */
             readonly severity: string;
+        };
+        /**
+         * AuditForwarderStatus
+         * @description What the forwarder has acknowledged, and what is still waiting.
+         */
+        readonly AuditForwarderStatus: {
+            /**
+             * Backoff Seconds Remaining
+             * @description Seconds until the next attempt is due; zero when it is due now.
+             * @default 0
+             */
+            readonly backoff_seconds_remaining: number;
+            /** Batch Size */
+            readonly batch_size: number;
+            /**
+             * Consecutive Failures
+             * @description Attempts in a row that did not get a 2xx; zero after a success.
+             * @default 0
+             */
+            readonly consecutive_failures: number;
+            /**
+             * Cursor Id
+             * @description id of the newest audit row the receiver acknowledged.
+             */
+            readonly cursor_id?: string | null;
+            /**
+             * Cursor Initialised
+             * @description Whether the state row exists yet. It is created on the worker's first pass, starting at the audit head at that moment.
+             */
+            readonly cursor_initialised: boolean;
+            /**
+             * Cursor Occurred At
+             * @description occurred_at of the newest audit row the receiver acknowledged.
+             */
+            readonly cursor_occurred_at?: string | null;
+            /**
+             * Enabled
+             * @description Whether Z4J_AUDIT_WEBHOOK_URL is set on this brain.
+             */
+            readonly enabled: boolean;
+            /**
+             * Lag Rows
+             * @description Audit rows written past the cursor and not yet acknowledged. Null until the cursor exists.
+             */
+            readonly lag_rows?: number | null;
+            /** Last Attempt At */
+            readonly last_attempt_at?: string | null;
+            /** Last Success At */
+            readonly last_success_at?: string | null;
+            /** Max Backoff Seconds */
+            readonly max_backoff_seconds: number;
+            /** Poll Interval Seconds */
+            readonly poll_interval_seconds: number;
+            /**
+             * Process Failed Count
+             * @description Failed attempts by this process since it started, or null.
+             */
+            readonly process_failed_count?: number | null;
+            /**
+             * Process Sent Count
+             * @description Rows this process delivered since it started. Null when this process has no forwarder constructed. One process's view only.
+             */
+            readonly process_sent_count?: number | null;
+            /**
+             * Sink Id
+             * @description The sink the cursor belongs to.
+             */
+            readonly sink_id: string;
+            /** Updated At */
+            readonly updated_at?: string | null;
+            /**
+             * Worker
+             * @description The supervisor and leader-lock name of the worker.
+             */
+            readonly worker: string;
         };
         /** AutomationSettings */
         readonly AutomationSettings: {
@@ -4063,6 +4307,11 @@ export interface components {
         /** CreateApiKeyRequest */
         readonly CreateApiKeyRequest: {
             /**
+             * Allowed Cidrs
+             * @description Optional per-key source-address allowlist: IPv4/IPv6 CIDRs (a bare address means one host). When set, requests with this key must come from one of them, in addition to Z4J_API_IP_ALLOWLIST. Null or empty means no per-key restriction. Loopback is not implicitly allowed.
+             */
+            readonly allowed_cidrs?: readonly string[] | null;
+            /**
              * Expires In Days
              * @description Key lifetime in days. Null means never expires.
              */
@@ -4110,10 +4359,7 @@ export interface components {
         readonly CreateUserRequest: {
             /** Display Name */
             readonly display_name?: string | null;
-            /**
-             * Email
-             * Format: email
-             */
+            /** Email */
             readonly email: string;
             /** First Name */
             readonly first_name?: string | null;
@@ -4131,6 +4377,71 @@ export interface components {
              * @default UTC
              */
             readonly timezone: string;
+        };
+        /**
+         * DeadLetterEntry
+         * @description One parked task as the engine's dead-letter store describes it.
+         *
+         *     Attributes:
+         *         task_id: Engine-native id, the same id ``requeue_dead_letter`` takes.
+         *         task_name: Dotted task / actor name. Empty when the engine does not
+         *                    store the name in a form the adapter can read without
+         *                    deserialising an untrusted payload (the adapter never
+         *                    unpickles broker data to fill this in).
+         *         queue: The queue the task was dead-lettered from, which is where a
+         *                requeue would put it back.
+         *         failed_at: When the engine parked it, UTC. ``None`` when the engine
+         *                    does not record that time.
+         *         error_excerpt: The tail of the stored failure text (traceback or
+         *                        exception string), passed through the redaction engine,
+         *                        at most :data:`DEAD_LETTER_EXCERPT_MAX_CHARS`
+         *                        characters. Empty when nothing was stored.
+         *         attempts: Number of executions the engine recorded before giving up.
+         *                   ``None`` when the engine does not track it.
+         */
+        readonly DeadLetterEntry: {
+            /** Attempts */
+            readonly attempts?: number | null;
+            /**
+             * Error Excerpt
+             * @default
+             */
+            readonly error_excerpt: string;
+            /** Failed At */
+            readonly failed_at?: string | null;
+            /** Queue */
+            readonly queue: string;
+            /** Task Id */
+            readonly task_id: string;
+            /**
+             * Task Name
+             * @default
+             */
+            readonly task_name: string;
+        };
+        /**
+         * DeadLetterPage
+         * @description One page of dead letters, newest first.
+         *
+         *     Attributes:
+         *         entries: At most :data:`DLQ_LIST_MAX_LIMIT` entries, newest first
+         *                  (as far as the engine's store orders them).
+         *         next_cursor: Opaque token for the next page, or ``None`` on the last
+         *                      page. The brain passes it back verbatim.
+         *         total: Number of dead letters matching the request across all pages
+         *                when the engine can count cheaply, else ``None``.
+         *         engine: Adapter name that produced the page (``"rq"``,
+         *                 ``"dramatiq"``, ...).
+         */
+        readonly DeadLetterPage: {
+            /** Engine */
+            readonly engine: string;
+            /** Entries */
+            readonly entries?: readonly components["schemas"]["DeadLetterEntry"][];
+            /** Next Cursor */
+            readonly next_cursor?: string | null;
+            /** Total */
+            readonly total?: number | null;
         };
         /**
          * DeepCheckResult
@@ -4461,6 +4772,89 @@ export interface components {
             readonly project_id: string;
             /** Task Id */
             readonly task_id: string;
+        };
+        /**
+         * ExportJobCreate
+         * @description Queue one background export of the audit log.
+         *
+         *     The filters are the synchronous export's. ``fields`` selects columns
+         *     by name; an unknown name is a ``422`` here rather than silently
+         *     dropped, because a job runs later and out of sight.
+         */
+        readonly ExportJobCreate: {
+            /** Action Prefix */
+            readonly action_prefix?: string | null;
+            /** Fields */
+            readonly fields?: readonly string[] | null;
+            /**
+             * Format
+             * @enum {string}
+             */
+            readonly format: "csv" | "json" | "xlsx";
+            /** Outcome */
+            readonly outcome?: string | null;
+            /** Since */
+            readonly since?: string | null;
+            /** User Id */
+            readonly user_id?: string | null;
+        };
+        /** ExportJobListResponse */
+        readonly ExportJobListResponse: {
+            /** Items */
+            readonly items: readonly components["schemas"]["ExportJobPublic"][];
+            /** Sink */
+            readonly sink: string | null;
+            /** Sink Location */
+            readonly sink_location: string | null;
+        };
+        /** ExportJobPublic */
+        readonly ExportJobPublic: {
+            /** Completed At */
+            readonly completed_at: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            readonly created_at: string;
+            /** Downloadable */
+            readonly downloadable: boolean;
+            /** Error */
+            readonly error: string | null;
+            /** Export Type */
+            readonly export_type: string;
+            /** Filters */
+            readonly filters: {
+                readonly [key: string]: unknown;
+            };
+            /** Format */
+            readonly format: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Location */
+            readonly location: string | null;
+            /**
+             * Project Id
+             * Format: uuid
+             */
+            readonly project_id: string;
+            /** Row Count */
+            readonly row_count: number | null;
+            /** Sink */
+            readonly sink: string | null;
+            /** Size Bytes */
+            readonly size_bytes: number | null;
+            /** Started At */
+            readonly started_at: string | null;
+            /** Status */
+            readonly status: string;
+            /**
+             * User Id
+             * Format: uuid
+             */
+            readonly user_id: string;
         };
         /**
          * ExternalScheduleControlOperationPublic
@@ -5680,7 +6074,7 @@ export interface components {
             readonly args: readonly unknown[];
             /**
              * Catch Up
-             * @default skip
+             * @default fire_one_missed
              */
             readonly catch_up: string;
             /** Engine */
@@ -5873,6 +6267,8 @@ export interface components {
             readonly schedule_revision?: number | null;
             /** Scheduler */
             readonly scheduler: string;
+            /** Skipped Slots 24H */
+            readonly skipped_slots_24h?: number | null;
             /**
              * Source
              * @default dashboard
@@ -6514,6 +6910,22 @@ export interface components {
         readonly UnreadCountPublic: {
             /** Unread */
             readonly unread: number;
+        };
+        /**
+         * UpdateApiKeyRequest
+         * @description ``PATCH /api-keys/{key_id}``: the per-key allowlist is the one mutable field.
+         *
+         *     Name, scopes, project binding and expiry are fixed at mint time;
+         *     changing any of them is a new key. The allowlist is operational
+         *     (an office moved, a runner got a new egress) and editing it must
+         *     not force a token rotation.
+         */
+        readonly UpdateApiKeyRequest: {
+            /**
+             * Allowed Cidrs
+             * @description Replacement per-key allowlist. Null or empty clears it; the global Z4J_API_IP_ALLOWLIST still applies.
+             */
+            readonly allowed_cidrs?: readonly string[] | null;
         };
         /** UpdateMembershipRequest */
         readonly UpdateMembershipRequest: {
@@ -7287,6 +7699,26 @@ export interface operations {
             };
         };
     };
+    readonly get_audit_forwarder_status_api_v1_admin_audit_forwarder_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AuditForwarderStatus"];
+                };
+            };
+        };
+    };
     readonly get_effective_settings_api_v1_admin_settings_get: {
         readonly parameters: {
             readonly query?: never;
@@ -7510,6 +7942,41 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly update_api_key_api_v1_api_keys__key_id__patch: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly key_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["UpdateApiKeyRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiKeyPublic"];
+                };
             };
             /** @description Validation Error */
             readonly 422: {
@@ -8645,6 +9112,138 @@ export interface operations {
             };
         };
     };
+    readonly list_export_jobs_api_v1_projects__slug__audit_export_jobs_get: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ExportJobListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly create_export_job_api_v1_projects__slug__audit_export_jobs_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ExportJobCreate"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ExportJobPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly get_export_job_api_v1_projects__slug__audit_export_jobs__job_id__get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly job_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ExportJobPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly download_export_job_api_v1_projects__slug__audit_export_jobs__job_id__download_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly job_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     readonly list_rules_api_v1_projects__slug__automation_rules_get: {
         readonly parameters: {
             readonly query?: never;
@@ -9442,6 +10041,42 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["CommandPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly list_dead_letters_api_v1_projects__slug__dead_letters_get: {
+        readonly parameters: {
+            readonly query: {
+                readonly engine: string;
+                readonly queue?: string | null;
+                readonly limit?: number;
+                readonly cursor?: string | null;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["DeadLetterPage"];
                 };
             };
             /** @description Validation Error */

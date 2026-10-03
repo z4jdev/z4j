@@ -71,6 +71,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** The request part FastAPI prepends to every validation ``loc``. */
+const REQUEST_PARTS = new Set(["body", "query", "path", "header", "cookie"]);
+
+/**
+ * The field a FastAPI/pydantic validation entry points at: the last string
+ * segment of its ``loc`` once the leading request part is dropped, so
+ * ``["body", "allowed_cidrs"]`` and ``["body", "allowed_cidrs", 0]`` both
+ * read ``allowed_cidrs``. ``null`` when the entry names no field.
+ */
+function validationField(loc: unknown): string | null {
+  if (!Array.isArray(loc)) return null;
+  const segments = loc.filter(
+    (segment): segment is string => typeof segment === "string",
+  );
+  if (segments.length > 0 && REQUEST_PARTS.has(segments[0])) segments.shift();
+  return segments.length > 0 ? segments[segments.length - 1] : null;
+}
+
+/**
+ * FastAPI's default 422 body for a pydantic field-validator failure is
+ * ``{"detail": [{"loc": [...], "msg": "...", "type": "..."}]}`` rather than
+ * z4j's error envelope. Fold the list into one readable message so the
+ * toast names the field instead of "request failed (422)".
+ */
+function normalizeValidationErrors(entries: unknown[]): {
+  message?: string;
+  code: string;
+  details: Record<string, unknown>;
+  requestId: null;
+} {
+  const messages = entries.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.msg !== "string") return [];
+    const field = validationField(entry.loc);
+    return [field ? `${field}: ${entry.msg}` : entry.msg];
+  });
+  return {
+    message: messages.length > 0 ? messages.join("; ") : undefined,
+    code: "validation_error",
+    details: { errors: entries },
+    requestId: null,
+  };
+}
+
 function normalizeErrorEnvelope(
   envelope: ErrorEnvelope | { message?: string; detail?: unknown },
 ): {
@@ -80,6 +123,9 @@ function normalizeErrorEnvelope(
   requestId: string | null;
 } {
   const outer: Record<string, unknown> = isRecord(envelope) ? envelope : {};
+  if (Array.isArray(outer.detail)) {
+    return normalizeValidationErrors(outer.detail);
+  }
   const candidate =
     typeof outer.error === "string"
       ? outer

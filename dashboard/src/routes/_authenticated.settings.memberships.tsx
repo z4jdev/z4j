@@ -92,5 +92,6 @@ function capabilitiesFor(role: string): string[] {
     ];
   if (role === "operator")
     return ["retry", "cancel", "bulk", "rate-limit", "schedules"];
+  if (role === "auditor") return ["view", "audit log"];
   return ["view only"];
 }

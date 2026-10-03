@@ -18,6 +18,7 @@ These run from inside the FastAPI lifespan in :func:`create_app`.
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING
 
 import structlog
@@ -29,6 +30,7 @@ from z4j_brain.domain.audit_verifier import (
     verify_active_audit_generation,
 )
 from z4j_brain.persistence.repositories import (
+    AuditLogRepository,
     FirstBootTokenRepository,
     MembershipRepository,
     ProjectRepository,
@@ -37,6 +39,8 @@ from z4j_brain.persistence.repositories import (
 from z4j_brain.schema_transition import RELEASE_MIGRATION_HEAD
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from z4j_brain.domain.setup_service import SetupService
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.settings import Settings
@@ -52,6 +56,70 @@ logger = structlog.get_logger("z4j.brain.startup")
 # would inherit it). Single-use: ``run_first_boot_check`` consumes
 # it and overwrites with None on first read.
 _CLI_BOOTSTRAP_PASSWORD: str | None = None
+
+#: A wait shorter than this is the lock handshake itself; longer, and a
+#: sibling worker was walking the chain, which the operator should be able
+#: to see in the log when a multi-worker start takes a while.
+_SIBLING_WALK_NOTICE_SECONDS = 1.0
+
+
+async def _queue_for_the_startup_walk(
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    """Let this worker wait its turn for the chain walk instead of dying.
+
+    Every uvicorn worker runs the full Boundary-F walk before it serves, and
+    the walk holds the chain advisory lock plus ``LOCK TABLE audit_log IN
+    SHARE MODE`` from its first page to its last, so sibling workers verify
+    one after another. Every PostgreSQL session carries the per-request
+    ``lock_timeout`` (``db_lock_timeout_ms``, three seconds by default),
+    and on a trail of a few tens of thousands of rows the third and fourth
+    worker waited longer than that for the advisory lock, raised
+    ``LockNotAvailableError``, and uvicorn stopped the whole server,
+    including the workers that had verified. The walk is not the problem
+    (its locks are the consistency guarantee of the verification); the
+    request-sized wait budget is.
+
+    ``SET LOCAL`` scopes the wider budget to the verifying transaction, so
+    the connection goes back to the pool with the per-request values. Both
+    timeouts are widened, because PostgreSQL also counts a lock wait against
+    ``statement_timeout``. Neither is ever set below the per-request bound,
+    so a misconfigured value cannot make startup stricter than a request.
+
+    The advisory lock is then taken here, timed, before the verifier takes
+    it again (advisory locks are reentrant within one transaction, so the
+    verifier's own request returns at once): the time spent on it is the
+    time spent waiting for a sibling's walk, and nothing else, which is the
+    one number worth logging about a slow multi-worker start.
+
+    Follow-up, deliberately not done here: skipping the walk in a worker
+    that observes a sibling's clean verification of the same head seconds
+    earlier. The authenticated state row has no field for such a marker
+    (adding one changes the MAC schema), and a sibling's result does not
+    prove the rows this process is about to serve from are still intact: a
+    direct write between the two walks is exactly what each process start
+    is meant to catch. Until that has a proof, every worker walks.
+    """
+
+    if session.bind is None or session.bind.dialect.name != "postgresql":
+        return
+    lock_ms = max(settings.startup_verify_lock_timeout_ms, settings.db_lock_timeout_ms)
+    statement_ms = max(lock_ms, settings.db_statement_timeout_ms)
+    # Both values are integers from Settings, never request input.
+    # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+    await session.execute(text(f"SET LOCAL lock_timeout = {int(lock_ms)}"))
+    # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+    await session.execute(text(f"SET LOCAL statement_timeout = {int(statement_ms)}"))
+    started = time.monotonic()
+    await AuditLogRepository(session).acquire_chain_lock()
+    waited = time.monotonic() - started
+    if waited > _SIBLING_WALK_NOTICE_SECONDS:
+        logger.info(
+            "z4j Boundary-F startup verification waited for a sibling worker's walk",
+            waited_seconds=round(waited, 2),
+            lock_timeout_ms=lock_ms,
+        )
 
 
 async def verify_production_authority_at_startup(
@@ -81,7 +149,7 @@ async def verify_production_authority_at_startup(
         if revisions != [RELEASE_MIGRATION_HEAD]:
             observed = revisions[0] if len(revisions) == 1 else repr(revisions)
             raise AuditChainIntegrityError(
-                "database migration head is not the activated z4j 1.8 head "
+                "database migration head is not the release head "
                 f"(observed {observed!r}, expected "
                 f"{RELEASE_MIGRATION_HEAD!r})",
             )
@@ -105,6 +173,7 @@ async def verify_production_authority_at_startup(
             raise AuditChainIntegrityError(
                 "authenticated audit_chain_state is missing after activation",
             )
+        await _queue_for_the_startup_walk(session, settings)
         report = await verify_active_audit_generation(
             session,
             settings,

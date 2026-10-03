@@ -6,7 +6,8 @@ type AgentInventoryFields = Pick<
 >;
 type AgentCandidateFields = AgentInventoryFields &
   Pick<AgentPublic, "last_seen_at">;
-type AgentAction = "retry_task" | "cancel_task";
+type AgentAction =
+  "retry_task" | "cancel_task" | "requeue_dead_letter" | "list_dead_letters";
 
 /**
  * Whether the brain holds this agent's adapter inventory.
@@ -78,6 +79,28 @@ export function pickAgentForAction<T extends AgentCandidateFields>(
 }
 
 /**
+ * Engines some agent's hello advertised ``action`` for, sorted and unique.
+ *
+ * Only reported inventories count: an agent whose inventory is unreported
+ * (long-poll) is admitted per command by the brain, but it cannot tell the
+ * dashboard which engines it has, so it never puts an engine in this list.
+ * Used to offer only the engines whose dead letters can actually be listed.
+ */
+export function enginesAdvertising(
+  agents: readonly AgentInventoryFields[] | undefined,
+  action: AgentAction,
+): string[] {
+  const engines = new Set<string>();
+  for (const agent of agents ?? []) {
+    if (!reportsAdapterInventory(agent)) continue;
+    for (const engine of agent.engine_adapters) {
+      if (supportsAgentAction(agent, engine, action)) engines.add(engine);
+    }
+  }
+  return [...engines].sort();
+}
+
+/**
  * Pair every row with a command target before anything is sent, and name the
  * engines no agent can act on. A caller sends nothing unless ``unserved`` is
  * empty, so a selection is never left partly done.
@@ -102,4 +125,3 @@ export function resolveCommandTargets<
   }
   return { targets, unserved: [...unserved] };
 }
-

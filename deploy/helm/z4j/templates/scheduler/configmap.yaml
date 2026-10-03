@@ -1,0 +1,27 @@
+{{- if .Values.scheduler.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "z4j-scheduler.fullname" . }}
+  labels:
+    {{- include "z4j-scheduler.labels" . | nindent 4 }}
+data:
+  # All non-secret env vars land here so an operator inspecting the
+  # ConfigMap sees the entire scheduler tunable surface in one place.
+  # Secrets (DSN, metrics token) come via dedicated env entries on the
+  # deployment so they can be sourced from Secret references.
+  Z4J_SCHEDULER_BRAIN_GRPC_URL: {{ include "z4j-scheduler.grpcUrl" . | quote }}
+  Z4J_SCHEDULER_BRAIN_REST_URL: {{ include "z4j-scheduler.restUrl" . | quote }}
+  Z4J_SCHEDULER_PROJECTS: {{ .Values.scheduler.config.projects | quote }}
+  Z4J_SCHEDULER_LEADER_BACKEND: {{ .Values.scheduler.leader.backend | quote }}
+  Z4J_SCHEDULER_LEADER_NAMESPACE: {{ .Values.scheduler.leader.namespace | quote }}
+  Z4J_SCHEDULER_RECONCILE_INTERVAL_SECONDS: {{ .Values.scheduler.config.reconcileIntervalSeconds | quote }}
+  Z4J_SCHEDULER_FIRE_TIMEOUT_SECONDS: {{ .Values.scheduler.config.fireTimeoutSeconds | quote }}
+  Z4J_SCHEDULER_FIRE_RETRY_MAX: {{ .Values.scheduler.config.fireRetryMax | quote }}
+  Z4J_SCHEDULER_FIRE_RETRY_BACKOFF_SECONDS: {{ .Values.scheduler.config.fireRetryBackoffSeconds | quote }}
+  Z4J_SCHEDULER_LOG_LEVEL: {{ .Values.scheduler.config.logLevel | quote }}
+  Z4J_SCHEDULER_LOG_JSON: {{ .Values.scheduler.config.logJson | quote }}
+  Z4J_SCHEDULER_METRICS_ENABLED: {{ .Values.scheduler.config.metricsEnabled | quote }}
+  Z4J_SCHEDULER_BIND_HOST: "0.0.0.0"
+  Z4J_SCHEDULER_BIND_PORT: {{ .Values.scheduler.service.httpPort | quote }}
+{{- end }}

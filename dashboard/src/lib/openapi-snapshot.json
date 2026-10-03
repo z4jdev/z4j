@@ -539,6 +539,21 @@
       "ApiKeyCreated": {
         "description": "Response from key creation - includes the plaintext token.\n\nThe token is shown exactly once. It cannot be retrieved later.",
         "properties": {
+          "allowed_cidrs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-key source-address allowlist (canonical CIDRs). Null or empty means the key is bound only by Z4J_API_IP_ALLOWLIST.",
+            "title": "Allowed Cidrs"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -671,6 +686,21 @@
       "ApiKeyPublic": {
         "description": "Public representation of an API key (no plaintext).",
         "properties": {
+          "allowed_cidrs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-key source-address allowlist (canonical CIDRs). Null or empty means the key is bound only by Z4J_API_IP_ALLOWLIST.",
+            "title": "Allowed Cidrs"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -843,6 +873,164 @@
           "message"
         ],
         "title": "AttentionItem",
+        "type": "object"
+      },
+      "AuditForwarderStatus": {
+        "additionalProperties": false,
+        "description": "What the forwarder has acknowledged, and what is still waiting.",
+        "properties": {
+          "backoff_seconds_remaining": {
+            "default": 0.0,
+            "description": "Seconds until the next attempt is due; zero when it is due now.",
+            "title": "Backoff Seconds Remaining",
+            "type": "number"
+          },
+          "batch_size": {
+            "title": "Batch Size",
+            "type": "integer"
+          },
+          "consecutive_failures": {
+            "default": 0,
+            "description": "Attempts in a row that did not get a 2xx; zero after a success.",
+            "title": "Consecutive Failures",
+            "type": "integer"
+          },
+          "cursor_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "id of the newest audit row the receiver acknowledged.",
+            "title": "Cursor Id"
+          },
+          "cursor_initialised": {
+            "description": "Whether the state row exists yet. It is created on the worker's first pass, starting at the audit head at that moment.",
+            "title": "Cursor Initialised",
+            "type": "boolean"
+          },
+          "cursor_occurred_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "occurred_at of the newest audit row the receiver acknowledged.",
+            "title": "Cursor Occurred At"
+          },
+          "enabled": {
+            "description": "Whether Z4J_AUDIT_WEBHOOK_URL is set on this brain.",
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "lag_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audit rows written past the cursor and not yet acknowledged. Null until the cursor exists.",
+            "title": "Lag Rows"
+          },
+          "last_attempt_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Attempt At"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "max_backoff_seconds": {
+            "title": "Max Backoff Seconds",
+            "type": "number"
+          },
+          "poll_interval_seconds": {
+            "title": "Poll Interval Seconds",
+            "type": "number"
+          },
+          "process_failed_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Failed attempts by this process since it started, or null.",
+            "title": "Process Failed Count"
+          },
+          "process_sent_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Rows this process delivered since it started. Null when this process has no forwarder constructed. One process's view only.",
+            "title": "Process Sent Count"
+          },
+          "sink_id": {
+            "description": "The sink the cursor belongs to.",
+            "title": "Sink Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "worker": {
+            "description": "The supervisor and leader-lock name of the worker.",
+            "title": "Worker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "sink_id",
+          "worker",
+          "cursor_initialised",
+          "batch_size",
+          "poll_interval_seconds",
+          "max_backoff_seconds"
+        ],
+        "title": "AuditForwarderStatus",
         "type": "object"
       },
       "AutomationSettings": {
@@ -1855,6 +2043,22 @@
       },
       "CreateApiKeyRequest": {
         "properties": {
+          "allowed_cidrs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 32,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional per-key source-address allowlist: IPv4/IPv6 CIDRs (a bare address means one host). When set, requests with this key must come from one of them, in addition to Z4J_API_IP_ALLOWLIST. Null or empty means no per-key restriction. Loopback is not implicitly allowed.",
+            "title": "Allowed Cidrs"
+          },
           "expires_in_days": {
             "anyOf": [
               {
@@ -1988,7 +2192,8 @@
             "title": "Display Name"
           },
           "email": {
-            "format": "email",
+            "maxLength": 320,
+            "minLength": 3,
             "title": "Email",
             "type": "string"
           },
@@ -2039,6 +2244,115 @@
           "password"
         ],
         "title": "CreateUserRequest",
+        "type": "object"
+      },
+      "DeadLetterEntry": {
+        "additionalProperties": false,
+        "description": "One parked task as the engine's dead-letter store describes it.\n\nAttributes:\n    task_id: Engine-native id, the same id ``requeue_dead_letter`` takes.\n    task_name: Dotted task / actor name. Empty when the engine does not\n               store the name in a form the adapter can read without\n               deserialising an untrusted payload (the adapter never\n               unpickles broker data to fill this in).\n    queue: The queue the task was dead-lettered from, which is where a\n           requeue would put it back.\n    failed_at: When the engine parked it, UTC. ``None`` when the engine\n               does not record that time.\n    error_excerpt: The tail of the stored failure text (traceback or\n                   exception string), passed through the redaction engine,\n                   at most :data:`DEAD_LETTER_EXCERPT_MAX_CHARS`\n                   characters. Empty when nothing was stored.\n    attempts: Number of executions the engine recorded before giving up.\n              ``None`` when the engine does not track it.",
+        "properties": {
+          "attempts": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempts"
+          },
+          "error_excerpt": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Error Excerpt",
+            "type": "string"
+          },
+          "failed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed At"
+          },
+          "queue": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Queue",
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          },
+          "task_name": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Task Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "queue"
+        ],
+        "title": "DeadLetterEntry",
+        "type": "object"
+      },
+      "DeadLetterPage": {
+        "additionalProperties": false,
+        "description": "One page of dead letters, newest first.\n\nAttributes:\n    entries: At most :data:`DLQ_LIST_MAX_LIMIT` entries, newest first\n             (as far as the engine's store orders them).\n    next_cursor: Opaque token for the next page, or ``None`` on the last\n                 page. The brain passes it back verbatim.\n    total: Number of dead letters matching the request across all pages\n           when the engine can count cheaply, else ``None``.\n    engine: Adapter name that produced the page (``\"rq\"``,\n            ``\"dramatiq\"``, ...).",
+        "properties": {
+          "engine": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Engine",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/DeadLetterEntry"
+            },
+            "maxItems": 200,
+            "title": "Entries",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          }
+        },
+        "required": [
+          "engine"
+        ],
+        "title": "DeadLetterPage",
         "type": "object"
       },
       "DeepCheckResult": {
@@ -2786,6 +3100,272 @@
           "payload"
         ],
         "title": "EventPublic",
+        "type": "object"
+      },
+      "ExportJobCreate": {
+        "description": "Queue one background export of the audit log.\n\nThe filters are the synchronous export's. ``fields`` selects columns\nby name; an unknown name is a ``422`` here rather than silently\ndropped, because a job runs later and out of sight.",
+        "properties": {
+          "action_prefix": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Prefix"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields"
+          },
+          "format": {
+            "enum": [
+              "csv",
+              "json",
+              "xlsx"
+            ],
+            "title": "Format",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "maxLength": 20,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "format"
+        ],
+        "title": "ExportJobCreate",
+        "type": "object"
+      },
+      "ExportJobListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ExportJobPublic"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "sink": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sink"
+          },
+          "sink_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sink Location"
+          }
+        },
+        "required": [
+          "items",
+          "sink",
+          "sink_location"
+        ],
+        "title": "ExportJobListResponse",
+        "type": "object"
+      },
+      "ExportJobPublic": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "downloadable": {
+            "title": "Downloadable",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "export_type": {
+            "title": "Export Type",
+            "type": "string"
+          },
+          "filters": {
+            "additionalProperties": true,
+            "title": "Filters",
+            "type": "object"
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "project_id": {
+            "format": "uuid",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "row_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Count"
+          },
+          "sink": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sink"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "user_id",
+          "export_type",
+          "format",
+          "filters",
+          "status",
+          "row_count",
+          "size_bytes",
+          "sink",
+          "location",
+          "error",
+          "created_at",
+          "started_at",
+          "completed_at",
+          "downloadable"
+        ],
+        "title": "ExportJobPublic",
         "type": "object"
       },
       "ExternalScheduleControlOperationPublic": {
@@ -5395,7 +5975,7 @@
             "type": "array"
           },
           "catch_up": {
-            "default": "skip",
+            "default": "fire_one_missed",
             "maxLength": 20,
             "minLength": 1,
             "title": "Catch Up",
@@ -5939,6 +6519,17 @@
           "scheduler": {
             "title": "Scheduler",
             "type": "string"
+          },
+          "skipped_slots_24h": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skipped Slots 24H"
           },
           "source": {
             "default": "dashboard",
@@ -7265,6 +7856,29 @@
           "unread"
         ],
         "title": "UnreadCountPublic",
+        "type": "object"
+      },
+      "UpdateApiKeyRequest": {
+        "description": "``PATCH /api-keys/{key_id}``: the per-key allowlist is the one mutable field.\n\nName, scopes, project binding and expiry are fixed at mint time;\nchanging any of them is a new key. The allowlist is operational\n(an office moved, a runner got a new egress) and editing it must\nnot force a token rotation.",
+        "properties": {
+          "allowed_cidrs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 32,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Replacement per-key allowlist. Null or empty clears it; the global Z4J_API_IP_ALLOWLIST still applies.",
+            "title": "Allowed Cidrs"
+          }
+        },
+        "title": "UpdateApiKeyRequest",
         "type": "object"
       },
       "UpdateMembershipRequest": {
@@ -8987,13 +9601,13 @@
   },
   "info": {
     "title": "z4j",
-    "version": "1.11.0"
+    "version": "1.12.0"
   },
   "openapi": "3.1.0",
   "paths": {
     "/api/v1/activity": {
       "get": {
-        "description": "List audit rows across every project the caller can see.\n\nAdmins see every row including brain-wide rows (no project_id).\nNon-admins see rows from projects where they hold a membership\nplus their own user-scoped rows whose project_id is null.",
+        "description": "List audit rows across every project the caller can see.\n\nInstance admins see every row including brain-wide rows (no\nproject_id). Other users see rows from the projects where their\nmembership satisfies ``Action.READ_AUDIT`` (auditor or admin, the\nsame tier the per-project audit page requires) plus their own\nuser-scoped rows whose project_id is null.",
         "operationId": "list_activity_api_v1_activity_get",
         "parameters": [
           {
@@ -9110,6 +9724,28 @@
         "summary": "List Activity",
         "tags": [
           "activity"
+        ]
+      }
+    },
+    "/api/v1/admin/audit-forwarder": {
+      "get": {
+        "description": "The forwarder's durable cursor and backlog, for admins.",
+        "operationId": "get_audit_forwarder_status_api_v1_admin_audit_forwarder_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditForwarderStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Audit Forwarder Status",
+        "tags": [
+          "admin-audit-forwarder"
         ]
       }
     },
@@ -9497,6 +10133,58 @@
           }
         },
         "summary": "Revoke Api Key",
+        "tags": [
+          "api-keys"
+        ]
+      },
+      "patch": {
+        "description": "Replace a key's per-key source-address allowlist.\n\nOnly the caller's own active keys are editable. The new list takes\neffect on the next request with the key; ``null`` or ``[]`` clears\nit, after which only ``Z4J_API_IP_ALLOWLIST`` applies.",
+        "operationId": "update_api_key_api_v1_api_keys__key_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Key Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Api Key",
         "tags": [
           "api-keys"
         ]
@@ -10532,7 +11220,7 @@
     },
     "/api/v1/projects/{slug}": {
       "delete": {
-        "description": "Soft-archive a project (sets ``is_active=False``).\n\nWe never hard-delete projects - that would cascade across the\naudit log and break the historical record. The archived\nproject is hidden from list views but its rows survive.",
+        "description": "Soft-archive a project (sets ``is_active=False``).\n\nWe never hard-delete projects - that would cascade across the\naudit log and break the historical record. The archived\nproject is hidden from list views but its rows survive.\n\nThe agents survive too, tokens included, so the archive has to\ndisconnect them itself: once the flag commits, every replica\ncloses the sockets it holds for the project with the revoked-agent\nclose code, and the hello path and the long-poll routes refuse the\nproject's agents until it is active again. Reactivation needs\nnothing further; the agents reconnect on their next retry.",
         "operationId": "archive_project_api_v1_projects__slug__delete",
         "parameters": [
           {
@@ -10951,7 +11639,7 @@
     },
     "/api/v1/projects/{slug}/audit": {
       "get": {
-        "description": "List audit log entries for one project.\n\nRequires admin role on the project - audit reads are\nprivileged because they can reveal who did what when, which\nis itself sensitive.\n\nWhen ``format`` is ``csv`` / ``json`` the response is a file\ndownload containing up to 50 000 matching rows; ``xlsx`` is\ncapped at 25 000 because its workbook is built in memory.\nCursor + limit are ignored on the export path - operators\nnarrow via the filter params instead.",
+        "description": "List audit log entries for one project.\n\nRequires the auditor tier on the project (``auditor`` or\n``admin``): audit reads are privileged because they reveal who\ndid what when, which is itself sensitive, and they are kept\naway from the operator tier so the people who review the\nrecord are not the people who produce it. The list path is\n``Action.READ_AUDIT``; the export path is ``Action.EXPORT_AUDIT``.\nBoth resolve to the same tier through the core table.\n\nWhen ``format`` is ``csv`` / ``json`` the response is a file\ndownload containing up to 50 000 matching rows; ``xlsx`` is\ncapped at 25 000 because its workbook is built in memory.\nCursor + limit are ignored on the export path - operators\nnarrow via the filter params instead.\n\nA served export is itself recorded: one ``audit.export`` row through\nthe chained writer naming the format, the filters, the selected\ncolumns and the row count, so the trail shows who took a copy of it\nand how much. The list path writes nothing; a page read is not an\nextraction.",
         "operationId": "list_audit_api_v1_projects__slug__audit_get",
         "parameters": [
           {
@@ -11129,6 +11817,218 @@
         "summary": "List Audit",
         "tags": [
           "audit"
+        ]
+      }
+    },
+    "/api/v1/projects/{slug}/audit/export-jobs": {
+      "get": {
+        "description": "Newest export jobs for this project, with the sink in effect.",
+        "operationId": "list_export_jobs_api_v1_projects__slug__audit_export_jobs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportJobListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Export Jobs",
+        "tags": [
+          "audit-exports"
+        ]
+      },
+      "post": {
+        "description": "Queue a background export of this project's audit log.\n\nRequires ``Action.EXPORT_AUDIT`` on the project (auditor or admin), the\nsame as the synchronous export.\nAnswers ``409`` when no export sink is configured\n(``Z4J_EXPORT_SINK``), ``422`` for an unknown field name. The job\nstarts ``queued``; poll ``GET .../export-jobs/{id}`` for progress.",
+        "operationId": "create_export_job_api_v1_projects__slug__audit_export_jobs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportJobCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportJobPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Export Job",
+        "tags": [
+          "audit-exports"
+        ]
+      }
+    },
+    "/api/v1/projects/{slug}/audit/export-jobs/{job_id}": {
+      "get": {
+        "description": "One job: status, progress, sink location, or the failure reason.",
+        "operationId": "get_export_job_api_v1_projects__slug__audit_export_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportJobPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Export Job",
+        "tags": [
+          "audit-exports"
+        ]
+      }
+    },
+    "/api/v1/projects/{slug}/audit/export-jobs/{job_id}/download": {
+      "get": {
+        "description": "Stream a finished local-sink export to an auditor or an admin.\n\n``409`` when the job is not done or its sink is not the local\ndirectory sink; an S3 object is fetched from the bucket at the\njob's ``location`` with the operator's own credentials. ``404`` when\nthe row's location does not name a regular file below the configured\ndirectory: the row is not trusted to name the file, the sink is\n(``LocalDirectorySink.open_download``), and what is served is the\nhandle the sink opened.",
+        "operationId": "download_export_job_api_v1_projects__slug__audit_export_jobs__job_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Download Export Job Api V1 Projects  Slug  Audit Export Jobs  Job Id  Download Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Export Job",
+        "tags": [
+          "audit-exports"
         ]
       }
     },
@@ -12197,7 +13097,7 @@
     },
     "/api/v1/projects/{slug}/commands/requeue-dead-letter": {
       "post": {
-        "description": "Move one dead-lettered task back onto its queue.\n\nDeliberately not gated on engine support, and the reason is safety rather\nthan convenience. Whether a requeue is safe is a property of the engine's\nown dead-letter primitive, which only the adapter knows. RQ has one:\n``FailedJobRegistry`` IS its dead-letter concept and ``registry.requeue``\nconsumes the entry and preserves its original routing. Celery does not, and\nits adapter's implementation was removed as a breaking safety correction\nafter it was found to publish a plain retry without consuming the broker\nentry, which could duplicate work; it now refuses without touching the\nbroker at all.\n\nSo an unsupported engine returns a FAILED command naming the reason, which\nis honest. An engine allowlist here would encode today's adapter set into\nthe brain, and would go stale in both directions: it would block an adapter\nthat gains a safe primitive, and it would keep advertising one whose\nimplementation was withdrawn.",
+        "description": "Move one dead-lettered task back onto its queue.\n\nGated on what the target agent advertises, not on an engine list, and the\nreason is safety rather than convenience. Whether a requeue is safe is a\nproperty of the engine's own dead-letter primitive, which only the adapter\nknows. RQ has one: ``FailedJobRegistry`` IS its dead-letter concept and\n``registry.requeue`` consumes the entry and preserves its original routing.\nCelery does not, and its adapter's implementation was removed as a breaking\nsafety correction after it was found to publish a plain retry without\nconsuming the broker entry, which could duplicate work; it no longer\nadvertises ``requeue_dead_letter`` and refuses without touching the broker.\n\nSo the adapter decides by advertising the capability in its hello frame,\nand the brain refuses (422) when the agent's session does not. An engine\nallowlist here would encode today's adapter set into the brain and go\nstale in both directions: it would block an adapter that gains a safe\nprimitive, and it would keep offering one whose implementation was\nwithdrawn.",
         "operationId": "issue_requeue_dead_letter_api_v1_projects__slug__commands_requeue_dead_letter_post",
         "parameters": [
           {
@@ -12401,6 +13301,106 @@
         "summary": "Get Command",
         "tags": [
           "commands"
+        ]
+      }
+    },
+    "/api/v1/projects/{slug}/dead-letters": {
+      "get": {
+        "description": "One page of the engine's dead letters, newest first.\n\n``engine`` is required and checked for shape only; whether anything can\nserve it is decided by the online agents' advertised capabilities. ``queue``\nnarrows the page to one queue; absent, every queue the adapter knows. The\n``cursor`` is the ``next_cursor`` of the previous page, passed back\nverbatim.\n\nErrors: ``409`` when no online agent advertises ``list_dead_letters`` for\nthe engine (the response lists the online agents and what each advertises\nfor it), ``504`` when the agent does not answer within the wait bound,\n``422`` for a malformed engine, limit or cursor, ``429`` when the\ncaller's address has used up the bulk-action bucket, and ``502`` when\nthe agent refused the listing or returned something that is not a page.",
+        "operationId": "list_dead_letters_api_v1_projects__slug__dead_letters_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "engine",
+            "required": true,
+            "schema": {
+              "maxLength": 40,
+              "minLength": 1,
+              "title": "Engine",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "queue",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Queue"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeadLetterPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Dead Letters",
+        "tags": [
+          "dead-letters"
         ]
       }
     },

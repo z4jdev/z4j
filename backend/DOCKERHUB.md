@@ -4,7 +4,7 @@
 
 One dashboard for every Python task engine: Celery, RQ, Dramatiq, Huey, arq, TaskIQ, APScheduler, or plain scripts. Self-hosted. Zero external dependencies in the default mode (bundled SQLite).
 
-**Links**: [PyPI](https://pypi.org/project/z4j/) - [GitHub](https://github.com/z4jdev/z4j) - [Docs](https://z4j.dev) - [Website](https://z4j.com)
+**Links**: [PyPI](https://pypi.org/project/z4j/) - [GitHub](https://github.com/z4jdev/z4j) - [Docs](https://docs.z4j.com) - [Website](https://z4j.com)
 
 ---
 
@@ -95,7 +95,7 @@ docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
 | `Z4J_AUDIT_RETENTION_DAYS` | `90` | Audit-log row lifetime |
 | `Z4J_METRICS_ENABLED` | `true` | Expose Prometheus `/metrics` |
 
-Full reference (30+ additional tunables for rate limits, Argon2 cost, CORS, session cookies, etc.): <https://z4j.dev>.
+Full reference (30+ additional tunables for rate limits, Argon2 cost, CORS, session cookies, etc.): <https://docs.z4j.com>.
 
 ## Volumes
 

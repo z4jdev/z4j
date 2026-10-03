@@ -115,6 +115,25 @@ def _task_payload(task: Task) -> TaskPublic:
     )
 
 
+def _export_file(
+    rows: list[Task],
+    *,
+    export_format: str,
+    slug: str,
+    selected_fields: list[str] | None,
+) -> Any:
+    """The file download for ``export_format`` (``csv``, ``json`` or ``xlsx``).
+
+    The route's ``pattern`` already limited the value to those three, so
+    anything that is not CSV or JSON is the workbook.
+    """
+    if export_format == "csv":
+        return _export_csv(rows, slug, selected_fields)
+    if export_format == "json":
+        return _export_json(rows, slug, selected_fields)
+    return _export_xlsx(rows, slug, selected_fields)
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -220,6 +239,9 @@ async def list_tasks(
         )
 
     tasks = TaskRepository(db_session)
+    # One row past the page in both modes: the listing uses it to know
+    # whether a next page exists, the export to know whether the filter
+    # exceeds the cap.
     rows = await tasks.list_for_project(
         project_id=project.id,
         state=state_enum,
@@ -231,16 +253,27 @@ async def list_tasks(
         since=since,
         until=until,
         cursor=cursor_pair,
-        limit=page_size if format else page_size + 1,
+        limit=page_size + 1,
     )
 
-    # Export path: return file.
-    if format == "csv":
-        return _export_csv(rows, slug, selected_fields)
-    if format == "json":
-        return _export_json(rows, slug, selected_fields)
-    if format == "xlsx":
-        return _export_xlsx(rows, slug, selected_fields)
+    # Export path: return file. A filter that exceeds the cap is refused
+    # with the hint the reference documents (narrow the filter), as the
+    # audit export is; silently truncating would hand the caller a file
+    # that looks complete and is not. The overflow row is the whole test,
+    # so no count query is added (exports never count, see ``include_total``).
+    if format is not None:
+        if len(rows) > page_size:
+            raise ValidationError(
+                f"{format} task export is capped at {page_size} rows "
+                "(Z4J_TASKS_EXPORT_MAX_ROWS); narrow the filter (state, "
+                "priority, queue, worker, since, until, name, search) and re-run",
+                details={
+                    "cap": page_size,
+                    "format": format,
+                    "setting": "Z4J_TASKS_EXPORT_MAX_ROWS",
+                },
+            )
+        return _export_file(rows, export_format=format, slug=slug, selected_fields=selected_fields)
 
     next_cursor: str | None = None
     if len(rows) > page_size:

@@ -1,0 +1,303 @@
+{{- if and .Values.brain.enabled .Values.scheduler.enabled .Values.pki.mintJob.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "z4j.fullname" . }}-pki-mint
+  labels:
+    {{- include "z4j.pki.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+data:
+  # Runs inside the brain image, which carries the ``cryptography``
+  # dependency the brain itself uses for the embedded-mode loopback PKI.
+  # Only the standard library is needed to talk to the Kubernetes API.
+  mint.py: |
+    """Mint the z4j scheduler mTLS bundle for one Helm release.
+
+    The Kubernetes counterpart of docker/scheduler-certs.sh: one private CA,
+    one server leaf for the brain's gRPC listener and one client leaf for
+    the scheduler, kept in two kubernetes.io/tls Secrets instead of a
+    directory. Same keys (EC P-256), same validity defaults, same
+    idempotency: an existing bundle is left alone unless a half is missing
+    or malformed, a leaf does not chain to the CA or match its key, a
+    certificate expires within the renew window, the requested names
+    changed, or Z4J_PKI_FORCE is set.
+    """
+
+    import base64
+    import json
+    import os
+    import secrets
+    import ssl
+    import sys
+    import urllib.error
+    import urllib.request
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+    CA_SUBJECT_CN = "z4j scheduler channel CA"
+    KEYS = ("tls.crt", "tls.key", "ca.crt")
+
+
+    def log(message):
+        print("pki-mint: " + message, flush=True)
+
+
+    def env(name, default=None):
+        value = os.environ.get(name, "")
+        if value:
+            return value
+        if default is not None:
+            return default
+        raise SystemExit("missing environment variable " + name)
+
+
+    def request(method, path, body=None):
+        host = env("KUBERNETES_SERVICE_HOST")
+        port = env("KUBERNETES_SERVICE_PORT")
+        with open(os.path.join(SA_DIR, "token"), encoding="utf-8") as handle:
+            token = handle.read().strip()
+        context = ssl.create_default_context(cafile=os.path.join(SA_DIR, "ca.crt"))
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        req = urllib.request.Request("https://" + host + ":" + port + path, data=data, method=method)
+        req.add_header("Authorization", "Bearer " + token)
+        req.add_header("Accept", "application/json")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, context=context, timeout=30) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode("utf-8", errors="replace")
+            return error.code, (json.loads(raw) if raw else {})
+
+
+    def load_bundle(namespace, name):
+        """None when absent, {} when malformed, else the three PEM blobs."""
+        status, payload = request("GET", "/api/v1/namespaces/" + namespace + "/secrets/" + name)
+        if status == 404:
+            return None
+        if status != 200:
+            raise SystemExit("GET secret " + name + " failed with HTTP " + str(status) + ": " + json.dumps(payload))
+        data = payload.get("data") or {}
+        try:
+            return dict((key, base64.b64decode(data[key])) for key in KEYS)
+        except (KeyError, ValueError):
+            return {}
+
+
+    def public_bytes(key):
+        return key.public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+
+    def expires_within(cert, window):
+        return cert.not_valid_after_utc <= datetime.now(UTC) + window
+
+
+    def leaf_problem(bundle, ca_cert, expected_cn, expected_dns, renew):
+        try:
+            cert = x509.load_pem_x509_certificate(bundle["tls.crt"])
+            key = serialization.load_pem_private_key(bundle["tls.key"], password=None)
+            cert.verify_directly_issued_by(ca_cert)
+        except Exception as error:  # noqa: BLE001 - any parse or chain failure means re-mint
+            return "does not parse or does not chain to the CA (" + type(error).__name__ + ")"
+        if public_bytes(cert.public_key()) != public_bytes(key.public_key()):
+            return "does not match its key"
+        if expires_within(cert, renew):
+            return "expires within the renew window"
+        cn = [a.value for a in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
+        if cn != [expected_cn]:
+            return "was minted for a different CN"
+        try:
+            names = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            dns = names.value.get_values_for_type(x509.DNSName)
+        except x509.ExtensionNotFound:
+            dns = []
+        if sorted(dns) != sorted(expected_dns):
+            return "was minted for different names"
+        return None
+
+
+    def subject(cn):
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+
+
+    def key_usage(sign_certs):
+        return x509.KeyUsage(
+            digital_signature=not sign_certs,
+            content_commitment=False,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=sign_certs,
+            crl_sign=sign_certs,
+            encipher_only=False,
+            decipher_only=False,
+        )
+
+
+    def serial():
+        return int.from_bytes(secrets.token_bytes(16), "big") >> 1
+
+
+    def mint_ca(days):
+        key = ec.generate_private_key(ec.SECP256R1())
+        now = datetime.now(UTC)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject(CA_SUBJECT_CN))
+            .issuer_name(subject(CA_SUBJECT_CN))
+            .public_key(key.public_key())
+            .serial_number(serial())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=days))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            .add_extension(key_usage(True), critical=True)
+            .sign(private_key=key, algorithm=hashes.SHA256())
+        )
+        return cert, key
+
+
+    def mint_leaf(cn, ca_cert, ca_key, sans, is_server, days):
+        key = ec.generate_private_key(ec.SECP256R1())
+        usage = ExtendedKeyUsageOID.SERVER_AUTH if is_server else ExtendedKeyUsageOID.CLIENT_AUTH
+        now = datetime.now(UTC)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject(cn))
+            .issuer_name(ca_cert.subject)
+            .public_key(key.public_key())
+            .serial_number(serial())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=days))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(key_usage(False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([usage]), critical=False)
+            .add_extension(x509.SubjectAlternativeName(sans), critical=False)
+            .sign(private_key=ca_key, algorithm=hashes.SHA256())
+        )
+        return cert, key
+
+
+    def pem_cert(cert):
+        return cert.public_bytes(serialization.Encoding.PEM)
+
+
+    def pem_key(key):
+        return key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+
+
+    def b64(data):
+        return base64.b64encode(data).decode("ascii")
+
+
+    def write_secret(namespace, name, labels, cert_pem, key_pem, ca_pem, existed):
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": namespace, "labels": labels},
+            "type": "kubernetes.io/tls",
+            "data": {"tls.crt": b64(cert_pem), "tls.key": b64(key_pem), "ca.crt": b64(ca_pem)},
+        }
+        base = "/api/v1/namespaces/" + namespace + "/secrets"
+        if existed:
+            status, payload = request("PUT", base + "/" + name, body)
+        else:
+            status, payload = request("POST", base, body)
+        if status not in (200, 201):
+            raise SystemExit("write of secret " + name + " failed with HTTP " + str(status) + ": " + json.dumps(payload))
+
+
+    def describe(label, cert_pem):
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        cn = ",".join(a.value for a in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME))
+        log(label + ": CN=" + cn + " notAfter=" + cert.not_valid_after_utc.isoformat())
+
+
+    def main():
+        namespace = env("Z4J_PKI_NAMESPACE")
+        brain_secret = env("Z4J_PKI_BRAIN_SECRET")
+        scheduler_secret = env("Z4J_PKI_SCHEDULER_SECRET")
+        server_names = [n.strip() for n in env("Z4J_PKI_SERVER_DNS_NAMES").split(",") if n.strip()]
+        client_cn = env("Z4J_PKI_SCHEDULER_CN")
+        ca_days = int(env("Z4J_PKI_CA_DAYS", "3650"))
+        leaf_days = int(env("Z4J_PKI_LEAF_DAYS", "825"))
+        renew = timedelta(days=int(env("Z4J_PKI_RENEW_DAYS", "30")))
+        force = env("Z4J_PKI_FORCE", "0") == "1"
+        labels = json.loads(env("Z4J_PKI_LABELS_JSON", "{}"))
+        if ca_days <= 0 or leaf_days <= 0 or not server_names:
+            raise SystemExit("validity days must be positive and Z4J_PKI_SERVER_DNS_NAMES non-empty")
+
+        brain = load_bundle(namespace, brain_secret)
+        scheduler = load_bundle(namespace, scheduler_secret)
+
+        why = None
+        if force:
+            why = "Z4J_PKI_FORCE=1"
+        elif brain is None and scheduler is None:
+            why = "no bundle in " + namespace + " yet"
+        elif not brain or not scheduler:
+            why = "a half of the bundle is missing or malformed"
+        elif brain["ca.crt"] != scheduler["ca.crt"]:
+            why = "the two halves carry different CAs"
+        else:
+            try:
+                ca_cert = x509.load_pem_x509_certificate(brain["ca.crt"])
+            except ValueError:
+                why = "the CA certificate does not parse"
+            else:
+                if expires_within(ca_cert, renew):
+                    why = "the CA expires within the renew window"
+                else:
+                    problem = leaf_problem(brain, ca_cert, server_names[0], server_names, renew)
+                    if problem is not None:
+                        why = "the brain certificate " + problem
+                    else:
+                        problem = leaf_problem(scheduler, ca_cert, client_cn, [client_cn], renew)
+                        if problem is not None:
+                            why = "the scheduler certificate " + problem
+
+        if why is None:
+            log("the bundle in " + brain_secret + " and " + scheduler_secret + " is valid; nothing to mint")
+            describe("brain", brain["tls.crt"])
+            describe("scheduler", scheduler["tls.crt"])
+            return 0
+
+        log(why)
+        log("minting the CA (" + str(ca_days) + " days) and both leaves (" + str(leaf_days) + " days)")
+        ca_cert, ca_key = mint_ca(ca_days)
+        server_cert, server_key = mint_leaf(
+            server_names[0], ca_cert, ca_key, [x509.DNSName(n) for n in server_names], True, leaf_days
+        )
+        client_cert, client_key = mint_leaf(
+            client_cn, ca_cert, ca_key, [x509.DNSName(client_cn)], False, leaf_days
+        )
+        ca_pem = pem_cert(ca_cert)
+        write_secret(namespace, brain_secret, labels, pem_cert(server_cert), pem_key(server_key), ca_pem, brain is not None)
+        write_secret(namespace, scheduler_secret, labels, pem_cert(client_cert), pem_key(client_key), ca_pem, scheduler is not None)
+        describe("CA", ca_pem)
+        describe("brain", pem_cert(server_cert))
+        log("brain names: " + ",".join(server_names))
+        describe("scheduler", pem_cert(client_cert))
+        log("brain allow-list entry for Z4J_SCHEDULER_GRPC_ALLOWED_CNS: " + client_cn)
+        if brain is not None or scheduler is not None:
+            log("RENEWED: the running brain and scheduler still hold the previous files; roll them (rolloutRevision) before the old certificates expire")
+        return 0
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
+{{- end }}

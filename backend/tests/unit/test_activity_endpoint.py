@@ -74,11 +74,16 @@ async def _seed_two_projects_one_user(
     brain_app,
     is_admin: bool = False,
     member_of_b: bool = False,
+    role: ProjectRole = ProjectRole.AUDITOR,
 ) -> dict:
     """Two projects, one user, optionally admin and/or member of B.
 
     Project A: user is member; Project B: user is NOT a member
-    unless ``member_of_b`` is true. Admins see both regardless.
+    unless ``member_of_b`` is true. Admins see both regardless. The
+    membership is at the auditor tier by default because that is the
+    tier that admits a project into the feed (the same rule as the
+    per-project audit page); ``test_auditor_separation_of_duties.py``
+    holds the viewer and operator exclusions.
     """
     db = brain_app.state.db
     hasher = PasswordHasher(settings)
@@ -109,7 +114,7 @@ async def _seed_two_projects_one_user(
         Membership(
             user_id=user_id,
             project_id=proj_a,
-            role=ProjectRole.VIEWER,
+            role=role,
         ),
     ]
     if member_of_b:
@@ -117,7 +122,7 @@ async def _seed_two_projects_one_user(
             Membership(
                 user_id=user_id,
                 project_id=proj_b,
-                role=ProjectRole.VIEWER,
+                role=role,
             ),
         )
 

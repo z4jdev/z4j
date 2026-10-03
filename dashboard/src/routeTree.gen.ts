@@ -40,6 +40,7 @@ import { Route as AuthenticatedProjectsSlugAgentsRouteImport } from './routes/_a
 import { Route as AuthenticatedProjectsSlugAuditRouteImport } from './routes/_authenticated.projects.$slug.audit'
 import { Route as AuthenticatedProjectsSlugAutomationRouteImport } from './routes/_authenticated.projects.$slug.automation'
 import { Route as AuthenticatedProjectsSlugCommandsRouteImport } from './routes/_authenticated.projects.$slug.commands'
+import { Route as AuthenticatedProjectsSlugDeadLettersRouteImport } from './routes/_authenticated.projects.$slug.dead-letters'
 import { Route as AuthenticatedProjectsSlugIssuesRouteImport } from './routes/_authenticated.projects.$slug.issues'
 import { Route as AuthenticatedProjectsSlugQueuesRouteImport } from './routes/_authenticated.projects.$slug.queues'
 import { Route as AuthenticatedProjectsSlugSchedulesRouteImport } from './routes/_authenticated.projects.$slug.schedules'
@@ -240,6 +241,12 @@ const AuthenticatedProjectsSlugCommandsRoute =
     path: '/commands',
     getParentRoute: () => AuthenticatedProjectsSlugRoute,
   } as any)
+const AuthenticatedProjectsSlugDeadLettersRoute =
+  AuthenticatedProjectsSlugDeadLettersRouteImport.update({
+    id: '/dead-letters',
+    path: '/dead-letters',
+    getParentRoute: () => AuthenticatedProjectsSlugRoute,
+  } as any)
 const AuthenticatedProjectsSlugIssuesRoute =
   AuthenticatedProjectsSlugIssuesRouteImport.update({
     id: '/issues',
@@ -423,6 +430,7 @@ export interface FileRoutesByFullPath {
   '/projects/$slug/audit': typeof AuthenticatedProjectsSlugAuditRoute
   '/projects/$slug/automation': typeof AuthenticatedProjectsSlugAutomationRoute
   '/projects/$slug/commands': typeof AuthenticatedProjectsSlugCommandsRoute
+  '/projects/$slug/dead-letters': typeof AuthenticatedProjectsSlugDeadLettersRoute
   '/projects/$slug/issues': typeof AuthenticatedProjectsSlugIssuesRoute
   '/projects/$slug/queues': typeof AuthenticatedProjectsSlugQueuesRoute
   '/projects/$slug/schedules': typeof AuthenticatedProjectsSlugSchedulesRoute
@@ -477,6 +485,7 @@ export interface FileRoutesByTo {
   '/projects/$slug/audit': typeof AuthenticatedProjectsSlugAuditRoute
   '/projects/$slug/automation': typeof AuthenticatedProjectsSlugAutomationRoute
   '/projects/$slug/commands': typeof AuthenticatedProjectsSlugCommandsRoute
+  '/projects/$slug/dead-letters': typeof AuthenticatedProjectsSlugDeadLettersRoute
   '/projects/$slug/issues': typeof AuthenticatedProjectsSlugIssuesRoute
   '/projects/$slug/queues': typeof AuthenticatedProjectsSlugQueuesRoute
   '/projects/$slug/schedules': typeof AuthenticatedProjectsSlugSchedulesRoute
@@ -534,6 +543,7 @@ export interface FileRoutesById {
   '/_authenticated/projects/$slug/audit': typeof AuthenticatedProjectsSlugAuditRoute
   '/_authenticated/projects/$slug/automation': typeof AuthenticatedProjectsSlugAutomationRoute
   '/_authenticated/projects/$slug/commands': typeof AuthenticatedProjectsSlugCommandsRoute
+  '/_authenticated/projects/$slug/dead-letters': typeof AuthenticatedProjectsSlugDeadLettersRoute
   '/_authenticated/projects/$slug/issues': typeof AuthenticatedProjectsSlugIssuesRoute
   '/_authenticated/projects/$slug/queues': typeof AuthenticatedProjectsSlugQueuesRoute
   '/_authenticated/projects/$slug/schedules': typeof AuthenticatedProjectsSlugSchedulesRoute
@@ -593,6 +603,7 @@ export interface FileRouteTypes {
     | '/projects/$slug/audit'
     | '/projects/$slug/automation'
     | '/projects/$slug/commands'
+    | '/projects/$slug/dead-letters'
     | '/projects/$slug/issues'
     | '/projects/$slug/queues'
     | '/projects/$slug/schedules'
@@ -647,6 +658,7 @@ export interface FileRouteTypes {
     | '/projects/$slug/audit'
     | '/projects/$slug/automation'
     | '/projects/$slug/commands'
+    | '/projects/$slug/dead-letters'
     | '/projects/$slug/issues'
     | '/projects/$slug/queues'
     | '/projects/$slug/schedules'
@@ -703,6 +715,7 @@ export interface FileRouteTypes {
     | '/_authenticated/projects/$slug/audit'
     | '/_authenticated/projects/$slug/automation'
     | '/_authenticated/projects/$slug/commands'
+    | '/_authenticated/projects/$slug/dead-letters'
     | '/_authenticated/projects/$slug/issues'
     | '/_authenticated/projects/$slug/queues'
     | '/_authenticated/projects/$slug/schedules'
@@ -957,6 +970,13 @@ declare module '@tanstack/react-router' {
       path: '/commands'
       fullPath: '/projects/$slug/commands'
       preLoaderRoute: typeof AuthenticatedProjectsSlugCommandsRouteImport
+      parentRoute: typeof AuthenticatedProjectsSlugRoute
+    }
+    '/_authenticated/projects/$slug/dead-letters': {
+      id: '/_authenticated/projects/$slug/dead-letters'
+      path: '/dead-letters'
+      fullPath: '/projects/$slug/dead-letters'
+      preLoaderRoute: typeof AuthenticatedProjectsSlugDeadLettersRouteImport
       parentRoute: typeof AuthenticatedProjectsSlugRoute
     }
     '/_authenticated/projects/$slug/issues': {
@@ -1258,6 +1278,7 @@ interface AuthenticatedProjectsSlugRouteChildren {
   AuthenticatedProjectsSlugAuditRoute: typeof AuthenticatedProjectsSlugAuditRoute
   AuthenticatedProjectsSlugAutomationRoute: typeof AuthenticatedProjectsSlugAutomationRoute
   AuthenticatedProjectsSlugCommandsRoute: typeof AuthenticatedProjectsSlugCommandsRoute
+  AuthenticatedProjectsSlugDeadLettersRoute: typeof AuthenticatedProjectsSlugDeadLettersRoute
   AuthenticatedProjectsSlugIssuesRoute: typeof AuthenticatedProjectsSlugIssuesRoute
   AuthenticatedProjectsSlugQueuesRoute: typeof AuthenticatedProjectsSlugQueuesRoute
   AuthenticatedProjectsSlugSchedulesRoute: typeof AuthenticatedProjectsSlugSchedulesRoute
@@ -1280,6 +1301,8 @@ const AuthenticatedProjectsSlugRouteChildren: AuthenticatedProjectsSlugRouteChil
       AuthenticatedProjectsSlugAutomationRoute,
     AuthenticatedProjectsSlugCommandsRoute:
       AuthenticatedProjectsSlugCommandsRoute,
+    AuthenticatedProjectsSlugDeadLettersRoute:
+      AuthenticatedProjectsSlugDeadLettersRoute,
     AuthenticatedProjectsSlugIssuesRoute: AuthenticatedProjectsSlugIssuesRoute,
     AuthenticatedProjectsSlugQueuesRoute: AuthenticatedProjectsSlugQueuesRoute,
     AuthenticatedProjectsSlugSchedulesRoute:

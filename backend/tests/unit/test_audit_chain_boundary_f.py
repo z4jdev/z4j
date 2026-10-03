@@ -178,6 +178,112 @@ async def test_startup_refuses_tampered_authenticated_state(engine) -> None:
         )
 
 
+class _RecordingSession:
+    """A session stand-in that only records what it is asked to run.
+
+    Enough for the startup wait helper and for ``acquire_chain_lock``: both
+    read ``bind.dialect.name`` and call ``execute``.
+    """
+
+    def __init__(self, dialect: str) -> None:
+        from types import SimpleNamespace
+
+        self.bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect))
+        self.statements: list[str] = []
+
+    async def execute(self, statement, params=None) -> None:  # type: ignore[no-untyped-def]
+        self.statements.append(str(statement))
+
+
+@pytest.mark.asyncio
+async def test_startup_widens_the_lock_wait_only_on_postgresql(engine) -> None:
+    """SQLite has no lock_timeout; PostgreSQL gets both SET LOCALs before the lock."""
+    from sqlalchemy import event
+    from z4j_brain import startup as startup_mod
+
+    settings = _settings()
+    await _activate(engine, AuditService(settings))
+    await _mark_release_migration_head(engine)
+    seen: list[str] = []
+
+    def _record(_conn, _cursor, statement, *_rest) -> None:  # type: ignore[no-untyped-def]
+        seen.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _record)
+    try:
+        report = await verify_production_authority_at_startup(
+            db=DatabaseManager(engine),
+            settings=settings,
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _record)
+    assert report.clean
+    assert any("audit_log" in statement for statement in seen), "the walk was not captured"
+    assert not [s for s in seen if "SET LOCAL" in s or "pg_advisory_xact_lock" in s]
+
+    # The PostgreSQL branch: the two local timeouts, then the advisory lock,
+    # in that order, since a SET LOCAL after the lock request would bound
+    # nothing.
+    session = _RecordingSession("postgresql")
+    await startup_mod._queue_for_the_startup_walk(session, settings)  # type: ignore[arg-type]
+    assert session.statements == [
+        "SET LOCAL lock_timeout = 600000",
+        "SET LOCAL statement_timeout = 600000",
+        "SELECT pg_advisory_xact_lock(:lock_id)",
+    ]
+
+    # Never below the per-request bounds: a small startup value is raised to
+    # the request lock budget, and the statement budget keeps its own value.
+    tight = settings.model_copy(
+        update={
+            "startup_verify_lock_timeout_ms": 1_000,
+            "db_lock_timeout_ms": 5_000,
+            "db_statement_timeout_ms": 10_000,
+        },
+    )
+    session = _RecordingSession("postgresql")
+    await startup_mod._queue_for_the_startup_walk(session, tight)  # type: ignore[arg-type]
+    assert session.statements[:2] == [
+        "SET LOCAL lock_timeout = 5000",
+        "SET LOCAL statement_timeout = 10000",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_startup_logs_a_wait_longer_than_a_second_for_a_sibling_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    import structlog
+    from z4j_brain import startup as startup_mod
+
+    settings = _settings()
+    # The module logger is a structlog proxy cached on first use with the
+    # processors active then; a fresh proxy binds under the capture
+    # configuration.
+    monkeypatch.setattr(startup_mod, "logger", structlog.get_logger("z4j.brain.startup"))
+    waited_line = "z4j Boundary-F startup verification waited for a sibling worker's walk"
+
+    async def _run_with_clock(readings: list[float]) -> list[dict[str, object]]:
+        monkeypatch.setattr(startup_mod, "time", SimpleNamespace(monotonic=iter(readings).__next__))
+        with structlog.testing.capture_logs() as events:
+            await startup_mod._queue_for_the_startup_walk(
+                _RecordingSession("postgresql"),  # type: ignore[arg-type]
+                settings,
+            )
+        return [e for e in events if e.get("event") == waited_line]
+
+    # Below one second is the lock handshake itself: nothing to say.
+    assert await _run_with_clock([10.0, 10.3]) == []
+    # Above it, the seconds and the bound in force.
+    waited = await _run_with_clock([10.0, 12.5])
+    assert len(waited) == 1
+    assert waited[0]["log_level"] == "info"
+    assert waited[0]["waited_seconds"] == 2.5
+    assert waited[0]["lock_timeout_ms"] == 600_000
+
+
 @pytest.mark.asyncio
 async def test_api_login_starts_authenticated_sqlite_write_unit_before_read(
     engine,

@@ -182,3 +182,28 @@ def test_no_misfires_exits_zero_with_message(
     out = capsys.readouterr().out
     assert rc == 0
     assert "no misfires recorded" in out
+
+
+def test_unreachable_database_exits_two_with_one_line(
+    cli_settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The reference promises exit 2 on an unreachable database, not a traceback.
+
+    A SQLite file in a directory that does not exist is the portable stand-in
+    for a refused connection: the driver raises at first use, inside the
+    session, exactly where a PostgreSQL connect failure would surface.
+    """
+    missing = tmp_path / "no-such-dir" / "z4j.db"
+    monkeypatch.setenv("Z4J_DATABASE_URL", f"sqlite+aiosqlite:///{missing.as_posix()}")
+
+    rc = _run_misfires("--project", "default")
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "z4j misfires: database unreachable: OperationalError:" in captured.err
+    assert "Traceback" not in captured.err
+    assert len([line for line in captured.err.splitlines() if line.strip()]) == 1
+    assert captured.out == ""

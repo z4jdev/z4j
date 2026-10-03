@@ -17,7 +17,16 @@ agent. Per-connection state machine:
 7. On disconnect: unregister, mark offline.
 
 Close codes:
-- ``4401`` - invalid bearer token
+- ``4401`` - invalid bearer token, or a valid token whose project is
+  archived (``projects.is_active`` false). Same code on purpose: the
+  shipped agent backs off on its auth schedule for 4401 and treats any
+  code it does not know as a transient failure it should retry fast.
+- ``4403`` - source address outside ``Z4J_AGENT_IP_ALLOWLIST``, sent right
+  after accept and before the bearer is read, so a refused peer learns
+  nothing about the token it holds; also a signed frame that fails HMAC or
+  replay verification on an established session. The shipped agent parks
+  on the same auth backoff as for 4401; the code keeps the two apart in
+  the log.
 - ``4400`` - first frame was not ``hello`` or shape was malformed
 - ``4426`` - protocol version not supported
 - ``4427`` - agent outside the supported version skew. RESERVED, not sent
@@ -25,7 +34,9 @@ Close codes:
   reconnect-storm. See ``CLOSE_VERSION_SKEW``.
 - ``4429`` - agent connect rate limit exceeded
 - ``4002`` - replaced by a newer connection from the same agent
-- ``4003`` - agent revoked after the connection authenticated
+- ``4003`` - agent revoked, or its project archived, after the connection
+  authenticated. Archiving a project kicks every agent of that project
+  through the same registry path a revoke uses.
 - ``1000`` - clean shutdown
 - ``1011`` - internal server error
 """
@@ -62,14 +73,20 @@ from z4j_core.transport.versioning import SUPPORTED_PROTOCOLS
 from z4j_brain import (
     __version__ as BRAIN_VERSION,  # noqa: N812  conventional version-constant alias
 )
+from z4j_brain.domain import refusal_audit
 from z4j_brain.domain.command_wire import wire_target
+from z4j_brain.domain.ip_allowlist import check_agent_ip, record_ip_denial
 from z4j_brain.domain.retry_contract import (
     required_retry_engine,
     retry_contracts_from_capabilities,
 )
 from z4j_brain.domain.version_check import ParsedVersion
 from z4j_brain.persistence.agent_authority import local_agent_authority
-from z4j_brain.websocket.auth import resolve_agent_by_bearer
+from z4j_brain.websocket.auth import (
+    agent_project_is_active,
+    resolve_agent_by_bearer,
+    resolve_websocket_client_ip,
+)
 from z4j_brain.websocket.frame_router import FrameOutcome, FrameRouter
 
 if TYPE_CHECKING:
@@ -173,6 +190,13 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
     settings = _settings_from(websocket)
     db = _db_from(websocket)
 
+    # The HTTP middleware never sees a WebSocket scope, so the gateway runs
+    # the trusted-proxy resolver itself. This one address keys the connect
+    # bucket, is matched against the agent allowlist and goes on every audit
+    # row the handshake writes; ``X-Forwarded-For`` counts only from a peer
+    # inside ``trusted_proxies``, as on HTTP.
+    client_ip = resolve_websocket_client_ip(websocket, settings=settings)
+
     # Per-IP rate limit on the WS handshake. Without this, a
     # leaked bearer could open thousands of connections; the
     # "second connection wins" policy only kicks the OTHER
@@ -180,9 +204,8 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
     # floods.
     from z4j_brain.domain.ip_rate_limit import _agent_connect_bucket
 
-    client_host = websocket.client.host if websocket.client else None
-    if client_host is not None:
-        ok = await _agent_connect_bucket.hit(client_host)
+    if client_ip:
+        ok = await _agent_connect_bucket.hit(client_ip)
         if not ok:
             await websocket.accept()
             await websocket.close(
@@ -191,21 +214,65 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
             )
             logger.warning(
                 "z4j gateway: WS connect rate-limited",
-                source_ip=client_host,
+                source_ip=client_ip,
             )
             return
 
     await websocket.accept()
 
-    # ------------------------------------------------------------------
-    # 1) Authenticate
-    # ------------------------------------------------------------------
-    bearer = websocket.headers.get("authorization")
     from z4j_brain.persistence.repositories import (
         AgentRepository,
         AgentWorkerRepository,
         AuditLogRepository,
     )
+
+    # ------------------------------------------------------------------
+    # 0) Source-address allowlist
+    # ------------------------------------------------------------------
+    # Before the bearer is read: a peer outside ``agent_ip_allowlist``
+    # learns nothing about the token it presents. Closed with 4403 rather
+    # than 4401 so the log tells the two apart; the shipped agent parks on
+    # its auth backoff for either. The check counted the metric; the audit
+    # row is written here on a session of its own, before the close so the
+    # write does not race the teardown, and once per address per interval
+    # across this hello and the long-poll routes: the record of written rows
+    # is consulted before any session is opened, so a refused address inside
+    # the interval of its row costs no write at all. An unlisted peer needs
+    # no credential to be refused, so without that a handful of addresses
+    # inside the connect bucket could hold the SQLite writer busy with
+    # denial rows. A row that could not be written gives its claim back and
+    # the next refusal writes it. The close code and the log line are the
+    # same whether or not a row was written.
+    denial = check_agent_ip(client_ip, settings=settings)
+    if denial is not None:
+        dedupe_key = denial.ip
+        user_agent = websocket.headers.get("user-agent")
+        try:
+            if refusal_audit.IP_DENIED_ROWS.claim(dedupe_key, now=refusal_audit.now()):
+                async with db.session(write=True) as audit_session:
+                    await record_ip_denial(
+                        websocket.app.state.audit_service,
+                        AuditLogRepository(audit_session),
+                        denial,
+                        user_agent=user_agent[:256] if user_agent else None,
+                        path="/ws/agent",
+                    )
+                    await audit_session.commit()
+        except Exception:
+            refusal_audit.IP_DENIED_ROWS.release(dedupe_key)
+            logger.exception("z4j gateway: failed to audit source-address refusal")
+        finally:
+            logger.info(
+                "z4j gateway: source address outside the agent allowlist",
+                source_ip=client_ip,
+            )
+            await _safe_close(websocket, code=4403)
+        return
+
+    # ------------------------------------------------------------------
+    # 1) Authenticate
+    # ------------------------------------------------------------------
+    bearer = websocket.headers.get("authorization")
 
     async with db.session() as session:
         agent_repo = AgentRepository(session)
@@ -214,29 +281,86 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
             settings=settings,
             agents=agent_repo,
         )
+        # A valid token is not enough: archiving a project leaves its agent
+        # rows and token hashes intact, so the project flag has to be read
+        # alongside the bearer or those agents keep connecting.
+        project_active = agent is not None and await agent_project_is_active(
+            project_id=agent.project_id,
+            session=session,
+        )
     if agent is None:
         # Audit the failure so operators have visibility into bearer
         # rejection patterns. The source IP is the realistic
         # rate-limit key for any future per-IP throttle middleware.
-        client_host = websocket.client.host if websocket.client else None
         # Audit the rejection BEFORE closing the socket so the write
-        # completes without racing the connection teardown.
+        # completes without racing the connection teardown, and once per
+        # address per interval: nothing was authenticated, so the address is
+        # the only fact the row carries and every row an address writes
+        # inside the interval repeats it, while a hello needs no valid
+        # credential to reach this point, so one row per refused hello let a
+        # handful of addresses fill the SQLite writer with denial rows. A row
+        # that could not be written gives its claim back. The close code and
+        # the log line are the same whether or not a row was written.
+        dedupe_key = client_ip or ""
         try:
-            async with db.session(write=True) as audit_session:
-                await websocket.app.state.audit_service.record(
-                    AuditLogRepository(audit_session),
-                    action="agent.auth.bearer_failed",
-                    target_type="agent",
-                    result="failed",
-                    outcome="deny",
-                    source_ip=client_host,
-                )
-                await audit_session.commit()
+            if refusal_audit.BEARER_FAILED_ROWS.claim(dedupe_key, now=refusal_audit.now()):
+                async with db.session(write=True) as audit_session:
+                    await websocket.app.state.audit_service.record(
+                        AuditLogRepository(audit_session),
+                        action="agent.auth.bearer_failed",
+                        target_type="agent",
+                        result="failed",
+                        outcome="deny",
+                        source_ip=client_ip or None,
+                    )
+                    await audit_session.commit()
         except Exception:
+            refusal_audit.BEARER_FAILED_ROWS.release(dedupe_key)
             logger.exception("z4j gateway: failed to audit bearer rejection")
         finally:
-            logger.info("z4j gateway: bearer rejected", source_ip=client_host)
+            logger.info("z4j gateway: bearer rejected", source_ip=client_ip)
             await websocket.close(code=4401)
+        return
+
+    if not project_active:
+        # Archived project. Close with the same code a revoked token gets so
+        # the shipped agent parks on its auth backoff (10s to 10min) and
+        # reconnects on its own once the project is active again, instead of
+        # the 1s..30s schedule it applies to close codes it does not know.
+        # Distinct audit action so operators can tell the two apart. The row
+        # is written once per agent per interval, on this hello and on the
+        # long-poll routes together (the record of written rows is shared):
+        # the agent keeps reconnecting on its backoff until the project is
+        # active again, and every row it would write names the same agent,
+        # project and address. A row that could not be written gives its
+        # claim back. The close code and the log line are the same whether
+        # or not a row was written.
+        dedupe_key = str(agent.id)
+        try:
+            if refusal_audit.PROJECT_INACTIVE_ROWS.claim(dedupe_key, now=refusal_audit.now()):
+                async with db.session(write=True) as audit_session:
+                    await websocket.app.state.audit_service.record(
+                        AuditLogRepository(audit_session),
+                        action="agent.auth.project_inactive",
+                        target_type="agent",
+                        target_id=str(agent.id),
+                        result="failed",
+                        outcome="deny",
+                        project_id=agent.project_id,
+                        source_ip=client_ip or None,
+                    )
+                    await audit_session.commit()
+        except Exception:
+            refusal_audit.PROJECT_INACTIVE_ROWS.release(dedupe_key)
+            logger.exception("z4j gateway: failed to audit inactive-project rejection")
+        finally:
+            logger.info(
+                "z4j gateway: agent of an archived project rejected",
+                agent_id=str(agent.id),
+                project_id=str(agent.project_id),
+                source_ip=client_ip,
+            )
+            await _safe_close(websocket, code=4401)
         return
 
     project_id = agent.project_id
@@ -469,17 +593,43 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
     # kick cannot see this socket yet. Once registered, recheck the durable
     # live predicate: either this check observes the tombstone and unregisters
     # us, or a later revoke observes the registered socket and kicks it.
+    #
+    # The same window exists for a project archive: its kick walks the
+    # registry after the commit, so a socket that registers just after the
+    # walk is only caught by rereading the project flag here.
     async with db.session() as db_session:
         still_live = await AgentRepository(db_session).get_live(agent_id)
-    if still_live is None:
+        project_still_active = still_live is not None and await agent_project_is_active(
+            project_id=project_id,
+            session=db_session,
+        )
+    if still_live is None or not project_still_active:
         await registry.unregister(
             agent_id,
             ws=websocket,
             worker_id=agent_worker_id,
         )
+        if still_live is not None:
+            # The agent row survives an archive, and mark_online has already
+            # promoted it. Flip it back so the fleet view does not show an
+            # online agent in an archived project until the health sweep.
+            try:
+                async with db.session(write=True) as offline_session:
+                    await AgentRepository(offline_session).mark_offline(
+                        agent_id,
+                        captured_at=connect_at,
+                    )
+                    await offline_session.commit()
+            except Exception:
+                logger.exception(
+                    "z4j gateway: offline flip after archived-project recheck failed",
+                    agent_id=str(agent_id),
+                )
         logger.info(
-            "z4j gateway: agent revoked while registering",
+            "z4j gateway: agent revoked or project archived while registering",
             agent_id=str(agent_id),
+            project_id=str(project_id),
+            reason="revoked" if still_live is None else "project_inactive",
         )
         await _safe_close(websocket, code=4003)
         return

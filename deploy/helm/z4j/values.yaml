@@ -1,0 +1,580 @@
+# Default values for the z4j chart.
+#
+# Every key has a comment explaining what it does and why the default is
+# what it is. Operators read this file as the canonical reference for the
+# chart's behavior; keep the comments honest.
+#
+# The defaults mirror the packaged docker-compose.yml evaluation posture:
+# one brain replica, bundled SQLite on a PersistentVolumeClaim, no
+# scheduler, no PostgreSQL, reachable through ``kubectl port-forward``.
+# Production installs set brain.publicUrl, brain.allowedHosts,
+# brain.secrets and a PostgreSQL database; see README.md.
+
+# -----------------------------------------------------------------------------
+# Image
+# -----------------------------------------------------------------------------
+image:
+  # The published brain image also contains the ``z4j-scheduler`` entry
+  # point, and the PKI minting Job runs from it too. There is no separately
+  # published z4j-scheduler image. Air-gapped operators mirror this image
+  # to their own registry and point ``repository`` at it.
+  repository: z4jdev/z4j
+  # Defaults to ``Chart.appVersion`` so a chart upgrade and an app upgrade
+  # are coupled by default. Override per release to pin a specific tag
+  # (``tag: "X@sha256:..."`` pins a digest as well).
+  tag: ""
+  pullPolicy: IfNotPresent
+  # Names of imagePullSecrets in the release namespace (private mirrors).
+  pullSecrets: []
+
+# Names + namespace bits.
+nameOverride: ""
+fullnameOverride: ""
+
+# Helm cannot checksum Secret contents that it does not render. Bump this
+# opaque value with ``helm upgrade`` after rotating any externally managed
+# Secret consumed by this chart: the brain application secrets, database
+# credentials, the scheduler's TLS bundle, leader PostgreSQL DSN, or a
+# metrics bearer token. Kubernetes captures Secret-backed environment
+# values when a pod starts, and z4j-scheduler loads its mTLS files once
+# when the gRPC channel is constructed, so an in-place Secret update is
+# not enough. The value lands as an annotation on every Deployment in the
+# release, so changing it rolls the brain and the scheduler together.
+rolloutRevision: ""
+
+# -----------------------------------------------------------------------------
+# Brain
+# -----------------------------------------------------------------------------
+brain:
+  # Set to false to deploy only the scheduler against a brain that lives
+  # outside this release (another cluster, Docker Compose, a VM). Then
+  # scheduler.brain.grpcUrl and scheduler.brain.restUrl are required and
+  # pki.mintJob cannot be used.
+  enabled: true
+
+  # One replica by default. More than one requires PostgreSQL and sticky
+  # session routing for /ws on your ingress or load balancer (each agent's
+  # WebSocket pins to one brain pod); the chart renders no affinity helper.
+  replicaCount: 1
+
+  # Recreate, not RollingUpdate. The brain migrates the database on boot,
+  # and Kubernetes rounds ``maxSurge`` up, so a rolling update of even one
+  # replica runs the new schema migration while the old process is still
+  # writing. Multi-replica installs that accept that mixed-version window
+  # may switch to RollingUpdate deliberately.
+  strategy:
+    type: Recreate
+
+  # Externally reachable origin of the dashboard, used for setup links and
+  # password-reset emails. Outside exactly ``dev`` the brain refuses a
+  # plain-http value unless allowHttpPublicUrl is true. The default is the
+  # port-forward evaluation posture; production sets an https:// origin.
+  publicUrl: "http://localhost:7700"
+  # Host-header allow-list, rendered as the JSON array the brain expects.
+  # Production deployments must list their public hostname.
+  allowedHosts:
+    - localhost
+    - 127.0.0.1
+  # Permit a plain-http publicUrl in production posture. Evaluation only;
+  # behind a TLS-terminating ingress set it to false.
+  allowHttpPublicUrl: true
+  # ``production`` keeps every startup invariant. The exact string ``dev``
+  # relaxes them and is never right on a cluster.
+  environment: production
+  # CIDRs of reverse proxies whose X-Forwarded-For the brain trusts (your
+  # ingress controller's pod or node CIDR). Empty trusts no proxy, so every
+  # client is attributed to the proxy's address.
+  trustedProxies: []
+  logLevel: INFO
+  logJson: true
+  eventRetentionDays: 30
+  auditRetentionDays: 90
+  # Spawn z4j-scheduler as a supervised subprocess inside the brain pod with
+  # auto-minted loopback PKI (the single-container deploy mode). Mutually
+  # exclusive with scheduler.enabled, which runs the standalone process.
+  embeddedScheduler: false
+  # Extra environment entries appended verbatim to the brain container, in
+  # Kubernetes ``env`` list form (name/value or name/valueFrom).
+  extraEnv: []
+
+  # Application secrets. On PostgreSQL the brain requires explicit values
+  # for all three; in SQLite mode it mints and persists them under /data on
+  # first boot, so both sources may stay empty.
+  secrets:
+    # Name of a Secret in the release namespace holding the three keys named
+    # under ``keys``. The chart never sees the secret material.
+    existingSecret: ""
+    keys:
+      appSecret: app-secret
+      sessionSecret: session-secret
+      auditChainSecret: audit-chain-secret
+    # Inline values (dev/homelab only): they land in the release object in
+    # plaintext. Generate each with ``openssl rand -hex 48``.
+    inline:
+      appSecret: ""
+      sessionSecret: ""
+      auditChainSecret: ""
+
+  # Database. Leave every field empty with postgresql.enabled false for the
+  # bundled SQLite on the persistent volume. For PostgreSQL supply an
+  # existing Secret holding a SQLAlchemy URL (postgresql+asyncpg://...) or
+  # enable the bundled evaluation PostgreSQL below.
+  database:
+    # Inline URL (dev/homelab only; lands in the release object).
+    url: ""
+    existingSecret: ""
+    existingSecretKey: database-url
+    # The brain refuses a PostgreSQL URL without sslmode=require, verify-ca
+    # or verify-full unless this is false. Keep it true for any database
+    # outside the cluster's private network.
+    requireSsl: true
+
+  # Z4J_HOME is /data. The brain keeps owner-private state there (generated
+  # secrets, restore-recovery and activation manifests, allowed hosts,
+  # embedded PKI, and the SQLite database when no PostgreSQL is
+  # configured), so a claim is needed even on PostgreSQL. ReadWriteOnce is
+  # enough under the Recreate strategy. The rendered claim carries
+  # ``helm.sh/resource-policy: keep`` so ``helm uninstall`` leaves it.
+  persistence:
+    enabled: true
+    existingClaim: ""
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+    annotations: {}
+    # Why the release needs one root step. The brain's secret store opens
+    # /data only when the directory is owned by the uid the brain runs as
+    # and carries no group or world permission bits (chmod 700). A dynamic
+    # provisioner hands over a directory owned by root, and
+    # podSecurityContext.fsGroup only changes the group and adds group
+    # bits, never the owner, so on a fresh claim the brain exits with
+    # "secret-store directory is not owned by the current uid: /data" and
+    # a standalone scheduler crash-loops on the refused connection. The
+    # emptyDir fallback has the same shape. This init container runs from
+    # the same image as root with only CHOWN and FOWNER, makes /data
+    # <runAsUser>:<runAsGroup> mode 0700, and touches nothing that is
+    # already right. It runs on every pod start because a storage driver
+    # that applies fsGroup on mount re-adds the group bits each time.
+    # It needs the PodSecurity "baseline" profile (or an exemption) on the
+    # namespace; "restricted" rejects any root container. Under that policy
+    # disable it and set the ownership once by hand: chown 10001:10001 and
+    # chmod 0700 on the claim's directory, and clear fsGroup from
+    # brain.podSecurityContext when the driver applies it on mount (see
+    # README, "Volume ownership").
+    fixPermissions:
+      enabled: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+
+  # Brain-side settings for the standalone scheduler's mTLS gRPC listener.
+  # Rendered only when scheduler.enabled is true.
+  schedulerGrpc:
+    # Scheduler client certificate CNs the brain accepts. Every scheduler
+    # instance's CN must appear here (pki.mintJob.schedulerCommonName or
+    # scheduler.tls.certManager.commonName).
+    allowedCNs:
+      - scheduler-1
+    requireAllowlist: true
+    tls:
+      # Server certificate for the brain's gRPC listener: a Secret with
+      # tls.crt, tls.key and ca.crt, where ca.crt is the CA that signs the
+      # scheduler client certificates. Leave empty and enable pki.mintJob
+      # to have the chart mint one CA, one server leaf and one client leaf
+      # for the release.
+      existingSecret: ""
+
+  # /metrics bearer token. The packaged SQLite mode auto-mints one into
+  # /data/secret.env; set a Secret here to pin it. Required when
+  # brain.serviceMonitor.enabled is true so Prometheus can present it.
+  metrics:
+    authExistingSecret: ""
+    authExistingSecretKey: token
+
+  service:
+    type: ClusterIP
+    httpPort: 7700
+    # Only rendered when scheduler.enabled is true.
+    grpcPort: 7701
+    annotations: {}
+
+  ingress:
+    enabled: false
+    className: ""
+    # WebSocket upgrades on /ws need long proxy timeouts; for nginx-ingress
+    # set nginx.ingress.kubernetes.io/proxy-read-timeout and
+    # proxy-send-timeout to "3600".
+    annotations: {}
+    hosts:
+      - host: z4j.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    # - secretName: z4j-tls
+    #   hosts:
+    #     - z4j.example.com
+    tls: []
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # The image runs as uid/gid 10001 (user ``z4j``). fsGroup gives the data
+  # claim its group; the owner and the 0700 mode the secret store demands
+  # come from persistence.fixPermissions above. The root filesystem is
+  # read-only; the brain writes only to /data and /tmp.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # Boot runs Alembic to head; the startup probe gives a long migration
+  # time without the liveness probe killing it.
+  startupProbe:
+    httpGet:
+      path: /api/v1/health
+      port: http
+    periodSeconds: 5
+    failureThreshold: 60
+  livenessProbe:
+    httpGet:
+      path: /api/v1/health
+      port: http
+    periodSeconds: 30
+    timeoutSeconds: 5
+  # /api/v1/health/ready returns 200 once lifespan startup has finished and
+  # a bounded SELECT 1 round-trips.
+  readinessProbe:
+    httpGet:
+      path: /api/v1/health/ready
+      port: http
+    periodSeconds: 10
+    timeoutSeconds: 5
+
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Same Secret and key as brain.metrics.authExistingSecret.
+    bearerTokenSecret:
+      name: ""
+      key: token
+
+# -----------------------------------------------------------------------------
+# Bundled PostgreSQL (evaluation and small installs)
+# -----------------------------------------------------------------------------
+# A single-instance StatefulSet on a PersistentVolumeClaim, the same image
+# and tuning as the packaged docker-compose.postgres.yml. It has no
+# replication, no backups and no operator. For production use a managed
+# PostgreSQL or an operator (CloudNativePG, Zalando, Crunchy) and point
+# brain.database.existingSecret at it instead.
+postgresql:
+  enabled: false
+  image:
+    repository: postgres
+    tag: "18.6"
+    # Pinned to the same image digest the compose file runs. Clear it to
+    # follow the tag.
+    digest: "sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941"
+    pullPolicy: IfNotPresent
+  auth:
+    username: z4j
+    database: z4j
+    # Inline password (lands in the release object). Required unless
+    # existingSecret is set. With an inline password the chart can also
+    # render the standalone scheduler's leader DSN Secret.
+    password: ""
+    # Secret holding the password under existingSecretKey. With this
+    # source the chart cannot compose the scheduler's leader DSN, so a
+    # standalone scheduler then needs scheduler.leader.existingSecret.
+    existingSecret: ""
+    existingSecretKey: postgres-password
+  persistence:
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 8Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # postgresql.conf overrides, passed as ``-c key=value``.
+  config:
+    max_connections: "200"
+    shared_buffers: 256MB
+    effective_cache_size: 1GB
+    work_mem: 8MB
+    maintenance_work_mem: 64MB
+    random_page_cost: "1.1"
+    wal_compression: "on"
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -----------------------------------------------------------------------------
+# PKI minting Job (scheduler mTLS without cert-manager)
+# -----------------------------------------------------------------------------
+# The Kubernetes counterpart of the compose kit's docker/scheduler-certs.sh.
+# A pre-install/pre-upgrade hook Job, run from the brain image, mints a
+# private CA, a server leaf for the brain's gRPC listener (SANs: the brain
+# Service's cluster DNS names) and a client leaf for the scheduler, and
+# writes them as two kubernetes.io/tls Secrets through the Kubernetes API.
+# Same keys (EC P-256) and validity defaults as the script, same
+# idempotency: an existing bundle is left alone unless a half is missing or
+# malformed, a leaf does not chain to the CA or match its key, a
+# certificate expires within renewDays, the requested names changed, or
+# force is set. A renewal replaces the Secrets but not the files already
+# loaded by running pods: pass a new rolloutRevision on that upgrade. The
+# Job's ServiceAccount can only get and update those two Secret names and
+# create Secrets in the release namespace.
+pki:
+  mintJob:
+    enabled: false
+    # CN and DNS SAN of the scheduler client certificate. Must be listed in
+    # brain.schedulerGrpc.allowedCNs.
+    schedulerCommonName: scheduler-1
+    caValidityDays: 3650
+    leafValidityDays: 825
+    # Mint again when any certificate expires this close to now.
+    renewDays: 30
+    # Discard the bundle and mint it again on the next hook run. Set it for
+    # one upgrade together with a new rolloutRevision, then unset it.
+    force: false
+    # Extra DNS names for the brain server leaf, on top of the Service's
+    # <name>, <name>.<ns>, <name>.<ns>.svc and <name>.<ns>.svc.cluster.local.
+    extraServerDnsNames: []
+    serviceAccount:
+      annotations: {}
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+# -----------------------------------------------------------------------------
+# Scheduler (standalone z4j-scheduler)
+# -----------------------------------------------------------------------------
+scheduler:
+  # Deploy the standalone scheduler. Off by default: the brain alone serves
+  # every API and dashboard feature, and schedules fire only once either
+  # this process or brain.embeddedScheduler runs.
+  enabled: false
+
+  # PostgreSQL advisory locks coordinate replicas without local disk, so a
+  # standard Deployment works. Two replicas provide failover. Do not assume
+  # work is balanced: one fast replica can acquire every project's lock
+  # while the other remains a hot standby.
+  replicaCount: 2
+
+  # Preferred pod anti-affinity so the scheduler replicas land on different
+  # nodes by default. Single-node clusters relax this with ``affinity: {}``.
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: '{{ include "z4j-scheduler.name" . }}'
+                app.kubernetes.io/instance: '{{ .Release.Name }}'
+            topologyKey: kubernetes.io/hostname
+
+  nodeSelector: {}
+  tolerations: []
+
+  # Brain wiring. Empty values resolve to this release's brain Service
+  # (<fullname>.<namespace>.svc.cluster.local on brain.service.grpcPort and
+  # brain.service.httpPort). Both are required when brain.enabled is false.
+  brain:
+    # gRPC endpoint of the brain's SchedulerService, ``host:port`` form.
+    grpcUrl: ""
+    # REST endpoint of the brain's HTTP API, with scheme.
+    restUrl: ""
+
+  # mTLS material: four sources, exactly one in use.
+  #
+  # 1. ``existingSecret`` - a Secret an operator (or another tool) already
+  #    produced, with keys ``tls.crt``, ``tls.key`` and ``ca.crt``. The
+  #    chart never sees the material. Highest-trust path.
+  # 2. ``certManager.enabled: true`` - the chart renders a ``Certificate``
+  #    that references the operator-provisioned Issuer/ClusterIssuer named
+  #    below. It does not create that issuer. The resulting Secret name
+  #    follows the chart convention.
+  # 3. ``pki.mintJob.enabled: true`` (above) - leave every field here empty;
+  #    the hook Job mints the client leaf and the chart mounts its Secret.
+  # 4. (legacy) ``inline`` - PEMs supplied as values. ONLY for dev/homelab.
+  #    Helm templates land in plaintext in the release object and any
+  #    operator with ``helm get`` access to the namespace can read them.
+  tls:
+    existingSecret: ""
+    certManager:
+      enabled: false
+      issuerKind: ClusterIssuer
+      issuerName: ca-issuer
+      # The CN MUST match an entry in brain.schedulerGrpc.allowedCNs (or
+      # the external brain's Z4J_SCHEDULER_GRPC_ALLOWED_CNS).
+      commonName: scheduler-1
+      dnsNames:
+        - scheduler-1
+      duration: 8760h        # 1 year
+      renewBefore: 720h      # 30 days
+    inline:
+      # Keep these EMPTY in production overrides.
+      cert: ""
+      key: ""
+      ca: ""
+
+  # PostgreSQL advisory lock (HA leader election). Required for either
+  # PostgreSQL leader backend, even with one replica. Use the same database
+  # the brain uses; a read-write user is sufficient. The scheduler passes
+  # this DSN directly to asyncpg, so use ``postgresql://`` or
+  # ``postgres://`` rather than the brain's ``postgresql+asyncpg://``
+  # SQLAlchemy spelling. With the bundled postgresql and an inline
+  # postgresql.auth.password, leaving both sources empty makes the chart
+  # render the DSN Secret itself.
+  leader:
+    # ``single`` - every process considers itself leader. Safe only when
+    # replicaCount is exactly 1; the chart rejects a larger replica count.
+    # ``postgres`` - global lock for the whole scheduler.
+    # ``postgres_per_project`` - one lock per project (recommended for HA).
+    # This permits distribution but does not guarantee load balancing.
+    backend: postgres_per_project
+    databaseUrl: ""
+    existingSecret: ""
+    existingSecretKey: leader-pg-dsn
+    namespace: z4j-scheduler-prod
+
+  # The scheduler exposes 7800 over plain HTTP for /health, /ready, /info
+  # and /metrics. Inside the cluster this is fine; never expose it to the
+  # public internet (no auth besides the bearer token on /metrics).
+  service:
+    type: ClusterIP
+    httpPort: 7800
+
+  # Tunables (env vars passed straight into the container).
+  config:
+    instanceId: ""           # defaults to the pod name via the downward API
+    projects: "*"
+    reconcileIntervalSeconds: 900   # 15-min defensive full re-sync
+    fireTimeoutSeconds: 60
+    fireRetryMax: 3
+    fireRetryBackoffSeconds: 1.0
+    logLevel: INFO
+    logJson: true
+    metricsEnabled: true
+    # Bearer token gate on /metrics. The scheduler REFUSES TO START in
+    # production (its default environment) when it binds a non-loopback
+    # address with metrics enabled and no token, which is exactly what this
+    # chart renders (bind 0.0.0.0, metricsEnabled true). Shipping no token
+    # therefore produces a crash-looping Deployment, so the chart fails
+    # fast at template time instead: when metricsEnabled is true you MUST
+    # set exactly one of
+    #   - metricsAuthExistingSecret (recommended): name of a Secret in the
+    #     release namespace holding the token; the key is
+    #     metricsAuthExistingSecretKey (default "token").
+    #   - metricsAuthToken (dev/homelab only): inline token, lands in
+    #     plaintext in the release object.
+    # or set metricsEnabled to false (the /metrics route is then not
+    # mounted at all).
+    metricsAuthToken: ""
+    metricsAuthExistingSecret: ""
+    metricsAuthExistingSecretKey: token
+
+  resources:
+    # Measured idle RSS is about 50-95 MiB; workload, Python allocator
+    # behavior and cache size can raise it.
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+
+  # Non-root + read-only rootfs: the scheduler writes nothing to disk in
+  # steady state. uid 10001 is the image's ``z4j`` user.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # ``/ready`` waits for the brain client, the initial cache sync and the
+  # leader gate before passing, so a crash-looping replica never
+  # advertises ready.
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 5
+
+  # Keeps at least one replica through voluntary disruption. Tied to
+  # replicaCount so a single-replica install renders no unsatisfiable PDB.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Point this at the SAME Secret + key as config.metricsAuthExistingSecret
+    # so Prometheus sends the token the scheduler expects. ServiceMonitor can
+    # only read tokens from Secrets, not inline values.
+    bearerTokenSecret:
+      name: ""
+      key: token

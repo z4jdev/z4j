@@ -1,0 +1,17 @@
+{{- if .Values.scheduler.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "z4j-scheduler.fullname" . }}
+  labels:
+    {{- include "z4j-scheduler.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.scheduler.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.scheduler.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "z4j-scheduler.selectorLabels" . | nindent 4 }}
+{{- end }}

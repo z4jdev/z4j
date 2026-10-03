@@ -19,7 +19,7 @@ invisible at runtime, because ``scheduled_for`` is stable per ``fire_id``
 (the id is ``uuid5(schedule_id + scheduled_for)``) so the dedup collapses
 exactly the same rows, and nothing reads this table by a bare id.
 
-Per ``docs/SCHEDULER.md §11`` Phase 4.
+Per ``docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §11`` Phase 4.
 """
 
 from __future__ import annotations

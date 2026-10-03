@@ -178,6 +178,9 @@ export function InviteDialog({ slug }: { slug: string }) {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="viewer">Viewer (read-only)</SelectItem>
+                    <SelectItem value="auditor">
+                      Auditor (read-only plus the audit log)
+                    </SelectItem>
                     <SelectItem value="operator">
                       Operator (retry / cancel / bulk actions)
                     </SelectItem>

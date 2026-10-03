@@ -1,0 +1,13 @@
+{{- if and .Values.scheduler.enabled .Values.scheduler.podDisruptionBudget.enabled (gt (.Values.scheduler.replicaCount | int) 1) -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "z4j-scheduler.fullname" . }}
+  labels:
+    {{- include "z4j-scheduler.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.scheduler.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "z4j-scheduler.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -28,12 +28,15 @@ class ApiKeyRepository(BaseRepository[ApiKey]):
         scopes: list[str],
         project_id: UUID | None = None,
         expires_at: datetime | None = None,
+        allowed_cidrs: list[str] | None = None,
     ) -> ApiKey:
         """Insert a new API key row.
 
         The plaintext token is NOT stored - only the HMAC hash.
         Caller is responsible for returning the plaintext to the
-        user exactly once.
+        user exactly once. ``allowed_cidrs`` is stored as given (the
+        route canonicalises it); ``None`` and ``[]`` both mean no
+        per-key source restriction.
         """
         api_key = ApiKey(
             user_id=user_id,
@@ -43,10 +46,45 @@ class ApiKeyRepository(BaseRepository[ApiKey]):
             scopes=scopes,
             project_id=project_id,
             expires_at=expires_at,
+            allowed_cidrs=allowed_cidrs,
         )
         self.session.add(api_key)
         await self.session.flush()
         return api_key
+
+    async def get_active_for_user(self, key_id: UUID, user_id: UUID) -> ApiKey | None:
+        """One of the user's own non-revoked keys, or ``None``."""
+        result = await self.session.execute(
+            select(ApiKey).where(
+                ApiKey.id == key_id,
+                ApiKey.user_id == user_id,
+                ApiKey.revoked_at.is_(None),
+            ),
+        )
+        return result.scalar_one_or_none()
+
+    async def set_allowed_cidrs(
+        self,
+        key_id: UUID,
+        user_id: UUID,
+        *,
+        allowed_cidrs: list[str] | None,
+    ) -> bool:
+        """Replace a key's per-key allowlist. Returns True if a row moved.
+
+        Scoped to the owner and to non-revoked keys, like :meth:`revoke`,
+        so a key id alone is never enough to edit someone else's key.
+        """
+        result = await self.session.execute(
+            update(ApiKey)
+            .where(
+                ApiKey.id == key_id,
+                ApiKey.user_id == user_id,
+                ApiKey.revoked_at.is_(None),
+            )
+            .values(allowed_cidrs=allowed_cidrs),
+        )
+        return bool(result.rowcount)
 
     async def list_for_user(self, user_id: UUID) -> list[ApiKey]:
         """Return all active (non-revoked) keys for a user.

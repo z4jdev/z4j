@@ -19,10 +19,10 @@ from __future__ import annotations
 import csv
 import io
 import json as _json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
-import xlsxwriter
+import xlsxwriter  # type: ignore[import-untyped]
 from fastapi.responses import Response, StreamingResponse
 
 from z4j_brain.errors import ValidationError
@@ -193,9 +193,129 @@ def export_xlsx(
     )
 
 
+# ---------------------------------------------------------------------------
+# Streaming encoders for background export jobs
+#
+# The helpers above take a list, which is what the synchronous export
+# path has after its capped query. A background job never has the whole
+# result in memory: it pages the query and hands each page to one of the
+# encoders below, which return bytes for that page only. The byte layout
+# is the one the synchronous path produces (same header, same quoting,
+# same two-space JSON indentation), so a file written by a job and a file
+# downloaded synchronously for the same filter are the same bytes.
+# ---------------------------------------------------------------------------
+
+#: Rows per worksheet an xlsx job may write. Excel's sheet holds 1 048 576
+#: rows and one is the header. Constant-memory mode spools rows to a
+#: temporary file as they are written, so this is the file format's
+#: limit, not a memory one.
+XLSX_JOB_ROW_CAP = 1_048_575
+
+
+def encode_csv_header(field_defs: list[FieldDef]) -> bytes:
+    """The header line, UTF-8, as the synchronous export writes it."""
+    buf = io.StringIO()
+    csv.writer(buf).writerow([name for name, _ in field_defs])
+    return buf.getvalue().encode("utf-8")
+
+
+def encode_csv_rows(rows: Iterable[Any], field_defs: list[FieldDef]) -> bytes:
+    """One CSV line per row, UTF-8, formula-neutralised."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    for row in rows:
+        writer.writerow([neutralise_formula(fn(row)) for _, fn in field_defs])
+    return buf.getvalue().encode("utf-8")
+
+
+class JsonArrayEncoder:
+    """Emit a JSON array one item at a time, matching ``json.dumps(indent=2)``.
+
+    ``json.dumps(list_of_dicts, indent=2)`` renders ``[\\n  {...},\\n  {...}\\n]``
+    and ``[]`` for nothing. This encoder produces the same bytes without
+    holding the list: call :meth:`start` once, :meth:`rows` per page and
+    :meth:`finish` once.
+    """
+
+    def __init__(self, field_defs: list[FieldDef]) -> None:
+        self._field_defs = field_defs
+        self._count = 0
+
+    def start(self) -> bytes:
+        return b"["
+
+    def rows(self, rows: Iterable[Any]) -> bytes:
+        pieces: list[str] = []
+        for row in rows:
+            item = {name: fn(row) for name, fn in self._field_defs}
+            text = _json.dumps(item, indent=2, default=str, ensure_ascii=False)
+            indented = "\n".join("  " + line for line in text.splitlines())
+            pieces.append(("\n" if self._count == 0 else ",\n") + indented)
+            self._count += 1
+        return "".join(pieces).encode("utf-8")
+
+    def finish(self) -> bytes:
+        return b"]" if self._count == 0 else b"\n]"
+
+
+class XlsxStreamWriter:
+    """Write an xlsx workbook row by row to a path in constant memory.
+
+    ``constant_memory`` makes xlsxwriter flush each row to a spool file as
+    it is written instead of assembling the sheet in RAM, which is what
+    lets a job write a sheet the synchronous export would refuse. Rows
+    must arrive in order, which a paged query guarantees.
+    """
+
+    def __init__(self, path: str, field_defs: list[FieldDef], sheet_name: str) -> None:
+        self._field_defs = field_defs
+        self._workbook = xlsxwriter.Workbook(
+            path,
+            {"constant_memory": True, "strings_to_formulas": False},
+        )
+        self._sheet = self._workbook.add_worksheet(sheet_name)
+        header_fmt = self._workbook.add_format({"bold": True, "bg_color": "#f1f5f9"})
+        for col, (name, _) in enumerate(field_defs):
+            self._sheet.write(0, col, name, header_fmt)
+        self._sheet.freeze_panes(1, 0)
+        self._next_row = 1
+
+    @property
+    def rows_written(self) -> int:
+        return self._next_row - 1
+
+    def write_rows(self, rows: Iterable[Any]) -> int:
+        """Append ``rows``; raise :class:`ValidationError` past the sheet cap."""
+        for row in rows:
+            if self._next_row > XLSX_JOB_ROW_CAP:
+                raise ValidationError(
+                    f"xlsx export is capped at {XLSX_JOB_ROW_CAP} rows by the "
+                    "worksheet format; use CSV or JSON for larger result sets",
+                    details={"cap": XLSX_JOB_ROW_CAP, "format": "xlsx"},
+                )
+            for col, (_, fn) in enumerate(self._field_defs):
+                value = neutralise_formula(fn(row))
+                if value is None or value == "":
+                    self._sheet.write_blank(self._next_row, col, None)
+                elif isinstance(value, (str, int, float, bool)):
+                    self._sheet.write(self._next_row, col, value)
+                else:
+                    self._sheet.write_string(self._next_row, col, str(value))
+            self._next_row += 1
+        return self.rows_written
+
+    def close(self) -> None:
+        self._workbook.close()
+
+
 __all__ = [
+    "XLSX_JOB_ROW_CAP",
     "XLSX_ROW_CAP",
     "FieldDef",
+    "JsonArrayEncoder",
+    "XlsxStreamWriter",
+    "encode_csv_header",
+    "encode_csv_rows",
     "export_csv",
     "export_json",
     "export_xlsx",

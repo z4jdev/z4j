@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from z4j_brain.domain.retry_contract import required_retry_engine
+from z4j_brain.domain.retry_contract import engine_name_error, required_retry_engine
 from z4j_brain.persistence.enums import TaskPriority, TaskState
 
 CURRENT_CANONICALIZER_VERSION = 2
@@ -30,7 +30,6 @@ _V1_ALLOWED_FILTER_KEYS = frozenset(
         "until",
     }
 )
-_V1_ENGINES = frozenset({"celery", "rq", "dramatiq"})
 _V2_ALLOWED_FILTER_KEYS = _V1_ALLOWED_FILTER_KEYS | {"priority", "search"}
 
 
@@ -144,8 +143,15 @@ def _v1_selection_filter(
                 raise TypeError(f"filter {key!r} must be a string")
             normalized_filter[key] = value
     engine = normalized_filter.get("engine")
-    if engine is not None and engine not in _V1_ENGINES:
-        raise ValueError(f"engine must be one of {sorted(_V1_ENGINES)}")
+    if engine is not None:
+        # Canonical identity checks the shape of the name only. Authority
+        # (which agent advertises bulk retry for it) is not part of the
+        # request's identity: it is decided against the live agent rows when
+        # the plan is sealed, so a replay keeps its digest whatever the fleet
+        # looks like later.
+        shape_error = engine_name_error(engine)
+        if shape_error is not None:
+            raise ValueError(shape_error)
 
     for key in ("since", "until"):
         value = _parse_datetime(raw_filter.get(key))
@@ -161,8 +167,8 @@ def _v1_selection_filter(
             )
         ):
             raise ValueError("task_ids must be a non-empty list of strings up to 200 characters")
-        if engine not in _V1_ENGINES:
-            raise ValueError("explicit task_ids require one known engine")
+        if engine is None:
+            raise ValueError("explicit task_ids require one engine")
         if len(ids) > maximum:
             raise ValueError("task_ids count exceeds max")
         normalized_filter["task_ids"] = list(dict.fromkeys(ids))
@@ -306,8 +312,16 @@ def build_sealed_plan(
     effective_filter: Mapping[str, Any],
     maximum: int,
     max_frame_bytes: int,
+    engine_authority: Callable[[str], bool],
 ) -> tuple[list[PlannedChild], str]:
-    """Build deterministic per-task children from production Task rows."""
+    """Build deterministic per-task children from production Task rows.
+
+    ``engine_authority`` answers whether some candidate agent's session
+    advertises ``bulk_retry`` for an engine (see
+    :func:`z4j_brain.domain.retry_contract.project_engine_authority`). A
+    selected task on an engine it refuses fails the whole plan: forward
+    compatible ingest names never become retry authority by themselves.
+    """
 
     if len(tasks) > maximum:
         raise SelectionLimitExceededError(
@@ -327,9 +341,10 @@ def build_sealed_plan(
             "bulk_retry",
             {"filter": {"engine": engine}},
         )
-        if requirement != engine:
+        if requirement != engine or not engine_authority(engine):
             raise UnsupportedRetryEngineError(
-                f"task {engine}:{task_id} uses an engine that cannot receive retry commands"
+                f"task {engine}:{task_id} uses an engine that cannot receive retry "
+                f"commands: no agent in this project advertises bulk retry for {engine!r}"
             )
         child_filter: dict[str, Any] = {
             **selection_filter,

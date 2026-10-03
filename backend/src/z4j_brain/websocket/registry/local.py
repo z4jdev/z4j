@@ -367,6 +367,41 @@ class LocalRegistry:
         )
         return closed
 
+    async def kick_project(self, project_id: UUID) -> int:
+        """Close every WebSocket of every agent in ``project_id``.
+
+        Project-archive counterpart of :meth:`kick`, with the same
+        ``4003`` close code so the shipped agent parks on its auth
+        backoff instead of reconnecting on the fast schedule. The
+        agents are found in the registry's own project map, not the
+        database, so this closes exactly the sockets this process
+        holds. Single-process backend, so that is the whole cluster.
+        """
+        async with self._lock:
+            agent_ids = [
+                agent_id
+                for agent_id, owner in self._project_for_agent.items()
+                if owner == project_id
+            ]
+            popped = [self._connections.pop(agent_id, None) for agent_id in agent_ids]
+            for agent_id in agent_ids:
+                self._project_for_agent.pop(agent_id, None)
+        closed = 0
+        for workers in popped:
+            for handle in list((workers or {}).values()):
+                try:
+                    await handle.websocket.close(code=4003)
+                    closed += 1
+                except Exception:  # noqa: S110  best-effort close of an archived project's socket
+                    pass
+        logger.info(
+            "z4j local registry: kicked agents of archived project",
+            project_id=str(project_id),
+            agents=len(agent_ids),
+            connections_closed=closed,
+        )
+        return closed
+
     def fleet_snapshot(self) -> dict[str, dict[str, int]]:
         """Return per-project agent + worker counts for this process.
 

@@ -1,0 +1,31 @@
+apiVersion: v2
+name: z4j
+description: |
+  The z4j brain (REST API, dashboard and the agent WebSocket plane) with
+  the optional z4j-scheduler companion and an optional evaluation
+  PostgreSQL. One chart, one published image: both processes run from
+  z4jdev/z4j, the scheduler by overriding the image entry point.
+type: application
+# ``version`` and ``appVersion`` move together. The chart is published to
+# ghcr.io/z4jdev/charts/z4j under the z4j release it was built for, so
+# ``helm install --version X`` and the image tag X always name the same
+# wave. Both lines are release carriers: ``make stamp-version`` rewrites
+# them and scripts/check-version-carriers.py refuses a release in which
+# either disagrees with VERSION.
+version: "1.12.0"
+appVersion: "1.12.0"
+kubeVersion: ">=1.28.0-0"
+home: https://z4j.com
+sources:
+  - https://github.com/z4jdev/z4j
+maintainers:
+  - name: z4j team
+    email: support@z4j.com
+keywords:
+  - z4j
+  - brain
+  - scheduler
+  - celery
+  - control-plane
+  - python
+icon: https://z4j.com/icon.png

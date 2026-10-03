@@ -19,12 +19,17 @@ real Postgres 18 container.
 
 from __future__ import annotations
 
+import json
 import uuid as _uuid
 from typing import Any
 
+import structlog
 from sqlalchemy import JSON, BigInteger, Text
 from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, INET, JSONB, TSVECTOR
+from sqlalchemy.exc import DontWrapMixin
 from sqlalchemy.types import TypeDecorator, TypeEngine, Uuid
+
+logger = structlog.get_logger("z4j.brain.persistence")
 
 
 class _SQLiteUuidArrayJSON(TypeDecorator):
@@ -88,6 +93,151 @@ class _SQLiteUuidArrayJSON(TypeDecorator):
                     # validators will silently drop unknown ids.
                     continue
         return out
+
+
+#: Purpose strings for the two encrypted notification config columns. They
+#: live here, not in ``domain.secret_fields``, because the models import this
+#: module and the domain package imports the repositories, which import the
+#: models; ``secret_fields`` re-exports them for the migration and the CLI.
+NOTIFICATION_CHANNEL_CONFIG_PURPOSE = "notification_channels.config"
+USER_CHANNEL_CONFIG_PURPOSE = "user_channels.config"
+
+
+class EncryptedJSONWriteError(RuntimeError, DontWrapMixin):
+    """A value could not be encrypted for an :class:`EncryptedJSON` column.
+
+    Any other exception a bind processor raises is wrapped by SQLAlchemy in
+    a ``StatementError`` whose text carries the bound parameters, which for
+    this column are the plaintext config. ``DontWrapMixin`` makes SQLAlchemy
+    raise this one as it is, and the message names the column's purpose and
+    the failure, never the value.
+    """
+
+
+#: Purposes a plaintext read has already been logged for in this process.
+#: One WARNING per purpose per process: the warning is a signal to run
+#: ``z4j secrets rewrap``, and a table full of plaintext rows read on every
+#: request must not turn it into a log flood.
+_plaintext_read_warned: set[str] = set()
+
+
+def reset_plaintext_read_warnings() -> None:
+    """Forget which purposes have been warned about (tests)."""
+    _plaintext_read_warned.clear()
+
+
+def _warn_plaintext_read(purpose: str) -> None:
+    if purpose in _plaintext_read_warned:
+        return
+    _plaintext_read_warned.add(purpose)
+    logger.warning(
+        "encrypted_column_plaintext_read",
+        purpose=purpose,
+        hint=(
+            "a stored secret is not encrypted at rest (written by a downgraded "
+            "brain or by hand); it was read as plaintext JSON. Run "
+            "`z4j secrets rewrap` to encrypt every such row under the current "
+            "Z4J_SECRET. Logged once per process per column."
+        ),
+    )
+
+
+class EncryptedJSON(TypeDecorator[Any]):
+    """A JSON value stored encrypted at rest, as text.
+
+    The column holds one ``z4jenc1:<base64>`` token (see
+    :mod:`z4j_brain.domain.secret_fields` for the format, the key
+    derivation and the rotation story). Python code reads and writes the
+    column as a plain dict or list exactly as it did when the column was
+    JSONB; the API and the dashboard do not know the storage changed.
+
+    What changes for the database: the column is ``TEXT`` on both
+    dialects, so JSON path queries and containment indexes against it are
+    not possible. Nothing in the brain queried channel configs that way
+    (they are loaded by row and inspected in Python), which is why this
+    column could move without touching a repository.
+
+    ``purpose`` is the per-column domain-separation string. The same
+    constant is used by the migration and the re-wrap command; a value
+    encrypted for one purpose will not decrypt under another.
+
+    Reads of a value without the prefix (a row written by a downgraded
+    brain, or plaintext JSON text inserted by hand) are parsed as JSON
+    rather than refused, and logged as a WARNING naming the purpose (once
+    per process per purpose, never the value). That is the migration path:
+    the next write of the row encrypts it, and ``z4j secrets rewrap``
+    encrypts every such row in one run. Writes always encrypt.
+
+    Where the keyring is needed: every write, and every read of a prefixed
+    value; both fail closed with :class:`SecretKeyringUnbound` when none is
+    bound. A read of a non-prefixed value does not touch the keyring, so it
+    returns the plaintext with no keyring bound. A write that fails for any
+    reason raises an exception whose text never carries the value:
+    :class:`SecretKeyringUnbound` with the purpose prepended, or
+    :class:`EncryptedJSONWriteError` when the value is not JSON.
+
+    A value that decrypted only under a previous secret is returned as
+    normal; the type cannot schedule a write, so the re-wrap is either the
+    row's next ordinary write or ``z4j secrets rewrap``.
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def __init__(self, purpose: str) -> None:
+        if not purpose:
+            raise ValueError("EncryptedJSON needs a non-empty purpose string")
+        super().__init__()
+        self.purpose = purpose
+
+    def process_bind_param(self, value: Any, dialect: Any) -> str | None:
+        if value is None:
+            return None
+        from z4j_brain.domain import secret_fields
+
+        try:
+            keyring = secret_fields.active_keyring()
+        except secret_fields.SecretKeyringUnbound as exc:
+            # Same class (it carries DontWrapMixin, so SQLAlchemy raises it
+            # as is rather than inside a StatementError that would print the
+            # bound parameters, i.e. the plaintext), with the column named.
+            raise secret_fields.SecretKeyringUnbound(f"{self.purpose}: {exc}") from None
+        try:
+            return secret_fields.encrypt_json(value, keyring=keyring, purpose=self.purpose)
+        except (TypeError, ValueError) as exc:
+            # json.dumps names the offending type, never the value, so the
+            # chained cause is safe to keep.
+            raise EncryptedJSONWriteError(
+                f"{self.purpose}: the value could not be serialised as JSON "
+                f"({type(exc).__name__}); the value itself is not part of this message",
+            ) from exc
+
+    def compare_values(self, x: Any, y: Any) -> bool:
+        # Never "unchanged": an assignment to the attribute always reaches
+        # the database, even when the new dict equals the loaded one, so
+        # ``channel.config = channel.config`` re-encrypts under the current
+        # master (fresh nonce, current key). Rows that are merely loaded and
+        # never assigned have no attribute history and are not written.
+        return False
+
+    def process_result_value(self, value: Any, dialect: Any) -> Any:
+        if value is None:
+            return None
+        from z4j_brain.domain import secret_fields
+
+        if secret_fields.is_encrypted(value):
+            decrypted, _needs_rewrap = secret_fields.decrypt_json(
+                value,
+                keyring=secret_fields.active_keyring(),
+                purpose=self.purpose,
+            )
+            return decrypted
+        _warn_plaintext_read(self.purpose)
+        if isinstance(value, str):
+            return json.loads(value)
+        # A dialect that already decoded JSON (a JSONB column read through
+        # this type before the migration altered it to TEXT).
+        return value
 
 
 def jsonb() -> TypeEngine:
@@ -175,10 +325,15 @@ def big_integer() -> TypeEngine:
 
 
 __all__ = [
+    "NOTIFICATION_CHANNEL_CONFIG_PURPOSE",
+    "USER_CHANNEL_CONFIG_PURPOSE",
+    "EncryptedJSON",
+    "EncryptedJSONWriteError",
     "big_integer",
     "citext",
     "inet",
     "jsonb",
+    "reset_plaintext_read_warnings",
     "text_array",
     "tsvector",
     "uuid_array",

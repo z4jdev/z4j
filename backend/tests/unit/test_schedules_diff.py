@@ -3,7 +3,7 @@
 The diff endpoint is the dry-run preview of ``:import`` - it
 returns four buckets (insert / update / unchanged / delete) without
 mutating brain state. The dashboard reconciliation panel
-(docs/SCHEDULER.md §13.1) and the CLI ``import --verify`` flag both
+(docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §13.1) and the CLI ``import --verify`` flag both
 consume this contract; the per-bucket counts feed the operator's
 "is this safe to apply?" decision before they run reconcile for real.
 

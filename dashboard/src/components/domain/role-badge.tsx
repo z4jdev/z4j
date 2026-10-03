@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils";
-import { ShieldCheck, User2, Wrench } from "lucide-react";
+import { ScrollText, ShieldCheck, User2, Wrench } from "lucide-react";
 
-export type Role = "admin" | "operator" | "viewer";
+export type Role = "admin" | "operator" | "auditor" | "viewer";
 
 /**
  * Color-coded role chip. One visual language used everywhere a
@@ -40,6 +40,10 @@ const ROLE_META: Record<Role, { icon: typeof ShieldCheck; classes: string }> = {
   operator: {
     icon: Wrench,
     classes: "border-warning/30 bg-warning/10 text-foreground",
+  },
+  auditor: {
+    icon: ScrollText,
+    classes: "border-success/30 bg-success/10 text-foreground",
   },
   viewer: {
     icon: User2,

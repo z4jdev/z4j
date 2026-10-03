@@ -233,6 +233,7 @@ async def test_dashboard_websocket_auth_durably_advances_last_seen(
         websocket=websocket,  # type: ignore[arg-type]
         settings=settings,
         db=brain_app.state.db,
+        client_ip="127.0.0.1",
     )
 
     assert resolved is not None

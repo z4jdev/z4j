@@ -13,7 +13,6 @@ from sqlalchemy.exc import IntegrityError
 
 from z4j_brain.api.commands import (
     CLIENT_ALLOWED_BULK_FILTER_KEYS,
-    KNOWN_ENGINES,
     _parse_filter_datetime,
 )
 from z4j_brain.api.deps import (
@@ -37,6 +36,11 @@ from z4j_brain.domain.bulk_retry import (
     canonicalize_request,
 )
 from z4j_brain.domain.ip_rate_limit import require_bulk_action_throttle
+from z4j_brain.domain.retry_contract import (
+    dispatch_refusal,
+    engine_name_error,
+    project_engine_authority,
+)
 from z4j_brain.persistence.enums import ProjectRole, TaskPriority, TaskState
 from z4j_brain.persistence.models import BulkRetryControlState
 
@@ -97,8 +101,13 @@ def _validate_text_filters(raw_filter: dict[str, Any]) -> None:
         if isinstance(raw_filter.get(key), str) and len(raw_filter[key]) > 200:
             raise ValueError(f"filter {key!r} must be at most 200 characters")
     engine = raw_filter.get("engine")
-    if engine not in (None, "") and engine not in KNOWN_ENGINES:
-        raise ValueError(f"engine must be one of {sorted(KNOWN_ENGINES)}")
+    if engine not in (None, ""):
+        # Shape only. Whether an agent in the project advertises bulk retry
+        # for this engine is decided after authorization, in
+        # ``_resolve_sealed_plan``, where the agent rows are in reach.
+        shape_error = engine_name_error(engine)
+        if shape_error is not None:
+            raise ValueError(shape_error)
 
 
 def _validate_priority_filter(raw_filter: dict[str, Any]) -> None:
@@ -131,8 +140,8 @@ def _validate_explicit_ids(
         or any(not isinstance(task_id, str) or not task_id or len(task_id) > 200 for task_id in ids)
     ):
         raise ValueError("task_ids must be a non-empty list of strings up to 200 characters")
-    if raw_filter.get("engine") not in KNOWN_ENGINES:
-        raise ValueError("explicit task_ids require one known engine")
+    if engine_name_error(raw_filter.get("engine")) is not None:
+        raise ValueError("explicit task_ids require one engine")
     if len(ids) > maximum:
         raise ValueError("task_ids count exceeds max")
 
@@ -346,6 +355,21 @@ async def _commit_refusal_audit(
     await db_session.commit()
 
 
+def _bulk_engine_refusal(candidates: list[Any], *, engine: str) -> str | None:
+    """Why no candidate agent may receive ``bulk_retry`` for ``engine``.
+
+    A single named target gets the precise reason from
+    :func:`dispatch_refusal`; a project-wide search reports that no agent
+    advertises the engine. ``None`` means at least one candidate can.
+    """
+    refusals = [dispatch_refusal(agent, engine=engine, action="bulk_retry") for agent in candidates]
+    if any(refusal is None for refusal in refusals):
+        return None
+    if len(refusals) == 1:
+        return refusals[0]
+    return f"no agent in this project advertises bulk retry for engine {engine!r}"
+
+
 async def _resolve_sealed_plan(
     *,
     project_id: uuid.UUID,
@@ -356,16 +380,31 @@ async def _resolve_sealed_plan(
 ) -> tuple[CanonicalRequest, list[PlannedChild], str]:
     from z4j_brain.persistence.repositories import AgentRepository, TaskRepository
 
+    agents = AgentRepository(db_session)
     if body.agent_id is not None:
-        agent = await AgentRepository(db_session).get_live(body.agent_id)
+        agent = await agents.get_live(body.agent_id)
         if agent is None or agent.project_id != project_id:
             raise HTTPException(status_code=404, detail="agent not found in this project")
+        candidates = [agent]
+    else:
+        # Each sealed child binds to a compatible session in the project at
+        # send time, so any agent whose session advertises ``bulk_retry`` for
+        # the engine is a candidate.
+        candidates = await agents.list_for_project(project_id, limit=5000)
 
     canonical = canonicalize_request(
         raw_identity,
         version=CURRENT_CANONICALIZER_VERSION,
     )
     effective_filter = dict(canonical.effective["filter"])
+    requested_engine = effective_filter.get("engine")
+    if requested_engine is not None:
+        refusal = _bulk_engine_refusal(candidates, engine=str(requested_engine))
+        if refusal is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": refusal, "engine": str(requested_engine)},
+            )
     task_repository = TaskRepository(db_session)
     explicit_ids = effective_filter.get("task_ids")
     if explicit_ids is not None:
@@ -408,6 +447,7 @@ async def _resolve_sealed_plan(
             effective_filter=effective_filter,
             maximum=body.max,
             max_frame_bytes=settings.effective_ws_max_frame_bytes,
+            engine_authority=project_engine_authority(candidates, action="bulk_retry"),
         )
     except SelectionLimitExceededError as exc:
         raise HTTPException(

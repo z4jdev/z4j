@@ -41,12 +41,17 @@ def test_domain_package_disclaims_a_strict_dependency_boundary() -> None:
     assert "brain persistence, authentication, settings" in contract
 
 
-def test_forwarder_shutdown_docs_disclose_serialization_not_locking() -> None:
-    contract = _normalized(audit_forwarder.AuditForwarder.stop.__doc__)
+def test_forwarder_docs_state_at_least_once_and_the_cursor_limit() -> None:
+    contract = _normalized(audit_forwarder.__doc__)
 
-    assert "No lock makes the empty-check/cancel sequence atomic" in contract
-    assert "same-loop serialization plus the" in contract
-    assert "UNDER lock" not in contract
+    assert "Delivery is at least once" in contract
+    assert "the receiver de-duplicates on the row id" in contract
+    assert "Nothing is dropped" in contract
+    # The cursor lives beside the log, so the forwarder still is not the
+    # out-of-band anchor; the docstring has to keep saying so.
+    assert "a role that can delete audit rows can also move the cursor past them" in contract
+    assert "bounded and in-memory" not in contract
+    assert not hasattr(audit_forwarder.AuditForwarder, "stop")
 
 
 def test_frozen_export_docs_bound_pathname_cleanup_operations() -> None:

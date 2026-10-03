@@ -161,3 +161,43 @@ class TestDevGuards:
             environment="dev",
             public_url="http://localhost:7700",
         )
+
+
+class TestExportSinkEndpointUrl:
+    """The S3 endpoint is rendered in clear, so it may never carry credentials."""
+
+    MARKER = "R2EENDPOINTPASS"
+
+    def test_userinfo_in_the_endpoint_url_is_refused(self) -> None:
+        with pytest.raises(ConfigError) as excinfo:
+            Settings(  # type: ignore[arg-type]
+                **_kw(
+                    export_sink="s3",
+                    export_sink_s3_bucket="evidence",
+                    export_sink_s3_endpoint_url=f"https://epuser:{self.MARKER}@minio.internal:9000",
+                )
+            )
+        message = str(excinfo.value)
+        assert "must not contain embedded userinfo (user@host)" in message
+        assert self.MARKER not in message
+
+    def test_userinfo_is_refused_even_when_the_sink_is_off(self) -> None:
+        with pytest.raises(ConfigError, match="embedded userinfo"):
+            Settings(  # type: ignore[arg-type]
+                **_kw(export_sink_s3_endpoint_url=f"https://u:{self.MARKER}@minio.internal:9000")
+            )
+
+    def test_an_at_sign_past_the_authority_is_not_userinfo(self) -> None:
+        for url in (
+            "https://minio.internal:9000",
+            "https://minio.internal:9000/path?x=a@b",
+            "https://minio.internal:9000?x=a@b",
+        ):
+            settings = Settings(  # type: ignore[arg-type]
+                **_kw(
+                    export_sink="s3",
+                    export_sink_s3_bucket="evidence",
+                    export_sink_s3_endpoint_url=url,
+                )
+            )
+            assert settings.export_sink_s3_endpoint_url == url

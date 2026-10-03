@@ -16,6 +16,10 @@
  * dist-demo/demo-data/ so the SPA can fetch JSON files at
  * runtime alongside its bundle.
  *
+ * It then writes the Cloudflare Pages files (route-manifest.json,
+ * _redirects, 404.html, _headers) and holds the finished dist-demo/
+ * to the rules in scripts/demo-pages-config.mjs before it exits.
+ *
  * The actual `vite build` is invoked via `pnpm exec` rather than
  * `import("vite")` because pnpm's symlinked node_modules layout
  * does not always expose vite to direct ESM imports from
@@ -24,11 +28,18 @@
  * See DEMO-Z4J-DEV-DESIGN.md for the full architecture.
  */
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  BUILD_WRITTEN_ENTRIES,
+  buildHeaders,
+  buildRedirects,
+  extractRouteManifestPaths,
+  validateDemoPagesDist,
+} from "./demo-pages-config.mjs";
 import {
   isReleaseVersion,
   requireDemoDataTree,
@@ -46,7 +57,7 @@ console.log("[build:demo] running vite build with VITE_Z4J_DEMO_MODE=true");
 // (often unset, which means vite's mode-detection falls back to
 // ``development`` for the implicit-mode case and emits .map files
 // alongside every chunk). The 1.6.3 advisory's "no source maps in
-// production" posture covers demo.z4j.dev too -- it's a publicly
+// production" posture covers demo.z4j.com too -- it's a publicly
 // reachable build and source maps reproduce the unminified React
 // source for any attacker who guesses ``<chunk>.js.map``.
 const env = {
@@ -102,7 +113,7 @@ if (result.status !== 0) {
 // but a future vite.config.ts edit, plugin, or operator override
 // could still produce maps -- this catches that at build time rather
 // than at deploy time when the maps would already be reachable on
-// demo.z4j.dev. The check covers ALL nested directories (assets/,
+// demo.z4j.com. The check covers ALL nested directories (assets/,
 // etc.), not just the top level.
 function* walkForMaps(dir) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -173,35 +184,68 @@ console.log(
     `(verified ${inventory.fields} fields in ${inventory.files} files)`,
 );
 
-// Cloudflare Pages uses _redirects (SPA fallback) and _headers
-// (cache + security headers). Vite does not generate these, so we
-// write them here every build. Keeping them next to the build script
-// (rather than in public/) means the production `pnpm build` does
-// NOT pick them up -- only the demo build does, which is the only
-// place SPA fallback makes sense (production serves the SPA via
-// FastAPI, which has its own catch-all).
-// A request for a hashed asset that does not exist must 404, NOT fall
-// through to the SPA shell.
+// Publish the real router paths. Cross-site link checks use them to tell a
+// valid demo deep link from a nonexistent page, and _redirects below is
+// generated from the same list.
+const routeSource = await readFile(
+  join(dashboardRoot, "src/routeTree.gen.ts"),
+  "utf8",
+);
+const paths = extractRouteManifestPaths(routeSource);
+if (!paths.includes("/projects/$slug/issues"))
+  throw new Error("Demo route manifest is incomplete");
+await writeFile(
+  join(distDemoPath, "route-manifest.json"),
+  JSON.stringify({ paths }, null, 2) + "\n",
+);
+
+// Cloudflare Pages routing. Vite does not generate _redirects, _headers or
+// 404.html, so this script writes them on every demo build; keeping them
+// out of public/ means the production `pnpm build` never picks them up
+// (FastAPI serves that SPA with its own catch-all).
 //
-// With only the catch-all below, a miss under /assets/ returned
-// index.html with `200 text/html`. Combined with the
-// `/assets/* -> immutable, max-age=31536000` rule in _headers, Cloudflare
-// then pinned that HTML at the edge, under that asset URL, FOR A YEAR.
-// That is exactly what took demo.z4j.dev down: a browser requested a
-// chunk during the upload window before it existed, the fallback HTML
-// got cached against the browser-shaped request variant, and every
+// What Pages did with the _redirects this script used to write:
+//   /static/*    /index.html   404
+//   /*    /index.html   200
+// It rejected both lines (404 is not a permitted status, and a splat
+// rewrite to /index.html is refused as a loop), so there were zero rules,
+// and nothing warned because `wrangler pages deploy` uploads the file
+// unparsed. With no top-level 404.html, Pages runs in single-page-
+// application mode: every unmatched path gets index.html with 200, and
+// _headers still applies to the request path. A missing hashed chunk
+// therefore came back as 200 text/html with `immutable, max-age=31536000`,
+// which is what took demo.z4j.com down: a chunk requested during the upload
+// window had the fallback HTML pinned at the edge for a year (in the
+// browser-shaped cache variant only, so curl looked healthy), and every
 // later visitor got HTML where a module was expected:
 //   "Expected a JavaScript-or-Wasm module script but the server
 //    responded with a MIME type of ''"
-// Plain curl hit a different cache variant and looked healthy, which is
-// what made it so hard to see.
 //
-// Returning 404 for a missing asset keeps the failure loud, local and
-// uncacheable-as-a-module.
-await writeFile(
-  resolve(dashboardRoot, "dist-demo/_redirects"),
-  ["/static/*    /index.html   404", "/*    /index.html   200", ""].join("\n"),
-);
+// What the build writes now:
+//   - 404.html, a byte copy of the final index.html (further down, after
+//     the Rocket Loader opt-out). Its presence turns single-page-application
+//     mode off, so an unknown path is a real 404 that still boots the SPA
+//     into its own Not Found view. Pages sends every 404 with
+//     `Cache-Control: no-store` whatever _headers says, so a miss under
+//     /static/ can no longer be pinned.
+//   - _redirects, a rewrite to "/" with 200 for every router path: an exact
+//     rule per static path, and one splat per static prefix of the dynamic
+//     paths (/projects/* for /projects/$slug/...). The target has to be "/",
+//     because Pages turns a rewrite to /index.html or any .html path into a
+//     308 redirect.
+// scripts/demo-pages-config.mjs holds these rules and re-checks the finished
+// dist-demo/ at the end of this script.
+const distEntries = [
+  ...new Set([...readdirSync(distDemoPath), ...BUILD_WRITTEN_ENTRIES]),
+];
+let redirects;
+try {
+  redirects = buildRedirects(paths, distEntries);
+} catch (err) {
+  console.error(`[build:demo] cannot generate _redirects: ${err.message}`);
+  process.exit(1);
+}
+await writeFile(resolve(dashboardRoot, "dist-demo/_redirects"), redirects);
 // Defense-in-depth CSP for the demo build. The mock-fetch
 // interceptor + WebSocket short-circuit already prevent any
 // outbound server-side request from inside the demo SPA. The CSP
@@ -209,7 +253,7 @@ await writeFile(
 // introduces an outbound fetch / WebSocket / image / script load
 // to anywhere except this origin, the browser refuses it. Reset
 // demo and every other UI control are now physically incapable
-// of reaching any server other than demo.z4j.dev's static-asset
+// of reaching any server other than demo.z4j.com's static-asset
 // surface.
 //
 // What's allowed:
@@ -224,7 +268,7 @@ await writeFile(
 //   img-src 'self' data:            -- bundled SVG + data URIs
 //   font-src 'self' data:           -- bundled fonts + data URIs
 //   connect-src 'self'              -- fetch/XHR/WS to this origin only
-//   frame-ancestors 'none'          -- nobody can iframe demo.z4j.dev
+//   frame-ancestors 'none'          -- nobody can iframe demo.z4j.com
 //   base-uri 'self'                 -- no <base> hijack
 //   form-action 'self'              -- no off-origin form posts
 //
@@ -246,7 +290,7 @@ await writeFile(
 // which invalidates the sha256 in the CSP below and gets that script
 // blocked as well.
 //
-// This bit us on demo.z4j.dev: the same build worked on
+// This bit us on demo.z4j.com: the same build worked on
 // *.pages.dev (which bypasses zone settings) and was blank on the
 // custom domain. ``data-cfasync="false"`` is Cloudflare's documented
 // opt-out and Rocket Loader leaves those tags untouched, so the build
@@ -278,7 +322,10 @@ const inlineScriptHashes = [];
 const inlineScriptRe = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g;
 let inlineMatch;
 while ((inlineMatch = inlineScriptRe.exec(indexHtml)) !== null) {
-  const sha = createHash("sha256").update(inlineMatch[1]).digest("base64");
+  // Hash the text a browser hashes: the HTML parser turns CRLF and a lone CR
+  // into LF first, so a CRLF checkout must not yield a hash no browser uses.
+  const text = inlineMatch[1].replace(/\r\n?/g, "\n");
+  const sha = createHash("sha256").update(text).digest("base64");
   inlineScriptHashes.push(`'sha256-${sha}'`);
 }
 console.log(
@@ -298,44 +345,65 @@ const csp = [
   "form-action 'self'",
 ].join("; ");
 
+// 404.html turns Pages' single-page-application mode off (see the
+// _redirects comment above). It is the final index.html byte for byte,
+// Rocket Loader opt-out included, so a 404 still boots the SPA and its
+// inline theme script still matches the CSP hash.
+await copyFile(indexHtmlPath, resolve(dashboardRoot, "dist-demo/404.html"));
+
+// `no-transform` on the HTML: the Cloudflare zone injects an inline JavaScript
+// detections bootstrap (a fresh Ray ID and timestamp per request, so no CSP
+// hash can ever match it) and the Web Analytics beacon into demo.z4j.com
+// pages, and the CSP blocks both, leaving two console errors. Cloudflare
+// injects neither into a response carrying `Cache-Control: no-transform`.
+// /static/* and /demo-data/* detach that value and restate their own, so
+// scripts and data stay compressed at the edge. Pages replaces Cache-Control
+// with `no-store` on every 404, so a 404 page (an unknown path, or a route
+// asked for with a trailing slash) never carries no-transform: it can still
+// get both injections and the two console errors, which _headers cannot
+// prevent.
 await writeFile(
   resolve(dashboardRoot, "dist-demo/_headers"),
+  buildHeaders(csp),
+);
+
+// The demo must not be indexed (_headers sends X-Robots-Tag: noindex), and a
+// crawler only sees that header on a page it is allowed to fetch. Without this
+// file the exact-route _redirects send /robots.txt to the 404 shell, which
+// crawlers read as "no rules", so an explicit allow-all is the honest form.
+await writeFile(
+  resolve(dashboardRoot, "dist-demo/robots.txt"),
   [
-    "/static/*",
-    "  Cache-Control: public, max-age=31536000, immutable",
-    "",
-    "/demo-data/*",
-    "  Cache-Control: public, max-age=300",
-    "",
-    "/*",
-    "  X-Frame-Options: DENY",
-    "  X-Content-Type-Options: nosniff",
-    "  Referrer-Policy: strict-origin-when-cross-origin",
-    `  Content-Security-Policy: ${csp}`,
+    "# A sample dashboard, not documentation. Every page is served with",
+    "# X-Robots-Tag: noindex; crawling stays allowed so that header is seen.",
+    "User-agent: *",
+    "Allow: /",
     "",
   ].join("\n"),
 );
 
-console.log("[build:demo] wrote _redirects + _headers for Cloudflare Pages");
-console.log("[build:demo] done. Output: dist-demo/");
+const ruleCount = redirects
+  .split("\n")
+  .filter((line) => line !== "" && !line.startsWith("#")).length;
+console.log(
+  `[build:demo] wrote _redirects (${ruleCount} rules), 404.html and _headers for Cloudflare Pages`,
+);
 
-// Publish the real router paths so cross-site link checks can distinguish a
-// valid SPA deep link from a nonexistent page behind the catch-all rewrite.
-const routeSource = await readFile(
-  join(dashboardRoot, "src/routeTree.gen.ts"),
-  "utf8",
+// Re-read the finished dist-demo/ and hold it to the same rules, so a step
+// moved out of order, or a file Pages would silently ignore, fails the build
+// here instead of breaking demo.z4j.com.
+const pagesViolations = await validateDemoPagesDist(distDemoPath, { csp });
+if (pagesViolations.length > 0) {
+  console.error(
+    `[build:demo] FAIL: ${pagesViolations.length} Cloudflare Pages ` +
+      "contract violation(s) in dist-demo:",
+  );
+  for (const violation of pagesViolations) {
+    console.error(`  ${violation}`);
+  }
+  process.exit(1);
+}
+console.log(
+  "[build:demo] OK: _redirects, 404.html and _headers meet the Pages contract",
 );
-const routeInterface = routeSource.match(
-  /export interface FileRoutesByFullPath \{([\s\S]*?)\n\}/,
-)?.[1];
-if (!routeInterface)
-  throw new Error("Missing FileRoutesByFullPath in generated router");
-const paths = [...routeInterface.matchAll(/['"](\/[^'"]*)['"]:/g)].map(
-  (match) => match[1],
-);
-if (!paths.includes("/projects/$slug/issues"))
-  throw new Error("Demo route manifest is incomplete");
-await writeFile(
-  join(distDemoPath, "route-manifest.json"),
-  JSON.stringify({ paths }, null, 2) + "\n",
-);
+console.log("[build:demo] done. Output: dist-demo/");

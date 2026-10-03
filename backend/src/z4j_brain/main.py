@@ -46,7 +46,9 @@ from z4j_brain.api import (
 from z4j_brain.api import automation_rules as automation_rules_api
 from z4j_brain.api import bulk_retry_requests as bulk_retry_requests_api
 from z4j_brain.api import commands as commands_api
+from z4j_brain.api import dead_letters as dead_letters_api
 from z4j_brain.api import events as events_api
+from z4j_brain.api import export_jobs as export_jobs_api
 from z4j_brain.api import home as home_api
 from z4j_brain.api import invitations as invitations_api
 from z4j_brain.api import issues as issues_api
@@ -202,21 +204,22 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
 
     verify_canonical_fields_emitted()
     audit_service = AuditService(settings)
-    # Optional out-of-band audit-row forwarder. Only constructed
-    # when an URL is set; nothing in the request path runs the
-    # forwarder code otherwise.
+    # Optional out-of-band audit-row forwarder. Only constructed when
+    # an URL is set; nothing in the request path runs the forwarder
+    # code otherwise. It is a leader-gated periodic worker (registered
+    # with the supervisor below) that reads the audit log past a
+    # durable cursor, not a hook on the audit write.
     audit_forwarder: AuditForwarder | None = None
-    if settings.audit_webhook_url is not None and (
-        settings.audit_webhook_url.get_secret_value().strip()
-    ):
-        secret_str = settings.audit_webhook_hmac_secret  # type: ignore[union-attr]
+    if settings.audit_forwarder_enabled():
+        secret_str = settings.audit_webhook_hmac_secret
         audit_forwarder = AuditForwarder(
-            webhook_url=settings.audit_webhook_url.get_secret_value().strip(),
+            db=db,
+            webhook_url=settings.audit_webhook_url.get_secret_value().strip(),  # type: ignore[union-attr]
             hmac_secret=secret_str.get_secret_value().encode("utf-8"),  # type: ignore[union-attr]
             timeout_seconds=settings.audit_webhook_timeout_seconds,
-            buffer_size=settings.audit_webhook_buffer_size,
+            batch_size=settings.audit_webhook_batch_size,
+            max_backoff_seconds=settings.audit_webhook_max_backoff_seconds,
         )
-        audit_service.register_post_write_hook(audit_forwarder.enqueue)
     auth_service = AuthService(
         settings=settings,
         hasher=hasher,
@@ -228,14 +231,21 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         audit=audit_service,
         db_manager=db,
     )
+    # Encrypted columns (notification channel configs) need the master
+    # keyring before the first ORM read or write; bind it here, where the
+    # validated Settings first exists, so the type fails closed anywhere
+    # a Settings-less process touches those rows instead.
+    from z4j_brain.domain.secret_fields import bind_keyring_from_settings
+
+    bind_keyring_from_settings(settings)
+
     redaction = RedactionEngine(
         RedactionConfig(
-            # Operator-supplied brain-side extra patterns are not wired
-            # (there is no brain setting for them yet); the DEFAULT
-            # patterns plus agent-side redaction are the active scrub.
-            # Kept explicit-empty rather than the old cors_origins[:0]
-            # placeholder that looked wired but never was.
-            extra_key_patterns=(),
+            # Operator-supplied brain-side extra key patterns
+            # (Z4J_REDACTION_EXTRA_KEY_PATTERNS, validated as regexes at
+            # Settings construction) run on top of the DEFAULT patterns
+            # for every inbound event, whatever the agent scrubbed.
+            extra_key_patterns=tuple(settings.redaction_extra_key_patterns),
             extra_value_patterns=(),
             default_patterns_enabled=True,
             max_value_bytes=settings.max_payload_size_bytes,
@@ -462,7 +472,7 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     )
 
     # ------------------------------------------------------------------
-    # Optional: embedded scheduler sidecar (docs/SCHEDULER.md §21.3)
+    # Optional: embedded scheduler sidecar (docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §21.3)
     # ------------------------------------------------------------------
     # When Z4J_EMBEDDED_SCHEDULER=true, brain auto-mints loopback PKI,
     # forces scheduler_grpc_enabled, and spawns ``z4j-scheduler serve``
@@ -701,6 +711,47 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                 name=AuditChainVerifierWorker.LEADER_LOCK_NAME,
                 tick=_audit_chain_verifier.tick,
                 interval_seconds=float(settings.audit_chain_verify_interval_seconds),
+            ),
+        )
+
+    # Audit webhook forwarder (opt-in, leader-only). Reads audit rows past
+    # the durable cursor in ``audit_forward_state`` and POSTs them in chain
+    # order, advancing the cursor only on a 2xx. Takes the per-worker lock
+    # inside its tick, like the verifier, so one replica forwards at a time;
+    # a pass that delivered a full batch asks to run again at once.
+    if audit_forwarder is not None:
+        _workers.append(
+            PeriodicWorker(
+                name=AuditForwarder.LEADER_LOCK_NAME,
+                tick=audit_forwarder.tick,
+                interval_seconds=float(settings.audit_webhook_poll_interval_seconds),
+            ),
+        )
+
+    # Export jobs and the scheduled audit-head export (opt-in, leader-only).
+    # Started only when Z4J_EXPORT_SINK names a sink: without one there is
+    # nowhere to write, the API answers 409 to a job request, and nothing
+    # here costs anything. Takes the per-worker lock inside its tick, like
+    # the verifier and the forwarder, so one replica drains the queue and
+    # one replica anchors the head. The sink is bound on app.state so the
+    # router can report it and serve local-sink downloads.
+    export_sink: Any = None
+    if settings.export_sink != "none":
+        from z4j_brain.domain.export_sinks import build_export_sink
+        from z4j_brain.domain.workers.export_jobs import ExportJobsWorker
+
+        export_sink = build_export_sink(settings)
+        _export_jobs_worker = ExportJobsWorker(
+            db=db,
+            settings=settings,
+            audit=audit_service,
+            sink=export_sink,
+        )
+        _workers.append(
+            PeriodicWorker(
+                name=ExportJobsWorker.LEADER_LOCK_NAME,
+                tick=_export_jobs_worker.tick,
+                interval_seconds=float(settings.export_jobs_poll_interval_seconds),
             ),
         )
 
@@ -1024,17 +1075,6 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         # metric families.
         from z4j_brain.api.metrics import register_inmemory_subsystem
 
-        if audit_forwarder is not None:
-            try:
-                register_inmemory_subsystem(
-                    "audit_forwarder_queue",
-                    audit_forwarder.queue_depth,
-                )
-            except Exception:
-                logger.exception(
-                    "z4j main: register_inmemory_subsystem(audit_forwarder) "
-                    "crashed; continuing without the gauge",
-                )
         try:
             from z4j_brain.api.activity import _user_bucket
 
@@ -1086,9 +1126,9 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
 
         if audit_forwarder is not None:
             try:
-                audit_forwarder.start()
-                # Surface obvious-misconfig as a startup WARNING so a
-                # typo'd URL is visible before any rows accumulate.
+                # The worker itself runs under the supervisor started above.
+                # Surface obvious-misconfig as a startup WARNING so a typo'd
+                # URL is visible before any rows accumulate at the cursor.
                 _audit_url = (
                     settings.audit_webhook_url.get_secret_value().strip()  # type: ignore[union-attr]
                 )
@@ -1102,13 +1142,14 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                 if _audit_err:
                     logger.warning(
                         "z4j audit_forwarder: configured URL fails SSRF "
-                        "validation (%s); every row will be dropped at "
-                        "dispatch. Fix Z4J_AUDIT_WEBHOOK_URL and restart.",
+                        "validation (%s); no row will be delivered until it "
+                        "is fixed, and every row waits at the cursor meanwhile. "
+                        "Fix Z4J_AUDIT_WEBHOOK_URL and restart.",
                         _audit_err,
                     )
             except Exception:
                 logger.exception(
-                    "z4j audit_forwarder start crashed; continuing",
+                    "z4j audit_forwarder URL check crashed; continuing",
                 )
 
         if scheduler_grpc_server is not None:
@@ -1281,24 +1322,10 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
                 await supervisor.stop()
             except Exception:
                 logger.exception("z4j supervisor stop crashed")
-            if audit_forwarder is not None:
-                # v1.6 audit H9: unregister the hook BEFORE stopping
-                # the drain task. Rows that arrive during teardown
-                # (e.g., a final ``shutdown.complete`` audit row)
-                # would otherwise queue into a forwarder whose drain
-                # task is about to be cancelled.
-                try:
-                    audit_service.unregister_post_write_hook(
-                        audit_forwarder.enqueue,
-                    )
-                except Exception:
-                    logger.exception(
-                        "z4j audit_forwarder hook unregister crashed",
-                    )
-                try:
-                    await audit_forwarder.stop()
-                except Exception:
-                    logger.exception("z4j audit_forwarder stop crashed")
+            # The audit forwarder stops with the supervisor above. A POST in
+            # flight at that moment is cancelled before the cursor moves, so
+            # the row is sent again after the restart; rows written during
+            # teardown wait at the cursor the same way.
             try:
                 await dashboard_hub.stop()
             except Exception:
@@ -1370,9 +1397,40 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
             settings.openapi_visibility,
         )
 
+    # Audit retention has no ceiling (an obligation can run past ten years),
+    # so a window that long is named here once rather than refused. The
+    # usual cause is a typo, and the table it governs grows without bound.
+    long_windows = settings.retention_windows_over_ten_years()
+    if long_windows:
+        logger.warning(
+            "audit retention exceeds ten years: %s. The window is honoured; "
+            "confirm it is an obligation and not a typo. audit_log rows are "
+            "kept for the whole window and the table grows accordingly.",
+            ", ".join(long_windows),
+        )
+
+    # A catch-all trusted-proxy range is honoured (a brain behind a service
+    # mesh may see nothing but the sidecar) but named once: with it, any
+    # peer can pick its client address through X-Forwarded-For, which is
+    # the address the agent connect bucket keys on and the three source
+    # allowlists match.
+    catch_all_proxies = settings.catch_all_trusted_proxies()
+    if catch_all_proxies:
+        logger.warning(
+            "Z4J_TRUSTED_PROXIES trusts every peer: %s. Any client can then "
+            "choose its own address through X-Forwarded-For, which bypasses "
+            "the agent connect rate limit and the dashboard, API and agent "
+            "IP allowlists. Narrow it to the proxy's own range unless every "
+            "peer the brain can see is a proxy you control.",
+            ", ".join(catch_all_proxies),
+        )
+
     # Bind every singleton onto app.state.
     app.state.settings = settings
     app.state.db = db
+    # The WebSocket gateways resolve their own peer with it: the HTTP
+    # middleware below never sees a WebSocket scope.
+    app.state.proxy_resolver = proxy_resolver
     app.state.password_hasher = hasher
     app.state.audit_service = audit_service
     app.state.auth_service = auth_service
@@ -1383,6 +1441,8 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     app.state.brain_registry = registry
     app.state.dashboard_hub = dashboard_hub
     app.state.worker_supervisor = supervisor
+    app.state.export_sink = export_sink
+    app.state.audit_forwarder = audit_forwarder
 
     # 1.3.4: load the bundled versions snapshot once at startup. The
     # Agents API + dashboard read from this for the *Update available*
@@ -1461,12 +1521,14 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     app.include_router(agent_workers_api.router, prefix="/api/v1")
     app.include_router(queues_api.router, prefix="/api/v1")
     app.include_router(commands_api.router, prefix="/api/v1")
+    app.include_router(dead_letters_api.router, prefix="/api/v1")
     app.include_router(bulk_retry_requests_api.router, prefix="/api/v1")
     app.include_router(automation_rules_api.router, prefix="/api/v1")
     app.include_router(automation_rules_api.settings_router, prefix="/api/v1")
     app.include_router(schedules_api.router, prefix="/api/v1")
     app.include_router(schedulers_fleet_api.router, prefix="/api/v1")
     app.include_router(audit_api.router, prefix="/api/v1")
+    app.include_router(export_jobs_api.router, prefix="/api/v1")
     app.include_router(activity_api.router, prefix="/api/v1")
     app.include_router(stats_api.router, prefix="/api/v1")
     app.include_router(trends_api.router, prefix="/api/v1")
@@ -1483,6 +1545,10 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     from z4j_brain.api import admin_settings as admin_settings_api
 
     app.include_router(admin_settings_api.router, prefix="/api/v1")
+    # Admin-scoped, read-only view of the audit forwarder's durable cursor.
+    from z4j_brain.api import audit_forwarder as audit_forwarder_api
+
+    app.include_router(audit_forwarder_api.router, prefix="/api/v1")
     app.include_router(agent_longpoll_api.router, prefix="/api/v1")
     # Invitations - two routers (admin project-scoped + public accept).
     app.include_router(invitations_api.admin_router, prefix="/api/v1")

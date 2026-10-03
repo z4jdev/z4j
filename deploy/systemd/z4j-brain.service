@@ -1,0 +1,70 @@
+# z4j brain: REST API, dashboard and the agent WebSocket plane.
+#
+# Install: copy to /etc/systemd/system/, create /etc/z4j/brain.env from
+# brain.env.example (owner root, mode 0600), then
+#   systemctl daemon-reload && systemctl enable --now z4j-brain
+# The unit assumes ``pip install z4j`` into /opt/z4j/venv and a ``z4j``
+# system user; README.md in this directory walks through both.
+
+[Unit]
+Description=z4j brain (REST API, dashboard, agent WebSocket plane)
+Documentation=https://docs.z4j.com/guides/self-hosting/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=z4j
+Group=z4j
+# Runtime posture lives in the env file, never in this unit.
+EnvironmentFile=/etc/z4j/brain.env
+# Z4J_HOME: the SQLite database (when no PostgreSQL is configured),
+# generated secrets, restore-recovery manifests, embedded-scheduler PKI.
+# systemd creates and owns it; everything else below is read-only.
+Environment=Z4J_HOME=/var/lib/z4j
+StateDirectory=z4j
+StateDirectoryMode=0700
+ConfigurationDirectory=z4j
+ExecStart=/opt/z4j/venv/bin/z4j serve
+Restart=on-failure
+RestartSec=5s
+# SIGTERM drains in-flight requests and WebSockets before exit.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30s
+UMask=0077
+
+# --- hardening ---
+# Check the result with ``systemd-analyze security z4j-brain``. Relax one
+# directive at a time with ``systemctl edit z4j-brain`` if the journal shows
+# the brain being denied something it needs.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+# AF_NETLINK stays: interface enumeration inside the C library needs it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# MemoryDenyWriteExecute is deliberately absent: CPython and some of its
+# compiled dependencies map writable-executable pages at import time.
+
+[Install]
+WantedBy=multi-user.target

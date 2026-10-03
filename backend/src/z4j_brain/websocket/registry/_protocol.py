@@ -287,6 +287,30 @@ class BrainRegistry(Protocol):
         """
         ...
 
+    async def kick_project(self, project_id: UUID) -> int:
+        """Close every WebSocket connection registered under ``project_id``.
+
+        Called by the project-archive route. Archiving flips
+        ``projects.is_active`` and leaves every agent row and token
+        hash intact, so without this primitive the project's agents
+        kept their live sockets, and reconnected freely, after the
+        archive committed.
+
+        Same close code and the same transport as :meth:`kick`:
+        ``4003``, and on the Postgres backend the ``z4j_agent_revoked``
+        channel carrying ``project:<project_id>`` instead of a bare
+        agent id. A connected agent of an archived project is torn
+        down exactly like a revoked one and backs off on the same
+        schedule. Each replica closes the sockets it holds for that
+        project from its own registry map; no database enumeration is
+        involved, so an agent that registered after the archive
+        route's own walk is still caught on the replica that holds it.
+
+        Returns the count of LOCAL connections closed. Idempotent and
+        best-effort like :meth:`kick`.
+        """
+        ...
+
     async def start(self) -> None:
         """Start any background tasks the implementation needs.
 

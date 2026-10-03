@@ -10,6 +10,7 @@ import type {
   CommandListResponse,
   CommandPublic,
   CommandStatus,
+  RequeueDeadLetterRequest,
   RetryTaskRequest,
 } from "@/lib/api-types";
 
@@ -39,10 +40,7 @@ export function useRetryTask(slug: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: RetryTaskRequest) =>
-      api.post<CommandPublic>(
-        `/projects/${slug}/commands/retry-task`,
-        body,
-      ),
+      api.post<CommandPublic>(`/projects/${slug}/commands/retry-task`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["commands", slug] });
       qc.invalidateQueries({ queryKey: ["tasks", slug] });
@@ -54,12 +52,30 @@ export function useCancelTask(slug: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: CancelTaskRequest) =>
+      api.post<CommandPublic>(`/projects/${slug}/commands/cancel-task`, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["commands", slug] });
+      qc.invalidateQueries({ queryKey: ["tasks", slug] });
+    },
+  });
+}
+
+/**
+ * Put one dead-lettered task back on its queue. The brain accepts any engine
+ * whose target agent advertises ``requeue_dead_letter``; the page offers the
+ * button only when one does.
+ */
+export function useRequeueDeadLetter(slug: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RequeueDeadLetterRequest) =>
       api.post<CommandPublic>(
-        `/projects/${slug}/commands/cancel-task`,
+        `/projects/${slug}/commands/requeue-dead-letter`,
         body,
       ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["commands", slug] });
+      qc.invalidateQueries({ queryKey: ["dead-letters", slug] });
       qc.invalidateQueries({ queryKey: ["tasks", slug] });
     },
   });
@@ -106,10 +122,7 @@ export function usePoolResize(slug: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: PoolResizeRequest) =>
-      api.post<CommandPublic>(
-        `/projects/${slug}/commands/pool-resize`,
-        body,
-      ),
+      api.post<CommandPublic>(`/projects/${slug}/commands/pool-resize`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["commands", slug] });
       // Delayed refetch - pool resize takes time to propagate.
@@ -124,10 +137,7 @@ export function useAddConsumer(slug: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: AddConsumerRequest) =>
-      api.post<CommandPublic>(
-        `/projects/${slug}/commands/add-consumer`,
-        body,
-      ),
+      api.post<CommandPublic>(`/projects/${slug}/commands/add-consumer`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["commands", slug] });
       setTimeout(() => {
@@ -175,10 +185,7 @@ export function useRateLimit(slug: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: RateLimitRequest) =>
-      api.post<CommandPublic>(
-        `/projects/${slug}/commands/rate-limit`,
-        body,
-      ),
+      api.post<CommandPublic>(`/projects/${slug}/commands/rate-limit`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["commands", slug] });
       // Rate-limit changes are immediate broker-side but we

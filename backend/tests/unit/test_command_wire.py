@@ -41,3 +41,21 @@ def test_empty_or_missing_engine_is_not_surfaced() -> None:
 
 def test_non_string_engine_is_ignored() -> None:
     assert "engine" not in wire_target("bulk", None, {"filter": {"engine": 123}})
+
+
+def test_queue_command_surfaces_payload_engine_into_target() -> None:
+    """``dlq.list``: the agent binds the adapter from ``target["engine"]``."""
+    target = wire_target(
+        "queue", "default", {"engine": "rq", "queue": "default", "limit": 100, "cursor": None}
+    )
+    assert target == {"type": "queue", "id": "default", "engine": "rq"}
+    assert wire_target("queue", None, {"engine": "dramatiq", "queue": None})["engine"] == "dramatiq"
+
+
+def test_purge_queue_payload_stays_without_an_engine_key() -> None:
+    target = wire_target(
+        "queue", "default", {"queue": "default", "confirm_token": "t", "force": False}
+    )
+    assert target == {"type": "queue", "id": "default"}
+    assert "engine" not in wire_target("queue", "q", {"engine": ""})
+    assert "engine" not in wire_target("queue", "q", {"engine": 7})

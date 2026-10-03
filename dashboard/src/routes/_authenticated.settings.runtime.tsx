@@ -43,9 +43,9 @@ import { toast } from "sonner";
 
 // Docs URLs. Kept inline rather than centralised because there is no
 // dashboard-wide docs registry; the page that needs a link knows
-// which page it wants. z4j.dev is the canonical operator-docs site.
-const DOCS_ENV_VARS_URL = "https://z4j.dev/reference/env-vars/";
-const DOCS_SETTINGS_URL = "https://z4j.dev/reference/settings/";
+// which page it wants. docs.z4j.com is the canonical operator-docs site.
+const DOCS_ENV_VARS_URL = "https://docs.z4j.com/reference/env-vars/";
+const DOCS_SETTINGS_URL = "https://docs.z4j.com/reference/settings/";
 
 // Description of every source label the backend can emit. Kept in
 // sync with `_normalize_source` in api/admin_settings.py.

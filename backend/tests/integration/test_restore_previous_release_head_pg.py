@@ -24,7 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from z4j_brain import management_restore_postgres as postgres_restore_module
 from z4j_brain.backup import backup_postgres, restore_postgres
 from z4j_brain.main import create_app
-from z4j_brain.management_restore import _PRE_TALLY_RELEASE_HEAD, _PREVIOUS_RELEASE_HEAD
+from z4j_brain.management_restore import (
+    _PRE_TALLY_RELEASE_HEAD,
+    _PREVIOUS_RELEASE_HEAD,
+    _TALLY_RELEASE_HEAD,
+)
 from z4j_brain.persistence.database import DatabaseManager
 from z4j_brain.persistence.models import AuditLog, Project
 from z4j_brain.schema_transition import RELEASE_MIGRATION_HEAD
@@ -80,7 +84,10 @@ async def _drop_database(admin_url: str, database: str) -> None:
         await admin.close()
 
 
-@pytest.mark.parametrize("prior_release_head", [_PREVIOUS_RELEASE_HEAD, _PRE_TALLY_RELEASE_HEAD])
+@pytest.mark.parametrize(
+    "prior_release_head",
+    [_PREVIOUS_RELEASE_HEAD, _PRE_TALLY_RELEASE_HEAD, _TALLY_RELEASE_HEAD],
+)
 async def test_current_checkout_prior_head_archive_restores_upgrades_and_starts(
     prior_release_head: str,
     migrated_engine: AsyncEngine,
@@ -260,7 +267,10 @@ async def test_current_checkout_prior_head_archive_restores_upgrades_and_starts(
         assert ready.json()["status"] == "ready"
 
 
-@pytest.mark.parametrize("prior_release_head", [_PREVIOUS_RELEASE_HEAD, _PRE_TALLY_RELEASE_HEAD])
+@pytest.mark.parametrize(
+    "prior_release_head",
+    [_PREVIOUS_RELEASE_HEAD, _PRE_TALLY_RELEASE_HEAD, _TALLY_RELEASE_HEAD],
+)
 async def test_current_checkout_prior_head_archive_derives_boundary_d_authority(
     prior_release_head: str,
     migrated_engine: AsyncEngine,
@@ -400,7 +410,10 @@ async def test_current_checkout_prior_head_archive_derives_boundary_d_authority(
     assert repeated["manifest_digest"] == authority["manifest_digest"]
 
 
-@pytest.mark.parametrize("prior_release_head", [_PREVIOUS_RELEASE_HEAD, _PRE_TALLY_RELEASE_HEAD])
+@pytest.mark.parametrize(
+    "prior_release_head",
+    [_PREVIOUS_RELEASE_HEAD, _PRE_TALLY_RELEASE_HEAD, _TALLY_RELEASE_HEAD],
+)
 async def test_unactivated_previous_head_archive_leaves_the_target_intact(
     prior_release_head: str,
     migrated_engine: AsyncEngine,

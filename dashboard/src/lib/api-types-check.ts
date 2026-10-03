@@ -42,6 +42,8 @@
 import type {
   AgentPublic,
   CommandPublic,
+  DeadLetterEntry,
+  DeadLetterPage,
   EventPublic,
   LoginRequest,
   LoginResponse,
@@ -186,6 +188,14 @@ type _CommandPublic = Assert<
 >;
 type _EventPublic = Assert<
   NotNever<StructurallyEquivalent<EventPublic, Schemas["EventPublic"]>>
+>;
+
+// Dead letters: the page an agent returns through GET /projects/{slug}/dead-letters
+type _DeadLetterEntry = Assert<
+  NotNever<StructurallyEquivalent<DeadLetterEntry, Schemas["DeadLetterEntry"]>>
+>;
+type _DeadLetterPage = Assert<
+  NotNever<StructurallyEquivalent<DeadLetterPage, Schemas["DeadLetterPage"]>>
 >;
 
 // TaskTreeNode lives in hooks/use-tasks.ts rather than api-types.ts, so it sat

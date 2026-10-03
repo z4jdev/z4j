@@ -16,10 +16,35 @@ import hashlib
 import hmac
 from typing import TYPE_CHECKING
 
+from sqlalchemy import select
+from z4j_core.errors import AuthorizationError
+
+from z4j_brain.auth.ip import TrustedProxyResolver
+
 if TYPE_CHECKING:
+    from uuid import UUID
+
+    from fastapi import WebSocket
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from z4j_brain.persistence.models import Agent
     from z4j_brain.persistence.repositories import AgentRepository
     from z4j_brain.settings import Settings
+
+
+class ProjectInactiveError(AuthorizationError):
+    """The bearer is valid but the agent's project has been archived.
+
+    Raised by the long-poll routes so the agent gets a ``403`` whose
+    ``error`` field is the stable string ``project_inactive`` rather
+    than the ``401`` a bad or revoked token gets. The WebSocket
+    gateway does not raise it; it closes with the revoked-agent close
+    codes instead, because the shipped agent runtime treats any
+    unknown close code as a transient network failure and would
+    reconnect on its fastest schedule.
+    """
+
+    code = "project_inactive"
 
 
 #: Salt baked into the agent-token HMAC. Distinct from the salt used
@@ -84,4 +109,61 @@ async def resolve_agent_by_bearer(
     return None
 
 
-__all__ = ["hash_agent_token", "resolve_agent_by_bearer"]
+async def agent_project_is_active(
+    *,
+    project_id: UUID,
+    session: AsyncSession,
+) -> bool:
+    """Return whether the project an agent belongs to is still active.
+
+    A valid bearer is not enough to admit an agent: archiving a project
+    (``DELETE /api/v1/projects/{slug}``) flips ``projects.is_active`` to
+    false and leaves the agent rows and their token hashes intact, so
+    without this check the agents of an archived project keep
+    connecting, streaming events and pulling commands. Both agent
+    transports call this right after the bearer lookup, and the
+    gateway calls it again after registry registration to close the
+    window where the archive commits mid-handshake.
+
+    A project row that does not exist counts as inactive; the agent's
+    foreign key makes that impossible in practice, but the safe answer
+    for a dangling reference is to refuse.
+    """
+    from z4j_brain.persistence.models import Project
+
+    result = await session.execute(
+        select(Project.is_active).where(Project.id == project_id),
+    )
+    return bool(result.scalar_one_or_none())
+
+
+def resolve_websocket_client_ip(websocket: WebSocket, *, settings: Settings) -> str:
+    """The trusted-proxy-resolved address of a WebSocket peer.
+
+    ``RealClientIPMiddleware`` only sees HTTP scopes, so both gateways run
+    the same :class:`TrustedProxyResolver` themselves: ``X-Forwarded-For``
+    counts only when the socket peer is inside ``trusted_proxies``, and a
+    header from anywhere else is ignored in favour of the peer. Returns the
+    empty string when the peer is unknown, which a non-empty allowlist
+    refuses and an empty one admits, exactly as on HTTP.
+    """
+    resolver: TrustedProxyResolver | None = getattr(
+        websocket.app.state,
+        "proxy_resolver",
+        None,
+    )
+    if resolver is None:
+        resolver = TrustedProxyResolver(settings.trusted_proxies)
+    return resolver.resolve(
+        peer_ip=websocket.client.host if websocket.client else None,
+        xff_header=websocket.headers.get("x-forwarded-for"),
+    )
+
+
+__all__ = [
+    "ProjectInactiveError",
+    "agent_project_is_active",
+    "hash_agent_token",
+    "resolve_agent_by_bearer",
+    "resolve_websocket_client_ip",
+]

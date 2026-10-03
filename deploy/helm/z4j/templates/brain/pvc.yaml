@@ -1,0 +1,25 @@
+{{- if and .Values.brain.enabled .Values.brain.persistence.enabled (not .Values.brain.persistence.existingClaim) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "z4j.fullname" . }}-data
+  labels:
+    {{- include "z4j.brain.labels" . | nindent 4 }}
+  annotations:
+    # ``helm uninstall`` leaves the claim behind. The SQLite database and
+    # the brain's owner-private state live here; deleting it is a
+    # deliberate ``kubectl delete pvc``, never a side effect.
+    helm.sh/resource-policy: keep
+    {{- with .Values.brain.persistence.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.brain.persistence.accessModes | nindent 4 }}
+  {{- with .Values.brain.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.brain.persistence.size }}
+{{- end }}

@@ -1,21 +1,28 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { resolve, join, sep } from "node:path";
 import ts from "typescript";
 import { expect, it } from "vitest";
+
+// Paths are compared as POSIX strings so the "/components/ui/" and
+// "_authenticated" checks below hold on Windows checkouts, where
+// node:path joins with backslashes, as well as on Linux CI.
+function posix(path: string): string {
+  return path.split(sep).join("/");
+}
 
 function files(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory()
       ? files(join(dir, entry.name))
       : entry.name.endsWith(".tsx")
-        ? [join(dir, entry.name)]
+        ? [posix(join(dir, entry.name))]
         : [],
   );
 }
 
 it("every record column declares sorting; only action or decorative headers omit it", () => {
   const violations: string[] = [];
-  const root = resolve("src");
+  const root = posix(resolve("src"));
   for (const file of files(root).filter(
     (file) => !file.includes("/components/ui/"),
   )) {

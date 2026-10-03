@@ -1,9 +1,13 @@
 """``/api/v1/activity`` cross-project live activity feed.
 
 Aggregates audit-log rows across every project the caller can see.
-Admins can see every row. Non-admin users can see rows from projects
-where they hold a membership plus their own user-scoped rows whose
-``project_id`` is null. The endpoint is the data source for the
+Instance admins can see every row. Other users can see rows from the
+projects where their membership satisfies ``Action.READ_AUDIT`` (the
+auditor tier: ``auditor`` or ``admin``, decided by the core policy
+table, exactly as ``/projects/{slug}/audit`` decides it), plus their
+own user-scoped rows whose ``project_id`` is null. A viewer or operator
+membership contributes nothing: the feed is a wider view of the audit
+trail, not a lower bar to it. The endpoint is the data source for the
 dashboard's Live Activity Feed page.
 
 Cursor pagination is keyed on ``(occurred_at, id)`` because the
@@ -31,6 +35,7 @@ from z4j_brain.api.deps import (
     get_membership_repo,
     get_session,
 )
+from z4j_brain.domain.policy_engine import Action, action_allowed
 from z4j_brain.persistence.models import AuditLog, Project
 
 if TYPE_CHECKING:
@@ -222,9 +227,11 @@ async def list_activity(
 ) -> ActivityListResponse:
     """List audit rows across every project the caller can see.
 
-    Admins see every row including brain-wide rows (no project_id).
-    Non-admins see rows from projects where they hold a membership
-    plus their own user-scoped rows whose project_id is null.
+    Instance admins see every row including brain-wide rows (no
+    project_id). Other users see rows from the projects where their
+    membership satisfies ``Action.READ_AUDIT`` (auditor or admin, the
+    same tier the per-project audit page requires) plus their own
+    user-scoped rows whose project_id is null.
     """
     # v1.6 audit H13: per-user rate limit (per worker process).
     # Include Retry-After per RFC 6585 so well-behaved clients
@@ -241,8 +248,18 @@ async def list_activity(
     if user.is_admin:
         accessible_project_ids = None
     else:
+        # The feed reads the same ``audit_log`` rows the per-project audit
+        # page serves, so a membership admits a project here only when it
+        # would admit the caller there: the core table's answer for
+        # ``READ_AUDIT``. A viewer or operator membership used to put the
+        # project in this set, which let those roles read through the
+        # feed what ``/projects/{slug}/audit`` refuses them with 403.
         membership_rows = await memberships.list_for_user(user.id)
-        accessible_project_ids = [membership.project_id for membership in membership_rows]
+        accessible_project_ids = [
+            membership.project_id
+            for membership in membership_rows
+            if action_allowed(membership.role, action=Action.READ_AUDIT)
+        ]
 
     project_id_filter = accessible_project_ids
     if project_slug is not None:

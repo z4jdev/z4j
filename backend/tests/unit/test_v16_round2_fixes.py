@@ -7,19 +7,12 @@ shipping.
 
 from __future__ import annotations
 
-import asyncio
-import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from z4j_brain.api import activity as activity_mod
-from z4j_brain.domain import audit_forwarder as af_mod
-from z4j_brain.domain.audit_forwarder import (
-    AuditForwarder,
-)
 from z4j_brain.observability.sentry import (
     _PATH_TOKEN_HOST_RE,
     _REDACT_MAX_DEPTH,
@@ -290,83 +283,9 @@ class TestRound2OtelHookFailClosed:
 # ---------------------------------------------------------------------------
 # Round 2 D -- Audit forwarder shutdown drain in-flight tracking
 # ---------------------------------------------------------------------------
-
-
-class TestRound2InFlightShutdownTracking:
-    @pytest.mark.asyncio
-    async def test_in_flight_row_counted_at_shutdown(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Round 2 Sev-5 / H10: a row that was pulled from the
-        queue and is awaiting _send_one when cancellation lands is
-        lost; before this fix it was NOT counted in shutdown_lost."""
-
-        async def _stuck_post(*_args: Any, **_kwargs: Any) -> httpx.Response:
-            await asyncio.Event().wait()
-            raise AssertionError("unreachable")
-
-        async def _noop_resolve_and_pin(
-            _u: str,
-        ) -> tuple[str | None, str | None]:
-            return None, "203.0.113.1"
-
-        monkeypatch.setattr(af_mod, "_post", _stuck_post)
-        monkeypatch.setattr(af_mod, "resolve_and_pin", _noop_resolve_and_pin)
-
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        fwd.start()
-        # Push a row; let the drain task pull it and park inside _send_one.
-        _row = SimpleNamespace(
-            id=uuid.UUID("00000000-0000-0000-0000-00000000abcd"),
-            action="test.action",
-            target_type="t",
-            target_id=None,
-            result="success",
-            outcome="allow",
-            event_id=None,
-            user_id=None,
-            api_key_id=None,
-            project_id=None,
-            source_ip=None,
-            user_agent=None,
-            audit_metadata={},
-            occurred_at=None,
-            prev_row_hmac=None,
-            row_hmac="0" * 64,
-        )
-        # Bypass _row_to_payload's occurred_at iso conversion.
-        fwd.enqueue(
-            {
-                "id": "00000000-0000-0000-0000-00000000abcd",
-                "action": "test.action",
-                "target_type": "t",
-                "target_id": None,
-                "result": "success",
-                "outcome": "allow",
-                "event_id": None,
-                "user_id": None,
-                "api_key_id": None,
-                "project_id": None,
-                "source_ip": None,
-                "user_agent": None,
-                "metadata": {},
-                "occurred_at": "2026-05-12T12:00:00.000000+00:00",
-                "prev_row_hmac": None,
-                "row_hmac": "0" * 64,
-            },
-        )
-        await asyncio.sleep(0.05)  # let drain task pull + block
-        # Stop with a short deadline so the in-flight row is forcibly
-        # cancelled.
-        await fwd.stop(drain_timeout=0.05)
-        # The fix: in-flight row IS counted (was 0 before fix).
-        assert fwd.shutdown_lost == 1, (
-            f"in-flight row must increment shutdown_lost; got {fwd.shutdown_lost}"
-        )
+# Retired: the forwarder no longer holds rows in memory. A row whose POST
+# is cancelled stays past the durable cursor and is sent again; see
+# tests/unit/test_audit_forwarder_cursor.py.
 
 
 # ---------------------------------------------------------------------------

@@ -15,13 +15,19 @@
 #
 #   docker compose -f docker-compose.postgres.yml up -d --build
 #
-# Two services:
+# Services:
 #
-#   z4j-postgres   PostgreSQL 18 Trixie     persistent volume only,
-#                  no exposed port
-#   z4j-brain      backend + dashboard,     single image, port 8080
-#                  built from this repo's   (put behind a TLS reverse
-#                  Dockerfile by default    proxy in production)
+#   z4j-postgres      PostgreSQL 18 Trixie     persistent volume only,
+#                     no exposed port
+#   z4j               backend + dashboard,     single image, port 8080
+#                     built from this repo's   (put behind a TLS reverse
+#                     Dockerfile by default    proxy in production)
+#   scheduler-certs   one-shot mTLS bootstrap  mints the CA and both
+#                     for the scheduler        certificates into the
+#                     channel, then exits      z4j_scheduler_pki volume
+#   scheduler         z4j-scheduler serve,     two replicas, Postgres
+#                     same image               leader election, mTLS to
+#                                              the brain on :7701
 #
 # Quickstart:
 #
@@ -49,7 +55,7 @@
 # For contributor development with hot-reload + dashboard HMR,
 # use docker-compose.dev.yml instead.
 #
-# See docs/DEPLOYMENT.md §3 for the full self-host quickstart.
+# See https://docs.z4j.com/guides/self-hosting/ for the full self-host quickstart.
 
 name: z4j
 
@@ -125,7 +131,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        Z4J_VERSION: ${Z4J_VERSION:-1.11.0}
+        Z4J_VERSION: ${Z4J_VERSION:-1.12.0}
     image: ${Z4J_BRAIN_IMAGE:-z4jdev/z4j:latest}
     container_name: z4j
     depends_on:
@@ -196,6 +202,26 @@ services:
 
       # ----- registry (multi-worker safe by default) -----
       Z4J_REGISTRY_BACKEND: postgres_notify
+
+      # ----- scheduler channel (mTLS gRPC on :7701, bridge network only) -----
+      # The brain serves the z4j-scheduler gRPC service with the server
+      # certificate that scheduler-certs minted into the z4j_scheduler_pki
+      # volume, and accepts exactly one client identity: the CN the same
+      # one-shot minted for the scheduler replicas below. The port is never
+      # published to the host.
+      Z4J_SCHEDULER_GRPC_ENABLED: "true"
+      Z4J_SCHEDULER_GRPC_BIND_HOST: "0.0.0.0"
+      Z4J_SCHEDULER_GRPC_BIND_PORT: "7701"
+      Z4J_SCHEDULER_GRPC_TLS_CERT: /pki/brain.crt
+      Z4J_SCHEDULER_GRPC_TLS_KEY: /pki/brain.key
+      Z4J_SCHEDULER_GRPC_TLS_CA: /pki/ca.crt
+      Z4J_SCHEDULER_GRPC_ALLOWED_CNS: '["${Z4J_PKI_SCHEDULER_CN:-z4j-scheduler}"]'
+      Z4J_SCHEDULER_GRPC_REQUIRE_ALLOWLIST: "true"
+      # The dashboard's Schedulers page polls each listed /info endpoint.
+      # Compose names the replicas <project>-scheduler-<n>, and this file's
+      # project name is z4j. Extend the list when you scale past two or
+      # run the stack under another -p project name.
+      Z4J_SCHEDULER_INFO_URLS: ${Z4J_SCHEDULER_INFO_URLS:-["http://z4j-scheduler-1:7800","http://z4j-scheduler-2:7800"]}
     ports:
       - "${Z4J_BRAIN_PORT:-8080}:7700"
       # IMPORTANT: put this behind a TLS-terminating reverse proxy
@@ -207,6 +233,8 @@ services:
       # containers. A named volume is required; the image's anonymous
       # /data volume would be discarded with the first container.
       - z4j_brain_state:/data
+      # mTLS material for the scheduler channel, minted by scheduler-certs.
+      - z4j_scheduler_pki:/pki:ro
     networks:
       - z4j_net
     healthcheck:
@@ -231,6 +259,104 @@ services:
     # tini is the entrypoint inside the image; we get clean PID 1
     # signal handling for free.
 
+  # ====================================================================
+  # scheduler-certs - one-shot mTLS bootstrap for the scheduler channel
+  # ====================================================================
+  # Runs docker/scheduler-certs.sh (POSIX sh + openssl, both in the brain
+  # image) as root once per `docker compose up`: mints a private CA, the
+  # brain's server certificate (SANs z4j, brain, localhost) and the
+  # scheduler's client certificate (CN z4j-scheduler) into the
+  # z4j_scheduler_pki volume, hands them to the uid the brain and the
+  # scheduler run as, and exits. Idempotent: a valid bundle is left alone
+  # and a certificate is minted again only when it is missing, mismatched
+  # or within 30 days of expiry (restart brain + scheduler to pick up a
+  # renewal). The CA key stays root-only. Bring your own PKI by replacing
+  # the files in the volume, keeping their names.
+  scheduler-certs:
+    image: ${Z4J_BRAIN_IMAGE:-z4jdev/z4j:latest}
+    container_name: z4j-scheduler-certs
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/usr/bin/tini", "--", "sh", "/usr/local/libexec/z4j/scheduler-certs.sh"]
+    environment:
+      Z4J_PKI_DIR: /pki
+      Z4J_PKI_BRAIN_SANS: z4j,brain,localhost
+      Z4J_PKI_SCHEDULER_CN: ${Z4J_PKI_SCHEDULER_CN:-z4j-scheduler}
+      Z4J_PKI_OWNER: "10001:10001"
+    volumes:
+      - ./docker/scheduler-certs.sh:/usr/local/libexec/z4j/scheduler-certs.sh:ro
+      - z4j_scheduler_pki:/pki
+    restart: "no"
+
+  # ====================================================================
+  # z4j-scheduler - two replicas, Postgres leader election
+  # ====================================================================
+  # The brain image with its entrypoint switched to `z4j-scheduler serve`.
+  # Both replicas dial the brain's gRPC channel at z4j:7701 with the same
+  # minted client certificate and race for an advisory lock in the
+  # stack's own Postgres; the holder ticks, the other stays warm and
+  # takes over within a few heartbeats. No container_name, so Compose
+  # names them z4j-scheduler-1 and z4j-scheduler-2. Add replicas with:
+  #
+  #   docker compose -f docker-compose.postgres.yml up -d --scale scheduler=3
+  #
+  # /health, /ready and /info answer on :7800 inside z4j_net only.
+  # /metrics ships off: the scheduler binds every container interface and
+  # refuses unauthenticated metrics outside dev, so set BOTH
+  # Z4J_SCHEDULER_METRICS_ENABLED=true and Z4J_SCHEDULER_METRICS_AUTH_TOKEN
+  # in .env to scrape it (an empty token locks the endpoint rather than
+  # opening it).
+  scheduler:
+    image: ${Z4J_BRAIN_IMAGE:-z4jdev/z4j:latest}
+    entrypoint: ["/usr/bin/tini", "--", "z4j-scheduler"]
+    command: ["serve"]
+    depends_on:
+      scheduler-certs:
+        condition: service_completed_successfully
+      z4j-postgres:
+        condition: service_healthy
+      z4j:
+        condition: service_healthy
+    environment:
+      Z4J_SCHEDULER_BRAIN_GRPC_URL: z4j:7701
+      Z4J_SCHEDULER_BRAIN_REST_URL: http://z4j:7700
+      Z4J_SCHEDULER_TLS_CERT: /pki/scheduler.crt
+      Z4J_SCHEDULER_TLS_KEY: /pki/scheduler.key
+      Z4J_SCHEDULER_TLS_CA: /pki/ca.crt
+      Z4J_SCHEDULER_LEADER_BACKEND: postgres
+      # Advisory-lock election in the stack's own database, from the same
+      # POSTGRES_* values the brain uses. This is a URL, so a password that
+      # contains URL delimiters (: @ / % ?) must be percent-encoded here;
+      # set Z4J_SCHEDULER_LEADER_PG_DSN in .env to supply the DSN yourself.
+      Z4J_SCHEDULER_LEADER_PG_DSN: ${Z4J_SCHEDULER_LEADER_PG_DSN:-postgres://${POSTGRES_USER:-z4j}:${POSTGRES_PASSWORD}@z4j-postgres:5432/${POSTGRES_DB:-z4j}}
+      Z4J_SCHEDULER_BIND_HOST: "0.0.0.0"
+      Z4J_SCHEDULER_BIND_PORT: "7800"
+      Z4J_SCHEDULER_ENVIRONMENT: ${Z4J_ENVIRONMENT:-production}
+      Z4J_SCHEDULER_METRICS_ENABLED: ${Z4J_SCHEDULER_METRICS_ENABLED:-false}
+      Z4J_SCHEDULER_METRICS_AUTH_TOKEN: ${Z4J_SCHEDULER_METRICS_AUTH_TOKEN:-}
+      Z4J_SCHEDULER_LOG_LEVEL: ${Z4J_LOG_LEVEL:-INFO}
+      Z4J_SCHEDULER_LOG_JSON: ${Z4J_LOG_JSON:-true}
+    volumes:
+      - z4j_scheduler_pki:/pki:ro
+    networks:
+      - z4j_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7800/ready',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+        reservations:
+          memory: 64m
+          cpus: "0.05"
+
 networks:
   # Private network for brain ↔ postgres traffic. Both services
   # join this network explicitly so the only host-exposed surface
@@ -245,3 +371,6 @@ volumes:
     name: z4j_pg_data
   z4j_brain_state:
     name: z4j_brain_state
+  # CA, brain server cert and scheduler client cert (see scheduler-certs).
+  z4j_scheduler_pki:
+    name: z4j_scheduler_pki

@@ -31,6 +31,7 @@ Auth: requires :func:`require_admin`, the same dep
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends
@@ -168,6 +169,20 @@ def _render_value(value: Any, *, is_secret: bool) -> str:
     return str(value)
 
 
+# ``user:password@`` at the start of a URL or right after its scheme.
+_URL_USERINFO = re.compile(r"(^|://)[^/?#@\s]*@")
+
+
+def _strip_url_userinfo(value: str) -> str:
+    """Drop ``user:password@`` from a URL-shaped value.
+
+    Every URL-valued field that is not already a secret goes through
+    this before it is rendered. Settings refuses userinfo in the fields
+    it knows about; this is the belt for a field it does not.
+    """
+    return _URL_USERINFO.sub(r"\1", value)
+
+
 @router.get(
     "",
     response_model=AdminSettingsResponse,
@@ -213,6 +228,8 @@ async def get_effective_settings(
             display = "***"
         else:
             display = _render_value(raw_value, is_secret=is_secret)
+            if field_name.endswith("_url") and isinstance(raw_value, str):
+                display = _strip_url_userinfo(display)
 
         description = field_info.description if field_info.description else ""
 

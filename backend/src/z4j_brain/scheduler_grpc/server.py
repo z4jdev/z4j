@@ -265,7 +265,7 @@ class SchedulerGrpcServer:
 def _build_server_credentials(settings: Settings) -> grpc.ServerCredentials:
     """Read the TLS material referenced by Settings into gRPC credentials.
 
-    Three required env vars (per ``docs/SCHEDULER.md §22``):
+    Three required env vars (per ``docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §22``):
 
     - ``Z4J_SCHEDULER_GRPC_TLS_CERT`` - server cert PEM
     - ``Z4J_SCHEDULER_GRPC_TLS_KEY`` - server key PEM

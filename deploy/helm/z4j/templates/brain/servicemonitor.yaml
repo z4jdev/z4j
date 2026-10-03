@@ -1,0 +1,20 @@
+{{- if and .Values.brain.enabled .Values.brain.serviceMonitor.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "z4j.fullname" . }}
+  labels:
+    {{- include "z4j.brain.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "z4j.brain.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.brain.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.brain.serviceMonitor.scrapeTimeout }}
+      bearerTokenSecret:
+        name: {{ .Values.brain.serviceMonitor.bearerTokenSecret.name }}
+        key: {{ .Values.brain.serviceMonitor.bearerTokenSecret.key }}
+{{- end }}

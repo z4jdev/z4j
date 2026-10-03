@@ -333,9 +333,12 @@ def _make_dependency(bucket: _IPBucket, name: str) -> Callable[..., Coroutine[An
         ok, retry_after_seconds = await bucket.hit_with_retry_after(ip)
         if not ok:
             assert retry_after_seconds is not None
+            # ``Retry-After`` carries the same bounded delay the body names,
+            # so a client can back off without parsing the detail string.
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=(f"too many requests; retry in {retry_after_seconds} seconds ({name})"),
+                headers={"Retry-After": str(retry_after_seconds)},
             )
 
     return _check
@@ -395,6 +398,7 @@ async def require_mfa_verify_throttle(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(f"too many requests; retry in {retry_after_seconds} seconds (mfa-verify)"),
+            headers={"Retry-After": str(retry_after_seconds)},
         )
 
 

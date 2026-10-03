@@ -11,7 +11,7 @@ The scheduler-side :rpc:`TriggerSchedule` server is retained for a Brain that
 predates durable schedule control. A current Brain dispatches operator manual
 fires directly and does not use that reverse RPC.
 
-Per ``docs/SCHEDULER.md §13.2``, every state-changing RPC writes an
+Per ``docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §13.2``, every state-changing RPC writes an
 audit row through the existing HMAC-chained ``audit_log``. Pure read
 RPCs (List/Watch/Ping) skip the audit because the scheduler reads
 the same data on every reconnect; auditing each one would balloon
@@ -3367,7 +3367,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
 
         # Phase 4 + 5: dispatch notifications matching the spec's
         # split between fire-side and task-side failures
-        # (docs/SCHEDULER.md §5.9):
+        # (docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §5.9):
         #
         # - ``schedule.fire.{succeeded,failed}``, outcome of the
         #   FireSchedule round-trip itself.

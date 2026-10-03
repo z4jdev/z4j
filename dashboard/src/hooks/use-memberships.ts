@@ -13,10 +13,26 @@
  */
 import { useMe } from "@/hooks/use-auth";
 
-export type ProjectRole = "admin" | "operator" | "viewer";
+export type ProjectRole = "admin" | "operator" | "auditor" | "viewer";
+
+export const PROJECT_ROLES: readonly ProjectRole[] = [
+  "viewer",
+  "auditor",
+  "operator",
+  "admin",
+] as const;
+
+export function isProjectRole(value: unknown): value is ProjectRole {
+  return (
+    typeof value === "string" &&
+    (PROJECT_ROLES as readonly string[]).includes(value)
+  );
+}
 
 export type ProjectCapability =
   | "view"
+  /** Read, export and verify the audit trail: auditor and admin only. */
+  | "read_audit"
   | "retry_task"
   | "cancel_task"
   | "delete_tasks"
@@ -32,7 +48,12 @@ export type ProjectCapability =
   | "manage_channels"
   | "manage_invitations";
 
-/** Pure role matrix shared by the hook and fail-sensitive unit tests. */
+/** Pure role matrix shared by the hook and fail-sensitive unit tests.
+ *
+ * Mirrors ``z4j_core.policy``: admin holds everything; viewer reads;
+ * auditor reads plus the audit trail and nothing else; operator acts
+ * on the data plane and does not read the audit trail. Auditor and
+ * operator are siblings, neither inherits the other. */
 export function canProjectRole(
   role: ProjectRole | null,
   action: ProjectCapability,
@@ -40,10 +61,14 @@ export function canProjectRole(
   if (role === null) return false;
   if (role === "admin") return true;
   if (role === "viewer") return action === "view";
+  if (role === "auditor") return action === "view" || action === "read_audit";
 
   // Operators can execute data-plane actions but cannot mutate admin-owned
-  // definitions or perform admin-only destructive operations.
+  // definitions, perform admin-only destructive operations, or read the
+  // audit trail.
   switch (action) {
+    case "read_audit":
+      return false;
     case "view":
     case "retry_task":
     case "cancel_task":
@@ -78,10 +103,7 @@ export function useCurrentUserRole(
   if (me.is_admin) return "admin";
   const m = me.memberships?.find((mem) => mem.project_slug === slug);
   const role = m?.role;
-  if (role === "admin" || role === "operator" || role === "viewer") {
-    return role;
-  }
-  return null;
+  return isProjectRole(role) ? role : null;
 }
 
 export function useIsProjectAdmin(slug: string): boolean {

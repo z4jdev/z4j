@@ -18,7 +18,8 @@ state machine:
 Close codes (mirrors the agent gateway scheme so operators only
 have to learn one set):
 
-- 4401  invalid / missing session cookie
+- 4401  invalid / missing session cookie, or a valid one presented from
+        outside ``Z4J_DASHBOARD_IP_ALLOWLIST``
 - 4400  malformed first frame
 - 4403  user is not a member of the requested project
 - 4402  hub is stopped (server is shutting down)
@@ -44,8 +45,11 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
+from z4j_brain.domain.ip_allowlist import check_dashboard_ip, record_ip_denial
+from z4j_brain.websocket.auth import resolve_websocket_client_ip
 
 if TYPE_CHECKING:
+    from z4j_brain.domain.ip_allowlist import IpDenial
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.persistence.models import SessionRow, User
     from z4j_brain.settings import Settings
@@ -58,6 +62,14 @@ router = APIRouter(tags=["dashboard"])
 
 class _NonTextFirstFrameError(Exception):
     """The first client frame used the binary WebSocket carrier."""
+
+
+class _SourceAddressRefusedError(Exception):
+    """A valid session was presented from outside the dashboard allowlist."""
+
+    def __init__(self, denial: IpDenial) -> None:
+        super().__init__(denial.surface)
+        self.denial = denial
 
 
 async def _receive_first_text(websocket: WebSocket) -> str:
@@ -78,7 +90,7 @@ async def _receive_first_text(websocket: WebSocket) -> str:
 
 
 @router.websocket("/ws/dashboard")
-async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912  websocket lifecycle handler
+async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR0915  websocket lifecycle handler
     """The dashboard push endpoint. See module docstring."""
     settings = _settings_from(websocket)
     db = _db_from(websocket)
@@ -93,7 +105,20 @@ async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912 
     # ------------------------------------------------------------------
     # 1) Authenticate (session cookie)
     # ------------------------------------------------------------------
-    resolved = await _resolve_user(websocket=websocket, settings=settings, db=db)
+    try:
+        resolved = await _resolve_user(
+            websocket=websocket,
+            settings=settings,
+            db=db,
+            client_ip=resolve_websocket_client_ip(websocket, settings=settings),
+        )
+    except _SourceAddressRefusedError as refused:
+        # Same close as a missing session: from outside the list the cookie
+        # opens nothing. The row names the user; the check already counted
+        # the metric.
+        await _audit_ip_denial(websocket, db=db, denial=refused.denial)
+        await _safe_close(websocket, code=4401)
+        return
     if resolved is None:
         await _safe_close(websocket, code=4401)
         return
@@ -235,6 +260,7 @@ async def _resolve_user(
     websocket: WebSocket,
     settings: Settings,
     db: DatabaseManager,
+    client_ip: str,
 ) -> tuple[SessionRow, User] | None:
     """Resolve the session cookie → ``(SessionRow, User)``, or None.
 
@@ -244,6 +270,12 @@ async def _resolve_user(
     cookie that works on REST also works here. Returns the SessionRow
     too so the caller can enforce the second-factor gate
     (``session_row.mfa_verified_at``) exactly as REST does.
+
+    ``client_ip`` is the trusted-proxy-resolved peer. A session presented
+    from outside ``dashboard_ip_allowlist`` raises
+    :class:`_SourceAddressRefusedError` instead of being touched, in the order
+    REST keeps (refuse, then park the touch): a refused request is not a
+    use of the session.
     """
     cookie_value = websocket.cookies.get(
         cookie_name(environment=settings.environment),
@@ -283,12 +315,19 @@ async def _resolve_user(
             if resolved[0].user_agent_at_issue != current_user_agent:
                 await sessions.revoke(resolved[0].id, reason="user_agent_changed")
                 resolved = None
-        if resolved is not None:
+        denial = (
+            check_dashboard_ip(client_ip, settings=settings, user_id=resolved[1].id)
+            if resolved is not None
+            else None
+        )
+        if resolved is not None and denial is None:
             await sessions.touch(resolved[0].id)
         # This session exists only for WebSocket authentication, so the commit
         # cannot carry handler business writes. It makes the successful touch
         # (and any revocation found by resolve_session) durable.
         await session.commit()
+    if denial is not None:
+        raise _SourceAddressRefusedError(denial)
     return resolved if resolved else None
 
 
@@ -410,6 +449,35 @@ async def _handle_client_message(
 async def _safe_close(websocket: WebSocket, *, code: int) -> None:
     with contextlib.suppress(Exception):
         await websocket.close(code=code)
+
+
+async def _audit_ip_denial(
+    websocket: WebSocket,
+    *,
+    db: DatabaseManager,
+    denial: IpDenial,
+) -> None:
+    """Write the ``auth.ip_denied`` row for a refused dashboard socket.
+
+    On a session of its own and before the close, so the write does not
+    race the teardown. A failure is logged, never raised: the refusal
+    stands either way.
+    """
+    from z4j_brain.persistence.repositories import AuditLogRepository
+
+    user_agent = websocket.headers.get("user-agent")
+    try:
+        async with db.session(write=True) as audit_session:
+            await record_ip_denial(
+                websocket.app.state.audit_service,
+                AuditLogRepository(audit_session),
+                denial,
+                user_agent=user_agent[:256] if user_agent else None,
+                path="/ws/dashboard",
+            )
+            await audit_session.commit()
+    except Exception:
+        logger.exception("z4j dashboard_gateway: failed to audit source-address refusal")
 
 
 def _settings_from(ws: WebSocket) -> Settings:

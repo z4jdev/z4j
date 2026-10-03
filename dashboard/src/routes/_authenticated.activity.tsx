@@ -3,10 +3,14 @@ import { useDebouncedValue } from "@/hooks/use-debounced-value";
 /**
  * Live Activity Feed.
  *
- * Cross-project timeline of audit-log rows, scoped to the user's
- * accessible projects. Backed by ``GET /api/v1/activity`` which
- * filters the underlying audit table by project membership (admins
- * see every row; non-admins see only their memberships).
+ * Cross-project timeline of audit-log rows, scoped to the projects
+ * whose audit trail the user may read. Backed by ``GET /api/v1/activity``
+ * which scopes the underlying audit table the way the per-project audit
+ * page does: an instance admin sees every row; a project's rows need the
+ * auditor or admin role on it; a viewer or operator membership contributes
+ * nothing, so such a caller sees only their own user-scoped rows (login,
+ * MFA, password events). The project filter offers only the projects the
+ * caller may audit, for the same reason.
  *
  * Sections top-to-bottom:
  *
@@ -35,7 +39,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useActivityInfinite, type ActivityItem } from "@/hooks/use-activity";
 import { useMe } from "@/hooks/use-auth";
 import { useProjects } from "@/hooks/use-projects";
-import { projectlessActivityScope } from "@/lib/activity-scope";
+import {
+  auditableProjects,
+  holdsAuditTier,
+  projectlessActivityScope,
+} from "@/lib/activity-scope";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   Activity,
@@ -72,6 +80,12 @@ function ActivityPage() {
 
   const query = useActivityInfinite(filters);
   const projects = useProjects();
+  const projectOptions = useMemo(
+    () => auditableProjects(me.data, projects.data ?? []),
+    [me.data, projects.data],
+  );
+  // Only once the caller is known: an unresolved /auth/me is not "no role".
+  const noAuditTier = me.isSuccess && !holdsAuditTier(me.data);
 
   const items: ActivityItem[] = useMemo(() => {
     if (!query.data) return [];
@@ -116,7 +130,11 @@ function ActivityPage() {
           setProjectSlug(ALL_PROJECTS_VALUE);
         }}
         filters={
-          <Select value={projectSlug} onValueChange={setProjectSlug}>
+          <Select
+            value={projectSlug}
+            onValueChange={setProjectSlug}
+            disabled={noAuditTier}
+          >
             <SelectTrigger
               id="activity-project"
               aria-label="Project"
@@ -126,7 +144,7 @@ function ActivityPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={ALL_PROJECTS_VALUE}>All projects</SelectItem>
-              {(projects.data ?? []).map((p) => (
+              {projectOptions.map((p) => (
                 <SelectItem key={p.slug} value={p.slug}>
                   {p.name}
                 </SelectItem>
@@ -140,6 +158,13 @@ function ActivityPage() {
           </span>
         }
       />
+
+      {noAuditTier && (
+        <p className="text-sm text-muted-foreground" role="note">
+          Project activity needs the auditor or admin role; your own account
+          activity is listed.
+        </p>
+      )}
 
       {query.isError && (
         <QueryError

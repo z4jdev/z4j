@@ -91,7 +91,9 @@ const EMPTY: FormState = {
   queue: "",
   args: "[]",
   kwargs: "{}",
-  catch_up: "skip",
+  // Matches the API's own default for a body that says nothing: a slot that
+  // comes due during a watch outage is run on recovery, not discarded.
+  catch_up: "fire_one_missed",
   is_enabled: true,
 };
 
@@ -431,7 +433,7 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
             </Field>
             <Field
               label="If a scheduled run was missed"
-              hint="Recovery can enqueue extra work. Choose how much missed work to replay."
+              hint="skip discards any occurrence that falls due while the scheduler cannot reach the brain; fire_one_missed runs the latest one on recovery."
             >
               <Select
                 value={form.catch_up}

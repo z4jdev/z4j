@@ -81,7 +81,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
@@ -98,7 +98,10 @@ from z4j_core.transport.frames import (
 from z4j_core.transport.framing import FrameSigner, FrameVerifier
 from z4j_core.transport.hmac import derive_project_secret
 
+from z4j_brain.api.deps import get_client_ip
+from z4j_brain.domain import refusal_audit
 from z4j_brain.domain.command_wire import wire_target
+from z4j_brain.domain.ip_allowlist import check_agent_ip, record_ip_denial
 from z4j_brain.domain.ip_rate_limit import require_agent_connect_throttle
 from z4j_brain.domain.retry_contract import (
     RETRY_FAMILY_ACTIONS,
@@ -106,7 +109,11 @@ from z4j_brain.domain.retry_contract import (
     session_supports_retry_engine,
 )
 from z4j_brain.persistence.enums import CommandStatus
-from z4j_brain.websocket.auth import resolve_agent_by_bearer
+from z4j_brain.websocket.auth import (
+    ProjectInactiveError,
+    agent_project_is_active,
+    resolve_agent_by_bearer,
+)
 from z4j_brain.websocket.frame_router import FrameOutcome, FrameRouter
 
 if TYPE_CHECKING:
@@ -703,6 +710,156 @@ class CommandPullResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Refusal audit rows: one per key per interval
+# ---------------------------------------------------------------------------
+#
+# A refused long-poll request is answered with a 403 every time, but the
+# HMAC-chained audit row that describes the refusal is appended once per key
+# per interval, and the record of which rows were written is the one the
+# WebSocket gateway consults (``z4j_brain.domain.refusal_audit``): an agent or
+# an address refused on either transport leaves one row per interval across
+# both. The shipped agent treats these 403s as authentication failures and
+# parks on its authentication backoff (10 seconds to 10 minutes), so it writes
+# at most one row per retry anyway; an agent from a release that treats them
+# as transient retries every 1 to 30 seconds and, without this, appends about
+# 2,880 rows a day for as long as it runs, bounded only by the connect bucket.
+# Process-local, like the session registry: in a multi-worker deployment each
+# worker records its own first refusal, which bounds the rate at one row per
+# worker per interval rather than one per request. The names below are the
+# ones this module's tests reach the shared state through; they are bound to
+# the same objects, not copies.
+_RefusalAuditDedupe = refusal_audit.RefusalAuditDedupe
+_REFUSAL_AUDIT_INTERVAL_SECONDS = refusal_audit.REFUSAL_AUDIT_INTERVAL_SECONDS
+_REFUSAL_AUDIT_CAPACITY = refusal_audit.REFUSAL_AUDIT_CAPACITY
+#: ``agent.auth.project_inactive`` rows, keyed on the agent id.
+_project_inactive_audit = refusal_audit.PROJECT_INACTIVE_ROWS
+#: ``auth.ip_denied`` rows of the agent surface, keyed on the resolved address.
+_ip_denied_audit = refusal_audit.IP_DENIED_ROWS
+
+
+async def _refuse_inactive_project(request: Request, agent: Agent) -> NoReturn:
+    """Refuse an agent whose project has been archived.
+
+    The bearer is valid, so this is a ``403`` whose ``error`` is the
+    stable string ``project_inactive``, not the ``401`` a bad or
+    revoked token gets: nothing about the token changed, and the
+    agent is admitted again the moment the project is active. Both
+    routes read the project flag alongside the bearer and call this when
+    it is off; the command poll checks again after its wait, mirroring
+    the revoke recheck. The long-poll session is left alone on purpose;
+    it idles out or resumes on reactivation.
+
+    The refusal writes the same ``agent.auth.project_inactive`` row the
+    WebSocket gateway writes for a hello from an archived project (agent
+    id, project, resolved address), plus the route path, so an operator
+    reading the trail sees the long-poll agents of an archived project
+    too, not only the WebSocket ones. The first refusal of an agent writes
+    its row at once; the ones that follow within
+    ``_REFUSAL_AUDIT_INTERVAL_SECONDS`` are refused without a row, so an
+    agent that keeps calling leaves one row per interval, not one per
+    request. The record is the one the WebSocket gateway consults for its
+    own ``agent.auth.project_inactive`` row, so an agent refused here and
+    on a hello inside one interval leaves one row, whichever transport
+    wrote it. The row goes on
+    a session of its own because the caller's read session has closed by
+    now and the pool may be one connection wide; a failure to write it is
+    counted and the claim released, never turned into a different answer
+    for the agent.
+    """
+    dedupe_key = str(agent.id)
+    if _project_inactive_audit.claim(dedupe_key, now=refusal_audit.now()):
+        user_agent = request.headers.get("user-agent")
+        try:
+            from z4j_brain.persistence.repositories import AuditLogRepository
+
+            async with request.app.state.db.session(write=True) as audit_session:
+                await request.app.state.audit_service.record(
+                    AuditLogRepository(audit_session),
+                    action="agent.auth.project_inactive",
+                    target_type="agent",
+                    target_id=str(agent.id),
+                    result="failed",
+                    outcome="deny",
+                    project_id=agent.project_id,
+                    source_ip=get_client_ip(request) or None,
+                    user_agent=user_agent[:256] if user_agent else None,
+                    metadata={"agent_id": str(agent.id), "path": request.url.path[:200]},
+                )
+                await audit_session.commit()
+        except Exception:
+            from z4j_brain.api.metrics import record_swallowed
+
+            _project_inactive_audit.release(dedupe_key)
+            record_swallowed("agent_longpoll.project_inactive", "refusal_audit")
+    raise ProjectInactiveError(
+        "the agent's project is archived",
+        details={"project_id": str(agent.project_id), "agent_id": str(agent.id)},
+    )
+
+
+async def _require_admitted_ip(request: Request) -> None:
+    """Refuse a request whose source address is outside the agent allowlist.
+
+    Consulted once per request, BEFORE the bearer is read, exactly as the
+    WebSocket gateway refuses a hello before looking at its token: a peer
+    outside ``agent_ip_allowlist`` gets the same ``403`` whether its token
+    is valid, bogus or belongs to an archived project, so the route is no
+    oracle for a token or for a project's archive state from outside the
+    list. The mid-wait recheck does not repeat it. The address is the
+    trusted-proxy-resolved one the HTTP middleware stored. The ``403``
+    body is the API surface's (``error: ip_denied``,
+    ``details.surface: agent``); the address goes to the
+    ``auth.ip_denied`` row, written without a user or agent id since
+    nothing was authenticated, and never to the caller. The row is
+    written on a session of its own because no request session is open
+    at this point and the pool may be one connection wide. The first
+    refusal of an address writes its row at once; the ones that follow
+    within ``_REFUSAL_AUDIT_INTERVAL_SECONDS`` are refused without a row,
+    on these routes and on the WebSocket hello alike, since the record of
+    written rows is shared with the gateway.
+    """
+    denial = check_agent_ip(get_client_ip(request), settings=request.app.state.settings)
+    if denial is None:
+        return
+    # Deduped like the inactive-project row, keyed on the resolved address
+    # rather than an agent id: this path resolves no identity on purpose
+    # (it runs before the bearer so the route is no oracle), so the address
+    # is the only fact the row carries, and every row an address writes
+    # within the interval repeats it (route path and user agent aside). The
+    # exact count of refusals stays in ``z4j_auth_ip_denied_total{surface=
+    # "agent"}``, counted by ``check_agent_ip`` before this point. Keying on
+    # the address also closes the cheaper version of the same growth: an
+    # unlisted peer needs no credential to be refused, so without the dedupe
+    # anyone could append chained rows at the connect bucket's rate; with it,
+    # one address appends one row per interval. The dashboard and API
+    # surfaces are not deduped, their rows name the user or key presented
+    # and are written after authentication; the WebSocket gateway's row for
+    # a refused hello shares this record, so an address refused on a hello
+    # and on these routes inside one interval leaves one row across both.
+    dedupe_key = denial.ip
+    if _ip_denied_audit.claim(dedupe_key, now=refusal_audit.now()):
+        user_agent = request.headers.get("user-agent")
+        try:
+            from z4j_brain.persistence.repositories import AuditLogRepository
+
+            async with request.app.state.db.session(write=True) as audit_session:
+                await record_ip_denial(
+                    request.app.state.audit_service,
+                    AuditLogRepository(audit_session),
+                    denial,
+                    user_agent=user_agent[:256] if user_agent else None,
+                    path=request.url.path,
+                )
+                await audit_session.commit()
+        except Exception:
+            from z4j_brain.api.metrics import record_swallowed
+
+            _ip_denied_audit.release(dedupe_key)
+            record_swallowed("agent_longpoll.ip_allowlist", "denial_audit")
+    raise denial.error()
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -722,6 +879,9 @@ async def agent_events(  # noqa: PLR0912, PLR0915  long-poll event-upload handle
     db = request.app.state.db
     response.headers["X-Z4J-LongPoll-Worker"] = str(os.getpid())
 
+    # Source address first, token second: see ``_require_admitted_ip``.
+    await _require_admitted_ip(request)
+
     async with db.session() as session:
         from z4j_brain.persistence.repositories import AgentRepository
 
@@ -730,8 +890,15 @@ async def agent_events(  # noqa: PLR0912, PLR0915  long-poll event-upload handle
             settings=settings,
             agents=AgentRepository(session),
         )
+        # Read alongside the bearer, acted on after the session closed so
+        # the refusal's audit row can take a connection of its own.
+        project_active = agent is not None and await agent_project_is_active(
+            project_id=agent.project_id, session=session
+        )
     if agent is None:
         raise HTTPException(status_code=401, detail="invalid agent token")
+    if not project_active:
+        await _refuse_inactive_project(request, agent)
 
     # Same identity advertisement as GET /commands (the connect
     # probe), so either route teaches the transport its canonical
@@ -959,6 +1126,10 @@ async def agent_commands(  # noqa: PLR0915, PLR0912  long-poll command handler
     db = request.app.state.db
     response.headers["X-Z4J-LongPoll-Worker"] = str(os.getpid())
 
+    # Source address first, token second: see ``_require_admitted_ip``.
+    # This covers the non-claiming ``max_frames=0`` connect probe too.
+    await _require_admitted_ip(request)
+
     async with db.session() as session:
         from z4j_brain.persistence.repositories import AgentRepository
 
@@ -967,8 +1138,13 @@ async def agent_commands(  # noqa: PLR0915, PLR0912  long-poll command handler
             settings=settings,
             agents=AgentRepository(session),
         )
+        project_active = agent is not None and await agent_project_is_active(
+            project_id=agent.project_id, session=session
+        )
     if agent is None:
         raise HTTPException(status_code=401, detail="invalid agent token")
+    if not project_active:
+        await _refuse_inactive_project(request, agent)
 
     # Advertise the canonical agent/project UUIDs, the long-poll
     # analogue of the WebSocket hello_ack. The agent's config holds
@@ -1030,6 +1206,12 @@ async def agent_commands(  # noqa: PLR0915, PLR0912  long-poll command handler
             if live is None:
                 await _drop_session(agent.id, session_nonce)
                 raise HTTPException(status_code=401, detail="invalid agent token")
+            # An archive can commit during the wait just like a revoke can.
+            still_active = await agent_project_is_active(
+                project_id=agent.project_id, session=live_session
+            )
+        if not still_active:
+            await _refuse_inactive_project(request, agent)
 
     # Inner helper that does ONE pass over the commands table for
     # this agent. Returns the list of pending Command rows or [].

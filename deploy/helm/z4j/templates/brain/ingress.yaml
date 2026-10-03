@@ -1,0 +1,35 @@
+{{- if and .Values.brain.enabled .Values.brain.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "z4j.fullname" . }}
+  labels:
+    {{- include "z4j.brain.labels" . | nindent 4 }}
+  {{- with .Values.brain.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.brain.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.brain.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.brain.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "z4j.fullname" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

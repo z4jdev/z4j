@@ -370,6 +370,48 @@ class TestTasksRouter:
         assert r.status_code == 200
         count.assert_not_awaited()
 
+    @pytest.mark.parametrize("export_format", ["csv", "json", "xlsx"])
+    async def test_export_over_the_row_cap_is_refused_with_the_narrowing_hint(
+        self,
+        brain_app,
+        client,
+        counted_history,
+        export_format,
+    ) -> None:
+        """``Z4J_TASKS_EXPORT_MAX_ROWS`` is a refusal, not a silent truncation:
+        the reference says a filter past the cap gets a validation error
+        pointing at narrower filters, and a file that looks complete but is
+        not would be worse than no file. The project holds four tasks, three
+        of them failures."""
+        url = "/api/v1/projects/default/tasks"
+        base = brain_app.state.settings
+        try:
+            brain_app.state.settings = base.model_copy(update={"tasks_export_max_rows": 3})
+            refused = await client.get(url, params={"format": export_format})
+            assert refused.status_code == 422, refused.text
+            body = refused.json()
+            assert body["error"] == "validation_error"
+            assert "narrow the filter" in body["message"]
+            assert "Z4J_TASKS_EXPORT_MAX_ROWS" in body["message"]
+            assert body["details"] == {
+                "cap": 3,
+                "format": export_format,
+                "setting": "Z4J_TASKS_EXPORT_MAX_ROWS",
+            }
+            # Narrowed to the cap's worth of rows, the export is served whole.
+            narrowed = await client.get(url, params={"format": export_format, "state": "failure"})
+            assert narrowed.status_code == 200, narrowed.text
+            if export_format == "json":
+                assert len(narrowed.json()) == 3
+
+            brain_app.state.settings = base.model_copy(update={"tasks_export_max_rows": 4})
+            served = await client.get(url, params={"format": export_format})
+            assert served.status_code == 200, served.text
+            if export_format == "json":
+                assert len(served.json()) == 4
+        finally:
+            brain_app.state.settings = base
+
     async def test_total_requires_project_access(self, client, seeded, brain_app) -> None:
         async with brain_app.state.db.session() as s:
             user = await s.get(User, seeded["user_id"])
@@ -794,7 +836,7 @@ class TestCommandsRouter:
                 framework_adapter="bare",
                 engine_adapters=["celery"],
                 scheduler_adapters=[],
-                capabilities={},
+                capabilities={"celery": ["retry_task", "cancel_task", "retry_by_reference_v1"]},
                 state=AgentState.OFFLINE,
                 # Attest, so this test still exercises the OFFLINE path
                 # (503) rather than being short-circuited by the retry gate.
@@ -882,7 +924,9 @@ class TestCommandsRouter:
                 framework_adapter="bare",
                 engine_adapters=["celery"],
                 scheduler_adapters=[],
-                capabilities={},
+                # The row advertises the capability (so the request-time rule
+                # admits it); only the registered session below is unattested.
+                capabilities={"celery": ["retry_task", "cancel_task", "retry_by_reference_v1"]},
                 state=AgentState.ONLINE,
                 # A stale positive is deliberate: session proof must win.
                 agent_metadata={"runtime_features": ["retry_by_reference"]},
@@ -935,7 +979,7 @@ class TestCommandsRouter:
                 framework_adapter="bare",
                 engine_adapters=["celery"],
                 scheduler_adapters=[],
-                capabilities={},
+                capabilities={"celery": ["retry_task", "cancel_task", "retry_by_reference_v1"]},
                 state=AgentState.ONLINE,
                 # The retry gate refuses an agent that has not attested the
                 # safe retry contract, so a retry fixture must attest.

@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from z4j_brain.api.deps import (
@@ -105,13 +105,28 @@ def _validate_user_timezone(value: str | None) -> str | None:
 
 
 class CreateUserRequest(BaseModel):
-    email: EmailStr
+    # The same validation as setup and login (``validate_admin_email``):
+    # reserved TLDs (.local, .test, .example, .invalid) are accepted
+    # because the address is a login identifier, never a mail target. A
+    # strict ``EmailStr`` here refused ``viewer@test.local`` while the
+    # admin who was creating it had bootstrapped as ``admin@test.local``.
+    email: str = Field(min_length=3, max_length=320)
     first_name: str | None = Field(default=None, max_length=100)
     last_name: str | None = Field(default=None, max_length=100)
     display_name: str | None = Field(default=None, max_length=200)
     password: str = Field(min_length=8, max_length=256)
     is_admin: bool = False
     timezone: str = Field(default="UTC", max_length=64)
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        from z4j_brain.domain.auth_service import validate_admin_email
+
+        try:
+            return validate_admin_email(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from None
 
     @field_validator("timezone")
     @classmethod

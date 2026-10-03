@@ -74,6 +74,8 @@ interface ApiKey {
   revoked_at: string | null;
   revoked_reason: string | null;
   created_at: string;
+  /** Per-key source-address allowlist (canonical CIDRs); null = none. */
+  allowed_cidrs?: string[] | null;
 }
 
 interface ScopeCatalogue {
@@ -162,6 +164,7 @@ function ApiKeysPage() {
             <TableHead sortKey="c0">Name</TableHead>
             <TableHead sortKey="c1">Scope</TableHead>
             <TableHead sortKey="c2">Project</TableHead>
+            <TableHead sortKey="c7">Allowed from</TableHead>
             <TableHead sortKey="c3">Prefix</TableHead>
             <TableHead sortKey="c4">Last used</TableHead>
             <TableHead sortKey="c5">Expires</TableHead>
@@ -176,6 +179,7 @@ function ApiKeysPage() {
                 c0: key.name,
                 c1: key.scopes.join(", "),
                 c2: key.project_slug ?? "global",
+                c7: (key.allowed_cidrs ?? []).join(", ") || "anywhere",
                 c3: key.prefix,
                 c4: sortTimestamp(key.last_used_at),
                 c5: sortTimestamp(key.expires_at),
@@ -208,6 +212,20 @@ function ApiKeysPage() {
                   </code>
                 ) : (
                   <span className="text-muted-foreground">global</span>
+                )}
+              </TableCell>
+              <TableCell className="text-xs">
+                {key.allowed_cidrs && key.allowed_cidrs.length > 0 ? (
+                  <code
+                    className="rounded bg-muted px-1.5 py-0.5 text-xs"
+                    title={key.allowed_cidrs.join(", ")}
+                  >
+                    {key.allowed_cidrs.length === 1
+                      ? key.allowed_cidrs[0]
+                      : `${key.allowed_cidrs.length} ranges`}
+                  </code>
+                ) : (
+                  <span className="text-muted-foreground">anywhere</span>
                 )}
               </TableCell>
               <TableCell className="font-mono text-xs text-muted-foreground">
@@ -281,6 +299,7 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
   const [expiry, setExpiry] = useState("never");
   const [scopes, setScopes] = useState<Set<string>>(new Set());
   const [projectId, setProjectId] = useState<string>("__global__");
+  const [allowedCidrs, setAllowedCidrs] = useState("");
   const [token, setToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -302,6 +321,7 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
       scopes: string[];
       project_id: string | null;
       expires_in_days?: number;
+      allowed_cidrs?: string[];
     }) => api.post<CreateApiKeyResponse>("/api-keys", body),
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ["api-keys"] });
@@ -330,6 +350,7 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
       scopes: string[];
       project_id: string | null;
       expires_in_days?: number;
+      allowed_cidrs?: string[];
     } = {
       name,
       scopes: Array.from(scopes),
@@ -337,6 +358,16 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
     };
     if (expiry !== "never") {
       body.expires_in_days = parseInt(expiry, 10);
+    }
+    // Comma or whitespace separated; the server validates each entry
+    // and stores the canonical form, so no client-side parsing of
+    // addresses beyond splitting.
+    const cidrs = allowedCidrs
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (cidrs.length > 0) {
+      body.allowed_cidrs = cidrs;
     }
     createKey.mutate(body);
   };
@@ -356,6 +387,7 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
   const handleClose = () => {
     setName("");
     setExpiry("never");
+    setAllowedCidrs("");
     setToken(null);
     setCopied(false);
     onCreated();
@@ -535,6 +567,28 @@ function CreateApiKeyDialog({ onCreated }: { onCreated: () => void }) {
               ))}
             </SelectContent>
           </Select>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="apikey-cidrs">
+            Allowed CIDRs{" "}
+            <span className="font-normal text-muted-foreground">
+              (optional)
+            </span>
+          </Label>
+          <Input
+            id="apikey-cidrs"
+            placeholder="e.g. 203.0.113.0/24, 2001:db8::/32"
+            value={allowedCidrs}
+            onChange={(e) => setAllowedCidrs(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <p className="text-xs text-muted-foreground">
+            IPv4 or IPv6 ranges the key may be used from, separated by commas.
+            Leave empty for no per-key restriction; the brain-wide API
+            allowlist, if any, still applies. Loopback is not included unless
+            you list it.
+          </p>
         </div>
       </div>
       <DialogFooter className="mt-6">

@@ -42,6 +42,35 @@ old rows are deleted. Verification of the surviving chain still
 works from the new oldest row forward, which is the documented
 behaviour of any time-based audit retention policy.
 
+Retention by action class
+-------------------------
+
+``settings.audit_retention_by_class`` maps an action class (the first
+dotted segment of an action name: ``auth`` for ``auth.login``,
+``command`` for ``command.issue.requeue_dead_letter``) to its own window
+in days; everything else uses ``audit_retention_days``. The chain only
+ever loses a contiguous oldest-first prefix, because that is the one
+shape the authenticated prune boundary can describe, so the rule is:
+
+- a row is *expired* when it is older than its own class's cutoff;
+- a pass removes the longest run of expired rows at the oldest end of the
+  active generation and stops at the first row that is not expired,
+  whatever lies beyond it.
+
+A class with a longer window therefore holds every row written after
+its oldest retained row, and a class with a shorter window only takes
+effect on rows older than all their retained neighbours. Both are
+allowed; the docs say what each buys. :class:`RetentionCutoffs` holds
+the computed cutoffs and :func:`expired_prefix` applies the rule; the
+sweep and ``z4j audit prune`` share them so there is exactly one answer
+to "what would retention remove".
+
+``z4j audit prune`` is the operator-driven form of the same authenticated
+prefix prune (soft mode) plus an epoch cut (hard mode, a generation reset
+once the generation is fully pruned). It reuses :meth:`AuditRetentionSweeper.
+prune_authenticated` and :func:`preview_authenticated_prune` rather than a
+second deletion path.
+
 1.5.0 extension: the same task body also purges
 ``agent_status_history`` rows older than
 ``settings.event_retention_days`` (NOT ``audit_retention_days`` -
@@ -59,22 +88,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import and_, delete, func, not_, or_, select, text
 
 from z4j_brain.domain.audit_chain import (
     AUDIT_ROW_HMAC_VERSION,
     AuditChainIntegrityError,
     authenticate_state,
     build_audit_keyring,
+    canonical_audit_key_id,
     compute_state_mac,
     normalize_timestamp,
 )
-from z4j_brain.persistence.models import AuditLog
+from z4j_brain.persistence.models import AuditChainState, AuditLog
+from z4j_brain.persistence.models.audit_chain import AUDIT_CHAIN_SINGLETON_ID
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql import ColumnElement
+
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.settings import Settings
 
@@ -86,6 +123,336 @@ logger = logging.getLogger("z4j.brain.audit_retention")
 #: do, but using ``hashtext`` keeps it readable in the migration's
 #: comments.
 _SWEEP_ADVISORY_LOCK_KEY: int = 0x7A346A41  # "z4jaA" stable seed
+
+#: Action name of the row ``z4j audit prune`` writes about itself.
+AUDIT_PRUNE_ACTION = "audit.prune"
+
+
+class SweepLeaseBusyError(Exception):
+    """Another process holds the retention sweep's advisory lock.
+
+    The periodic sweeper treats this as "skip this pass"; ``z4j audit
+    prune`` surfaces it as a refusal, because an operator who asked for a
+    prune and got silence would reasonably conclude there was nothing to
+    prune.
+    """
+
+
+def action_class(action: str) -> str:
+    """Return the retention class of an action name: its first dotted segment.
+
+    ``command.issue.requeue_dead_letter`` -> ``command``, ``dead_letters.list``
+    -> ``dead_letters``, ``auth`` -> ``auth``.
+    """
+    return action.partition(".")[0]
+
+
+class _ActionRow(Protocol):
+    action: str
+    occurred_at: datetime
+
+
+class _ChainRow(_ActionRow, Protocol):
+    id: uuid.UUID
+
+
+RowT = TypeVar("RowT", bound=_ActionRow)
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionCutoffs:
+    """The moment before which a row of each class is expired.
+
+    ``default`` applies to every class absent from ``by_class``. ``label`` is
+    the human description the sweep logs and the CLI prints, so the two never
+    describe the same policy in two ways.
+    """
+
+    default: datetime
+    by_class: Mapping[str, datetime] = field(default_factory=dict)
+    label: str = ""
+
+    @classmethod
+    def from_settings(cls, settings: Settings, now: datetime) -> RetentionCutoffs:
+        """Compute the cutoffs the configured policy implies at ``now``."""
+        by_class = {
+            name: now - timedelta(days=days)
+            for name, days in sorted(settings.audit_retention_by_class.items())
+        }
+        parts = [f"{settings.audit_retention_days} days"]
+        parts.extend(
+            f"{name} {days} days"
+            for name, days in sorted(settings.audit_retention_by_class.items())
+        )
+        return cls(
+            default=now - timedelta(days=settings.audit_retention_days),
+            by_class=by_class,
+            label="retention: " + ", ".join(parts),
+        )
+
+    @classmethod
+    def before(cls, cutoff: datetime) -> RetentionCutoffs:
+        """One explicit cutoff for every class (``z4j audit prune --before``)."""
+        normalized = normalize_timestamp(cutoff)
+        return cls(
+            default=normalized,
+            by_class={},
+            label="--before " + normalized.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        )
+
+    def cutoff_for(self, action: str) -> datetime:
+        return self.by_class.get(action_class(action), self.default)
+
+    @property
+    def latest(self) -> datetime:
+        """The newest cutoff: no row at or after it is expired in any class."""
+        return max(self.default, *self.by_class.values()) if self.by_class else self.default
+
+    def expired(self, action: str, occurred_at: datetime | str) -> bool:
+        return normalize_timestamp(occurred_at) < self.cutoff_for(action)
+
+
+def expired_prefix(
+    rows: Iterable[RowT],
+    cutoffs: RetentionCutoffs,
+) -> list[RowT]:
+    """Return the leading run of ``rows`` that retention may remove.
+
+    ``rows`` must be in chain order, oldest first. The run stops at the first
+    row that is not expired under its own class; nothing after it is
+    returned even if it is expired, because the chain can only lose a
+    contiguous prefix.
+    """
+    out: list[RowT] = []
+    for row in rows:
+        if not cutoffs.expired(row.action, row.occurred_at):
+            break
+        out.append(row)
+    return out
+
+
+def expired_predicate(cutoffs: RetentionCutoffs) -> ColumnElement[bool]:
+    """The SQL form of :meth:`RetentionCutoffs.expired`.
+
+    A row matches when it is older than the cutoff of its own class, so a
+    count under this predicate says how many rows retention would remove if
+    the chain could lose them individually. The prefix rule is what stops
+    it, and the difference is what :func:`warn_when_prefix_blocked` reports.
+    """
+    if not cutoffs.by_class:
+        return AuditLog.occurred_at < cutoffs.default
+    in_any_class = []
+    clauses = []
+    for name, cutoff in cutoffs.by_class.items():
+        # A class name may carry an underscore, which LIKE treats as a
+        # wildcard; escape it so ``dead_letters`` matches only itself.
+        escaped = name.replace("_", r"\_")
+        in_class = or_(
+            AuditLog.action == name,
+            AuditLog.action.like(f"{escaped}.%", escape="\\"),
+        )
+        in_any_class.append(in_class)
+        clauses.append(and_(in_class, AuditLog.occurred_at < cutoff))
+    clauses.append(and_(not_(or_(*in_any_class)), AuditLog.occurred_at < cutoffs.default))
+    return or_(*clauses)
+
+
+async def warn_when_prefix_blocked(
+    session: AsyncSession,
+    *,
+    candidates: Sequence[_ChainRow],
+    kept: int,
+    cutoffs: RetentionCutoffs,
+    generation: uuid.UUID | None = None,
+) -> int:
+    """Log one WARNING when the prefix stopped early with expired rows behind it.
+
+    ``candidates`` is the oldest-first page the batch considered and ``kept``
+    how many of them :func:`expired_prefix` returned. When the run stopped
+    inside the page, the row it stopped at is the blocker: its class window
+    keeps it, and nothing after it can be removed however old, because the
+    chain only loses a contiguous prefix. Silence here is what let a class
+    window quietly hold several times the configured retention, so the pass
+    says which row holds the line, how old it is, and how many expired rows
+    wait behind it. Returns that count (0 when there is nothing to say).
+    """
+    if kept >= len(candidates):
+        return 0
+    blocker = candidates[kept]
+    stmt = (
+        select(func.count())
+        .select_from(AuditLog)
+        .where(
+            expired_predicate(cutoffs),
+            or_(
+                AuditLog.occurred_at > blocker.occurred_at,
+                and_(
+                    AuditLog.occurred_at == blocker.occurred_at,
+                    AuditLog.id > blocker.id,
+                ),
+            ),
+        )
+    )
+    if generation is not None:
+        stmt = stmt.where(
+            AuditLog.legacy_frozen.is_(False),
+            AuditLog.chain_generation == generation,
+        )
+    behind = int((await session.execute(stmt)).scalar_one())
+    if not behind:
+        return 0
+    occurred_at = normalize_timestamp(blocker.occurred_at)
+    age_days = (datetime.now(UTC) - occurred_at).days
+    logger.warning(
+        "z4j.brain.audit_retention: the prune stopped at a %s row (%s, %d days "
+        "old; its class keeps rows until %s) with %d expired row(s) retained "
+        "behind it. The chain only loses a contiguous prefix, so they stay "
+        "until that row ages out (%s)",
+        action_class(blocker.action),
+        blocker.action,
+        age_days,
+        cutoffs.cutoff_for(blocker.action).isoformat(timespec="seconds"),
+        behind,
+        cutoffs.label,
+    )
+    return behind
+
+
+@dataclass(frozen=True, slots=True)
+class PrunePreview:
+    """What one authenticated prefix prune would remove, computed read-only."""
+
+    generation: uuid.UUID
+    active_rows: int
+    frozen_rows: int
+    expired_rows: int
+    expired_by_class: dict[str, int]
+    #: The newest row the prune would remove, which becomes the new boundary.
+    boundary_id: uuid.UUID | None
+    boundary_row_hmac: str | None
+    boundary_occurred_at: datetime | None
+    #: The first row the prune stops at, when an expired row exists beyond it.
+    blocker_action: str | None
+    blocker_occurred_at: datetime | None
+    blocker_cutoff: datetime | None
+    #: The authenticated boundary before the prune, if retention ever ran.
+    current_prune_id: uuid.UUID | None
+
+    @property
+    def remaining_rows(self) -> int:
+        return self.active_rows - self.expired_rows
+
+
+async def preview_authenticated_prune(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    cutoffs: RetentionCutoffs,
+    page_size: int = 1000,
+) -> PrunePreview:
+    """Count the expired prefix of the active generation without touching it.
+
+    Authenticates the chain state first and refuses (raises
+    :class:`AuditChainIntegrityError`) when the state is missing, does not
+    authenticate under the configured keys, or disagrees with the physical
+    row count, so a dry run never reports a number from a chain the prune
+    itself would refuse. The walk also checks every link of the prefix it
+    counts; a broken link is the same refusal.
+    """
+    from z4j_brain.persistence.repositories import AuditLogRepository
+
+    if not 1 <= page_size <= 5000:
+        raise ValueError("page_size must be between 1 and 5000")
+    secrets = settings.all_audit_chain_secrets_for_verification()
+    if not secrets:
+        raise AuditChainIntegrityError("dedicated audit-chain key is unavailable")
+    keyring = {canonical_audit_key_id(secret): secret for secret in secrets}
+    states = list(
+        (
+            await session.execute(
+                select(AuditChainState).where(
+                    AuditChainState.singleton_id == AUDIT_CHAIN_SINGLETON_ID,
+                ),
+            )
+        ).scalars(),
+    )
+    if len(states) != 1:
+        raise AuditChainIntegrityError(
+            f"audit_chain_state holds {len(states)} rows where exactly one is required",
+        )
+    state = states[0]
+    authenticate_state(state, keyring)
+    repo = AuditLogRepository(session)
+    active_count = await repo.count_active_generation(generation=state.generation)
+    if active_count != state.active_row_count:
+        raise AuditChainIntegrityError(
+            f"active audit row count {active_count} does not match authenticated "
+            f"state {state.active_row_count}",
+        )
+    frozen_count = await repo.count_frozen_rows()
+
+    expired = 0
+    by_class: dict[str, int] = {}
+    boundary: AuditLog | None = None
+    blocker: AuditLog | None = None
+    previous = state.prune_row_hmac
+    cursor_time: datetime | None = None
+    cursor_id: uuid.UUID | None = None
+    while blocker is None:
+        stmt = (
+            select(AuditLog)
+            .where(
+                AuditLog.legacy_frozen.is_(False),
+                AuditLog.chain_generation == state.generation,
+                AuditLog.occurred_at < cutoffs.latest,
+            )
+            .order_by(AuditLog.occurred_at.asc(), AuditLog.id.asc())
+            .limit(page_size)
+        )
+        if cursor_time is not None and cursor_id is not None:
+            stmt = stmt.where(
+                or_(
+                    AuditLog.occurred_at > cursor_time,
+                    (AuditLog.occurred_at == cursor_time) & (AuditLog.id > cursor_id),
+                ),
+            )
+        rows = list((await session.execute(stmt)).scalars().all())
+        if not rows:
+            break
+        for row in rows:
+            if not cutoffs.expired(row.action, row.occurred_at):
+                blocker = row
+                break
+            if row.prev_row_hmac != previous:
+                raise AuditChainIntegrityError(
+                    f"expired audit prefix contains a broken link at row {row.id}",
+                )
+            previous = row.row_hmac
+            expired += 1
+            by_class[action_class(row.action)] = by_class.get(action_class(row.action), 0) + 1
+            boundary = row
+        cursor_time = rows[-1].occurred_at
+        cursor_id = rows[-1].id
+        if len(rows) < page_size:
+            break
+    return PrunePreview(
+        generation=state.generation,
+        active_rows=active_count,
+        frozen_rows=frozen_count,
+        expired_rows=expired,
+        expired_by_class=dict(sorted(by_class.items())),
+        boundary_id=boundary.id if boundary is not None else None,
+        boundary_row_hmac=boundary.row_hmac if boundary is not None else None,
+        boundary_occurred_at=(
+            normalize_timestamp(boundary.occurred_at) if boundary is not None else None
+        ),
+        blocker_action=blocker.action if blocker is not None else None,
+        blocker_occurred_at=(
+            normalize_timestamp(blocker.occurred_at) if blocker is not None else None
+        ),
+        blocker_cutoff=cutoffs.cutoff_for(blocker.action) if blocker is not None else None,
+        current_prune_id=state.prune_id,
+    )
 
 
 class AuditRetentionSweeper:
@@ -151,6 +518,15 @@ class AuditRetentionSweeper:
         """Cumulative ``agent_status_history`` deletes since :meth:`start`."""
         return self._total_agent_status_deleted
 
+    def bind(self, *, db: DatabaseManager, settings: Settings) -> None:
+        """Attach a database and settings without spawning the periodic task.
+
+        ``z4j audit prune`` drives :meth:`prune_authenticated` from a
+        short-lived process and never wants the loop.
+        """
+        self._db = db
+        self._settings = settings
+
     def start(
         self,
         *,
@@ -160,8 +536,7 @@ class AuditRetentionSweeper:
         """Spawn the sweep task. Idempotent."""
         if self._task is not None:
             return
-        self._db = db
-        self._settings = settings
+        self.bind(db=db, settings=settings)
         self._stop_event.clear()
         self._task = asyncio.create_task(
             self._loop(),
@@ -310,7 +685,7 @@ class AuditRetentionSweeper:
             )
             return 0
 
-        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        cutoffs = RetentionCutoffs.from_settings(self._settings, datetime.now(UTC))
         batch_size = max(
             100,
             self._settings.audit_retention_sweep_batch_size,
@@ -367,7 +742,7 @@ class AuditRetentionSweeper:
                 while not self._stop_event.is_set() and total < max_per_pass:
                     rows = await self._sweep_one_batch_postgres(
                         session,
-                        cutoff=cutoff,
+                        cutoffs=cutoffs,
                         batch_size=batch_size,
                     )
                     total += rows
@@ -381,7 +756,7 @@ class AuditRetentionSweeper:
             # unbounded across the pass.
             while not self._stop_event.is_set() and total < max_per_pass:
                 rows = await self._sweep_one_batch_sqlite(
-                    cutoff=cutoff,
+                    cutoffs=cutoffs,
                     batch_size=batch_size,
                 )
                 total += rows
@@ -404,24 +779,54 @@ class AuditRetentionSweeper:
         self._last_error = None
         if total:
             logger.info(
-                "z4j.brain.audit_retention: pruned %d rows older than %s (retention_days=%d)",
+                "z4j.brain.audit_retention: pruned %d rows older than their class cutoff (%s)",
                 total,
-                cutoff.isoformat(),
-                retention_days,
+                cutoffs.label,
             )
         return total
 
-    async def _do_sweep_v2(self) -> int:
-        """Delete authenticated v2 prefixes and advance state atomically."""
+    async def prune_authenticated(self, *, cutoffs: RetentionCutoffs) -> int:
+        """Run authenticated prefix passes until nothing expired remains.
+
+        The entry point ``z4j audit prune`` uses. Each pass is bounded by the
+        same batch and per-pass caps as the periodic sweep and commits per
+        batch, so an interrupted run leaves a consistent, signed state and
+        the next run continues. Raises :class:`SweepLeaseBusyError` instead of
+        skipping when the periodic sweeper holds the lease.
+        """
+        assert self._settings is not None
+        batch_size = max(100, self._settings.audit_retention_sweep_batch_size)
+        max_per_pass = max(batch_size, self._settings.audit_retention_sweep_max_per_pass)
+        total = 0
+        while True:
+            pruned = await self._do_sweep_v2(cutoffs=cutoffs, raise_when_busy=True)
+            total += pruned
+            if pruned < max_per_pass:
+                return total
+
+    async def _do_sweep_v2(
+        self,
+        *,
+        cutoffs: RetentionCutoffs | None = None,
+        raise_when_busy: bool = False,
+    ) -> int:
+        """Delete authenticated v2 prefixes and advance state atomically.
+
+        ``cutoffs`` defaults to the configured policy at the current time;
+        ``z4j audit prune`` passes its own. ``raise_when_busy`` turns the
+        periodic "another worker holds the sweep lock, skip" into
+        :class:`SweepLeaseBusyError` for a caller that must not stay silent.
+        """
 
         assert self._db is not None
         assert self._settings is not None
 
         self._last_error = None
-        retention_days = self._settings.audit_retention_days
-        if retention_days <= 0:
-            return 0
-        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        if cutoffs is None:
+            retention_days = self._settings.audit_retention_days
+            if retention_days <= 0:
+                return 0
+            cutoffs = RetentionCutoffs.from_settings(self._settings, datetime.now(UTC))
         batch_size = max(100, self._settings.audit_retention_sweep_batch_size)
         max_per_pass = max(
             batch_size,
@@ -436,38 +841,20 @@ class AuditRetentionSweeper:
 
         total = 0
         while not self._stop_event.is_set() and total < max_per_pass:
-            async with self._db.session() as session:
-                is_postgres = session.bind is not None and (
-                    session.bind.dialect.name == "postgresql"
+            try:
+                rows = await self._sweep_one_batch_v2_in_session(
+                    cutoffs=cutoffs,
+                    batch_size=min(batch_size, max_per_pass - total),
+                    current_key_id=current_key_id,
+                    keyring=keyring,
                 )
-                if is_postgres:
-                    async with session.begin():
-                        rows = await self._sweep_one_batch_v2(
-                            session,
-                            cutoff=cutoff,
-                            batch_size=min(batch_size, max_per_pass - total),
-                            current_key_id=current_key_id,
-                            keyring=keyring,
-                            is_postgres=True,
-                        )
-                else:
-                    # SQLite must obtain its writer reservation before its
-                    # first read; upgrading a deferred read transaction after
-                    # inspecting state is forbidden.
-                    await session.execute(text("BEGIN IMMEDIATE"))
-                    try:
-                        rows = await self._sweep_one_batch_v2(
-                            session,
-                            cutoff=cutoff,
-                            batch_size=min(batch_size, max_per_pass - total),
-                            current_key_id=current_key_id,
-                            keyring=keyring,
-                            is_postgres=False,
-                        )
-                        await session.commit()
-                    except BaseException:
-                        await session.rollback()
-                        raise
+            except SweepLeaseBusyError:
+                if raise_when_busy:
+                    raise
+                logger.debug(
+                    "z4j.brain.audit_retention: another worker holds the sweep lock; skipping pass",
+                )
+                break
             total += rows
             if rows < batch_size:
                 break
@@ -479,23 +866,71 @@ class AuditRetentionSweeper:
         if total:
             logger.info(
                 "z4j.brain.audit_retention: authenticated-prefix prune "
-                "removed %d rows older than %s",
+                "removed %d rows older than their class cutoff (%s)",
                 total,
-                cutoff.isoformat(),
+                cutoffs.label,
             )
         return total
+
+    async def _sweep_one_batch_v2_in_session(
+        self,
+        *,
+        cutoffs: RetentionCutoffs,
+        batch_size: int,
+        current_key_id: str,
+        keyring: dict[str, bytes],
+    ) -> int:
+        """Open one session with the dialect's write discipline for one batch."""
+
+        assert self._db is not None
+        async with self._db.session() as session:
+            is_postgres = session.bind is not None and (session.bind.dialect.name == "postgresql")
+            if is_postgres:
+                async with session.begin():
+                    return await self._sweep_one_batch_v2(
+                        session,
+                        cutoffs=cutoffs,
+                        batch_size=batch_size,
+                        current_key_id=current_key_id,
+                        keyring=keyring,
+                        is_postgres=True,
+                    )
+            # SQLite must obtain its writer reservation before its
+            # first read; upgrading a deferred read transaction after
+            # inspecting state is forbidden.
+            await session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                rows = await self._sweep_one_batch_v2(
+                    session,
+                    cutoffs=cutoffs,
+                    batch_size=batch_size,
+                    current_key_id=current_key_id,
+                    keyring=keyring,
+                    is_postgres=False,
+                )
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
+            return rows
 
     async def _sweep_one_batch_v2(  # noqa: PLR0912, PLR0915
         self,
         session,
         *,
-        cutoff: datetime,
+        cutoffs: RetentionCutoffs,
         batch_size: int,
         current_key_id: str,
         keyring: dict[str, bytes],
         is_postgres: bool,
     ) -> int:
-        """Verify and delete exactly one oldest active-generation prefix."""
+        """Verify and delete exactly one oldest active-generation prefix.
+
+        The candidate page is every active row older than the newest class
+        cutoff, oldest first; :func:`expired_prefix` then keeps only the
+        leading run that is expired under each row's own class, so the
+        deleted set is always a contiguous prefix of the chain.
+        """
 
         from z4j_brain.domain.audit_service import AuditService
         from z4j_brain.persistence.repositories import AuditLogRepository
@@ -507,7 +942,7 @@ class AuditRetentionSweeper:
                 {"k": _SWEEP_ADVISORY_LOCK_KEY},
             )
             if not bool(lock_row.scalar()):
-                return 0
+                raise SweepLeaseBusyError("another worker holds the audit retention sweep lock")
         await repo.acquire_chain_lock()
         state = await repo.get_chain_state_for_update()
         state_payload = authenticate_state(state, keyring)
@@ -556,14 +991,22 @@ class AuditRetentionSweeper:
             .where(
                 AuditLog.legacy_frozen.is_(False),
                 AuditLog.chain_generation == state.generation,
-                AuditLog.occurred_at < cutoff,
+                AuditLog.occurred_at < cutoffs.latest,
             )
             .order_by(AuditLog.occurred_at.asc(), AuditLog.id.asc())
             .limit(batch_size)
         )
         if is_postgres:
             stmt = stmt.with_for_update()
-        selected = list((await session.execute(stmt)).scalars().all())
+        candidates = list((await session.execute(stmt)).scalars().all())
+        selected = expired_prefix(candidates, cutoffs)
+        await warn_when_prefix_blocked(
+            session,
+            candidates=candidates,
+            kept=len(selected),
+            cutoffs=cutoffs,
+            generation=state.generation,
+        )
         if not selected:
             return 0
 
@@ -667,7 +1110,7 @@ class AuditRetentionSweeper:
         self,
         session,
         *,
-        cutoff: datetime,
+        cutoffs: RetentionCutoffs,
         batch_size: int,
     ) -> int:
         """Delete one bounded batch on Postgres.
@@ -675,7 +1118,8 @@ class AuditRetentionSweeper:
         Uses ``SET LOCAL z4j.audit_sweep = 'on'`` so the trigger
         function added in migration 0015 permits the DELETE.
         ``FOR UPDATE SKIP LOCKED`` cooperates with concurrent
-        readers.
+        readers. The candidates are selected first and trimmed to the
+        expired prefix under each row's class, then deleted by id.
 
         Scoping note: per Postgres docs, ``SET LOCAL`` is
         TRANSACTION-scoped, not SAVEPOINT-scoped. The GUC
@@ -694,45 +1138,59 @@ class AuditRetentionSweeper:
             await session.execute(
                 text("SET LOCAL z4j.audit_sweep = 'on'"),
             )
-            result = await session.execute(
-                text(
-                    "DELETE FROM audit_log "
-                    "WHERE id IN ("
-                    "  SELECT id FROM audit_log "
-                    "  WHERE occurred_at < :cutoff "
-                    "  ORDER BY occurred_at "
-                    "  LIMIT :limit "
-                    "  FOR UPDATE SKIP LOCKED"
-                    ") RETURNING 1",
-                ),
-                {"cutoff": cutoff, "limit": batch_size},
+            candidates = (
+                await session.execute(
+                    select(AuditLog.id, AuditLog.action, AuditLog.occurred_at)
+                    .where(AuditLog.occurred_at < cutoffs.latest)
+                    .order_by(AuditLog.occurred_at.asc(), AuditLog.id.asc())
+                    .limit(batch_size)
+                    .with_for_update(skip_locked=True),
+                )
+            ).all()
+            doomed = expired_prefix(candidates, cutoffs)
+            await warn_when_prefix_blocked(
+                session,
+                candidates=candidates,
+                kept=len(doomed),
+                cutoffs=cutoffs,
             )
-            return len(result.fetchall())
+            if not doomed:
+                return 0
+            result = await session.execute(
+                delete(AuditLog).where(AuditLog.id.in_([row.id for row in doomed])),
+            )
+            return int(result.rowcount or 0)
 
     async def _sweep_one_batch_sqlite(
         self,
         *,
-        cutoff: datetime,
+        cutoffs: RetentionCutoffs,
         batch_size: int,
     ) -> int:
         """Delete one bounded batch on SQLite, in its own tx."""
         async with self._db.session() as session:  # type: ignore[union-attr]
+            candidates = (
+                await session.execute(
+                    select(AuditLog.id, AuditLog.action, AuditLog.occurred_at)
+                    .where(AuditLog.occurred_at < cutoffs.latest)
+                    .order_by(AuditLog.occurred_at.asc(), AuditLog.id.asc())
+                    .limit(batch_size),
+                )
+            ).all()
+            doomed = expired_prefix(candidates, cutoffs)
+            await warn_when_prefix_blocked(
+                session,
+                candidates=candidates,
+                kept=len(doomed),
+                cutoffs=cutoffs,
+            )
+            if not doomed:
+                return 0
             result = await session.execute(
-                delete(AuditLog).where(
-                    AuditLog.id.in_(
-                        text(
-                            "SELECT id FROM audit_log "
-                            "WHERE occurred_at < :cutoff "
-                            "ORDER BY occurred_at LIMIT :limit",
-                        ).bindparams(
-                            cutoff=cutoff,
-                            limit=batch_size,
-                        ),
-                    ),
-                ),
+                delete(AuditLog).where(AuditLog.id.in_([row.id for row in doomed])),
             )
             await session.commit()
-            return result.rowcount or 0
+            return int(result.rowcount or 0)
 
     async def _record_prune_watermark(self) -> None:
         """Advance the audit HMAC-chain prune watermark after a sweep.
@@ -850,4 +1308,15 @@ class AuditRetentionSweeper:
         return total
 
 
-__all__ = ["AuditRetentionSweeper"]
+__all__ = [
+    "AUDIT_PRUNE_ACTION",
+    "AuditRetentionSweeper",
+    "PrunePreview",
+    "RetentionCutoffs",
+    "SweepLeaseBusyError",
+    "action_class",
+    "expired_predicate",
+    "expired_prefix",
+    "preview_authenticated_prune",
+    "warn_when_prefix_blocked",
+]

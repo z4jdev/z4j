@@ -1,20 +1,37 @@
 """Project membership / role policy.
 
-The brain has three roles per :class:`ProjectRole`: ``viewer``,
-``operator``, ``admin``. Routes call :class:`PolicyEngine` to
-verify "this user can perform this action on this project". The
-engine raises :class:`AuthorizationError` on denial; routes never
-do their own role math.
+Routes call :class:`PolicyEngine` to verify "this user can perform this
+action on this project". The engine raises :class:`AuthorizationError`
+on denial; routes never do their own role math.
 
-The policy is small enough in v1 to fit in one class. When the
-brain grows resource-level permissions in Phase 2 we'll add a
-real ABAC layer; for now, role-on-project is sufficient.
+The role vocabulary is not defined here. The role order and the
+role-to-action table live in :mod:`z4j_core.policy` (decision D-4: core
+is authoritative) and this module takes both from there. What this
+module adds is everything that needs the database or the HTTP contract:
+resolving the project by slug, loading the caller's membership,
+synthesising the instance-admin membership, and answering 404 rather
+than 403 to a non-member so project slugs cannot be enumerated. A
+contract test under ``tests/contract`` enumerates every (role, action)
+pair through both engines and fails when they disagree.
+
+Routes may state their requirement either as an :class:`Action` (the
+preferred form; the required role comes from the core table) or as a
+``min_role`` floor (the historical form, still a core role). Both go
+through the same comparison.
 """
 
 from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+
+from z4j_core.policy import (
+    Action,
+    action_allowed,
+    action_required_role,
+    role_rank,
+    role_satisfies,
+)
 
 from z4j_brain.errors import AuthorizationError, NotFoundError
 from z4j_brain.persistence.enums import ProjectRole
@@ -35,18 +52,6 @@ if TYPE_CHECKING:
         MembershipRepository,
         ProjectRepository,
     )
-
-
-_ROLE_RANK: dict[ProjectRole, int] = {
-    ProjectRole.VIEWER: 0,
-    ProjectRole.OPERATOR: 1,
-    ProjectRole.ADMIN: 2,
-}
-
-
-def role_rank(role: ProjectRole) -> int:
-    """Return a comparable integer rank for a role."""
-    return _ROLE_RANK[role]
 
 
 class PolicyEngine:
@@ -88,9 +93,19 @@ class PolicyEngine:
         *,
         user: User,
         project: Project,
-        min_role: ProjectRole,
+        min_role: ProjectRole | None = None,
+        action: Action | None = None,
     ) -> Membership:
-        """Verify ``user`` has at least ``min_role`` on ``project``.
+        """Verify ``user`` may act on ``project`` and return the membership.
+
+        Exactly one of ``action`` and ``min_role`` must be given.
+        ``action`` is decided by the core table
+        (:func:`z4j_core.policy.action_allowed`, which keeps the audit
+        tier away from operators); ``min_role`` is a rank floor
+        (:func:`z4j_core.policy.role_satisfies`). Audit routes must
+        name the action: a ``min_role`` of ``auditor`` would admit
+        every higher rank, operator included, which is exactly the
+        separation the auditor role exists to keep.
 
         Global brain admins (``user.is_admin``) bypass the check -
         they always have admin-equivalent access on every project.
@@ -106,6 +121,20 @@ class PolicyEngine:
         at that point the user already PROVED membership and the
         slug is not a secret to them.
         """
+        if (action is None) == (min_role is None):
+            raise TypeError("require_member needs exactly one of action= or min_role=")
+        if action is not None:
+            required = action_required_role(action)
+
+            def _permits(held: ProjectRole) -> bool:
+                return action_allowed(held, action)
+
+        else:
+            required = min_role  # type: ignore[assignment]
+
+            def _permits(held: ProjectRole) -> bool:
+                return role_satisfies(held, required)
+
         if user.is_admin:
             # Synthesize an admin-grade membership row for the
             # bypass case. We do NOT touch the database - there
@@ -121,11 +150,11 @@ class PolicyEngine:
         all_memberships = await memberships.list_for_user(user.id)
         for m in all_memberships:
             if m.project_id == project.id:
-                if role_rank(m.role) >= role_rank(min_role):
+                if _permits(m.role):
                     return m
                 raise AuthorizationError(
-                    f"role {m.role.value!r} is not sufficient (need at least {min_role.value!r})",
-                    details={"have": m.role.value, "need": min_role.value},
+                    f"role {m.role.value!r} is not sufficient (need at least {required.value!r})",
+                    details={"have": m.role.value, "need": required.value},
                 )
         # S-3: indistinguishable from a true 404 for non-admins.
         raise NotFoundError(
@@ -134,4 +163,4 @@ class PolicyEngine:
         )
 
 
-__all__ = ["PolicyEngine", "role_rank"]
+__all__ = ["Action", "PolicyEngine", "action_allowed", "role_rank"]

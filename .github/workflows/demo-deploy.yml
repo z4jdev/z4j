@@ -1,38 +1,21 @@
 name: demo-deploy
 
-# Continuous redeploy of demo.z4j.dev on every push to main that
-# touches the dashboard or its seed data. Built via `pnpm build:demo`,
-# uploaded to the Cloudflare Pages project z4jdemo via wrangler.
+# Builds the demo.z4j.com SPA and checks the Cloudflare Pages tree it would
+# ship. It NEVER deploys: no step talks to Cloudflare and no Cloudflare
+# credential is referenced. A deploy token on this repository would be an
+# unattended production deploy past every release gate, so none is wanted.
 #
-# By design this fires on every dashboard change, NOT only on release
-# tags, so the demo always reflects the current production-bound code
-# rather than the most recent tagged version. See
-# DEMO-Z4J-DEV-DESIGN.md "The release / sync flow" for rationale.
+# The demo is deployed by the maintainer from the operator machine, with
+# wrangler, through the site deployment helper (scripts/deploy-sites.sh in the
+# development repository). That helper builds, verifies and freezes all three
+# sites, and deploys only after an explicit operator authorization.
 #
-# Required repository secrets (configure once at z4jdev/z4j Settings ->
-# Secrets and variables -> Actions):
-#
-#   CLOUDFLARE_API_TOKEN
-#     A scoped Cloudflare API token with permissions:
-#       Account: Cloudflare Pages:Edit
-#       Zone:    Workers Routes:Edit (only needed if custom-domain
-#                changes happen via this workflow; safe to grant)
-#     Create at: dash.cloudflare.com -> My Profile -> API Tokens.
-#
-#   CLOUDFLARE_ACCOUNT_ID
-#     The 32-char hex account ID. Visible at the bottom-right of any
-#     page on dash.cloudflare.com, or via `wrangler whoami`.
-#
-# Until both secrets are set the deploy step will fail with a wrangler
-# auth error; the build step still runs, so a broken dashboard build fails
-# this workflow rather than deploying. Note there is no pull_request
-# trigger below, so that check happens after a change lands on main, not
-# before it merges.
-#
-# The deploy tool is the wrangler pinned in deploy/demo-pages/pnpm-lock.yaml,
-# installed with --frozen-lockfile under the same three-day release-age
-# quarantine every other lockfile in the repository observes. Nothing on the
-# runner resolves a dependency graph fresh while holding the Cloudflare token.
+# The file path and the workflow name above are this workflow's GitHub
+# identity, which .github/source_tag_authority.py pins, so both stay as they
+# are even though the workflow no longer deploys. The same policy pins its
+# GitHub state as disabled_manually, so GitHub runs it on neither trigger
+# below. The development repository's release tests run the shape check
+# below against sample build trees instead.
 
 on:
   push:
@@ -42,9 +25,8 @@ on:
       - ".github/workflows/demo-deploy.yml"
   workflow_dispatch:
 
-# One in-flight deploy per branch. A new push cancels the previous
-# run -- the demo always reflects the newest commit, so the older
-# deploy would be obsolete anyway.
+# One in-flight check per branch. A new push cancels the previous run, whose
+# commit the newer one supersedes.
 concurrency:
   group: demo-deploy-${{ github.ref }}
   cancel-in-progress: true
@@ -53,11 +35,14 @@ permissions:
   contents: read
 
 jobs:
-  build-and-deploy-demo:
-    name: Build + deploy demo.z4j.dev
+  build-and-check-demo:
+    name: Build and check demo.z4j.com (never deploys)
     runs-on: ubuntu-24.04
     steps:
+      # Nothing here pushes, so the checkout keeps no token on disk.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
+        with:
+          persist-credentials: false
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # immutable ref; audited 2026-08-20
@@ -69,9 +54,7 @@ jobs:
         with:
           node-version: "24.19.0"
           cache: pnpm
-          cache-dependency-path: |
-            dashboard/pnpm-lock.yaml
-            deploy/demo-pages/pnpm-lock.yaml
+          cache-dependency-path: dashboard/pnpm-lock.yaml
 
       - name: Install dashboard dependencies
         working-directory: dashboard
@@ -81,16 +64,83 @@ jobs:
         working-directory: dashboard
         run: pnpm build:demo
 
-      # Smoke check: assert dist-demo/ has the bundle, the seed data
-      # tree, and the Cloudflare Pages routing files. If any of these
-      # are missing, fail the build BEFORE talking to Cloudflare.
+      # Assert dist-demo/ has the bundle, the seed data tree and the Cloudflare
+      # Pages routing files, and that the routing files keep the shape Pages
+      # actually honors. 404.html must equal index.html: it turns the
+      # single-page-application fallback off, so a missing asset is a 404
+      # rather than a cached HTML shell. _redirects may hold only exact
+      # "<path> / 200" rewrites followed by "<prefix>/* / 200" splats, with no
+      # trailing slash (exact rules are not slash-normalized), no "$" router
+      # segment, no rule on /* and no rule on a real file, which Pages would
+      # rewrite even though the asset exists. _headers must put no-transform
+      # on HTML, so the zone injects no script the demo CSP would block, and
+      # detach and restate Cache-Control on /static/* and /demo-data/*.
       - name: Verify build output shape
         working-directory: dashboard
         run: |
           set -euo pipefail
           test -f dist-demo/index.html || { echo "::error::dist-demo/index.html missing"; exit 1; }
+          test -f dist-demo/404.html || { echo "::error::dist-demo/404.html missing"; exit 1; }
           test -f dist-demo/_redirects || { echo "::error::dist-demo/_redirects missing"; exit 1; }
           test -f dist-demo/_headers || { echo "::error::dist-demo/_headers missing"; exit 1; }
+          cmp -s dist-demo/index.html dist-demo/404.html \
+            || { echo "::error::dist-demo/404.html differs from dist-demo/index.html"; exit 1; }
+          if grep -n '^/\*' dist-demo/_redirects; then
+            echo "::error::dist-demo/_redirects has a rule on /*, which Pages rejects as a loop"
+            exit 1
+          fi
+          if grep -nEv '^(#.*)?$|^(/[^[:space:]/$*:]+)+(/\*)? / 200$' dist-demo/_redirects; then
+            echo "::error::dist-demo/_redirects has a line that is not a '<path> / 200' rewrite"
+            exit 1
+          fi
+          # Pages counts a rule as exact only until the first splat rule.
+          if ! awk '
+            /^\// { if ($1 ~ /\*$/) splat = 1; else if (splat) { print NR ": " $0; late = 1 } }
+            END { exit late }
+          ' dist-demo/_redirects; then
+            echo "::error::dist-demo/_redirects has an exact rule after a splat rule"
+            exit 1
+          fi
+          grep -qx '/projects/\* / 200' dist-demo/_redirects \
+            || { echo "::error::dist-demo/_redirects lacks the /projects/* rewrite"; exit 1; }
+          grep -qE '^/[^*]+ / 200$' dist-demo/_redirects \
+            || { echo "::error::dist-demo/_redirects has no exact route rewrite"; exit 1; }
+          # A rule must not cover anything the build ships, as a path or as the
+          # extensionless URL Pages serves an .html file at.
+          while read -r rule _ || [ -n "$rule" ]; do
+            case "$rule" in /*) ;; *) continue ;; esac
+            base="${rule%/\*}"
+            if [ -e "dist-demo${base}" ] || [ -e "dist-demo${base}.html" ]; then
+              echo "::error::dist-demo/_redirects rule ${rule} covers a real file in dist-demo"
+              exit 1
+            fi
+          done < dist-demo/_redirects
+          # Cache-Control is checked per _headers block, so a value set on the
+          # wrong block cannot pass.
+          awk '
+            function need(path, header) {
+              if (!((path, header) in have)) {
+                print "::error::dist-demo/_headers " path " lacks \"" header "\""
+                missing = 1
+              }
+            }
+            /^#/ { next }
+            /^[^ \t]/ { block = $1; next }
+            {
+              line = $0
+              sub(/^[ \t]+/, "", line)
+              sub(/[ \t]+$/, "", line)
+              if (line != "") have[block, line] = 1
+            }
+            END {
+              need("/*", "Cache-Control: public, max-age=0, must-revalidate, no-transform")
+              need("/static/*", "! Cache-Control")
+              need("/static/*", "Cache-Control: public, max-age=31536000, immutable")
+              need("/demo-data/*", "! Cache-Control")
+              need("/demo-data/*", "Cache-Control: public, max-age=300")
+              exit missing
+            }
+          ' dist-demo/_headers || exit 1
           test -d dist-demo/demo-data/projects || { echo "::error::dist-demo/demo-data/projects missing"; exit 1; }
           test -f dist-demo/demo-data/projects/index.json || { echo "::error::projects/index.json missing"; exit 1; }
           test -f dist-demo/demo-data/auth/me.json || { echo "::error::auth/me.json missing"; exit 1; }
@@ -100,23 +150,3 @@ jobs:
               || { echo "::error::demo-data/projects/${slug}/tasks.json missing"; exit 1; }
           done
           echo "Demo build output shape OK."
-
-      # The deploy tool comes from a committed lockfile, never from a fresh
-      # resolution on the runner: wrangler-action installs the named version
-      # plus its whole closure by version only, with no integrity pins and no
-      # release-age quarantine, on the one job that holds the Cloudflare
-      # token. This tree pins the same wrangler the site deploy helper runs.
-      - name: Install the locked deploy tool
-        working-directory: deploy/demo-pages
-        run: pnpm install --frozen-lockfile
-
-      # Cloudflare Pages deploy. Secrets travel by environment variable, which
-      # wrangler reads and the workflow log masks. Branch=main marks this as
-      # the production deploy; preview deploys (Cloudflare's per-PR previews)
-      # are not used here because we deploy from main only.
-      - name: Deploy to Cloudflare Pages (z4jdemo)
-        working-directory: deploy/demo-pages
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec wrangler pages deploy ../../dashboard/dist-demo --project-name=z4jdemo --branch=main --commit-dirty=true

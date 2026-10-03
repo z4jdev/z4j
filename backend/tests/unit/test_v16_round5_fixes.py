@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 from datetime import UTC
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -242,6 +243,7 @@ class TestAuditForwarderSwallowedCoverage:
         monkeypatch.setattr(af_mod, "resolve_and_pin", _noop_resolve_and_pin)
 
         fwd = AuditForwarder(
+            db=SimpleNamespace(),  # _send_one never touches the database
             webhook_url="https://siem.example/ingest",
             hmac_secret=b"x" * 32,
         )

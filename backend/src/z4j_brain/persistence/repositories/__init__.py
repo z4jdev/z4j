@@ -32,6 +32,9 @@ from z4j_brain.persistence.repositories.agent_workers import (
 )
 from z4j_brain.persistence.repositories.agents import AgentRepository
 from z4j_brain.persistence.repositories.api_keys import ApiKeyRepository
+from z4j_brain.persistence.repositories.audit_forward_state import (
+    AuditForwardStateRepository,
+)
 from z4j_brain.persistence.repositories.audit_log import AuditLogRepository
 from z4j_brain.persistence.repositories.automation_firing_outbox import (
     AutomationFiringOutboxRepository,
@@ -47,6 +50,7 @@ from z4j_brain.persistence.repositories.bulk_retry_requests import (
 )
 from z4j_brain.persistence.repositories.commands import CommandRepository
 from z4j_brain.persistence.repositories.events import EventRepository
+from z4j_brain.persistence.repositories.export_jobs import ExportJobRepository
 from z4j_brain.persistence.repositories.first_boot_tokens import (
     FirstBootTokenRepository,
 )
@@ -96,6 +100,7 @@ __all__ = [
     "AgentStatusHistoryRepository",
     "AgentWorkerRepository",
     "ApiKeyRepository",
+    "AuditForwardStateRepository",
     "AuditLogRepository",
     "AutomationFiringOutboxRepository",
     "AutomationRuleDispatchCandidate",
@@ -105,6 +110,7 @@ __all__ = [
     "CircuitDecision",
     "CommandRepository",
     "EventRepository",
+    "ExportJobRepository",
     "FirstBootTokenRepository",
     "InvitationRepository",
     "IssuesRepository",

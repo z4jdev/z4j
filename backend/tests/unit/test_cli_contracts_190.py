@@ -202,3 +202,48 @@ def test_status_labels_are_total_rows_and_stored_revision() -> None:
     assert "alembic revision" in source
     assert "active sessions" not in source
     assert "sessions" in source
+
+
+_DSN_USERINFO = "postgresql+asyncpg://alice:swordfish@db.example/z4j"
+_DSN_QUERY = "postgresql+asyncpg://alice@db.example/z4j?password=swordfish&sslmode=require"
+
+
+@pytest.mark.parametrize(
+    ("dsn", "shown"),
+    [
+        (_DSN_USERINFO, "postgresql+asyncpg://alice:***@db.example/z4j"),
+        (_DSN_QUERY, "postgresql+asyncpg://alice@db.example/z4j"),
+        ("sqlite+aiosqlite:///C:/x/brain.db", "sqlite+aiosqlite:///C:/x/brain.db"),
+        ("not a dsn at all", "(unparseable database URL)"),
+    ],
+)
+def test_database_url_for_display_masks_both_credential_shapes(dsn: str, shown: str) -> None:
+    rendered = cli._database_url_for_display(dsn)
+    assert rendered == shown
+    assert "swordfish" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("dsn", "line"),
+    [
+        (_DSN_USERINFO, "  database            postgresql+asyncpg://alice:***@db.example/z4j\n"),
+        (_DSN_QUERY, "  database            postgresql+asyncpg://alice@db.example/z4j\n"),
+    ],
+)
+def test_status_database_line_never_prints_the_password(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dsn: str,
+    line: str,
+) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    settings = SimpleNamespace(database_url=dsn, environment="dev", is_dev=True)
+    monkeypatch.setattr(cli, "_build_settings_from_env", lambda: (settings, engine))
+
+    assert cli.main(["status"]) == 0
+
+    output = capsys.readouterr().out
+    assert "swordfish" not in output
+    assert line in output

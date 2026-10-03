@@ -58,7 +58,7 @@ _PRESERVED_POSTGRES_SEQUENCES = frozenset(
     },
 )
 SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST = (
-    "e9699a59170cbc24e95d9d700adc8f9037f2dcd0ecb20e4884bdf109be31550b"
+    "74dcba84a80b7604fb600c87975a39439a4792287e888f1b5e40181b18326352"
 )
 # Derived per major from a clean migration-head database driven by that
 # major's OWN client. 16 and 17 agree because their catalog representation
@@ -66,19 +66,27 @@ SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST = (
 # Column positions are live-column ranks rather than raw attnums, so a
 # database carrying dropped-column slots derives the same value as a clean one.
 _POSTGRES_SCHEMA_CONTRACT_DIGESTS = {
-    16: "84182859137c63caffc9398178d2246e11862426af4cd9b17f9d322dfc689f99",
-    17: "84182859137c63caffc9398178d2246e11862426af4cd9b17f9d322dfc689f99",
-    18: "f829cde1b62a437972b938439386ae8344d89101482b8fa4059ee001b81bdcee",
+    16: "ecf76c23756523c526d6dabf4d0c83148d4b0f83dae458cd4d7a0da2e038bad5",
+    17: "ecf76c23756523c526d6dabf4d0c83148d4b0f83dae458cd4d7a0da2e038bad5",
+    18: "1bc6340a07ed92769eccd9bab072e1952a0655d4208c3c1c1a87b976b24a9427",
 }
 
-# SQLite batch ALTER rebuilt these three tables while removing the post-1.8
-# compatibility columns.  That path adds quotes around the table name and
-# parentheses around CURRENT_* defaults even though both spellings have the
-# same SQLite semantics.  Keep the immutable prior-release digest stable by
-# canonicalising only the known compatibility rebuilds; older migrations have
+# SQLite batch ALTER rebuilt the first three tables while removing the
+# post-1.8 compatibility columns, and rebuilds the two channel tables when
+# ``v1_12_channel_config_encrypted`` moves their ``config`` column between
+# JSON and TEXT in either direction.  That path adds quotes around the table
+# name and parentheses around CURRENT_* defaults even though both spellings
+# have the same SQLite semantics.  Keep the immutable prior-release digests
+# stable by canonicalising only the known rebuilds; older migrations have
 # their own frozen physical spellings and remain exact evidence.
 _SQLITE_COMPATIBILITY_REBUILT_TABLES = frozenset(
-    {"automation_rules", "notification_deliveries", "projects"},
+    {
+        "automation_rules",
+        "notification_channels",
+        "notification_deliveries",
+        "projects",
+        "user_channels",
+    },
 )
 
 # Reviewed with RESET_MIGRATION_HEAD.  Base.metadata is checked against this
@@ -93,6 +101,7 @@ RESET_ORM_TABLES = frozenset(
         "api_keys",
         "audit_chain_preparation",
         "audit_chain_state",
+        "audit_forward_state",
         "audit_log",
         "automation_firing_outbox",
         "automation_rule_admissions",
@@ -1096,6 +1105,23 @@ async def _external_authority_manifest(
     }
 
 
+def _bind_secret_keyring(settings: Settings) -> None:
+    """Bind the keyring the encrypted channel-config columns decrypt with.
+
+    The manifest walk reads every table through the ORM-typed Core tables,
+    and ``notification_channels.config`` and ``user_channels.config`` are
+    decrypted on read; without a bound keyring the first channel row raises
+    ``SecretKeyringUnbound`` in the middle of the ceremony. The CLI binds one
+    in its bootstrap, but an in-process caller is handed ``Settings`` here
+    and must not depend on that. Binding again from the same values is a
+    no-op in effect.
+    """
+
+    from z4j_brain.domain.secret_fields import bind_keyring_from_settings
+
+    bind_keyring_from_settings(settings)
+
+
 async def build_generation_reset_preview(
     session: AsyncSession,
     settings: Settings,
@@ -1106,6 +1132,7 @@ async def build_generation_reset_preview(
         verify_active_audit_generation,
     )
 
+    _bind_secret_keyring(settings)
     if session.bind is None:
         raise GenerationResetRefused("reset preview session is not bound")
     if session.bind.dialect.name == "sqlite" and not session.sync_session.info.get(
@@ -1172,6 +1199,7 @@ async def perform_generation_reset(  # noqa: PLR0912, PLR0915  one atomic cross-
 ) -> dict[str, Any]:
     """Perform one atomic ordinary reset and return its signed manifest data."""
 
+    _bind_secret_keyring(settings)
     if session.bind is None:
         raise GenerationResetRefused("reset session is not bound")
     if session.bind.dialect.name == "sqlite" and not session.sync_session.info.get(

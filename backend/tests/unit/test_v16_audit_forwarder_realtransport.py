@@ -1,32 +1,39 @@
 """Real-transport audit-forwarder tests.
 
-Every prior audit-forwarder test monkeypatches ``_post``, so the
+Every other audit-forwarder test monkeypatches ``_post``, so the
 production call chain (``_send_one`` -> ``_post`` -> ``client.send``
--> transport) never actually ran end-to-end. That is exactly how the
-Ship-stopper landed: ``_post`` shipped with a broken ``timeout``
-kwarg shape, and the unit suite passed.
+-> transport) would never actually run end-to-end. That is exactly how
+an earlier ship-stopper landed: ``_post`` shipped with a broken
+``timeout`` kwarg shape, and the unit suite passed.
 
 These tests pin the contract through ``httpx.MockTransport`` so a
 regression in ANY of these classes would fail here:
 
-timeout-kwarg-not-applied
+- timeout-kwarg-not-applied
 - HMAC body mismatch (signature drift)
 - timestamp header shape drift
 - response-body cap removal (``_MAX_RESPONSE_BYTES`` machinery)
 - non-2xx accounting + ``record_swallowed`` plumbing
-- full enqueue -> drain-loop -> transport delivery
-- cancel-during-in-flight against a blocking real transport"""
+- a full cursor pass -> transport delivery, in chain order
+- cancel-during-request against a blocking real transport
+"""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib as _hashlib
 import hmac as _hmac
 import json
+import uuid
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
 from z4j_brain.domain import audit_forwarder as af_mod
 from z4j_brain.domain.audit_forwarder import (
     AUDIT_SIGNATURE_HEADER,
@@ -34,6 +41,13 @@ from z4j_brain.domain.audit_forwarder import (
     AuditForwarder,
 )
 from z4j_brain.domain.notifications.channels import set_shared_client
+from z4j_brain.persistence import models  # noqa: F401  - register mappers
+from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.database import DatabaseManager
+from z4j_brain.persistence.models import AuditLog
+from z4j_brain.persistence.repositories.audit_forward_state import (
+    AuditForwardStateRepository,
+)
 
 WEBHOOK = "https://siem.example.test/ingest"
 SECRET = b"k" * 32
@@ -87,6 +101,47 @@ async def _no_dns(_url: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _send_only_forwarder(**overrides: Any) -> AuditForwarder:
+    kwargs: dict[str, Any] = {
+        "db": SimpleNamespace(),
+        "webhook_url": WEBHOOK,
+        "hmac_secret": SECRET,
+    }
+    kwargs.update(overrides)
+    return AuditForwarder(**kwargs)
+
+
+@pytest.fixture
+async def db(tmp_path: Path) -> Any:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'forwarder.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    manager = DatabaseManager(engine)
+    yield manager
+    await engine.dispose()
+
+
+async def _seed(db: DatabaseManager, n: int) -> list[str]:
+    ids: list[str] = []
+    start = datetime(2026, 10, 1, tzinfo=UTC)
+    async with db.session(write=True) as session:
+        for i in range(n):
+            row = AuditLog(
+                id=uuid.uuid4(),
+                action="test.event",
+                target_type="thing",
+                target_id=f"user-{i}",
+                result="success",
+                outcome="allow",
+                occurred_at=start + timedelta(seconds=i),
+                row_hmac=f"{i:064x}",
+            )
+            session.add(row)
+            ids.append(str(row.id))
+        await session.commit()
+    return ids
+
+
 @pytest.mark.asyncio
 class TestSendOneAgainstRealTransport:
     """``_send_one`` -> real ``_post`` -> ``MockTransport``."""
@@ -105,8 +160,8 @@ class TestSendOneAgainstRealTransport:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         set_shared_client(client)
         try:
-            fwd = AuditForwarder(webhook_url=WEBHOOK, hmac_secret=SECRET)
-            await fwd._send_one(_payload())
+            fwd = _send_only_forwarder()
+            assert await fwd._send_one(_payload()) is True
         finally:
             set_shared_client(None)
             await client.aclose()
@@ -137,8 +192,8 @@ class TestSendOneAgainstRealTransport:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         set_shared_client(client)
         try:
-            fwd = AuditForwarder(webhook_url=WEBHOOK, hmac_secret=SECRET)
-            await fwd._send_one(_payload())
+            fwd = _send_only_forwarder()
+            assert await fwd._send_one(_payload()) is True
         finally:
             set_shared_client(None)
             await client.aclose()
@@ -166,11 +221,10 @@ class TestSendOneAgainstRealTransport:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Ship-stopper regression guard. The forwarder's
-        ``_timeout`` must arrive in the transport-side request
-        extension as an httpx.Timeout-derived shape, NOT the client
-        default (60s) and NOT a stale dict that httpx silently
-        ignored on 0.28+."""
+        """Ship-stopper regression guard. The forwarder's ``_timeout``
+        must arrive in the transport-side request extension as an
+        httpx.Timeout-derived shape, NOT the client default (60s) and
+        NOT a stale dict that httpx silently ignored on 0.28+."""
         monkeypatch.setattr(af_mod, "resolve_and_pin", _no_dns)
         seen: list[dict[str, Any]] = []
 
@@ -184,11 +238,7 @@ class TestSendOneAgainstRealTransport:
         )
         set_shared_client(client)
         try:
-            fwd = AuditForwarder(
-                webhook_url=WEBHOOK,
-                hmac_secret=SECRET,
-                timeout_seconds=7.5,
-            )
+            fwd = _send_only_forwarder(timeout_seconds=7.5)
             await fwd._send_one(_payload())
         finally:
             set_shared_client(None)
@@ -210,11 +260,12 @@ class TestSendOneAgainstRealTransport:
 
 
 @pytest.mark.asyncio
-class TestDrainLoopAgainstRealTransport:
-    """``enqueue`` -> ``start`` -> drain loop -> transport."""
+class TestCursorPassAgainstRealTransport:
+    """``forward_once`` -> rows past the cursor -> transport, in chain order."""
 
-    async def test_three_enqueued_rows_all_reach_transport(
+    async def test_three_rows_past_the_cursor_all_reach_transport_in_order(
         self,
+        db: DatabaseManager,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(af_mod, "resolve_and_pin", _no_dns)
@@ -227,26 +278,22 @@ class TestDrainLoopAgainstRealTransport:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         set_shared_client(client)
         try:
-            fwd = AuditForwarder(webhook_url=WEBHOOK, hmac_secret=SECRET)
-            fwd.start()
-            for i in range(3):
-                p = _payload()
-                p["target_id"] = f"user-{i}"
-                assert fwd.enqueue(p)
-            # Wait for drain.
-            for _ in range(100):
-                if fwd.sent_count == 3:
-                    break
-                await asyncio.sleep(0.01)
-            await fwd.stop(drain_timeout=1.0)
+            fwd = AuditForwarder(db=db, webhook_url=WEBHOOK, hmac_secret=SECRET)
+            assert (await fwd.forward_once()).status == "idle"  # cursor row, log empty
+            seeded = await _seed(db, 3)
+            outcome = await fwd.forward_once()
         finally:
             set_shared_client(None)
             await client.aclose()
 
+        assert outcome.status == "sent" and outcome.sent == 3
         assert fwd.sent_count == 3
-        assert len(seen) == 3
-        target_ids = sorted(json.loads(r.content)["target_id"] for r in seen)
-        assert target_ids == ["user-0", "user-1", "user-2"]
+        assert [json.loads(r.content)["id"] for r in seen] == seeded
+        assert [json.loads(r.content)["target_id"] for r in seen] == [
+            "user-0",
+            "user-1",
+            "user-2",
+        ]
 
 
 @pytest.mark.asyncio
@@ -275,8 +322,8 @@ class TestNon2xxAgainstRealTransport:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         set_shared_client(client)
         try:
-            fwd = AuditForwarder(webhook_url=WEBHOOK, hmac_secret=SECRET)
-            await fwd._send_one(_payload())
+            fwd = _send_only_forwarder()
+            assert await fwd._send_one(_payload()) is False
         finally:
             set_shared_client(None)
             await client.aclose()
@@ -287,15 +334,16 @@ class TestNon2xxAgainstRealTransport:
 
 
 @pytest.mark.asyncio
-class TestCancelDuringInFlight:
-    """``stop()`` mid-POST against a real (blocking) transport.
+class TestCancelDuringRequest:
+    """Cancelling a pass mid-POST against a real (blocking) transport.
 
-    Pre- a row pulled off the queue but parked on _send_one
-    vanished from ``qsize()``. The fix tracks ``_in_flight`` and
-    accounts for it in ``_shutdown_lost``."""
+    The row the request was carrying stays past the cursor, so the next
+    pass sends it again. Nothing is lost and nothing is counted as lost:
+    there is no in-memory queue for a row to vanish from."""
 
-    async def test_in_flight_row_counted_in_shutdown_lost(
+    async def test_cancelled_request_leaves_the_cursor_where_it_was(
         self,
+        db: DatabaseManager,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(af_mod, "resolve_and_pin", _no_dns)
@@ -304,25 +352,31 @@ class TestCancelDuringInFlight:
         async def handler(_req: httpx.Request) -> httpx.Response:
             entered.set()
             # Block until cancelled. MockTransport supports async
-            # handlers; this parks the send() until stop() fires.
+            # handlers; this parks the send() until the task is cancelled.
             await asyncio.sleep(60.0)
             return _resp(200)  # unreachable
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         set_shared_client(client)
         try:
-            fwd = AuditForwarder(webhook_url=WEBHOOK, hmac_secret=SECRET)
-            fwd.start()
-            assert fwd.enqueue(_payload())
+            fwd = AuditForwarder(db=db, webhook_url=WEBHOOK, hmac_secret=SECRET)
+            assert (await fwd.forward_once()).status == "idle"
+            seeded = await _seed(db, 1)
+            task = asyncio.create_task(fwd.tick())
             # Wait until the handler is actually mid-request.
-            await asyncio.wait_for(entered.wait(), timeout=1.0)
-            await fwd.stop(drain_timeout=0.1)
+            await asyncio.wait_for(entered.wait(), timeout=5.0)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         finally:
             set_shared_client(None)
             await client.aclose()
 
-        assert fwd.shutdown_lost == 1, (
-            f"in-flight row not accounted in shutdown_lost: "
-            f"sent={fwd.sent_count} failed={fwd.failed_count} "
-            f"lost={fwd.shutdown_lost}"
-        )
+        async with db.session() as session:
+            state = await AuditForwardStateRepository(session).get_for_sink("default")
+            assert state is not None
+            assert state.last_forwarded_id is None
+            assert await AuditForwardStateRepository(session).count_pending(
+                after_occurred_at=None, after_id=None
+            ) == len(seeded)
+        assert fwd.sent_count == 0

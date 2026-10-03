@@ -1,19 +1,25 @@
 # z4j - default self-host deployment.
 #
-# One container. Bundled SQLite. Zero required env vars. The simplest
-# way to run z4j: clone the repo and:
+# The brain and its scheduler from one image. Bundled SQLite. Zero
+# required env vars. The simplest way to run z4j: clone the repo and:
 #
 #   docker compose up -d
 #
-# On first boot the brain container:
-#   - auto-detects SQLite (no Z4J_DATABASE_URL set) and initializes
-#     /data/z4j.db
+# On first boot:
+#   - scheduler-certs (one-shot) mints a private CA plus the brain's
+#     server certificate and the scheduler's client certificate into the
+#     z4j_scheduler_pki volume, then exits
+#   - the brain container auto-detects SQLite (no Z4J_DATABASE_URL set)
+#     and initializes /data/z4j.db
 #   - auto-generates Z4J_SECRET + Z4J_SESSION_SECRET on first boot
 #     and persists them to /data/secret.env so subsequent restarts
 #     keep the same session keys (tokens survive `docker compose restart`)
 #   - runs Alembic migrations to head
 #   - boots FastAPI on :7700 serving both the REST API and the
-#     compiled React dashboard
+#     compiled React dashboard, plus the scheduler gRPC channel on :7701
+#     (mTLS, bridge network only)
+#   - the scheduler container (z4j-scheduler serve) connects over that
+#     channel and fires the schedules you create in the dashboard
 #
 # Tail logs to find the first-boot admin setup URL:
 #
@@ -23,6 +29,8 @@
 #   - writes SQLite + persisted secrets to the z4j_data named volume
 #   - binds only localhost port 7700 on the host; put a reverse proxy
 #     in front for public access (see docker-compose.caddy.yml)
+#   - the scheduler channel and the scheduler's own :7800 never leave
+#     the z4j_net bridge
 #
 # When to graduate to the Postgres stack:
 #   - more than one concurrent admin
@@ -44,7 +52,7 @@
 # PostgreSQL. Treat graduating as a new installation, and do NOT remove the
 # SQLite volume on the assumption its contents were transferred.
 #
-# Full deployment matrix: docs/DEPLOYMENT.md
+# Full deployment matrix: https://docs.z4j.com/guides/docker/
 
 name: z4j
 
@@ -61,7 +69,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        Z4J_VERSION: ${Z4J_VERSION:-1.11.0}
+        Z4J_VERSION: ${Z4J_VERSION:-1.12.0}
     image: ${Z4J_IMAGE:-z4jdev/z4j:latest}
     container_name: z4j
     environment:
@@ -90,7 +98,7 @@ services:
 
       # --- optional: public URL override ---
       # Leave unset for local-only use; set when behind a reverse proxy
-      # (see docker-compose.caddy.yml or docs/DEPLOYMENT.md §6).
+      # (see docker-compose.caddy.yml or https://docs.z4j.com/guides/docker/).
       Z4J_PUBLIC_URL: ${Z4J_PUBLIC_URL:-http://localhost:7700}
 
       # --- optional: operational overrides ---
@@ -98,6 +106,23 @@ services:
       Z4J_LOG_JSON: ${Z4J_LOG_JSON:-true}
       Z4J_EVENT_RETENTION_DAYS: ${Z4J_EVENT_RETENTION_DAYS:-30}
       Z4J_AUDIT_RETENTION_DAYS: ${Z4J_AUDIT_RETENTION_DAYS:-90}
+
+      # --- scheduler channel (mTLS gRPC on :7701, bridge network only) ---
+      # The brain serves the z4j-scheduler gRPC service with the server
+      # certificate that scheduler-certs minted into the z4j_scheduler_pki
+      # volume, and accepts exactly one client identity: the CN the same
+      # one-shot minted for the scheduler service below. The port is never
+      # published to the host.
+      Z4J_SCHEDULER_GRPC_ENABLED: "true"
+      Z4J_SCHEDULER_GRPC_BIND_HOST: "0.0.0.0"
+      Z4J_SCHEDULER_GRPC_BIND_PORT: "7701"
+      Z4J_SCHEDULER_GRPC_TLS_CERT: /pki/brain.crt
+      Z4J_SCHEDULER_GRPC_TLS_KEY: /pki/brain.key
+      Z4J_SCHEDULER_GRPC_TLS_CA: /pki/ca.crt
+      Z4J_SCHEDULER_GRPC_ALLOWED_CNS: '["${Z4J_PKI_SCHEDULER_CN:-z4j-scheduler}"]'
+      Z4J_SCHEDULER_GRPC_REQUIRE_ALLOWLIST: "true"
+      # The dashboard's Schedulers page polls each listed /info endpoint.
+      Z4J_SCHEDULER_INFO_URLS: '["http://scheduler:7800"]'
     ports:
       # Bind to localhost only by default. Use a reverse proxy for
       # public HTTPS; see docker-compose.caddy.yml for Caddy auto-TLS.
@@ -105,6 +130,11 @@ services:
     volumes:
       # SQLite DB, persisted secrets, access logs. Back this up.
       - z4j_data:/data
+      # mTLS material for the scheduler channel, minted by scheduler-certs.
+      - z4j_scheduler_pki:/pki:ro
+    depends_on:
+      scheduler-certs:
+        condition: service_completed_successfully
     networks:
       - z4j_net
     healthcheck:
@@ -123,6 +153,92 @@ services:
           memory: 256m
           cpus: "0.25"
 
+  # ====================================================================
+  # scheduler-certs - one-shot mTLS bootstrap for the scheduler channel
+  # ====================================================================
+  # Runs docker/scheduler-certs.sh (POSIX sh + openssl, both in the brain
+  # image) as root once per `docker compose up`: mints a private CA, the
+  # brain's server certificate (SANs z4j, brain, localhost) and the
+  # scheduler's client certificate (CN z4j-scheduler) into the
+  # z4j_scheduler_pki volume, hands them to the uid the brain and the
+  # scheduler run as, and exits. Idempotent: a valid bundle is left alone
+  # and a certificate is minted again only when it is missing, mismatched
+  # or within 30 days of expiry (restart brain + scheduler to pick up a
+  # renewal). The CA key stays root-only. Bring your own PKI by replacing
+  # the files in the volume, keeping their names.
+  scheduler-certs:
+    image: ${Z4J_IMAGE:-z4jdev/z4j:latest}
+    container_name: z4j-scheduler-certs
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/usr/bin/tini", "--", "sh", "/usr/local/libexec/z4j/scheduler-certs.sh"]
+    environment:
+      Z4J_PKI_DIR: /pki
+      Z4J_PKI_BRAIN_SANS: z4j,brain,localhost
+      Z4J_PKI_SCHEDULER_CN: ${Z4J_PKI_SCHEDULER_CN:-z4j-scheduler}
+      Z4J_PKI_OWNER: "10001:10001"
+    volumes:
+      - ./docker/scheduler-certs.sh:/usr/local/libexec/z4j/scheduler-certs.sh:ro
+      - z4j_scheduler_pki:/pki
+    restart: "no"
+
+  # ====================================================================
+  # z4j-scheduler - fires the schedules the brain holds
+  # ====================================================================
+  # The brain image with its entrypoint switched to `z4j-scheduler serve`.
+  # Dials the brain's gRPC channel at z4j:7701 with the minted client
+  # certificate. One instance, so leader election is the always-true
+  # `single` gate. /health, /ready and /info answer on :7800 inside
+  # z4j_net only. /metrics ships off: the scheduler binds every container
+  # interface and refuses unauthenticated metrics outside dev, so set BOTH
+  # Z4J_SCHEDULER_METRICS_ENABLED=true and Z4J_SCHEDULER_METRICS_AUTH_TOKEN
+  # in .env to scrape it (an empty token locks the endpoint rather than
+  # opening it).
+  scheduler:
+    image: ${Z4J_IMAGE:-z4jdev/z4j:latest}
+    container_name: z4j-scheduler
+    entrypoint: ["/usr/bin/tini", "--", "z4j-scheduler"]
+    command: ["serve"]
+    depends_on:
+      scheduler-certs:
+        condition: service_completed_successfully
+      z4j:
+        condition: service_healthy
+    environment:
+      Z4J_SCHEDULER_BRAIN_GRPC_URL: z4j:7701
+      Z4J_SCHEDULER_BRAIN_REST_URL: http://z4j:7700
+      Z4J_SCHEDULER_TLS_CERT: /pki/scheduler.crt
+      Z4J_SCHEDULER_TLS_KEY: /pki/scheduler.key
+      Z4J_SCHEDULER_TLS_CA: /pki/ca.crt
+      Z4J_SCHEDULER_INSTANCE_ID: z4j-scheduler-1
+      Z4J_SCHEDULER_LEADER_BACKEND: single
+      Z4J_SCHEDULER_BIND_HOST: "0.0.0.0"
+      Z4J_SCHEDULER_BIND_PORT: "7800"
+      Z4J_SCHEDULER_ENVIRONMENT: ${Z4J_ENVIRONMENT:-production}
+      Z4J_SCHEDULER_METRICS_ENABLED: ${Z4J_SCHEDULER_METRICS_ENABLED:-false}
+      Z4J_SCHEDULER_METRICS_AUTH_TOKEN: ${Z4J_SCHEDULER_METRICS_AUTH_TOKEN:-}
+      Z4J_SCHEDULER_LOG_LEVEL: ${Z4J_LOG_LEVEL:-INFO}
+      Z4J_SCHEDULER_LOG_JSON: ${Z4J_LOG_JSON:-true}
+    volumes:
+      - z4j_scheduler_pki:/pki:ro
+    networks:
+      - z4j_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7800/ready',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+        reservations:
+          memory: 64m
+          cpus: "0.05"
+
 networks:
   # Private network. The Caddy overlay joins this network to proxy
   # to z4j over the internal bridge.
@@ -133,3 +249,6 @@ networks:
 volumes:
   z4j_data:
     name: z4j_data
+  # CA, brain server cert and scheduler client cert (see scheduler-certs).
+  z4j_scheduler_pki:
+    name: z4j_scheduler_pki

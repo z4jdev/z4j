@@ -49,6 +49,7 @@ from z4j_brain.api.deps import (
     get_settings,
     get_user_repo,
     require_csrf,
+    require_dashboard_ip,
     require_fresh_mfa,
 )
 from z4j_brain.auth.csrf import csrf_cookie_kwargs, csrf_cookie_name
@@ -478,7 +479,10 @@ async def _apply_mfa_enrollment_enforcement(
 @router.post(
     "/login",
     response_model=LoginResponse,
-    dependencies=[Depends(require_login_throttle)],
+    # Throttle first (in-memory, cheap), then the dashboard source-address
+    # allowlist: a caller outside ``Z4J_DASHBOARD_IP_ALLOWLIST`` is refused
+    # before the credentials are looked at.
+    dependencies=[Depends(require_login_throttle), Depends(require_dashboard_ip)],
 )
 async def login(
     request: Request,

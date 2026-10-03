@@ -123,6 +123,7 @@ TAG_TO_RESOURCE: Final[dict[str, str]] = {
     "commands": "commands",
     "schedules": "schedules",
     "audit": "audit",
+    "audit-exports": "audit",  # background exports; every method reads, see below
     "memberships": "memberships",
     "notifications": "notifications",
     "automation": "automation",
@@ -130,9 +131,17 @@ TAG_TO_RESOURCE: Final[dict[str, str]] = {
     "users": "users",
     "api-keys": "admin",  # minting/revoking keys is an admin surface
     "events": "tasks",  # raw event stream is a task-level surface
+    "dead-letters": "tasks",  # parked tasks read under tasks:read
     "stats": "tasks",  # aggregate task stats roll up under tasks
     "auth": "auth",  # /auth/me read. Writes denied for Bearer.
 }
+
+
+#: Tags whose every method requires only the ``read`` verb. Queueing a
+#: background audit export (``POST``) reveals exactly what the synchronous
+#: ``GET ...?format=`` export reveals and changes nothing else, so a key
+#: holding ``audit:read`` may create one; there is no ``audit:write``.
+READ_VERB_FOR_ALL_METHODS: Final[frozenset[str]] = frozenset({"audit-exports"})
 
 
 #: Sentinel returned by :func:`required_scope` for routes that
@@ -164,7 +173,7 @@ def required_scope(
     resource = TAG_TO_RESOURCE.get(tag)
     if resource is None:
         return SCOPE_UNREACHABLE
-    verb = "read" if method.upper() == "GET" else "write"
+    verb = "read" if method.upper() == "GET" or tag in READ_VERB_FOR_ALL_METHODS else "write"
     return f"{resource}:{verb}"
 
 
@@ -235,6 +244,7 @@ __all__ = [
     "BEARER_DENY_TAGS",
     "PROJECT_SCOPED_NONSLUG_ALLOWLIST",
     "PUBLIC_TAGS",
+    "READ_VERB_FOR_ALL_METHODS",
     "SCOPE_UNREACHABLE",
     "TAG_TO_RESOURCE",
     "is_bearer_denied_tag",

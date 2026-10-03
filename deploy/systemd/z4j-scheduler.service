@@ -1,0 +1,62 @@
+# z4j-scheduler: the standalone schedule-firing companion to the brain.
+#
+# Install: copy to /etc/systemd/system/, create /etc/z4j/scheduler.env from
+# scheduler.env.example (owner root, mode 0600), put the client certificate,
+# key and CA under /etc/z4j/tls (readable by the z4j user only), then
+#   systemctl daemon-reload && systemctl enable --now z4j-scheduler
+# The unit assumes ``pip install z4j-scheduler`` into /opt/z4j/venv (the
+# same venv as the brain is fine) and a ``z4j`` system user.
+
+[Unit]
+Description=z4j-scheduler (schedule firing, PostgreSQL leader election)
+Documentation=https://docs.z4j.com/schedulers/z4j-scheduler/
+After=network-online.target z4j-brain.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=z4j
+Group=z4j
+EnvironmentFile=/etc/z4j/scheduler.env
+Environment=Z4J_HOME=/var/lib/z4j-scheduler
+StateDirectory=z4j-scheduler
+StateDirectoryMode=0700
+ConfigurationDirectory=z4j
+ExecStart=/opt/z4j/venv/bin/z4j-scheduler serve
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30s
+UMask=0077
+
+# --- hardening ---
+# Same baseline as z4j-brain.service; check it with
+# ``systemd-analyze security z4j-scheduler``.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -96,6 +96,12 @@ _HEARTBEAT_CHANNEL: str = "z4j_heartbeat"
 #: the DB row -- already-connected agents on other replicas kept
 #: forging signed event frames until natural disconnect.
 _AGENT_REVOKED_CHANNEL: str = "z4j_agent_revoked"
+#: Payload prefix on the same channel for a project archive. The
+#: archive route publishes ``project:<project_id>`` once; every
+#: replica walks its own map and closes the sockets it holds for
+#: that project with the revoked-agent close code. A replica that
+#: predates this form logs the payload as malformed and ignores it.
+_PROJECT_REVOKED_PREFIX: str = "project:"
 
 #: Backoff schedule for the reconnect loop, in seconds. Caps at
 #: 30s. The list is short because we WANT the listener back fast -
@@ -307,7 +313,7 @@ class PostgresNotifyRegistry:
         # Step 1: local kick.
         local_closed = await self._kick_local(agent_id)
         # Step 2: broadcast.
-        await self._publish_revoke_notify(agent_id)
+        await self._publish_revoke_notify(str(agent_id))
         logger.info(
             "z4j registry: agent revoked, kick broadcast issued",
             agent_id=str(agent_id),
@@ -337,20 +343,73 @@ class PostgresNotifyRegistry:
                 pass
         return closed
 
-    async def _publish_revoke_notify(self, agent_id: UUID) -> None:
-        """Fire ``NOTIFY z4j_agent_revoked, '<agent_id>'``.
+    async def kick_project(self, project_id: UUID) -> int:
+        """Close every WS of every agent in ``project_id`` cluster-wide.
 
-        Uses the SQLAlchemy session so the NOTIFY participates in
-        the calling request's transaction (the agent-revoke handler
-        commits the DELETE + the NOTIFY atomically -- if the txn
-        rolls back, the cluster doesn't hear a phantom revoke).
+        Project-archive counterpart of :meth:`kick`, on the same
+        channel and with the same two steps: close the LOCAL sockets
+        for the project, then publish
+        ``NOTIFY z4j_agent_revoked, 'project:<project_id>'`` so every
+        replica walks its own map for that project. The agents come
+        from each replica's registry map, never from a database
+        enumeration, so a socket that registered after the archive
+        committed is still caught on the replica that holds it.
+
+        Returns the count of LOCAL connections closed, like
+        :meth:`kick`. Idempotent: still publishes when nothing is
+        connected here, because another replica may hold sockets.
+        """
+        local_closed = await self._kick_project_local(project_id)
+        await self._publish_revoke_notify(f"{_PROJECT_REVOKED_PREFIX}{project_id}")
+        logger.info(
+            "z4j registry: project archived, kick broadcast issued",
+            project_id=str(project_id),
+            local_connections_closed=local_closed,
+            worker_id=self._worker_id,
+        )
+        return local_closed
+
+    async def _kick_project_local(self, project_id: UUID) -> int:
+        """Close every WS in THIS process's map whose agent is in ``project_id``.
+
+        Used by ``kick_project`` (operator-initiated) and by the
+        ``_on_agent_revoked`` listener callback when the payload
+        carries the project form.
+        """
+        async with self._lock:
+            agent_ids = [
+                agent_id
+                for agent_id, owner in self._project_for_agent.items()
+                if owner == project_id
+            ]
+            popped = [self._connections.pop(agent_id, None) for agent_id in agent_ids]
+            for agent_id in agent_ids:
+                self._project_for_agent.pop(agent_id, None)
+        closed = 0
+        for workers in popped:
+            for handle in list((workers or {}).values()):
+                try:
+                    await handle.websocket.close(code=4003)
+                    closed += 1
+                except Exception:  # noqa: S110  best-effort close of an archived project's socket
+                    pass
+        return closed
+
+    async def _publish_revoke_notify(self, payload: str) -> None:
+        """Fire ``NOTIFY z4j_agent_revoked, '<payload>'``.
+
+        ``payload`` is a bare agent id for a revoke or
+        ``project:<project_id>`` for an archive. Runs in its own
+        short transaction after the caller's revoke or archive has
+        committed, so the cluster never hears a phantom kick for a
+        transaction that rolled back.
         """
         from sqlalchemy import text
 
         async with self._db.session() as session:
             await session.execute(
                 text("SELECT pg_notify(:channel, :payload)"),
-                {"channel": _AGENT_REVOKED_CHANNEL, "payload": str(agent_id)},
+                {"channel": _AGENT_REVOKED_CHANNEL, "payload": payload},
             )
             await session.commit()
 
@@ -876,6 +935,26 @@ class PostgresNotifyRegistry:
         read loop and MUST NOT block, so we punt the actual close
         to a background task.
         """
+        if payload.startswith(_PROJECT_REVOKED_PREFIX):
+            # Project archive: close every local socket of that project.
+            try:
+                project_id = UUID(payload[len(_PROJECT_REVOKED_PREFIX) :])
+            except (ValueError, TypeError):
+                logger.warning(
+                    "z4j registry: malformed project-revoked payload, ignoring",
+                    payload_len=len(payload),
+                )
+                return
+            # Fast path: nothing of that project lives here.
+            if project_id not in self._project_for_agent.values():
+                return
+            project_task = asyncio.create_task(
+                self._kick_project_local(project_id),
+                name="z4j-registry-kick-archived-project",
+            )
+            project_task.add_done_callback(_log_task_exception)
+            return
+
         try:
             agent_id = UUID(payload)
         except (ValueError, TypeError):

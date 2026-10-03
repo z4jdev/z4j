@@ -1,0 +1,22 @@
+{{- if and .Values.scheduler.enabled .Values.scheduler.serviceMonitor.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "z4j-scheduler.fullname" . }}
+  labels:
+    {{- include "z4j-scheduler.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "z4j-scheduler.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.scheduler.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.scheduler.serviceMonitor.scrapeTimeout }}
+      {{- if .Values.scheduler.serviceMonitor.bearerTokenSecret.name }}
+      bearerTokenSecret:
+        name: {{ .Values.scheduler.serviceMonitor.bearerTokenSecret.name }}
+        key: {{ .Values.scheduler.serviceMonitor.bearerTokenSecret.key }}
+      {{- end }}
+{{- end }}

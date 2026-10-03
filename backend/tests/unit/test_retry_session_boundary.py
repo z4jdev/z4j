@@ -67,10 +67,16 @@ class FakeWebSocket:
     [
         ("cancel_task", {"engine": "celery"}, None),
         ("retry_task", {"engine": "celery"}, "celery"),
-        ("retry_task", {"engine": "unknown"}, ""),
+        # Any well-formed name is a requirement on the receiving session; no
+        # list in the brain decides it, and nothing is rewritten.
+        ("retry_task", {"engine": "huey"}, "huey"),
+        ("retry_task", {"engine": "laravel"}, "laravel"),
+        ("retry_task", {"engine": "not an engine"}, ""),
+        ("retry_task", {"engine": ""}, ""),
+        ("retry_task", {"engine": 7}, ""),
         ("retry_task", {}, ""),
         ("bulk_retry", {"filter": {"engine": "rq"}}, "rq"),
-        ("bulk_retry", {"filter": {"engine": "unknown"}}, ""),
+        ("bulk_retry", {"filter": {"engine": "not an engine"}}, ""),
         ("bulk_retry", {"filter": {}}, ""),
         ("bulk_retry", None, ""),
     ],

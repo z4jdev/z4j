@@ -1,5 +1,336 @@
 # Changelog
 
+## 1.12.0 (2026-10-03)
+
+- Add `GET /api/v1/projects/{slug}/dead-letters`. The brain picks an online
+  agent that advertises `list_dead_letters` for the requested engine, issues
+  a `dlq.list` command with the queue, limit and cursor, records a
+  `dead_letters.list` row beside the `command.issue.dlq.list` row, waits on
+  the durable command row so any replica can answer, and
+  returns the validated page. It answers 409 when no capable agent is online
+  (naming what each online agent advertises), 504 on a silent agent, 422 on
+  a malformed cursor or limit, and 502 on an adapter failure. The
+  `dead-letters` tag maps to `tasks:read` for API keys. A queue-targeted
+  command carries its engine on the wire so a multi-engine host binds the
+  right adapter.
+
+- Add a Dead letters page beside Tasks in the dashboard, with an engine
+  selector, a queue filter, a paginated table and a Requeue action where the
+  adapter advertises `requeue_dead_letter`.
+
+- Dispatch retry, cancel, dead-letter requeue and bulk retry by the target
+  agent's advertised capabilities instead of a celery, rq and dramatiq
+  allowlist. Huey, arq and taskiq tasks answered 422 for actions their
+  adapters advertise. A command for an engine and action is dispatchable
+  only when the agent's recorded hello inventory lists the engine and
+  carries the action's capability token (retry actions also need the
+  retry-by-reference marker every delivery path already requires); the
+  engine string is checked for shape and never rewritten, so an engine no
+  agent advertises is refused by name and the old silent fallback to celery
+  stays impossible.
+
+- A schedule created without `catch_up` now stores `fire_one_missed`.
+  Explicit values, updates, imports and the column default are unchanged, so
+  existing rows keep their policy. `SchedulePublic` carries
+  `skipped_slots_24h` on list and single reads (null on mutation responses),
+  counted from the cursor transitions the scheduler commits, so a schedule
+  that is discarding occurrences is visible where operators look. The
+  schedule form defaults to `fire_one_missed` with one sentence on the
+  difference, and the detail page shows the count beside the run strip when
+  it is above zero.
+
+- Every shipped compose stack (`docker-compose.yml` and
+  `docker-compose.postgres.yml`) starts a scheduler over mTLS. A one-shot
+  `scheduler-certs` service runs `docker/scheduler-certs.sh` to mint a CA, a
+  brain server certificate and a scheduler client certificate into a named
+  volume (idempotent, renewed within thirty days of expiry, keys 0600). The
+  brain enables its scheduler gRPC server against those certificates with
+  the scheduler's CN allow-listed (`Z4J_PKI_SCHEDULER_CN`), and a scheduler
+  service on the same image serves against it: one replica with the single
+  leader backend on the SQLite stack, two replicas electing through
+  PostgreSQL on the PostgreSQL stack (`Z4J_SCHEDULER_LEADER_PG_DSN` moves the
+  lock elsewhere). `Z4J_SCHEDULER_METRICS_ENABLED` and
+  `Z4J_SCHEDULER_METRICS_AUTH_TOKEN` together expose the scheduler's
+  `/metrics`.
+
+- Ship the deployment kit in the sdist under `deploy/`: the Helm chart `z4j`
+  (brain with an inline Secret, PVC, Deployment, Service, Ingress and
+  ServiceMonitor; the scheduler with a leader-DSN Secret; an opt-in
+  single-instance PostgreSQL; a pre-install hook Job that mints the
+  scheduler mTLS material the way the compose script does), raw Kubernetes
+  manifests `deploy/kubernetes/z4j-brain.yaml` and
+  `deploy/kubernetes/z4j-scheduler.yaml`, and hardened systemd units with
+  environment-file examples under `deploy/systemd/`. The chart is also
+  published to `ghcr.io/z4jdev/charts/z4j` as OCI by `publish-helm.yml`,
+  which packages it at a release tag, signs the digest keylessly, attests
+  its provenance and verifies the pull-back. `helm lint` passes in four
+  value shapes; a cluster run is the next step.
+
+- Give the brain's `/data` volume to the brain on Kubernetes. A dynamically
+  provisioned claim arrives owned by root, `fsGroup` changes only its group,
+  and the secret store refuses a directory the running uid does not own with
+  mode 0700, so on a kind cluster the brain exited with `secret-store
+  directory is not owned by the current uid: /data` and the scheduler
+  crash-looped on the refused connection. The chart and
+  `deploy/kubernetes/z4j-brain.yaml` now run a `fix-data-permissions` init
+  container ahead of the brain: the same image as root with only `CHOWN` and
+  `FOWNER`, which sets the owner and the mode when they are wrong and
+  otherwise changes nothing. `brain.persistence.fixPermissions.enabled=false`
+  removes it where PodSecurity `restricted` forbids root containers; the
+  chart README gives the one-time manual ownership step. Pod-level `fsGroup`
+  stays.
+
+- Every package release attaches a reproducible CycloneDX 1.6 SBOM of the
+  wheel's locked dependency closure to the GitHub Release beside the wheel
+  and sdist, `publish-docker.yml` attaches an SPDX SBOM to the published
+  image as an attestation, and `dco.yml` requires a `Signed-off-by` trailer
+  on every pull-request commit.
+
+- Require `pyjwt>=2.15.0`, the first release closing the thirteen
+  PYSEC-2026-414x advisories (CVE-2026-102268 among them); the brain never
+  imports jwt, the floor exists because redis-py carries it.
+
+- The dashboard's pnpm overrides raise brace-expansion to 5.0.11
+  (GHSA-qhr7-859c-m2p7 and GHSA-6j4f-fj2g-mc7p, reached through eslint's
+  minimatch) and undici to 7.29.1; pnpm audit reports nothing at high
+  severity. The bundled dashboard is rebuilt from this release's sources
+  with the pnpm its own `packageManager` pin names.
+
+- The published security policy names the current minor line as receiving
+  fixes and the previous minor as critical-only, and a release test holds
+  both policy files to the version file.
+
+- The Security workflow uploads a scan report only when the scan that
+  produces it ran, so a filesystem finding fails the job for the finding
+  alone instead of also failing on a missing image report.
+
+- The brain's scheduler-server docstring names
+  `Z4J_SCHEDULER_GRPC_BIND_PORT`, the variable that exists; the April
+  scheduler design draft it cited moved to `docs/historical/`.
+
+- Gate the audit routes through core's policy vocabulary and the new
+  `auditor` role. `require_member` keeps its membership synthesis and 404
+  anti-enumeration but takes the decision from `z4j_core.policy`
+  (`action_allowed` for an action, `role_satisfies` for a `min_role` floor);
+  its own rank table is gone. The audit list route names
+  `Action.READ_AUDIT` and the synchronous `GET ...?format=` export
+  `Action.EXPORT_AUDIT`, and the audit tier is granted to auditor and admin
+  only, so an operator does not gain audit reads on upgrade. The dashboard's
+  role selectors (members, invitations, memberships), the role badge and the
+  audit navigation know the role. Ten separation-of-duties tests over the
+  real app refuse the auditor on all fifty-six mutating project routes.
+
+- Add `z4j audit prune`: soft mode is the authenticated prefix prune (verify
+  the prefix, delete, advance the signed prune quartet), hard mode (`--hard`)
+  is the epoch cut, admitted only once the generation is fully pruned. A dry
+  run by default, `--apply` executes, `--before` takes one explicit ISO-8601
+  cutoff instead of the configured windows. It refuses without a chain key or
+  an authenticated state, holds the verifier's leader lease, surfaces the
+  sweep lock as a refusal, and writes an `audit.prune` row with mode,
+  cutoffs, rows by class and the new boundary. `Z4J_AUDIT_RETENTION_BY_CLASS`
+  gives an action class (the first dotted segment of the action name) its
+  own window for both the worker and the command; the expired prefix stops at
+  the first row whose class still keeps it. The ten-year ceiling on
+  `Z4J_AUDIT_RETENTION_DAYS` is a startup warning instead of a refusal.
+
+- Add audit export jobs. `POST /api/v1/projects/{slug}/audit/export-jobs`
+  (202) queues a row in the reserved `export_jobs` table; the leader-gated
+  `export_jobs_worker` streams the rows in keyset pages into the configured
+  sink, writes progress per page, records `audit.export_job.completed` or
+  `audit.export_job.failed`, and sweeps stale running jobs. `GET` lists the
+  jobs with status and sink location, `GET /{job_id}` reads one and
+  `GET /{job_id}/download` serves a local-sink file; every method requires
+  an auditor or an admin (`Action.EXPORT_AUDIT`), every `POST` writes an
+  `audit.export_job.created` row, and the `audit-exports` tag maps to
+  `audit:read` for API keys on every method (`READ_VERB_FOR_ALL_METHODS`). The sync export shares
+  the field resolver and statement builder. The audit page queues and lists
+  the jobs.
+
+- Add the export sinks. `Z4J_EXPORT_SINK=local` writes under
+  `Z4J_EXPORT_SINK_PATH` through an exclusive temp file and rename, mode
+  0640, symlinks refused at every level; `Z4J_EXPORT_SINK=s3` writes to an
+  S3-compatible bucket (`Z4J_EXPORT_SINK_S3_BUCKET`,
+  `Z4J_EXPORT_SINK_S3_PREFIX`, `Z4J_EXPORT_SINK_S3_ENDPOINT_URL`,
+  `Z4J_EXPORT_SINK_S3_REGION`, `Z4J_EXPORT_SINK_S3_ACCESS_KEY_ID`,
+  `Z4J_EXPORT_SINK_S3_SECRET_ACCESS_KEY`) through the new `z4j[s3]` extra
+  (`aiobotocore>=2.21,<3`, imported lazily, multipart with abort,
+  credentials never described). `Z4J_EXPORT_JOBS_POLL_INTERVAL_SECONDS` and
+  `Z4J_EXPORT_JOBS_PAGE_SIZE` tune the worker.
+
+- Add the scheduled head export. With `Z4J_AUDIT_HEAD_EXPORT_INTERVAL_SECONDS`
+  set (0 is off, at least 60 otherwise, a sink required) the export-jobs
+  worker writes the audit chain head envelope, byte for byte what
+  `z4j audit export-head` prints, to `audit-head/current.json` and a dated
+  `audit-head/<timestamp>.json` beside it, so `z4j audit verify --known-head`
+  has an anchor without an operator cron. No audit row is written for a head
+  export.
+
+- The audit webhook forwarder keeps a durable cursor per sink in
+  `audit_forward_state`, the verifier's chain order (`occurred_at`, `id`),
+  instead of an in-memory queue that dropped rows when the receiver was slow
+  or down. Each leader-gated pass (`audit_forwarder_worker`) sends the rows
+  strictly after the cursor in bounded batches
+  (`Z4J_AUDIT_WEBHOOK_BATCH_SIZE`, `Z4J_AUDIT_WEBHOOK_POLL_INTERVAL_SECONDS`),
+  advances the cursor by compare-and-set only after a 2xx, and stops at the
+  first failure with a persisted exponential backoff
+  (`Z4J_AUDIT_WEBHOOK_MAX_BACKOFF_SECONDS`). A restart resumes at the cursor;
+  the first run starts at the current head rather than replaying history,
+  with the backfill statement documented. Body and headers are unchanged;
+  at-least-once is the contract and receivers de-duplicate on the row id.
+  `GET /api/v1/admin/audit-forwarder` reads the cursor state for an instance
+  admin. `z4j_audit_forward_lag_rows` reports the lag in rows and
+  `z4j_audit_forward_failures_total{reason}` the failures.
+  `Z4J_AUDIT_WEBHOOK_BUFFER_SIZE` is inert and still accepted.
+
+- Add source-address allowlists on every surface. `Z4J_DASHBOARD_IP_ALLOWLIST`
+  covers session-cookie requests, the login route and the dashboard
+  WebSocket (which closes 4401 without touching the session);
+  `Z4J_API_IP_ALLOWLIST` covers bearer requests; `Z4J_AGENT_IP_ALLOWLIST`
+  covers the agent WebSocket (checked after accept and before the bearer is
+  read, close 4403) and both long-poll routes (checked right after the
+  bearer, so a bad bearer is still a 401). An API key may carry its own
+  `allowed_cidrs` that applies on top of the API list: a new `api_keys`
+  column, a create field, `PATCH /api/v1/api-keys/{key_id}` under CSRF and
+  fresh MFA (an `api_key.updated` row), and a dashboard input and column.
+  IPv4 and IPv6 CIDRs are validated at settings construction and evaluated
+  after the trusted-proxy resolution of the client address, which now also
+  keys the agent connect bucket; an empty list means no restriction and
+  loopback is never implicitly exempt. Every denial answers 403 `ip_denied`
+  with the same body, writes an `auth.ip_denied` row on its own write session
+  and increments `z4j_auth_ip_denied_total{surface}`.
+
+- Encrypt notification channel configs at rest. Both config columns use an
+  `EncryptedJSON` type: canonical JSON under AES-256-GCM with a key derived
+  from `Z4J_SECRET` and a per-column purpose string, a random nonce per
+  write, the purpose as associated data, stored as versioned base64 text.
+  Decrypt tries the current master then each entry of
+  `Z4J_PREVIOUS_SECRETS`, and a row that decrypts only under a previous
+  secret is re-wrapped on its next write. Column names are unchanged, so the
+  API and dashboard do not move. The keyring binds from settings at startup
+  and fails closed when unbound.
+
+- Add `z4j secrets rewrap` (`--dry-run` to report only). It walks both
+  config columns and the stored TOTP secrets, reports scanned, current,
+  re-wrapped and undecryptable rows, writes a `secrets.rewrap` row, and is
+  the documented step that makes dropping a value from
+  `Z4J_PREVIOUS_SECRETS` safe; the rotation runbook is rewritten around it.
+
+- Honour `Z4J_REDACTION_EXTRA_KEY_PATTERNS` on ingest, validated at settings
+  construction.
+
+- Archiving a project disconnects its agents and refuses them until
+  reactivation. The hello path reads the project flag with the bearer and
+  refuses an inactive project with close 4401 and an
+  `agent.auth.project_inactive` row; the post-register recheck covers an
+  archive committed mid-handshake and closes 4003. Archiving publishes a
+  project-wide kick through the registry: the local backend closes every
+  socket of that project, the PostgreSQL backend closes its own and sends
+  one NOTIFY with a project payload the other replicas act on. The long-poll
+  probe, fetch, upload and the mid-wait recheck answer 403
+  `project_inactive`. Reactivation needs nothing special.
+
+- Five migrations, in chain order from `v1_11_audit_append_tally`:
+  `v1_12_api_key_allowed_cidrs` (additive, bidirectional; the 1.3 shape of
+  `api_keys` is frozen in the initial revision so older heads keep their
+  digests), `v1_12_audit_forward_state` (additive, bidirectional),
+  `v1_12_channel_config_encrypted` (converts both config columns to
+  text and encrypts existing rows in batches, idempotent by prefix; needs
+  `Z4J_SECRET` at migration time; the downgrade decrypts every row first and
+  refuses, naming the row, when none of the listed secrets can),
+  `v1_12_export_jobs_sink` (adds `sink`, `size_bytes` and `started_at`),
+  and `v1_12_auditor_role` (adds the value to the native PostgreSQL enum
+  `project_role`; the downgrade refuses while any membership holds the
+  role).
+
+- New settings: `Z4J_AUDIT_RETENTION_BY_CLASS`,
+  `Z4J_REDACTION_EXTRA_KEY_PATTERNS`, `Z4J_AUDIT_WEBHOOK_BATCH_SIZE`,
+  `Z4J_AUDIT_WEBHOOK_POLL_INTERVAL_SECONDS`,
+  `Z4J_AUDIT_WEBHOOK_MAX_BACKOFF_SECONDS`, `Z4J_EXPORT_SINK`,
+  `Z4J_EXPORT_SINK_PATH`, `Z4J_EXPORT_SINK_S3_BUCKET`,
+  `Z4J_EXPORT_SINK_S3_PREFIX`, `Z4J_EXPORT_SINK_S3_ENDPOINT_URL`,
+  `Z4J_EXPORT_SINK_S3_REGION`, `Z4J_EXPORT_SINK_S3_ACCESS_KEY_ID`,
+  `Z4J_EXPORT_SINK_S3_SECRET_ACCESS_KEY`,
+  `Z4J_EXPORT_JOBS_POLL_INTERVAL_SECONDS`, `Z4J_EXPORT_JOBS_PAGE_SIZE`,
+  `Z4J_AUDIT_HEAD_EXPORT_INTERVAL_SECONDS`, `Z4J_DASHBOARD_IP_ALLOWLIST`,
+  `Z4J_API_IP_ALLOWLIST` and `Z4J_AGENT_IP_ALLOWLIST`. The leader-gated
+  worker names grow by `audit_forwarder_worker` and `export_jobs_worker`.
+
+- New CLI commands: `z4j audit prune` and `z4j secrets rewrap`.
+
+- New audit actions: `agent.auth.project_inactive`, `api_key.updated`,
+  `audit.export` (the synchronous export), `audit.export_job.created`,
+  `audit.export_job.completed`, `audit.export_job.failed`, `audit.prune`,
+  `auth.ip_denied`, `command.issue.dlq.list`, `dead_letters.list` and
+  `secrets.rewrap`.
+
+- New metrics: `z4j_auth_ip_denied_total{surface}`,
+  `z4j_audit_forward_lag_rows` and `z4j_audit_forward_failures_total{reason}`.
+
+Fixed before publication, from the release audit:
+
+- The activity feed returned raw audit rows to every project member; a
+  project's rows now require the audit-read action, while instance admins
+  and a caller's own user-scoped rows are unchanged.
+- Both long-poll routes evaluated the agent allowlist after the bearer and
+  the archive check; they now refuse before the bearer, like the WebSocket
+  gateway, and the long-poll archive refusal writes the same
+  `agent.auth.project_inactive` row the gateway writes.
+- The dead-letter listing draws on the bulk-action throttle bucket, and its
+  422 maps on the core's exact cursor error. The synchronous audit export
+  writes an `audit.export` row.
+- Every per-IP throttle's 429 carries a `Retry-After` header with the same
+  whole-second wait the body names.
+- The export-job download resolved a stored absolute path lexically, so a
+  path written into `export_jobs` from outside the brain turned the project
+  download into an arbitrary file read as the brain user; local jobs now
+  store the sink-relative key, base and target resolve strictly with the
+  target inside the base, and the file is opened without following links.
+- Hard prune re-checks every active row under the chain locks before the
+  reset and refuses by name; a completion that lost its compare-and-set
+  discards its object instead of appending a row; a held SQLite writer is a
+  refusal, not a traceback.
+- The channel-config, export-jobs and auditor-role revisions declare a
+  downgrade preflight that `env.py` evaluates before the first step, so a
+  rollback across all three refuses whole instead of after two steps have
+  committed.
+- Zone-scoped IPv6 entries are refused in every allowlist,
+  `Z4J_TRUSTED_PROXIES` is validated at settings construction with a catch-all
+  range named in a startup warning, and the task export refuses past its cap
+  with the narrowing hint instead of dropping rows.
+- `z4j misfires` exits 2 on an unreachable database; `z4j changepassword
+  --password-stdin` prompts without echo on a terminal; `z4j migrate
+  prepare-runtime-rollback --help` prints without any environment; `migrate`
+  and `status` report an interrupted restore's fence by name; every
+  management command binds the secret keyring, so `restore`, `reset`,
+  `check`, `doctor` and `status` decrypt the encrypted channel configs.
+- `aiobotocore` is capped at `<4` instead of `<3`, the `sentry`, `s3` and
+  `test-integration` extras floor `urllib3>=2.8.0`, the image installs the
+  `s3` extra because the installer is removed from the final stage, and
+  `versions.json` ships at the sdist root.
+- The Security and CI workflows no longer pass `--ignore-unfixed` to Trivy's
+  filesystem scan and point it at `.trivyignore.yaml`, so the dated
+  exceptions are read and an unfixed HIGH or CRITICAL is a finding again.
+- The HTTP client loggers sit at WARNING and any outbound request line is
+  reduced to scheme and host, so webhook and bot-token paths never reach the
+  log; the S3 endpoint refuses embedded userinfo and URL-valued settings render
+  without it; `z4j status` hides a query-string password; export-job failures
+  record fixed phrases.
+- Refusal rows (denied address, failed bearer, archived project) are written
+  once per address or agent per ten minutes on both agent transports;
+  `z4j secrets rewrap` refuses below the revision that encrypts the channel
+  columns; the CIDR-column revision declares the downgrade preflight.
+- Catastrophic `Z4J_REDACTION_EXTRA_KEY_PATTERNS` entries are refused at
+  construction and long keys never reach a pattern.
+- Dashboard: demo audit routing anchored, project settings gated on the admin
+  capability, the activity page explains its scope, validation errors name
+  their field; `POST /users` accepts the emails setup accepts; the bad-cursor
+  refusal carries `invalid_cursor`.
+- A multi-worker PostgreSQL brain waits for a sibling's startup verification
+  walk under its own budget (`Z4J_STARTUP_VERIFY_LOCK_TIMEOUT_MS`) instead of
+  dying on the request lock timeout; the PostgreSQL timeouts are set outside
+  the adapter's transaction so a rollback keeps them; an in-process migration
+  leaves the existing loggers enabled.
+
 ## 1.11.0 (2026-09-10)
 
 - Require `aiosmtplib>=5.1.3` for email delivery. This excludes STARTTLS

@@ -1,4 +1,4 @@
-"""Embedded scheduler sidecar (docs/SCHEDULER.md §21.3).
+"""Embedded scheduler sidecar (docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §21.3).
 
 When ``Z4J_EMBEDDED_SCHEDULER=true`` the brain image starts a
 ``z4j-scheduler serve`` subprocess in its own lifespan. The

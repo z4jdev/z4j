@@ -1,0 +1,28 @@
+{{- if and .Values.scheduler.enabled .Values.scheduler.tls.certManager.enabled -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "z4j-scheduler.fullname" . }}
+  labels:
+    {{- include "z4j-scheduler.labels" . | nindent 4 }}
+spec:
+  # cert-manager writes the resulting cert + key + ca.crt into the same
+  # Secret name resolved by the deployment, so swapping between
+  # ``existingSecret`` and ``certManager`` modes is a values-only change.
+  secretName: {{ include "z4j-scheduler.tlsSecretName" . }}
+  duration: {{ .Values.scheduler.tls.certManager.duration }}
+  renewBefore: {{ .Values.scheduler.tls.certManager.renewBefore }}
+  commonName: {{ .Values.scheduler.tls.certManager.commonName | quote }}
+  dnsNames:
+    {{- toYaml .Values.scheduler.tls.certManager.dnsNames | nindent 4 }}
+  # Client cert: the brain validates it when it accepts an inbound
+  # connection from the scheduler. clientAuth is the EKU that gates this;
+  # the issuer must be configured to allow it.
+  usages:
+    - digital signature
+    - key encipherment
+    - client auth
+  issuerRef:
+    kind: {{ .Values.scheduler.tls.certManager.issuerKind }}
+    name: {{ .Values.scheduler.tls.certManager.issuerName }}
+{{- end }}

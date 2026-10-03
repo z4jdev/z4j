@@ -245,6 +245,9 @@ function MembersPage() {
                       <SelectContent>
                         <SelectItem value="admin">admin</SelectItem>
                         <SelectItem value="operator">operator</SelectItem>
+                        <SelectItem value="auditor" disabled={isLastAdmin}>
+                          auditor
+                        </SelectItem>
                         <SelectItem value="viewer" disabled={isLastAdmin}>
                           viewer
                         </SelectItem>

@@ -11,7 +11,7 @@
 # build an older published z4j when invoked from a release artifact.
 #
 # Runtime contents are equivalent to:
-#   uv pip install "/build/source[postgres,scheduler-grpc]" z4j-core z4j-scheduler
+#   uv pip install "/build/source[postgres,s3,scheduler-grpc]" z4j-core z4j-scheduler
 #   z4j serve
 #
 # Built by .github/workflows/publish-docker.yml, dispatched after the wave is
@@ -72,7 +72,7 @@ LABEL org.opencontainers.image.title="z4j" \
       org.opencontainers.image.version="${Z4J_RESOLVED_VERSION}" \
       org.opencontainers.image.source="https://github.com/z4jdev/z4j" \
       org.opencontainers.image.url="https://pypi.org/project/z4j/" \
-      org.opencontainers.image.documentation="https://z4j.dev" \
+      org.opencontainers.image.documentation="https://docs.z4j.com" \
       org.opencontainers.image.vendor="z4j contributors" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
 
@@ -156,9 +156,12 @@ RUN set -eux; \
     # silently reach for the network.
     test -f /build/source/docker/vendor/z4j-core/pyproject.toml; \
     test -f /build/source/docker/vendor/z4j-scheduler/pyproject.toml; \
+    # [s3] is the aiobotocore export sink (Z4J_EXPORT_SINK=s3), pure Python.
+    # It has to be installed here: the installer is removed below, so an
+    # operator cannot add an extra to the running image.
     uv pip install --system --no-cache \
         "/build/source/docker/vendor/z4j-core" \
-        "/build/source[postgres,scheduler-grpc]" \
+        "/build/source[postgres,s3,scheduler-grpc]" \
         "/build/source/docker/vendor/z4j-scheduler"; \
     uv pip check --system; \
     # grpcio-tools is the protoc toolchain, needed only to regenerate the

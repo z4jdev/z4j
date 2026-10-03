@@ -1,0 +1,115 @@
+Thanks for installing {{ .Chart.Name }} {{ .Chart.AppVersion }}.
+{{- if .Values.brain.enabled }}
+
+Brain:
+
+    kubectl --namespace {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+    kubectl --namespace {{ .Release.Namespace }} logs deployment/{{ include "z4j.fullname" . }} --tail=100
+
+On first boot the brain prints a one-time setup URL in its log; open it to
+create the admin user. Reach the dashboard from your laptop with:
+
+    kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "z4j.fullname" . }} {{ .Values.brain.service.httpPort }}:{{ .Values.brain.service.httpPort }}
+    open {{ .Values.brain.publicUrl }}
+{{- if not .Values.brain.ingress.enabled }}
+
+No Ingress is rendered. For anything beyond port-forward, enable
+brain.ingress (WebSocket upgrades on /ws need long proxy timeouts), set
+brain.publicUrl to the https:// origin, brain.allowedHosts to its hostname
+and brain.allowHttpPublicUrl to false.
+{{- end }}
+{{- if (include "z4j.brain.usesSqlite" .) }}
+
+Database: bundled SQLite under /data on the release's PersistentVolumeClaim.
+This is the evaluation posture; configure PostgreSQL before relying on it.
+{{- else if .Values.postgresql.enabled }}
+
+Database: the bundled single-instance PostgreSQL StatefulSet. It has no
+replication and no backups; take `z4j backup` snapshots, and move to a
+managed PostgreSQL or an operator for production.
+{{- end }}
+{{- if .Values.brain.persistence.fixPermissions.enabled }}
+
+/data ownership: the fix-data-permissions init container (root, CHOWN and
+FOWNER only) gives /data to uid {{ .Values.brain.podSecurityContext.runAsUser | default 10001 }} with mode 0700 before the
+brain starts; it needs the PodSecurity baseline profile on the namespace.
+Disable it with brain.persistence.fixPermissions.enabled=false and set the
+ownership by hand (README, "Volume ownership").
+{{- else }}
+
+/data ownership: brain.persistence.fixPermissions is off. The brain refuses
+/data unless uid {{ .Values.brain.podSecurityContext.runAsUser | default 10001 }} owns it with mode 0700; set that by hand
+before the first start (README, "Volume ownership").
+{{- end }}
+{{- if .Values.brain.embeddedScheduler }}
+
+Scheduler: embedded subprocess inside the brain pod (loopback PKI, auto-minted).
+{{- end }}
+{{- end }}
+{{- if .Values.scheduler.enabled }}
+
+Scheduler:
+
+    kubectl --namespace {{ .Release.Namespace }} get pods -l app.kubernetes.io/component=scheduler,app.kubernetes.io/instance={{ .Release.Name }}
+    kubectl --namespace {{ .Release.Namespace }} logs -l app.kubernetes.io/component=scheduler,app.kubernetes.io/instance={{ .Release.Name }} --tail=50
+
+Operational HTTP endpoints inside the cluster:
+
+    http://{{ include "z4j-scheduler.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.scheduler.service.httpPort }}/info
+    http://{{ include "z4j-scheduler.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.scheduler.service.httpPort }}/health
+    http://{{ include "z4j-scheduler.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.scheduler.service.httpPort }}/ready
+
+To port-forward and view /info from your laptop:
+
+    kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "z4j-scheduler.fullname" . }} {{ .Values.scheduler.service.httpPort }}:{{ .Values.scheduler.service.httpPort }}
+    curl http://localhost:{{ .Values.scheduler.service.httpPort }}/info
+{{- if .Values.scheduler.tls.certManager.enabled }}
+
+cert-manager mode: a Certificate resource has been rendered. Verify it is
+Ready before the scheduler pods will succeed:
+
+    kubectl --namespace {{ .Release.Namespace }} get certificate {{ include "z4j-scheduler.fullname" . }}
+{{- end }}
+{{- if .Values.pki.mintJob.enabled }}
+
+PKI: the hook Job keeps one CA, the brain's gRPC server leaf and the
+scheduler's client leaf in two Secrets that Helm does not manage:
+
+    kubectl --namespace {{ .Release.Namespace }} get secret {{ include "z4j.brain.schedulerGrpcTlsSecretName" . }} {{ include "z4j-scheduler.tlsSecretName" . }}
+    kubectl --namespace {{ .Release.Namespace }} logs job/{{ include "z4j.fullname" . }}-pki-mint
+
+It mints again on an upgrade when a certificate is within
+{{ .Values.pki.mintJob.renewDays }} days of expiry, when the names changed,
+or when pki.mintJob.force is set. A line saying RENEWED means the running
+pods still hold the previous files: upgrade again with a new
+rolloutRevision before the old certificates expire.
+{{- end }}
+{{- if eq .Values.scheduler.leader.backend "single" }}
+
+scheduler.leader.backend is "single": this pod is always leader. The chart
+permits that backend only with replicaCount=1. For failover use a
+PostgreSQL backend and supply scheduler.leader.databaseUrl (or
+scheduler.leader.existingSecret).
+{{- end }}
+{{- if and (not .Values.scheduler.tls.existingSecret) (not .Values.scheduler.tls.certManager.enabled) (not .Values.pki.mintJob.enabled) }}
+
+WARNING: scheduler TLS material is sourced from values (scheduler.tls.inline).
+This is for DEV / HOMELAB use only: the PEMs land in the Helm release
+object in plaintext and any operator with `helm get` access can read them.
+For production use scheduler.tls.existingSecret, cert-manager or pki.mintJob.
+{{- end }}
+{{- end }}
+{{- if or .Values.brain.secrets.existingSecret .Values.brain.database.existingSecret .Values.scheduler.tls.existingSecret .Values.scheduler.tls.certManager.enabled .Values.pki.mintJob.enabled .Values.scheduler.leader.existingSecret .Values.scheduler.config.metricsAuthExistingSecret }}
+
+External Secret rotation is explicit. Secret-backed environment variables are
+captured at pod start, and z4j-scheduler reads mTLS files once when it creates
+the gRPC channel. After an application-secret, database, TLS, leader-DSN or
+metrics-token Secret is renewed, either restart the affected Deployment:
+
+    kubectl --namespace {{ .Release.Namespace }} rollout restart deployment/{{ include "z4j.fullname" . }}
+    kubectl --namespace {{ .Release.Namespace }} rollout status deployment/{{ include "z4j.fullname" . }}
+
+or run a Helm upgrade with a new rolloutRevision value, which rolls every
+Deployment in the release. cert-manager renewal, a PKI Job renewal and
+in-place Secret updates do not roll these pods by themselves.
+{{- end }}

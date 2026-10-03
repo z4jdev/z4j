@@ -1,0 +1,315 @@
+# z4j brain - plain Kubernetes manifest (no Helm).
+#
+# A reference deployment with values inlined for clarity. It is not ready to
+# apply unchanged: create the referenced Secret and edit every ``CHANGE ME``
+# value first. The Helm chart in ../helm/z4j renders the same objects with
+# fail-fast validation that plain YAML cannot provide; prefer it.
+#
+# Edit the placeholders marked ``# CHANGE ME`` before applying:
+#
+# 1. The public origin, the allowed hosts and the trusted proxy CIDR.
+# 2. The ``z4j-secrets`` Secret: app-secret, session-secret and
+#    audit-chain-secret (each ``openssl rand -hex 48``) plus database-url, a
+#    ``postgresql+asyncpg://`` URL carrying sslmode=require, verify-ca or
+#    verify-full. Without PostgreSQL the brain runs bundled SQLite on the
+#    claim below and mints its own secrets: then delete the four Secret env
+#    entries and set Z4J_REGISTRY_BACKEND to "local".
+# 3. The image tag (pin its digest if you can).
+# 4. An Ingress per your controller; WebSocket upgrades on /ws need long
+#    proxy timeouts (for nginx-ingress, proxy-read-timeout and
+#    proxy-send-timeout of "3600").
+# 5. For the standalone scheduler, uncomment the gRPC listener block in the
+#    ConfigMap, the grpc port, and the TLS volume, create the
+#    z4j-scheduler-grpc-tls Secret (server leaf tls.crt + tls.key, client CA
+#    ca.crt), then apply z4j-scheduler.yaml.
+#
+# Strategy is Recreate on purpose: the brain migrates the database on boot,
+# and Kubernetes rounds maxSurge up, so a rolling update would run the new
+# migration while the old process still writes.
+#
+# The fix-data-permissions init container is the one root step; its comment
+# says why fsGroup alone cannot make /data acceptable to the brain. Under
+# the PodSecurity "restricted" profile delete it, set the claim's directory
+# to 10001:10001 mode 0700 once by hand, and clear fsGroup when your storage
+# driver applies it on mount.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: z4j-brain
+  namespace: z4j
+  labels:
+    app.kubernetes.io/name: z4j-brain
+    app.kubernetes.io/component: brain
+    app.kubernetes.io/part-of: z4j
+# The brain does not call the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: z4j-brain
+  namespace: z4j
+  labels:
+    app.kubernetes.io/name: z4j-brain
+    app.kubernetes.io/component: brain
+    app.kubernetes.io/part-of: z4j
+data:
+  Z4J_HOME: /data
+  Z4J_BIND_HOST: "0.0.0.0"
+  Z4J_BIND_PORT: "7700"
+  # Load-bearing: anything but the exact string "dev" keeps every startup
+  # invariant (allowed hosts, https public URL, explicit audit-chain key).
+  Z4J_ENVIRONMENT: "production"
+  # --- public origin (CHANGE ME) ---
+  Z4J_PUBLIC_URL: "https://z4j.example.com"
+  Z4J_ALLOWED_HOSTS: '["z4j.example.com"]'
+  # CHANGE ME - the ingress controller's CIDR, so X-Forwarded-For is honored
+  # and clients are rate-limited and audited by their own address.
+  Z4J_TRUSTED_PROXIES: '["10.0.0.0/8"]'
+  # --- observability ---
+  Z4J_LOG_LEVEL: "INFO"
+  Z4J_LOG_JSON: "true"
+  # --- retention ---
+  Z4J_EVENT_RETENTION_DAYS: "30"
+  Z4J_AUDIT_RETENTION_DAYS: "90"
+  # --- database posture (PostgreSQL) ---
+  Z4J_REGISTRY_BACKEND: "postgres_notify"
+  Z4J_REQUIRE_DB_SSL: "true"
+  # --- standalone scheduler listener (uncomment with step 5) ---
+  # Z4J_SCHEDULER_GRPC_ENABLED: "true"
+  # Z4J_SCHEDULER_GRPC_BIND_HOST: "0.0.0.0"
+  # Z4J_SCHEDULER_GRPC_BIND_PORT: "7701"
+  # Z4J_SCHEDULER_GRPC_TLS_CERT: /etc/z4j/scheduler-grpc-tls/tls.crt
+  # Z4J_SCHEDULER_GRPC_TLS_KEY: /etc/z4j/scheduler-grpc-tls/tls.key
+  # Z4J_SCHEDULER_GRPC_TLS_CA: /etc/z4j/scheduler-grpc-tls/ca.crt
+  # Z4J_SCHEDULER_GRPC_ALLOWED_CNS: '["scheduler-1"]'
+  # Z4J_SCHEDULER_GRPC_REQUIRE_ALLOWLIST: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: z4j-brain-data
+  namespace: z4j
+  labels:
+    app.kubernetes.io/name: z4j-brain
+    app.kubernetes.io/component: brain
+    app.kubernetes.io/part-of: z4j
+spec:
+  # Z4J_HOME. Owner-private state (generated secrets, restore-recovery and
+  # activation manifests, allowed hosts, embedded PKI, SQLite when no
+  # PostgreSQL is configured). ReadWriteOnce is enough under Recreate.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: z4j-brain
+  namespace: z4j
+  labels:
+    app.kubernetes.io/name: z4j-brain
+    app.kubernetes.io/component: brain
+    app.kubernetes.io/part-of: z4j
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 7700
+      targetPort: http
+      protocol: TCP
+    # - name: grpc
+    #   port: 7701
+    #   targetPort: grpc
+    #   protocol: TCP
+  selector:
+    app.kubernetes.io/name: z4j-brain
+    app.kubernetes.io/instance: z4j-brain
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: z4j-brain
+  namespace: z4j
+  labels:
+    app.kubernetes.io/name: z4j-brain
+    app.kubernetes.io/instance: z4j-brain
+    app.kubernetes.io/component: brain
+    app.kubernetes.io/part-of: z4j
+spec:
+  # One replica. More requires sticky session routing for /ws on your
+  # ingress or load balancer; each agent's WebSocket pins to one brain pod.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: z4j-brain
+      app.kubernetes.io/instance: z4j-brain
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: z4j-brain
+        app.kubernetes.io/instance: z4j-brain
+    spec:
+      serviceAccountName: z4j-brain
+      # The image runs as uid/gid 10001 (user ``z4j``). fsGroup gives the
+      # data claim its group; the init container below gives it its owner.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # fsGroup is not enough for /data. The brain's secret store refuses a
+      # directory that uid 10001 does not own or that carries any group or
+      # world permission bit, and fsGroup changes only the group (plus group
+      # bits) of the freshly provisioned root:root directory, so the brain
+      # would exit with "secret-store directory is not owned by the current
+      # uid: /data" and a standalone scheduler would crash-loop on the
+      # refused connection. This is the one root step in the manifest: the
+      # same image, only CHOWN and FOWNER, no change when the owner and the
+      # mode are already right. It runs on every pod start because a
+      # storage driver that applies fsGroup on mount re-adds the group bits
+      # each time. It needs the PodSecurity "baseline" profile or an
+      # exemption; under "restricted" delete it and set the ownership once
+      # by hand (chown 10001:10001 and chmod 0700 on the claim's directory),
+      # clearing fsGroup above when the driver applies it on mount.
+      initContainers:
+        - name: fix-data-permissions
+          # CHANGE ME - keep this the same tag as the brain container.
+          image: "z4jdev/z4j:1.12.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+            seccompProfile:
+              type: RuntimeDefault
+          # Replaces the image entry point (tini -- z4j) for this one step.
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              dir=/data; uid=10001; gid=10001
+              if [ "$(stat -c %u:%g "$dir")" != "$uid:$gid" ]; then chown "$uid:$gid" "$dir"; fi
+              if [ "$(stat -c %a "$dir")" != "700" ]; then chmod 0700 "$dir"; fi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+      containers:
+        - name: brain
+          # CHANGE ME - pin this release tag to a digest before production
+          # rollout if possible.
+          image: "z4jdev/z4j:1.12.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # The image entry point is ``tini -- z4j``; ``serve`` is its
+          # default command, restated so the intent is visible.
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: 7700
+              protocol: TCP
+            # - name: grpc
+            #   containerPort: 7701
+            #   protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: z4j-brain
+          env:
+            # CHANGE ME - create the Secret first, e.g.
+            #   kubectl -n z4j create secret generic z4j-secrets \
+            #     --from-literal=app-secret=$(openssl rand -hex 48) \
+            #     --from-literal=session-secret=$(openssl rand -hex 48) \
+            #     --from-literal=audit-chain-secret=$(openssl rand -hex 48) \
+            #     --from-literal=database-url='postgresql+asyncpg://z4j:PASSWORD@db.internal:5432/z4j?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt'
+            - name: Z4J_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: z4j-secrets
+                  key: app-secret
+            - name: Z4J_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: z4j-secrets
+                  key: session-secret
+            - name: Z4J_AUDIT_CHAIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: z4j-secrets
+                  key: audit-chain-secret
+            # The URL must carry exactly one sslmode set to require,
+            # verify-ca or verify-full (the verify modes also need
+            # sslrootcert). Only Z4J_REQUIRE_DB_SSL=false, for a database on
+            # a private network, relaxes that.
+            - name: Z4J_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: z4j-secrets
+                  key: database-url
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            # - name: scheduler-grpc-tls
+            #   mountPath: /etc/z4j/scheduler-grpc-tls
+            #   readOnly: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          # Boot runs Alembic to head; the startup probe gives a long
+          # migration time without the liveness probe killing it.
+          startupProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: z4j-brain-data
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+        # - name: scheduler-grpc-tls
+        #   secret:
+        #     secretName: z4j-scheduler-grpc-tls

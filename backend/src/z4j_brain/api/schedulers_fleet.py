@@ -1,6 +1,6 @@
 """``GET /api/v1/schedulers`` - fleet overview for the dashboard.
 
-docs/SCHEDULER.md §13.1: *"the dashboard's Schedulers page, which
+docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §13.1: *"the dashboard's Schedulers page, which
 can poll across all enrolled scheduler instances to render a
 per-instance status grid."*
 

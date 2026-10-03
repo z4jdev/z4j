@@ -1,0 +1,1 @@
+import{t as e}from"./createLucideIcon-Ye6m-t9q.js";var t={name:`mail-x`,size:24,node:[[`path`,{d:`M22 12.532V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8.792`,key:`8lpqwp`}],[`path`,{d:`m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7`,key:`132q7q`}],[`path`,{d:`m16.5 16.5 5 5`,key:`zc9lw7`}],[`path`,{d:`m21.5 16.5-5 5`,key:`1empo3`}]]};t.node;var n=e(t);export{n as t};

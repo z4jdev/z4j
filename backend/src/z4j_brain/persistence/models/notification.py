@@ -57,7 +57,13 @@ from sqlalchemy.types import Uuid
 
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models._mixins import PKMixin, TimestampsMixin
-from z4j_brain.persistence.types import jsonb, uuid_array
+from z4j_brain.persistence.types import (
+    NOTIFICATION_CHANNEL_CONFIG_PURPOSE,
+    USER_CHANNEL_CONFIG_PURPOSE,
+    EncryptedJSON,
+    jsonb,
+    uuid_array,
+)
 
 # ---------------------------------------------------------------------------
 # Type vocabularies (kept as plain string constants - matches the rest of
@@ -142,8 +148,10 @@ class NotificationChannel(PKMixin, TimestampsMixin, Base):
         project_id: Owning project.
         name: Human-readable label (e.g. "Ops Slack #alerts").
         type: One of webhook/email/slack/telegram.
-        config: JSON blob with channel-specific settings.
-            See :mod:`z4j_brain.domain.notifications.channels` for shapes.
+        config: Channel-specific settings, a dict in Python. Stored
+            encrypted at rest (``EncryptedJSON``) because it carries the
+            channel's credentials; see
+            :mod:`z4j_brain.domain.notifications.channels` for shapes.
         is_active: Soft toggle. Disabled channels are skipped
             during dispatch but kept for audit references.
     """
@@ -157,7 +165,11 @@ class NotificationChannel(PKMixin, TimestampsMixin, Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     type: Mapped[str] = mapped_column(String(20), nullable=False)
-    config: Mapped[dict] = mapped_column(jsonb(), nullable=False, default=dict)
+    config: Mapped[dict] = mapped_column(
+        EncryptedJSON(NOTIFICATION_CHANNEL_CONFIG_PURPOSE),
+        nullable=False,
+        default=dict,
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
@@ -179,7 +191,9 @@ class UserChannel(PKMixin, TimestampsMixin, Base):
         name: Human-readable label (e.g. "My Telegram", "Work Email").
         type: One of webhook/email/slack/telegram - same vocabulary
             as project channels.
-        config: JSON blob with channel-specific settings.
+        config: Channel-specific settings, a dict in Python, stored
+            encrypted at rest (``EncryptedJSON``) like the project
+            channel's.
         is_verified: Future use - set when the user proves they
             actually own the destination (e.g., they replied to
             a confirmation email). Phase 1 ignores this.
@@ -196,7 +210,11 @@ class UserChannel(PKMixin, TimestampsMixin, Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     type: Mapped[str] = mapped_column(String(20), nullable=False)
-    config: Mapped[dict] = mapped_column(jsonb(), nullable=False, default=dict)
+    config: Mapped[dict] = mapped_column(
+        EncryptedJSON(USER_CHANNEL_CONFIG_PURPOSE),
+        nullable=False,
+        default=dict,
+    )
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 

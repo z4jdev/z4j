@@ -176,10 +176,15 @@ class TestEndpointStripsServerOwnedKeys:
             "It must fail closed for celery/dramatiq too, else a foreign id "
             "labeled engine=celery skips the project-scoped ownership check."
         )
-        assert "filter_engine not in KNOWN_ENGINES" in src, (
+        assert "engine_name_error(filter_engine) is not None" in src, (
             "H4 regression: a bulk retry with task_ids must reject a missing "
-            "or unknown engine (an omitted engine previously skipped the "
+            "or malformed engine (an omitted engine previously skipped the "
             "ownership lookup entirely)."
+        )
+        assert 'dispatch_requirement=(str(enriched_filter["engine"]), "bulk_retry")' in src, (
+            "W1-16 regression: the target agent's session must advertise "
+            "bulk_retry for the filter engine; the capability rule replaced "
+            "the engine allowlist and must stay on the explicit-ids path."
         )
         assert "HTTPException" in src and "status_code=400" in src, (
             " regression: the partial-resolution guard must raise "

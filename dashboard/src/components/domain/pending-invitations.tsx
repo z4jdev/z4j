@@ -25,10 +25,17 @@ import {
   useRevokeInvitation,
   type InvitationPublic,
 } from "@/hooks/use-invitations";
+import { useCan } from "@/hooks/use-memberships";
 import { ApiError } from "@/lib/api";
 
 export function PendingInvitations({ slug }: { slug: string }) {
-  const { data: pending, isLoading } = useInvitations(slug);
+  // The brain refuses the invitations list below the admin role, so a
+  // role that cannot manage invitations neither asks for it nor renders
+  // the block: an empty table would read as "no invitations pending".
+  const canManage = useCan(slug, "manage_invitations");
+  const { data: pending, isLoading } = useInvitations(
+    canManage ? slug : undefined,
+  );
   const { confirm, dialog } = useConfirm();
   const revoke = useRevokeInvitation(slug);
 
@@ -59,7 +66,7 @@ export function PendingInvitations({ slug }: { slug: string }) {
     });
   };
 
-  if (isLoading) return null;
+  if (!canManage || isLoading) return null;
   if (!pending || pending.length === 0) return null;
 
   return (

@@ -3,7 +3,7 @@
 This is the policy published with the standalone `z4j` brain repository. It
 mirrors the canonical root `SECURITY.md` in the release source; the detailed
 product threat model is published at
-[z4j.dev](https://z4j.dev/security/threat-model/).
+[docs.z4j.com](https://docs.z4j.com/security/threat-model/).
 
 ## Reporting a vulnerability
 
@@ -36,9 +36,9 @@ backported to the previous minor when operators cannot upgrade promptly.
 
 | Version line | Receives security fixes |
 |---|---|
-| 1.9.x | Yes (current) |
-| 1.8.x | Critical only |
-| < 1.8.x | No (please upgrade) |
+| 1.12.x | Yes (current) |
+| 1.11.x | Critical only |
+| < 1.11.x | No (please upgrade) |
 
 ## Known limitation: database writers can defeat both database guards
 
@@ -61,7 +61,9 @@ the z4j schema as equivalent to control of these integrity guarantees:
   to a durable append-only sink outside that database and verify with
   `z4j audit verify --known-head`.
 
-The built-in audit webhook is best-effort and is not such an append-only sink.
+The built-in audit webhook delivers from a durable cursor and drops nothing,
+but that cursor lives in the same database, so it is not such an append-only
+sink.
 Closing this needs authorization the database role cannot manufacture, which
 is a design change rather than a hardening pass. Two things have to be true
 before this entry comes off the list, and both are required, because a fix

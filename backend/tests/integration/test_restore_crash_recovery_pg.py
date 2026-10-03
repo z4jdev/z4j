@@ -52,19 +52,31 @@ from z4j_brain.backup import (
     restore_postgres,
     rollback_restore,
 )
+from z4j_brain.domain.secret_fields import (
+    NOTIFICATION_CHANNEL_CONFIG,
+    SecretKeyring,
+    bind_keyring,
+    bind_keyring_from_settings,
+    decrypt_json,
+)
 from z4j_brain.main import create_app
 from z4j_brain.management_restore import DatabaseRestorePending
 from z4j_brain.persistence.database import (
     DatabaseManager,
     create_engine_from_settings,
 )
-from z4j_brain.persistence.models import AuditLog, Project
+from z4j_brain.persistence.models import AuditLog, NotificationChannel, Project
 from z4j_brain.settings import Settings
 
 pytestmark = pytest.mark.asyncio
 
 #: The head an archive predating the authenticated audit boundary lands at.
 _LEGACY_ARCHIVE_HEAD = "v1_7_security_hardening"
+#: A channel config stored encrypted at rest in a release-head archive.
+_ARCHIVED_CHANNEL_CONFIG = {
+    "webhook_url": "https://hooks.slack.com/services/T0/B0/PGRESTORESLACK",
+    "channel": "#ops",
+}
 
 
 class _SimulatedPowerLoss(RuntimeError):  # noqa: N818  not an error, a crash
@@ -302,9 +314,32 @@ async def test_a_restore_that_committed_its_marker_is_not_run_a_second_time(
 
     database = DatabaseManager(migrated_engine)
     from_archive = f"kept-{uuid.uuid4().hex[:12]}"
+    archived_channel_id = uuid.uuid4()
+    # One encrypted channel row in the archive. The snapshot before the clear
+    # and the finalization after the load read this table through the ORM
+    # type, which decrypts config with the keyring the ceremony binds for
+    # itself; before that bind existed the restore failed here, after the
+    # target had been cleared and loaded. Written under the keyring the brain
+    # would bind, then unbound again: the ceremony runs in a process of its
+    # own and must not depend on what this one happened to have bound.
+    bind_keyring_from_settings(integration_settings)
     async with database.session(write=True) as session:
-        session.add(Project(id=uuid.uuid4(), slug=from_archive, name="in archive"))
+        project = Project(id=uuid.uuid4(), slug=from_archive, name="in archive")
+        session.add(project)
+        # The channel carries no mapped relationship to its project, so the
+        # unit of work cannot order the two inserts; flush the project first.
+        await session.flush()
+        session.add(
+            NotificationChannel(
+                id=archived_channel_id,
+                project_id=project.id,
+                name="ops",
+                type="slack",
+                config=dict(_ARCHIVED_CHANNEL_CONFIG),
+            ),
+        )
         await session.commit()
+    bind_keyring(None)
     archive = tmp_path / "restore-source.dump"
     await asyncio.to_thread(
         backup_postgres,
@@ -440,10 +475,21 @@ async def test_a_restore_that_committed_its_marker_is_not_run_a_second_time(
             slugs = set(
                 (await session.execute(select(Project.slug))).scalars().all(),
             )
+            archived_config = (
+                await session.execute(
+                    text("SELECT config FROM notification_channels WHERE id = :id"),
+                    {"id": archived_channel_id},
+                )
+            ).scalar_one()
     finally:
         await verify.dispose()
     assert from_archive in slugs
     assert not [slug for slug in slugs if slug.startswith("gone-")]
+    assert decrypt_json(
+        archived_config,
+        keyring=SecretKeyring.from_settings(integration_settings),
+        purpose=NOTIFICATION_CHANNEL_CONFIG,
+    ) == (_ARCHIVED_CHANNEL_CONFIG, False), "the archived channel came back encrypted and readable"
 
     # The property the operator lost: a database that admits connections.
     startable = create_engine_from_settings(integration_settings)

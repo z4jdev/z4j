@@ -17,7 +17,7 @@ from sqlalchemy.types import Uuid
 
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models._mixins import PKMixin, TimestampsMixin
-from z4j_brain.persistence.types import text_array
+from z4j_brain.persistence.types import jsonb, text_array
 
 
 class ApiKey(PKMixin, TimestampsMixin, Base):
@@ -92,6 +92,14 @@ class ApiKey(PKMixin, TimestampsMixin, Base):
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    # Optional per-key source-address allowlist: canonical CIDR strings
+    # (see ``domain.ip_allowlist.parse_cidr_list``). NULL or empty means
+    # no per-key restriction. Evaluated AFTER the global
+    # ``Z4J_API_IP_ALLOWLIST``; both must admit the request.
+    allowed_cidrs: Mapped[list[str] | None] = mapped_column(
+        jsonb(),
         nullable=True,
     )
 

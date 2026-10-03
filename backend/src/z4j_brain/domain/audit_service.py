@@ -279,6 +279,7 @@ def _build_forward_payload(row: Any) -> dict[str, Any]:
 
 
 if TYPE_CHECKING:
+    from z4j_brain.audit_retention import RetentionCutoffs
     from z4j_brain.persistence.models import AuditLog
     from z4j_brain.persistence.repositories import AuditLogRepository
     from z4j_brain.settings import Settings
@@ -601,6 +602,7 @@ class AuditService:
         repo: AuditLogRepository,
         *,
         metadata: dict[str, Any],
+        cutoffs: RetentionCutoffs | None = None,
     ) -> AuditLog:
         """Replace one verified generation with one signed reset genesis.
 
@@ -610,6 +612,15 @@ class AuditService:
         verified set, writes one visible generation-reset marker, and advances
         the authenticated singleton without changing the installation id or a
         retired-recovery binding.
+
+        ``cutoffs`` is what ``z4j audit prune --hard`` passes: the policy its
+        preview checked the generation against before taking its leases.
+        The preview ran outside this transaction, so a live brain may have
+        appended since. With the chain locks held, every active row is
+        checked against the cutoffs again, and one row younger than its
+        class's cutoff refuses the reset (nothing deleted, nothing written)
+        rather than being destroyed by an epoch cut that was never allowed
+        to remove a row the cutoff keeps.
         """
 
         from sqlalchemy import delete, select, text
@@ -725,6 +736,17 @@ class AuditService:
             if any(value is None for value in head_quartet) or head_quartet != prune_quartet:
                 raise AuditChainIntegrityError(
                     "empty active generation lacks an authenticated fully-pruned head",
+                )
+
+        if cutoffs is not None:
+            for row in active:
+                if cutoffs.expired(row.action, row.occurred_at):
+                    continue
+                when = normalize_timestamp(row.occurred_at).isoformat(timespec="seconds")
+                raise AuditChainIntegrityError(
+                    f"active audit row {row.id} ({row.action} at {when}) is younger "
+                    "than its cutoff: the generation changed after the preview, "
+                    "so the epoch cut would remove a row the cutoff keeps",
                 )
 
         deleted = await repo.session.execute(delete(AuditLog))

@@ -50,6 +50,7 @@ from z4j_brain.management_restore import (
     _PRE_TALLY_RELEASE_HEAD,
     _PREVIOUS_RELEASE_HEAD,
     _SQLITE_SOURCE_SCHEMA_DIGESTS,
+    _TALLY_RELEASE_HEAD,
     DatabaseRestoreRefused,
     _absent_directories,
     _attestation_envelope,
@@ -165,12 +166,19 @@ _PRE_TALLY_FUNCTION_SIGNATURES = frozenset(
         "z4j_schedules_notify()",
     },
 )
-_RELEASE_FUNCTION_SIGNATURES = _PRE_TALLY_FUNCTION_SIGNATURES | frozenset(
+_TALLY_FUNCTION_SIGNATURES = _PRE_TALLY_FUNCTION_SIGNATURES | frozenset(
     {"z4j_audit_tally_rows_v1()", "z4j_audit_protect_tally_v1()"},
 )
-_RELEASE_FUNCTION_DEFINITIONS_DIGEST = (
+_TALLY_FUNCTION_DEFINITIONS_DIGEST = (
     "07a621a92bc74736fd3f1e8ba5aa6a3521c412469de1c9145d443a3375d263bc"
 )
+# The 1.12 migrations add columns, one table and one enum label and neither
+# create nor alter a PostgreSQL function or trigger, so the release head
+# carries the 1.11 executable-function contract unchanged.  Both values were
+# re-measured at the 1.12 head on real servers of every supported major and
+# matched the 1.11 values, which is why they are shared rather than copied.
+_RELEASE_FUNCTION_SIGNATURES = _TALLY_FUNCTION_SIGNATURES
+_RELEASE_FUNCTION_DEFINITIONS_DIGEST = _TALLY_FUNCTION_DEFINITIONS_DIGEST
 _PRE_TALLY_FUNCTION_DEFINITIONS_DIGEST = (
     "46c33b9745272b9cf04b72f17476af102d2915d434d472d77f79c4bffc2745de"
 )
@@ -188,6 +196,15 @@ _LEGACY_FUNCTION_DEFINITIONS_DIGEST = (
 # inspected by matching-major client/server pairs.  A converted or cross-major
 # archive is not valid derivation evidence for this fail-closed map.
 _RELEASE_SCHEMA_DEFINITIONS_DIGESTS = {
+    16: "6ae5979f7513a62dc2d9e37bc5c6f14d29c3b87fb0ada56f5c613a62a0fae844",
+    17: "6ae5979f7513a62dc2d9e37bc5c6f14d29c3b87fb0ada56f5c613a62a0fae844",
+    18: "028308d921fbd6c6b7c1ac55e0b253cbd07baa9c7159e8a3f8023782cc313079",
+}
+# The 1.11 release head, carried over verbatim when the head moved on: these
+# are the values the 1.11 ceremony measured, never re-derived from a later
+# source tree.  The 1.12 head differs from them only by the static schema the
+# five 1.12 migrations add (columns, one table, one enum label).
+_TALLY_SCHEMA_DEFINITIONS_DIGESTS = {
     16: "523c60bed9107fd8d8050a5cdbc3fe952c953352cc1b88fe5fa1b4f355c9cd66",
     17: "523c60bed9107fd8d8050a5cdbc3fe952c953352cc1b88fe5fa1b4f355c9cd66",
     18: "b33000e55ded396f5172e42f40f57d21ae2b8ecfa0176a7e982bbb6ba8f7192e",
@@ -224,15 +241,27 @@ _LEGACY_SCHEMA_DEFINITIONS_DIGESTS = {
 #: invisible, and the Boundary-D set below adopts a head nobody confirmed
 #: shipped D activated.  The literals here turn that into an import failure, so
 #: the commit that bumps the head is the commit that has to re-derive.
-_MEASURED_RELEASE_HEAD = "v1_11_audit_append_tally"
+_MEASURED_RELEASE_HEAD = "v1_12_auditor_role"
+_MEASURED_TALLY_RELEASE_HEAD = "v1_11_audit_append_tally"
 _MEASURED_PRE_TALLY_RELEASE_HEAD = "v1_9_audit_action_pattern"
 _MEASURED_PREVIOUS_RELEASE_HEAD = "v1_8_schedule_cursor_repair"
 _SCHEMA_DEFINITIONS_DIGESTS_BY_HEAD = {
     RELEASE_MIGRATION_HEAD: _RELEASE_SCHEMA_DEFINITIONS_DIGESTS,
+    _TALLY_RELEASE_HEAD: _TALLY_SCHEMA_DEFINITIONS_DIGESTS,
     _PRE_TALLY_RELEASE_HEAD: _PRE_TALLY_SCHEMA_DEFINITIONS_DIGESTS,
     _PREVIOUS_RELEASE_HEAD: _PREVIOUS_SCHEMA_DEFINITIONS_DIGESTS,
     _LEGACY_SOURCE_HEAD: _LEGACY_SCHEMA_DEFINITIONS_DIGESTS,
 }
+#: Heads whose archives carry the audit tally functions.  The 1.12 head
+#: shares the 1.11 executable contract (see ``_RELEASE_FUNCTION_SIGNATURES``),
+#: so an archive at either head is held to the same function manifest and
+#: definitions digest; the heads before the tally keep their own.
+_TALLY_FUNCTION_SOURCE_HEADS = frozenset(
+    {
+        RELEASE_MIGRATION_HEAD,
+        _TALLY_RELEASE_HEAD,
+    },
+)
 #: Heads whose archives carry an activated Boundary D, so their schedule
 #: authority is read out of the archive rather than assumed.  The previous
 #: release head belongs here: it shipped Boundary D already activated, and
@@ -242,14 +271,16 @@ _SCHEMA_DEFINITIONS_DIGESTS_BY_HEAD = {
 _BOUNDARY_D_SOURCE_HEADS = frozenset(
     {
         RELEASE_MIGRATION_HEAD,
+        _TALLY_RELEASE_HEAD,
         _PREVIOUS_RELEASE_HEAD,
         _PRE_TALLY_RELEASE_HEAD,
     },
 )
-#: Every head this release can accept as a restore source.  The previous
-#: release heads retain their pre-tally function contract. The current head
-#: adds audit maintenance functions; each source is validated against the
-#: executable functions and static schema actually shipped at that head.
+#: Every head this release can accept as a restore source.  The 1.8 and 1.9
+#: heads retain their pre-tally function contract; the 1.11 head added the
+#: audit maintenance functions and the 1.12 head keeps them unchanged.  Each
+#: source is validated against the executable functions and static schema
+#: actually shipped at that head.
 _SUPPORTED_SOURCE_HEADS = frozenset(_SCHEMA_DEFINITIONS_DIGESTS_BY_HEAD)
 
 
@@ -270,6 +301,7 @@ def _assert_source_head_evidence_is_current() -> None:
 
     for imported, measured, role in (
         (RELEASE_MIGRATION_HEAD, _MEASURED_RELEASE_HEAD, "release"),
+        (_TALLY_RELEASE_HEAD, _MEASURED_TALLY_RELEASE_HEAD, "tally release"),
         (_PRE_TALLY_RELEASE_HEAD, _MEASURED_PRE_TALLY_RELEASE_HEAD, "pre-tally release"),
         (
             _PREVIOUS_RELEASE_HEAD,
@@ -288,6 +320,7 @@ def _assert_source_head_evidence_is_current() -> None:
         _BOUNDARY_D_SOURCE_HEADS
         - {
             _MEASURED_RELEASE_HEAD,
+            _MEASURED_TALLY_RELEASE_HEAD,
             _MEASURED_PREVIOUS_RELEASE_HEAD,
             _MEASURED_PRE_TALLY_RELEASE_HEAD,
         },
@@ -1162,7 +1195,7 @@ def _inspect_toc(  # noqa: PLR0912, PLR0915
     boundary_d_head = source_head in _BOUNDARY_D_SOURCE_HEADS
     expected_functions = (
         _RELEASE_FUNCTION_SIGNATURES
-        if source_head == RELEASE_MIGRATION_HEAD
+        if source_head in _TALLY_FUNCTION_SOURCE_HEADS
         else _PRE_TALLY_FUNCTION_SIGNATURES
         if boundary_d_head
         else _LEGACY_FUNCTION_SIGNATURES
@@ -1176,7 +1209,7 @@ def _inspect_toc(  # noqa: PLR0912, PLR0915
         archive,
         expected_digest=(
             _RELEASE_FUNCTION_DEFINITIONS_DIGEST
-            if source_head == RELEASE_MIGRATION_HEAD
+            if source_head in _TALLY_FUNCTION_SOURCE_HEADS
             else _PRE_TALLY_FUNCTION_DEFINITIONS_DIGEST
             if boundary_d_head
             else _LEGACY_FUNCTION_DEFINITIONS_DIGEST
@@ -1727,6 +1760,22 @@ async def _clear_fence(target: _Target) -> None:
         )
 
 
+def _bind_secret_keyring(settings: Settings) -> None:
+    """Bind the keyring the encrypted channel-config columns decrypt with.
+
+    The snapshot taken before the clear, the finalization after the load and
+    the rollback all read the channel tables through the ORM type, which
+    decrypts ``config`` on read. The bind is made from the ``Settings`` this
+    ceremony builds for itself, so it holds whether the ceremony is driven by
+    the CLI (whose bootstrap binds the same values) or in-process. Binding
+    again from the same values is a no-op in effect.
+    """
+
+    from z4j_brain.domain.secret_fields import bind_keyring_from_settings
+
+    bind_keyring_from_settings(settings)
+
+
 async def _recover_committed_finalization(
     target: _Target,
     *,
@@ -1737,6 +1786,7 @@ async def _recover_committed_finalization(
     connection: AsyncConnection | None = None,
 ) -> dict[str, Any]:
     active_settings = settings or Settings()
+    _bind_secret_keyring(active_settings)
     if connection is None:
         engine = _pinned_coordinator_engine(target)
         try:
@@ -2641,6 +2691,7 @@ async def _run_restore(  # noqa: PLR0912, PLR0915
     recovery = operation_dir / "target-recovery.dump"
     passfile = operation_dir / "pgpass"
     settings = Settings()  # type: ignore[call-arg]
+    _bind_secret_keyring(settings)
     if known_head is not None:
         if not isinstance(known_head, dict):
             raise DatabaseRestoreRefused("--known-head must be a JSON object")
@@ -3606,6 +3657,7 @@ async def _run_rollback(  # noqa: PLR0912, PLR0915
         hostaddr=target.hostaddr,
     )
     settings = Settings()  # type: ignore[call-arg]
+    _bind_secret_keyring(settings)
     coordinator_engine = _pinned_coordinator_engine(target)
     coordinator: AsyncConnection | None = None
     lock_owned = False

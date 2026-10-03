@@ -256,7 +256,7 @@ export function GeneralSettingsPage() {
             <SettingsTable rows={[["License", "AGPL-3.0-or-later"]]} />
             <div className="mt-4 flex flex-wrap gap-2">
               <ResourceLink href="https://z4j.com" label="z4j.com" />
-              <ResourceLink href="https://z4j.dev" label="Documentation" />
+              <ResourceLink href="https://docs.z4j.com" label="Documentation" />
               <ResourceLink href="https://github.com/z4jdev" label="GitHub" />
             </div>
           </SectionCard>

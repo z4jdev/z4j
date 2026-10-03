@@ -1,0 +1,45 @@
+{{- if and .Values.brain.enabled .Values.scheduler.enabled .Values.pki.mintJob.enabled -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "z4j.fullname" . }}-pki-mint
+  labels:
+    {{- include "z4j.pki.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  # The Job reads and renews only its own two Secret names (to detect an
+  # existing bundle and leave it alone, or replace it near expiry) and
+  # creates Secrets. Kubernetes cannot scope ``create`` by resource name,
+  # so creation is the one namespace-wide verb.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "update"]
+    resourceNames:
+      - {{ include "z4j.brain.schedulerGrpcTlsSecretName" . | quote }}
+      - {{ include "z4j-scheduler.tlsSecretName" . | quote }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "z4j.fullname" . }}-pki-mint
+  labels:
+    {{- include "z4j.pki.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "z4j.fullname" . }}-pki-mint
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "z4j.fullname" . }}-pki-mint
+    namespace: {{ .Release.Namespace }}
+{{- end }}

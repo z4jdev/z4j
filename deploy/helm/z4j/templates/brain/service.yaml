@@ -1,0 +1,28 @@
+{{- if .Values.brain.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "z4j.fullname" . }}
+  labels:
+    {{- include "z4j.brain.labels" . | nindent 4 }}
+  {{- with .Values.brain.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.brain.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.brain.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+    {{- if .Values.scheduler.enabled }}
+    # mTLS gRPC for the standalone scheduler; cluster-internal only.
+    - name: grpc
+      port: {{ .Values.brain.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "z4j.brain.selectorLabels" . | nindent 4 }}
+{{- end }}

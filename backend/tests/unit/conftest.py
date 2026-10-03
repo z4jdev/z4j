@@ -48,6 +48,25 @@ def _restore_process_configuration() -> Iterator[None]:
         configuration.set_active_configuration_snapshot(original_snapshot)
 
 
+@pytest.fixture(autouse=True)
+def _bind_test_secret_keyring() -> Iterator[None]:
+    """Give every test a process keyring for the encrypted columns.
+
+    ``EncryptedJSON`` (notification channel configs) fails closed without
+    a bound keyring. ``create_app`` binds one from its Settings, but tests
+    that build an engine by hand and insert channel rows have no app, so a
+    deterministic keyring is bound here and cleared afterwards; a test that
+    exercises rotation binds its own and relies on this teardown.
+    """
+    from z4j_brain.domain.secret_fields import SecretKeyring, bind_keyring
+
+    bind_keyring(SecretKeyring.from_secrets("unit-test-master-secret-" + "k" * 24))
+    try:
+        yield
+    finally:
+        bind_keyring(None)
+
+
 @pytest.fixture
 def brain_settings() -> Settings:
     """A valid Settings instance backed by in-memory SQLite.
@@ -123,6 +142,28 @@ async def _reset_per_ip_rate_limits() -> None:
         bucket = getattr(ipl, bucket_attr, None)
         if bucket is not None:
             await bucket.prune_idle(idle_seconds=0)
+
+
+@pytest.fixture(autouse=True)
+def _reset_refusal_audit_dedupe() -> Iterator[None]:
+    """Forget every refusal-row claim between tests.
+
+    The agent WebSocket hello and the long-poll routes write one
+    ``auth.ip_denied``, ``agent.auth.project_inactive`` or
+    ``agent.auth.bearer_failed`` row per address or agent per interval, and
+    the record of what was written is process-local, like the rate-limit
+    buckets above. Tests across the suite refuse the same handful of
+    addresses, so without this the first test to be refused would be the
+    only one to see its row and the suite would become an order-dependent
+    result.
+    """
+    from z4j_brain.domain import refusal_audit
+
+    refusal_audit.clear_all()
+    try:
+        yield
+    finally:
+        refusal_audit.clear_all()
 
 
 @pytest.fixture

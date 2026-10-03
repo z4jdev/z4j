@@ -22,92 +22,18 @@ import hashlib
 import hmac
 import json
 import time
-import uuid
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 
 # ---------------------------------------------------------------------------
-# Round 6 SHIP-STOPPER 1 -- queue_depth is a real class method
+# Round 6 SHIP-STOPPER 1 and 2 -- queue_depth and its gauge registration
 # ---------------------------------------------------------------------------
-
-
-class TestAuditForwarderQueueDepth:
-    def test_method_is_on_the_class(self) -> None:
-        from z4j_brain.domain.audit_forwarder import AuditForwarder
-
-        fwd = AuditForwarder(
-            webhook_url="https://x.example/i",
-            hmac_secret=b"x" * 32,
-        )
-        # Pre- fix: queue_depth was indented outside the class so
-        # hasattr returned False; the lifespan registration line
-        # crashed the brain on boot.
-        assert hasattr(fwd, "queue_depth")
-        assert callable(fwd.queue_depth)
-        assert fwd.queue_depth() == 0
-
-    def test_queue_depth_reflects_enqueue(self) -> None:
-        from z4j_brain.domain.audit_forwarder import AuditForwarder
-
-        fwd = AuditForwarder(
-            webhook_url="https://x.example/i",
-            hmac_secret=b"x" * 32,
-            buffer_size=10,
-        )
-        for _ in range(3):
-            fwd.enqueue(
-                {
-                    "id": str(uuid.uuid4()),
-                    "action": "t",
-                    "target_type": "t",
-                    "target_id": None,
-                    "result": "success",
-                    "outcome": "allow",
-                    "event_id": None,
-                    "user_id": None,
-                    "api_key_id": None,
-                    "project_id": None,
-                    "source_ip": None,
-                    "user_agent": None,
-                    "metadata": {},
-                    "occurred_at": None,
-                    "prev_row_hmac": None,
-                    "row_hmac": "0" * 64,
-                }
-            )
-        assert fwd.queue_depth() == 3
-
-
-# ---------------------------------------------------------------------------
-# Round 6 SHIP-STOPPER 2 -- audit_forwarder registration wrapped in try/except
-# ---------------------------------------------------------------------------
-
-
-class TestInmemorySubsystemRegistrationGuards:
-    """All four v1.6 ``register_inmemory_subsystem`` callsites must
-    be wrapped in try/except so a registration failure does not crash
-    lifespan startup."""
-
-    def test_main_wraps_audit_forwarder_registration_in_try_except(
-        self,
-    ) -> None:
-        from pathlib import Path
-
-        src = Path(__file__).resolve().parent.parent.parent / "src/z4j_brain/main.py"
-        text = src.read_text(encoding="utf-8")
-        # The audit_forwarder block must contain the same try/except
-        # shape as the other three surfaces.
-        anchor = '"audit_forwarder_queue"'
-        idx = text.find(anchor)
-        assert idx > 0, "audit_forwarder_queue registration missing"
-        # Walk backward to find the surrounding try.
-        window = text[max(0, idx - 300) : idx + 200]
-        assert "try:" in window, (
-            "audit_forwarder registration MUST be wrapped in try/except "
-            "to match the other three v1.6 surfaces (SHIP-STOPPER 2)"
-        )
+# Retired: the forwarder no longer has a queue, so there is no depth to
+# expose and no in-memory gauge for main.py to register. Delivery state
+# is the durable cursor; see tests/unit/test_audit_forwarder_cursor.py.
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +121,7 @@ class TestAuditForwarderRealTransport:
         try:
             secret = b"a" * 48
             fwd = AuditForwarder(
+                db=SimpleNamespace(),  # _send_one never touches the database
                 webhook_url="https://siem.example.com/ingest",
                 hmac_secret=secret,
                 timeout_seconds=7.5,

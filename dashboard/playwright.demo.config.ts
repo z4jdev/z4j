@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 
-/** Browser regression suite for the same static build deployed to demo.z4j.dev. */
+/** Browser regression suite for the same static build deployed to demo.z4j.com. */
 export default defineConfig({
   testDir: "./tests/demo",
   outputDir: "./test-results/demo",

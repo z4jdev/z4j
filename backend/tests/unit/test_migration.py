@@ -1023,6 +1023,27 @@ def test_every_unconditionally_refusing_migration_declares_itself(
     assert undeclared == []
 
 
+def test_every_revision_id_fits_the_alembic_version_column(
+    alembic_cfg: Config,
+) -> None:
+    """``alembic_version.version_num`` is ``VARCHAR(32)`` on every backend.
+
+    SQLite does not enforce the length, so a longer revision id passes every
+    SQLite test and then fails on PostgreSQL at the moment Alembic stamps it,
+    which leaves the upgrade half-applied at exactly that revision.  The
+    column is Alembic's own and is not widened here; the ids have to fit.
+    """
+    from alembic.script import ScriptDirectory
+
+    too_long = sorted(
+        script.revision
+        for script in ScriptDirectory.from_config(alembic_cfg).walk_revisions()
+        if len(script.revision) > 32
+    )
+
+    assert too_long == []
+
+
 def test_boundary_f_sqlite_activation_is_atomic(
     alembic_cfg: Config,
 ) -> None:
@@ -1144,3 +1165,184 @@ def test_v1_6_6_scrub_worker_conf_strips_existing_rows_r7_h1(
                 assert needle not in blob, f" migration left {needle!r} in workers.metadata"
     finally:
         engine.dispose()
+
+
+def _api_key_columns(sync_url: str) -> set[str]:
+    engine = create_engine(sync_url)
+    try:
+        return {column["name"] for column in inspect(engine).get_columns("api_keys")}
+    finally:
+        engine.dispose()
+
+
+def test_api_key_allowed_cidrs_round_trips_on_sqlite(alembic_cfg: Config) -> None:
+    """``v1_12_api_key_allowed_cidrs`` adds one nullable column and takes it away again.
+
+    Targeted by revision rather than ``head`` so the test holds whatever
+    else the release stacks above it. A populated key survives both
+    directions: the downgrade loses only the per-key restriction, never
+    the key, and the upgrade brings the column back NULL.
+    """
+    import json
+
+    command.upgrade(alembic_cfg, "v1_11_audit_append_tally")
+    sync_url = alembic_cfg.attributes["test_sync_url"]
+    assert "allowed_cidrs" not in _api_key_columns(sync_url)
+
+    command.upgrade(alembic_cfg, "v1_12_api_key_allowed_cidrs")
+    assert "allowed_cidrs" in _api_key_columns(sync_url)
+
+    engine = create_engine(sync_url)
+    try:
+        with engine.begin() as connection:
+            user_id = str(uuid.uuid4())
+            key_id = str(uuid.uuid4())
+            now = datetime.now(UTC).isoformat()
+            connection.exec_driver_sql(
+                "INSERT INTO users (id, email, password_hash, is_admin, is_active, "
+                "created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+                (user_id, "cidr@example.test", "x", now, now),
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO api_keys (id, user_id, name, token_hash, prefix, scopes, "
+                "allowed_cidrs, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    key_id,
+                    user_id,
+                    "ci",
+                    "hash-" + key_id,
+                    "z4k_abcd",
+                    '["home:read"]',
+                    '["203.0.113.0/24", "2001:db8::/32"]',
+                    now,
+                    now,
+                ),
+            )
+        with engine.connect() as connection:
+            stored = connection.exec_driver_sql(
+                "SELECT allowed_cidrs FROM api_keys WHERE id = ?",
+                (key_id,),
+            ).scalar_one()
+            assert json.loads(stored) == ["203.0.113.0/24", "2001:db8::/32"]
+    finally:
+        engine.dispose()
+
+    command.downgrade(alembic_cfg, "v1_11_audit_append_tally")
+    assert "allowed_cidrs" not in _api_key_columns(sync_url)
+    engine = create_engine(sync_url)
+    try:
+        with engine.connect() as connection:
+            assert (
+                connection.exec_driver_sql(
+                    "SELECT count(*) FROM api_keys WHERE id = ?",
+                    (key_id,),
+                ).scalar_one()
+                == 1
+            )
+            assert (
+                connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+                == "v1_11_audit_append_tally"
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(alembic_cfg, "v1_12_api_key_allowed_cidrs")
+    assert "allowed_cidrs" in _api_key_columns(sync_url)
+    engine = create_engine(sync_url)
+    try:
+        with engine.connect() as connection:
+            assert (
+                connection.exec_driver_sql(
+                    "SELECT allowed_cidrs FROM api_keys WHERE id = ?",
+                    (key_id,),
+                ).scalar_one()
+                is None
+            )
+    finally:
+        engine.dispose()
+
+
+def test_audit_forward_state_round_trips_and_matches_the_orm_definition(
+    alembic_cfg: Config,
+) -> None:
+    """The forwarder cursor table is created, dropped, recreated, and agrees
+    with the ORM definition the initial migration materialises on a fresh
+    install, so an upgraded database and a fresh one carry the same schema."""
+    from z4j_brain.management_reset import _normalize_sqlite_schema_definition
+    from z4j_brain.persistence import models  # noqa: F401  - register mappers
+    from z4j_brain.persistence.base import Base
+
+    table = "audit_forward_state"
+    expected_columns = [
+        "sink_id",
+        "last_forwarded_occurred_at",
+        "last_forwarded_id",
+        "last_attempt_at",
+        "last_success_at",
+        "consecutive_failures",
+        "updated_at",
+    ]
+
+    def _definition(connection: object) -> str:
+        return str(
+            connection.exec_driver_sql(  # type: ignore[attr-defined]
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).scalar_one()
+        )
+
+    # Explicit revisions rather than "head": the forwarder migration has a
+    # fixed place in the chain, and this test is about that step, not about
+    # whatever the release eventually pins as head above it.
+    revision = "v1_12_audit_forward_state"
+    previous = "v1_12_api_key_allowed_cidrs"
+    command.upgrade(alembic_cfg, revision)
+    engine = create_engine(alembic_cfg.attributes["test_sync_url"])
+    try:
+        inspector = inspect(engine)
+        assert inspector.has_table(table)
+        columns = {column["name"]: column for column in inspector.get_columns(table)}
+        assert list(columns) == expected_columns
+        assert inspector.get_pk_constraint(table)["constrained_columns"] == ["sink_id"]
+        assert columns["consecutive_failures"]["nullable"] is False
+        assert columns["updated_at"]["nullable"] is False
+        with engine.connect() as connection:
+            fresh_definition = _definition(connection)
+            assert (
+                connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+                == revision
+            )
+
+        # Downgrading the forwarder migration removes the table and nothing else.
+        command.downgrade(alembic_cfg, previous)
+        assert not inspect(engine).has_table(table)
+        assert inspect(engine).has_table("audit_log")
+        with engine.connect() as connection:
+            assert (
+                connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
+                == previous
+            )
+
+        # Upgrading again exercises the migration's own CREATE TABLE, which
+        # the fresh install above skipped because the initial migration had
+        # already materialised the table from the model.
+        command.upgrade(alembic_cfg, revision)
+        assert inspect(engine).has_table(table)
+        with engine.connect() as connection:
+            recreated_definition = _definition(connection)
+    finally:
+        engine.dispose()
+
+    orm_only = create_engine("sqlite://")
+    try:
+        Base.metadata.tables[table].create(orm_only)
+        with orm_only.connect() as connection:
+            orm_definition = _definition(connection)
+    finally:
+        orm_only.dispose()
+
+    normalised = [
+        _normalize_sqlite_schema_definition("table", definition)
+        for definition in (fresh_definition, recreated_definition, orm_definition)
+    ]
+    assert normalised[0] == normalised[1] == normalised[2], normalised

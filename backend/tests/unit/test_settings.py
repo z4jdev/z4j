@@ -36,6 +36,20 @@ class TestSecretLength:
             Settings(**kwargs)  # type: ignore[arg-type]
 
 
+class TestStartupVerifyLockTimeout:
+    def test_default_is_ten_minutes(self) -> None:
+        assert Settings(**_base_kwargs()).startup_verify_lock_timeout_ms == 600_000  # type: ignore[arg-type]
+
+    def test_env_var_is_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("Z4J_STARTUP_VERIFY_LOCK_TIMEOUT_MS", "900000")
+        assert Settings(**_base_kwargs()).startup_verify_lock_timeout_ms == 900_000  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("value", [999, 3_600_001, -1, "soon"])
+    def test_out_of_bounds_rejected(self, value: object) -> None:
+        with pytest.raises(ValidationError, match="startup_verify_lock_timeout_ms"):
+            Settings(**_base_kwargs(), startup_verify_lock_timeout_ms=value)  # type: ignore[arg-type]
+
+
 class TestDatabaseUrl:
     def test_sync_postgres_url_rejected(self) -> None:
         kwargs = _base_kwargs()

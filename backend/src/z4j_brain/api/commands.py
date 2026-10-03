@@ -34,8 +34,9 @@ from z4j_brain.api.deps import (
 )
 from z4j_brain.domain.ip_rate_limit import require_bulk_action_throttle
 from z4j_brain.domain.retry_contract import (
-    RETRY_COMMAND_ENGINES,
+    dispatch_refusal,
     engine_is_native_retry,
+    engine_name_error,
     polyfill_retry_has_operator_overrides,
 )
 from z4j_brain.errors import NotFoundError
@@ -55,18 +56,13 @@ if TYPE_CHECKING:
     from z4j_brain.settings import Settings
 
 
-# Engines the brain knows how to dispatch commands to. This is the
-# whitelist that gates ``RetryTaskRequest.engine`` /
-# ``CancelTaskRequest.engine``. Adding a new engine = one line here.
-# Keeping this centralized (vs a plain Enum on each request) so the
-# error message at 422 time is clear + one code edit covers every
-# endpoint that accepts an engine name.
-#
-# The brain already accepts ``Event.engine`` as a free-form string
-# for *ingest* (so we don't break when an agent on a newer brain
-# version reports a newly-added engine) - this list applies only
-# to *dispatch*, where we have to actually have an adapter.
-KNOWN_ENGINES: frozenset[str] = RETRY_COMMAND_ENGINES
+# There is no list of engines the brain knows how to dispatch to. The request
+# models check the SHAPE of ``engine`` (``_validate_engine_dispatch``), and
+# each endpoint then asks ``dispatch_refusal`` whether the target agent's
+# current session advertises that engine together with the action's
+# capability token. The brain accepts ``Event.engine`` as a free-form string
+# for *ingest*; dispatch is the place where an adapter has to exist, and the
+# adapter says so by advertising it in its hello frame.
 
 
 # Every key in this frozenset is populated by the
@@ -110,7 +106,7 @@ SERVER_OWNED_FILTER_KEYS: frozenset[str] = frozenset(
 CLIENT_ALLOWED_BULK_FILTER_KEYS: frozenset[str] = frozenset(
     {
         "task_ids",  # the selection set (hard-clamped to body.max)
-        "engine",  # routing; validated against KNOWN_ENGINES
+        "engine",  # routing; shape-checked, then the target agent must advertise it
         "state",  # celery selection: task state
         "status",  # alias some clients send for state
         "queue",  # celery selection: single SOURCE queue to filter on
@@ -154,19 +150,40 @@ class CommandListResponse(BaseModel):
 
 
 def _validate_engine_dispatch(value: str) -> str:
-    """Reject dispatch requests for engines the brain cannot route to.
+    """Reject an engine string that is not even the shape of an adapter name.
 
-    Raises ``ValueError`` (→ FastAPI 422) with the known-engine list
-    when the caller sends something like ``{"engine": "laravel"}``.
-    Without this check, an unknown engine used to silently fall back
-    to ``"celery"`` in two repository helpers (LATENT-1). See
-    docs/MULTI_ENGINE_VERIFICATION_2026Q2.md §7.
+    Raises ``ValueError`` (→ FastAPI 422) for an empty, overlong or malformed
+    value. A well-formed name such as ``"laravel"`` passes here and is then
+    refused by :func:`_require_dispatchable` unless the target agent's session
+    advertises it; it is never rewritten. Without that refusal an unknown
+    engine used to silently fall back to ``"celery"`` in two repository
+    helpers (LATENT-1). See docs/MULTI_ENGINE_VERIFICATION_2026Q2.md §7.
     """
-    if value not in KNOWN_ENGINES:
-        raise ValueError(
-            f"engine must be one of {sorted(KNOWN_ENGINES)}, got {value!r}",
-        )
+    error = engine_name_error(value)
+    if error is not None:
+        raise ValueError(error)
     return value
+
+
+def _require_dispatchable(agent: Any, *, engine: str, action: str) -> None:
+    """Refuse (422) unless ``agent``'s session advertises ``engine`` + ``action``.
+
+    The capability rule lives in ``z4j_brain.domain.retry_contract``; this is
+    the HTTP shape of its refusal. The engine string in the message is the one
+    the caller sent, so a typo or an engine no agent runs is named, not
+    defaulted.
+    """
+    refusal = dispatch_refusal(agent, engine=engine, action=action)
+    if refusal is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": refusal,
+                "engine": engine,
+                "action": action,
+                "agent_id": str(agent.id),
+            },
+        )
 
 
 class RetryTaskRequest(BaseModel):
@@ -579,7 +596,7 @@ async def issue_retry_task(
     # enumeration oracle, but a real one.
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.enums import ProjectRole
-    from z4j_brain.persistence.repositories import TaskRepository
+    from z4j_brain.persistence.repositories import AgentRepository, TaskRepository
 
     policy = PolicyEngine()
     project = await policy.get_project_or_404(projects, slug)
@@ -589,6 +606,19 @@ async def issue_retry_task(
         project=project,
         min_role=ProjectRole.OPERATOR,
     )
+    # Capability rule before any task lookup: the target agent's session must
+    # advertise this engine with ``retry_task``. Checking it first keeps the
+    # answer for an engine nothing advertises a 422 that names the engine,
+    # rather than the 409 below about overrides. ``_issue_task_command``
+    # re-checks against the row it locks, so a hello that lands in between
+    # cannot widen what this request was admitted for.
+    target = await AgentRepository(db_session).get_live(body.agent_id)
+    if target is None or target.project_id != project.id:
+        raise NotFoundError(
+            "agent not found in this project",
+            details={"agent_id": str(body.agent_id)},
+        )
+    _require_dispatchable(target, engine=body.engine, action="retry_task")
     task_repo = TaskRepository(db_session)
     priority_label = await task_repo.get_priority_label(
         project_id=project.id,
@@ -616,17 +646,17 @@ async def issue_retry_task(
         engine=body.engine,
         task_id=body.task_id,
     )
-    # RH1 (direction 1) -- defense in depth. The manual retry endpoint already
-    # validates ``engine`` against KNOWN_ENGINES (all native today), so this
-    # branch is unreachable UNLESS a future release adds a polyfill engine to
-    # KNOWN_ENGINES. If that happens, a polyfill retry is refused unless BOTH
-    # operator override halves are supplied: the engine has no native retry, so
-    # the agent lowers it to a re-submit, and the brain's stored arguments are
-    # redacted -- only real operator overrides make the re-submit safe (on ANY
-    # runtime). This is a static rule on the presence of overrides, not a
-    # negotiated runtime capability; the agent-side dispatcher fails closed on
-    # the same criterion, and the automation runner refuses polyfill retries
-    # outright (it can supply no overrides at all).
+    # RH1 (direction 1). Any engine an agent advertises ``retry_task`` for can
+    # reach this point, including polyfill engines such as huey whose broker
+    # keeps no arguments after completion. A polyfill retry is refused unless
+    # BOTH operator override halves are supplied: the engine has no native
+    # retry, so the agent lowers it to a re-submit, and the brain's stored
+    # arguments are redacted -- only real operator overrides make the re-submit
+    # safe (on ANY runtime). This is a static rule on the presence of
+    # overrides, keyed on the engine (NATIVE_RETRY_ENGINES), not a negotiated
+    # runtime capability; the agent-side dispatcher fails closed on the same
+    # criterion, and the automation runner refuses polyfill retries outright
+    # (it can supply no overrides at all).
     if not engine_is_native_retry(body.engine) and not polyfill_retry_has_operator_overrides(
         body.override_args, body.override_kwargs
     ):
@@ -646,6 +676,7 @@ async def issue_retry_task(
         slug=slug,
         action="retry_task",
         agent_id=body.agent_id,
+        engine=body.engine,
         target_id=f"{body.engine}:{body.task_id}",
         payload={
             "engine": body.engine,
@@ -694,6 +725,7 @@ async def issue_cancel_task(
         slug=slug,
         action="cancel_task",
         agent_id=body.agent_id,
+        engine=body.engine,
         target_id=f"{body.engine}:{body.task_id}",
         payload={
             "engine": body.engine,
@@ -729,26 +761,28 @@ async def issue_requeue_dead_letter(
 ) -> CommandPublic:
     """Move one dead-lettered task back onto its queue.
 
-    Deliberately not gated on engine support, and the reason is safety rather
-    than convenience. Whether a requeue is safe is a property of the engine's
-    own dead-letter primitive, which only the adapter knows. RQ has one:
-    ``FailedJobRegistry`` IS its dead-letter concept and ``registry.requeue``
-    consumes the entry and preserves its original routing. Celery does not, and
-    its adapter's implementation was removed as a breaking safety correction
-    after it was found to publish a plain retry without consuming the broker
-    entry, which could duplicate work; it now refuses without touching the
-    broker at all.
+    Gated on what the target agent advertises, not on an engine list, and the
+    reason is safety rather than convenience. Whether a requeue is safe is a
+    property of the engine's own dead-letter primitive, which only the adapter
+    knows. RQ has one: ``FailedJobRegistry`` IS its dead-letter concept and
+    ``registry.requeue`` consumes the entry and preserves its original routing.
+    Celery does not, and its adapter's implementation was removed as a breaking
+    safety correction after it was found to publish a plain retry without
+    consuming the broker entry, which could duplicate work; it no longer
+    advertises ``requeue_dead_letter`` and refuses without touching the broker.
 
-    So an unsupported engine returns a FAILED command naming the reason, which
-    is honest. An engine allowlist here would encode today's adapter set into
-    the brain, and would go stale in both directions: it would block an adapter
-    that gains a safe primitive, and it would keep advertising one whose
-    implementation was withdrawn.
+    So the adapter decides by advertising the capability in its hello frame,
+    and the brain refuses (422) when the agent's session does not. An engine
+    allowlist here would encode today's adapter set into the brain and go
+    stale in both directions: it would block an adapter that gains a safe
+    primitive, and it would keep offering one whose implementation was
+    withdrawn.
     """
     return await _issue_task_command(
         slug=slug,
         action="requeue_dead_letter",
         agent_id=body.agent_id,
+        engine=body.engine,
         target_id=f"{body.engine}:{body.task_id}",
         payload={
             "engine": body.engine,
@@ -885,14 +919,16 @@ async def issue_bulk_retry(
         # (which needs an engine for its WHERE clause) rather than
         # guessing.
         filter_engine = raw_filter.get("engine")
-        # H4: a bulk retry that targets explicit task_ids MUST name a known
-        # engine, and EVERY id must resolve to a Task row in THIS project for
-        # THAT engine -- for ALL engines, not just RQ. Otherwise an operator
-        # could label foreign ids (RQ ids as engine=celery, or omit the engine
-        # entirely) to skip the project-scoped ownership lookup and have the
-        # sole matching adapter requeue tasks that belong to another workload /
-        # project on shared broker infrastructure.
-        if filter_engine not in KNOWN_ENGINES:
+        # H4: a bulk retry that targets explicit task_ids MUST name a
+        # well-formed engine, and EVERY id must resolve to a Task row in THIS
+        # project for THAT engine -- for ALL engines, not just RQ. Otherwise an
+        # operator could label foreign ids (RQ ids as engine=celery, or omit
+        # the engine entirely) to skip the project-scoped ownership lookup and
+        # have the sole matching adapter requeue tasks that belong to another
+        # workload / project on shared broker infrastructure. Whether the
+        # target agent advertises ``bulk_retry`` for that engine is checked by
+        # ``_issue_generic_command`` against the agent row it locks.
+        if engine_name_error(filter_engine) is not None:
             await audit_service.record(
                 audit_log,
                 action="command.bulk_retry.refused",
@@ -1027,6 +1063,7 @@ async def issue_bulk_retry(
         payload=cmd_payload,
         idempotency_key=body.idempotency_key,
         agent_id=body.agent_id,
+        dispatch_requirement=(str(enriched_filter["engine"]), "bulk_retry"),
         user=user,
         memberships=memberships,
         projects=projects,
@@ -1122,19 +1159,21 @@ def _validate_narrowing_filters(raw_filter: dict[str, Any]) -> None:
                 status_code=400,
                 detail={"error": f"bulk-retry filter {key!r} must be a string"},
             )
-    # M1: a present engine must be a KNOWN engine. An unknown engine string (e.g.
-    # a "celrey" typo) otherwise resolves to zero owned rows and returns a
-    # false-success no-op that masks the mistake instead of surfacing it -- and if
-    # it ever DID match rows it would dispatch an unhandleable command. An empty
-    # string is treated as "no engine filter" (unchanged), not an unknown engine.
+    # M1: a present engine must be a well-formed adapter name. A malformed
+    # string otherwise resolves to zero owned rows and returns a false-success
+    # no-op that masks the mistake instead of surfacing it. Whether an agent
+    # advertises ``bulk_retry`` for the engine is checked per issued command by
+    # ``_issue_generic_command``, so a typo such as "celrey" is refused there,
+    # naming the engine. An empty string is treated as "no engine filter"
+    # (unchanged), not an unknown engine.
     engine = raw_filter.get("engine")
-    if isinstance(engine, str) and engine and engine not in KNOWN_ENGINES:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": (f"bulk-retry filter 'engine' must be one of {sorted(KNOWN_ENGINES)}"),
-            },
-        )
+    if isinstance(engine, str) and engine:
+        shape_error = engine_name_error(engine)
+        if shape_error is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"bulk-retry filter 'engine' is invalid: {shape_error}"},
+            )
     # H2: a present state/status must be a VALID task state. Silently coercing an
     # invalid value to FAILURE (the old except-branch) mass-retries every failed
     # task in the project that the operator never scoped -- e.g. a state="sucess"
@@ -1361,6 +1400,7 @@ async def _resolve_and_issue_all_matching_bulk_retry(
             target_type="bulk",
             target_id=None,
             payload=payload,
+            dispatch_requirement=(engine, "bulk_retry"),
             # A distinct idempotency key per engine so the several commands from
             # one request do not collide on the CommandRepository UNIQUE index
             # (and a retry of the whole request stays idempotent per engine).
@@ -1692,6 +1732,7 @@ async def _issue_task_command(
     slug: str,
     action: str,
     agent_id: uuid.UUID,
+    engine: str,
     target_id: str,
     payload: dict[str, Any],
     idempotency_key: str | None,
@@ -1703,7 +1744,11 @@ async def _issue_task_command(
     db_session: AsyncSession,
     ip: str,
 ) -> CommandPublic:
-    """Shared body for the two task-targeting command endpoints."""
+    """Shared body for the task-targeting command endpoints.
+
+    ``engine`` is the engine the command is for; the target agent's session
+    must advertise it with ``action``'s capability token.
+    """
     return await _issue_generic_command(
         slug=slug,
         action=action,
@@ -1712,6 +1757,7 @@ async def _issue_task_command(
         payload=payload,
         idempotency_key=idempotency_key,
         agent_id=agent_id,
+        dispatch_requirement=(engine, action),
         user=user,
         memberships=memberships,
         projects=projects,
@@ -1740,6 +1786,7 @@ async def _issue_generic_command(
     ip: str,
     require_role: ProjectRole = ProjectRole.OPERATOR,
     synthetic_success_result: dict[str, Any] | None = None,
+    dispatch_requirement: tuple[str, str] | None = None,
 ) -> CommandPublic:
     """Shared body for every command-issuing endpoint.
 
@@ -1751,6 +1798,11 @@ async def _issue_generic_command(
     in place with that result instead of being delivered to the agent (used by
     the no-owned-match bulk-retry no-op, which must not round-trip a task_ids=[]
     command the adapter reports as failed).
+
+    ``dispatch_requirement`` is ``(engine, action)`` for engine-bound commands:
+    the locked agent row's session must advertise that engine with the action's
+    capability token, or the request is refused with 422 (see
+    :func:`_require_dispatchable`).
     """
     from z4j_brain.domain.policy_engine import PolicyEngine
     from z4j_brain.persistence.repositories import (
@@ -1774,6 +1826,9 @@ async def _issue_generic_command(
             "agent not found in this project",
             details={"agent_id": str(agent_id)},
         )
+    if dispatch_requirement is not None:
+        required_engine, required_action = dispatch_requirement
+        _require_dispatchable(agent, engine=required_engine, action=required_action)
 
     commands = CommandRepository(db_session)
     command = await dispatcher.issue(

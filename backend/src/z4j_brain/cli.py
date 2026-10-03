@@ -455,6 +455,51 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         ),
     )
 
+    # audit prune: the operator-driven form of the authenticated retention
+    # prune. Soft mode is the same verified prefix removal the periodic
+    # sweeper performs, recorded under the signed prune boundary so `verify`
+    # reports the chain clean with the prune on record; hard mode is an
+    # epoch cut through the generation-reset primitive. Dry run by default.
+    audit_prune = audit_sub.add_parser(
+        "prune",
+        help=(
+            "prune expired audit rows under the authenticated prune boundary "
+            "(dry run unless --apply); --hard cuts a fully pruned generation "
+            "over to a fresh signed genesis"
+        ),
+    )
+    audit_prune.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "execute the prune. Without this flag the command prints the "
+            "rows it would remove and the boundary it would record, and "
+            "changes nothing."
+        ),
+    )
+    audit_prune.add_argument(
+        "--hard",
+        action="store_true",
+        help=(
+            "epoch cut: after the prune, replace the fully pruned generation "
+            "with a fresh signed genesis so the chain carries no boundary "
+            "into the old history. Refuses while any active row younger "
+            "than the cutoff remains, or while frozen legacy rows exist "
+            "(export them with `audit export-and-delete-frozen` first)."
+        ),
+    )
+    audit_prune.add_argument(
+        "--before",
+        default=None,
+        metavar="ISO-8601",
+        help=(
+            "prune rows of every class older than this timestamp instead of "
+            "the configured retention windows (Z4J_AUDIT_RETENTION_DAYS and "
+            "Z4J_AUDIT_RETENTION_BY_CLASS). A timezone offset or Z is "
+            "required and the value must not be in the future."
+        ),
+    )
+
     # projects: operator-initiated project-scoped data operations.
     # Currently exposes ``rewrite-scheduler`` for the explicit
     # migration of ``Schedule.scheduler`` values when an operator
@@ -1120,6 +1165,30 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         help=("path to a candidate .env file. Defaults to $Z4J_HOME/config.env."),
     )
 
+    # secrets - lifecycle of values encrypted under Z4J_SECRET.
+    secrets_cmd = sub.add_parser(
+        "secrets",
+        help="re-wrap values encrypted under Z4J_SECRET after a rotation",
+    )
+    secrets_sub = secrets_cmd.add_subparsers(
+        dest="secrets_command",
+        required=True,
+    )
+    secrets_rewrap = secrets_sub.add_parser(
+        "rewrap",
+        help=(
+            "re-encrypt every notification channel config and stored TOTP "
+            "secret under the current Z4J_SECRET; run it to a clean report "
+            "before dropping a value from Z4J_PREVIOUS_SECRETS"
+        ),
+    )
+    secrets_rewrap.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="report what would be re-wrapped without writing anything",
+    )
+
     # version
     sub.add_parser("version", help="print installed z4j version")
 
@@ -1203,6 +1272,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         if args.config_command == "validate":
             return _run_config_validate(args)
         parser.error(f"unknown config subcommand {args.config_command!r}")
+        return 2
+
+    if args.command == "secrets":
+        if args.secrets_command == "rewrap":
+            return _run_secrets_rewrap(args)
+        parser.error(f"unknown secrets subcommand {args.secrets_command!r}")
         return 2
 
     parser.error(f"unknown command {args.command!r}")
@@ -2779,7 +2854,7 @@ def _run_serve(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915  serv
             "  or unset Z4J_ENVIRONMENT on the local SQLite serve path\n"
             "  to allow production-shaped auto-detection.\n"
             "\n"
-            "  See: https://z4j.dev/operations/dev-vs-production",
+            "  See: https://docs.z4j.com/operations/dev-vs-production",
             file=sys.stderr,
         )
         return 2
@@ -2941,12 +3016,16 @@ def _run_migrate(args: argparse.Namespace) -> int:
     """
     from alembic.config import main as alembic_main
 
+    if args.action == "prepare-runtime-rollback":
+        # The ceremony parses its own arguments and bootstraps the
+        # environment itself, after parsing: ``--help`` (and a usage error)
+        # must print without any environment, and the bootstrap used to run
+        # first and fail on a bare shell before argparse ever saw ``--help``.
+        return _run_migrate_prepare_runtime_rollback(args.rest)
+
     # Bootstrap env (DB URL + secrets) so alembic's env.py can
     # instantiate Settings(). Fresh installs don't have these yet.
     _bootstrap_env_for_management_commands()
-
-    if args.action == "prepare-runtime-rollback":
-        return _run_migrate_prepare_runtime_rollback(args.rest)
 
     config_path = _find_alembic_config_path()
     if config_path is None:
@@ -2969,14 +3048,24 @@ def _run_migrate(args: argparse.Namespace) -> int:
         )
 
     cli_args = ["-c", str(config_path), args.action, *args.rest]
-    alembic_main(argv=cli_args, prog="z4j migrate")
+    from z4j_brain.management_restore import DatabaseRestorePending
+
+    try:
+        alembic_main(argv=cli_args, prog="z4j migrate")
+    except DatabaseRestorePending as exc:
+        # env.py raises this before touching a database an interrupted
+        # restore has fenced. The message already names the operation and
+        # both exits (resume, or roll back); ``current --check-heads`` used
+        # to surface it as a traceback.
+        print(f"z4j migrate: {exc}", file=sys.stderr)  # noqa: T201
+        return 2
     return 0
 
 
 def _run_migrate_prepare_runtime_rollback(  # noqa: PLR0911, PLR0915
     rest: Sequence[str],
 ) -> int:
-    """Run the two-phase, image-bound 1.9 -> 1.8.2 preparation ceremony."""
+    """Run the two-phase, image-bound runtime-rollback preparation ceremony."""
 
     import asyncio
     import hmac
@@ -3014,7 +3103,8 @@ def _run_migrate_prepare_runtime_rollback(  # noqa: PLR0911, PLR0915
     ceremony = argparse.ArgumentParser(
         prog="z4j migrate prepare-runtime-rollback",
         description=(
-            "preview or apply the sealed 1.9.0 -> 1.8.2/Python-3.14.7 schedule preparation"
+            "preview or apply the schedule preparation for the sealed previous "
+            "runtime this build can roll back to"
         ),
     )
     ceremony.add_argument("--target", required=True)
@@ -3023,9 +3113,9 @@ def _run_migrate_prepare_runtime_rollback(  # noqa: PLR0911, PLR0915
         "--candidate-authority-root",
         required=True,
         help=(
-            "read-only production-finalization-attestation-1.9.0 directory; "
-            "must contain exactly the signed receipt, bundle, attestation "
-            "transcript, and staging index"
+            "read-only production finalization attestation directory of the "
+            "sealed previous runtime; must contain exactly the signed receipt, "
+            "bundle, attestation transcript, and staging index"
         ),
     )
     ceremony.add_argument(
@@ -3046,6 +3136,10 @@ def _run_migrate_prepare_runtime_rollback(  # noqa: PLR0911, PLR0915
         ),
     )
     options = ceremony.parse_args(list(rest))
+    # Only now, with the arguments accepted: ``--help`` and usage errors have
+    # exited above without needing Z4J_HOME or any secret. Everything below
+    # (release-binding env vars, settings, the engine) needs the bootstrap.
+    _bootstrap_env_for_management_commands()
     if options.target != ROLLBACK_TARGET:
         print(  # noqa: T201
             "z4j migrate prepare-runtime-rollback: unsupported target; "
@@ -3633,6 +3727,8 @@ def _run_audit(args: argparse.Namespace) -> int:  # noqa: PLR0911  flat subcomma
         return _run_audit_fork_cleanup(args)
     if args.audit_command == "reseal-watermark":
         return _run_audit_reseal_watermark(args)
+    if args.audit_command == "prune":
+        return _run_audit_prune(args)
     print(  # noqa: T201
         f"z4j audit: unknown subcommand {args.audit_command!r}",
         file=sys.stderr,
@@ -4113,7 +4209,21 @@ def _run_misfires(args: argparse.Namespace) -> int:
         _print_misfires_table(args.project, records)
         return 0
 
-    return asyncio.run(_run())
+    from sqlalchemy.exc import SQLAlchemyError
+
+    try:
+        return asyncio.run(_run())
+    except (SQLAlchemyError, OSError) as exc:
+        # The reference promises exit 2 on an unreachable database; before
+        # this an unopenable SQLite file or a refused PostgreSQL connection
+        # was a traceback. One line: SQLAlchemy's message continues with the
+        # statement and a "Background on this error" link.
+        detail = (str(exc).splitlines() or [""])[0].strip()
+        print(  # noqa: T201
+            f"z4j misfires: database unreachable: {type(exc).__name__}: {detail}",
+            file=sys.stderr,
+        )
+        return 2
 
 
 def _run_audit_reseal_watermark(args: argparse.Namespace) -> int:
@@ -4228,6 +4338,314 @@ def _run_audit_reseal_watermark(args: argparse.Namespace) -> int:
                     "pass (assuming the rest of the chain is intact).",
                 )
                 return 0
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_run())
+
+
+def _run_audit_prune(  # noqa: PLR0915  explicit refusal outcomes
+    args: argparse.Namespace,
+) -> int:
+    """``z4j audit prune``: the operator-driven authenticated prefix prune.
+
+    Soft mode (the default) removes the expired oldest-first prefix of the
+    active generation under the authenticated prune boundary, exactly as the
+    periodic sweeper does: every row of the prefix is verified, deleted, and
+    the signed boundary advanced in the same transaction, so ``z4j audit
+    verify`` reports the chain clean with the prune on record rather than as
+    a truncation. Hard mode (``--hard``) is an epoch cut: once the generation
+    is fully pruned it is replaced by a fresh signed genesis through the
+    generation-reset primitive, so the chain carries no boundary into the
+    old history at all.
+
+    Dry run by default, printing the rows it would remove and the boundary it
+    would record. ``--apply`` executes. On apply the command holds the
+    scheduled verifier's leader lease, surfaces the periodic sweeper's lease
+    (and, on SQLite, a held writer lock) as a refusal rather than silence or
+    a traceback, and writes one ``audit.prune`` row about itself once every
+    batch is through. Each batch is its own signed transaction, so an
+    interrupted run leaves the boundary at the last committed batch and no
+    ``audit.prune`` row; a rerun continues from there and records itself.
+
+    The hard-mode preconditions are checked on the preview, which runs
+    before the leases are taken; a live brain may append in between. The
+    generation reset therefore re-checks every active row against the same
+    cutoffs with the chain locks held and refuses, changing nothing, when a
+    row younger than its cutoff appeared (``AuditService.reset_generation``).
+
+    After any prune a head exported from inside the pruned range reports
+    UNPROVABLE to ``z4j audit verify --known-head`` (exit 1): the anchor is
+    gone, the chain is not broken. Export a new head afterwards.
+
+    Returns 0 on success, dry run, or nothing to do; 1 on a refusal the
+    operator must resolve (no audit key, missing or unauthenticated chain
+    state, a prefix that does not verify, a held lease or writer lock,
+    hard-mode preconditions before or during the reset); 2 on a settings
+    or argument failure.
+    """
+    import asyncio
+    from datetime import UTC, datetime
+
+    _bootstrap_env_for_management_commands()
+
+    from sqlalchemy.exc import OperationalError
+
+    from z4j_brain.audit_retention import (
+        AUDIT_PRUNE_ACTION,
+        AuditRetentionSweeper,
+        PrunePreview,
+        RetentionCutoffs,
+        SweepLeaseBusyError,
+        preview_authenticated_prune,
+    )
+    from z4j_brain.domain.audit_chain import AuditChainIntegrityError
+    from z4j_brain.domain.audit_service import AuditService
+    from z4j_brain.domain.workers._leader_lock import try_acquire_singleton_lock
+    from z4j_brain.domain.workers.audit_verifier import AuditChainVerifierWorker
+    from z4j_brain.persistence.database import (
+        DatabaseManager,
+        create_engine_from_settings,
+    )
+    from z4j_brain.persistence.repositories import AuditLogRepository
+    from z4j_brain.settings import Settings
+
+    label = "z4j audit prune"
+    try:
+        settings = Settings()  # type: ignore[call-arg]
+    except Exception as exc:
+        print(  # noqa: T201
+            f"{label}: failed to load settings: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if settings.audit_chain_secret is None:
+        print(  # noqa: T201
+            f"{label}: REFUSING. No audit-chain key is configured "
+            "(Z4J_AUDIT_CHAIN_SECRET), so there is no authenticated prune "
+            "boundary to prune under. The periodic sweeper still handles a "
+            "keyless development database.",
+            file=sys.stderr,
+        )
+        return 1
+
+    now = datetime.now(UTC)
+    if args.before is not None:
+        try:
+            before = datetime.fromisoformat(args.before)
+        except ValueError:
+            print(  # noqa: T201
+                f"{label}: --before must be an ISO-8601 timestamp such as 2026-01-31T00:00:00Z",
+                file=sys.stderr,
+            )
+            return 2
+        if before.tzinfo is None:
+            print(  # noqa: T201
+                f"{label}: --before must carry a timezone offset or a trailing Z",
+                file=sys.stderr,
+            )
+            return 2
+        if before.astimezone(UTC) > now:
+            print(  # noqa: T201
+                f"{label}: --before must not be in the future",
+                file=sys.stderr,
+            )
+            return 2
+        cutoffs = RetentionCutoffs.before(before)
+    else:
+        cutoffs = RetentionCutoffs.from_settings(settings, now)
+    mode = "hard" if args.hard else "soft"
+
+    def _iso(value: datetime | None) -> str:
+        if value is None:
+            return "-"
+        return value.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    def _print_preview(preview: PrunePreview) -> None:
+        heading = "APPLY" if args.apply else "DRY RUN (pass --apply to execute)"
+        by_class = ", ".join(f"{name} {count}" for name, count in preview.expired_by_class.items())
+        lines = [
+            f"{label}: {heading}",
+            f"  mode         : {mode}",
+            f"  cutoffs      : {cutoffs.label}",
+            f"  generation   : {preview.generation}",
+            f"  active rows  : {preview.active_rows} (frozen legacy rows: {preview.frozen_rows})",
+            f"  would prune  : {preview.expired_rows} rows"
+            + (f" ({by_class})" if by_class else ""),
+        ]
+        if preview.blocker_action is not None:
+            lines.append(
+                f"  stops at     : {preview.blocker_action} at "
+                f"{_iso(preview.blocker_occurred_at)} (its class keeps rows "
+                f"until {_iso(preview.blocker_cutoff)}; the chain only loses "
+                "a contiguous prefix)",
+            )
+        if preview.boundary_id is not None:
+            lines.append(
+                f"  new boundary : row {preview.boundary_id} at "
+                f"{_iso(preview.boundary_occurred_at)} "
+                f"(row_hmac {(preview.boundary_row_hmac or '')[:16]}...)",
+            )
+        lines.append(f"  remaining    : {preview.remaining_rows} active rows")
+        print("\n".join(lines))  # noqa: T201
+
+    async def _run() -> int:  # noqa: PLR0911, PLR0912, PLR0915  explicit refusal outcomes
+        engine = create_engine_from_settings(settings)
+        db = DatabaseManager(engine)
+        try:
+            try:
+                async with db.session() as session:
+                    preview = await preview_authenticated_prune(
+                        session,
+                        settings,
+                        cutoffs=cutoffs,
+                    )
+            except AuditChainIntegrityError as exc:
+                print(  # noqa: T201
+                    f"{label}: REFUSING: {exc}. Run `z4j audit verify` and "
+                    "resolve the finding first; nothing was changed.",
+                    file=sys.stderr,
+                )
+                return 1
+            _print_preview(preview)
+
+            if args.hard and preview.frozen_rows:
+                print(  # noqa: T201
+                    f"{label}: REFUSING --hard: {preview.frozen_rows} frozen "
+                    "legacy rows exist. An epoch cut replaces the whole table; "
+                    "export them first with `z4j audit export-and-delete-frozen`. "
+                    "Nothing was changed.",
+                    file=sys.stderr,
+                )
+                return 1
+            if args.hard and preview.remaining_rows:
+                print(  # noqa: T201
+                    f"{label}: REFUSING --hard: {preview.remaining_rows} active "
+                    "rows are younger than the cutoff. An epoch cut replaces "
+                    "the fully pruned generation and never removes a row the "
+                    "cutoff keeps; pass --before later than the newest row you "
+                    "are prepared to lose, or run soft mode. Nothing was changed.",
+                    file=sys.stderr,
+                )
+                return 1
+            if not args.apply:
+                return 0
+
+            lease = await try_acquire_singleton_lock(
+                db,
+                AuditChainVerifierWorker.LEADER_LOCK_NAME,
+                announce=False,
+            )
+            if lease is None:
+                print(  # noqa: T201
+                    f"{label}: REFUSING: the scheduled audit verifier holds its "
+                    "lease, so it is walking the chain right now. Retry after "
+                    "its walk. Nothing was changed.",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                sweeper = AuditRetentionSweeper()
+                sweeper.bind(db=db, settings=settings)
+                try:
+                    pruned = await sweeper.prune_authenticated(cutoffs=cutoffs)
+                except SweepLeaseBusyError:
+                    print(  # noqa: T201
+                        f"{label}: REFUSING: the periodic retention sweeper holds "
+                        "the sweep lease. Retry after its pass. Batches already "
+                        "committed before this point are signed and consistent.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                except AuditChainIntegrityError as exc:
+                    print(  # noqa: T201
+                        f"{label}: REFUSING mid-prune: {exc}. Batches already "
+                        "committed are signed and consistent; nothing after them "
+                        "was changed. Run `z4j audit verify`.",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+                metadata: dict[str, Any] = {
+                    "mode": mode,
+                    "cutoff": _iso(cutoffs.default),
+                    "cutoff_by_class": {
+                        name: _iso(value) for name, value in cutoffs.by_class.items()
+                    },
+                    "cutoff_source": "before" if args.before is not None else "retention",
+                    "rows": pruned,
+                    "rows_by_class": preview.expired_by_class,
+                    "generation": str(preview.generation),
+                    "boundary_id": (
+                        str(preview.boundary_id) if preview.boundary_id is not None else None
+                    ),
+                    "boundary_row_hmac": preview.boundary_row_hmac,
+                }
+                audit = AuditService(settings)
+                async with db.session() as session:
+                    repo = AuditLogRepository(session)
+                    marker_id: str | None = None
+                    if args.hard:
+                        try:
+                            marker = await audit.reset_generation(
+                                repo,
+                                metadata={"reason": "audit prune --hard", **metadata},
+                                cutoffs=cutoffs,
+                            )
+                        except AuditChainIntegrityError as exc:
+                            await session.rollback()
+                            print(  # noqa: T201
+                                f"{label}: REFUSING --hard: {exc}. The soft prune's "
+                                f"{pruned} rows are committed under the signed boundary "
+                                "and the generation was not reset; no audit.prune row "
+                                "was written. Run it again when the brain is quiet.",
+                                file=sys.stderr,
+                            )
+                            return 1
+                        marker_id = str(marker.id)
+                        metadata["new_generation"] = str(marker.chain_generation)
+                        metadata["reset_marker_id"] = marker_id
+                    row = await audit.record(
+                        repo,
+                        action=AUDIT_PRUNE_ACTION,
+                        target_type="audit_chain",
+                        target_id=str(preview.generation),
+                        metadata=metadata,
+                    )
+                    await session.commit()
+            finally:
+                await lease.release()
+
+            if args.hard:
+                print(  # noqa: T201
+                    f"{label}: pruned {pruned} rows, then cut the epoch: generation "
+                    f"{preview.generation} replaced by {metadata['new_generation']} "
+                    f"(reset marker {marker_id}). Recorded as {AUDIT_PRUNE_ACTION} "
+                    f"row {row.id}. Earlier exported heads from the old generation "
+                    "now report UNPROVABLE; export a new head.",
+                )
+            else:
+                print(  # noqa: T201
+                    f"{label}: pruned {pruned} rows under the authenticated boundary. "
+                    f"Recorded as {AUDIT_PRUNE_ACTION} row {row.id}. "
+                    "`z4j audit verify` reports the chain clean with the prune on "
+                    "record; a head exported from inside the pruned range now "
+                    "reports UNPROVABLE, so export a new head.",
+                )
+            return 0
+        except OperationalError as exc:
+            if "database is locked" not in str(getattr(exc, "orig", None) or exc).lower():
+                raise
+            print(  # noqa: T201
+                f"{label}: REFUSING: another connection holds the SQLite writer "
+                "lock (database is locked), so a batch could not begin. Retry "
+                "when the brain is quiet. Batches already committed are signed "
+                "and consistent, and no audit.prune row was written for them; "
+                "a rerun continues from the boundary and records itself.",
+                file=sys.stderr,
+            )
+            return 1
         finally:
             await engine.dispose()
 
@@ -5854,21 +6272,64 @@ def _bootstrap_env_for_management_commands(
     )
     snapshot = overlay_runtime_environment(snapshot)
     export_snapshot_environment(snapshot)
+    _bind_secret_keyring_from_snapshot(snapshot)
     return snapshot
+
+
+def _bind_secret_keyring_from_snapshot(snapshot: Any) -> None:
+    """Bind the process keyring for the encrypted channel-config columns.
+
+    Every management command passes through the bootstrap, and most of them
+    read ORM-typed rows: ``reset`` walks every table for its manifest,
+    ``restore`` and its rollback snapshot the target, ``check``, ``doctor``,
+    the audit commands and the user commands load rows through the models.
+    ``notification_channels.config`` and ``user_channels.config`` are
+    decrypted on read, so until this bind existed any installation with one
+    channel failed with ``SecretKeyringUnbound`` in the middle of the
+    command, on PostgreSQL after a restore had already cleared and loaded
+    the target.
+
+    The keyring is derived from the same ``Z4J_SECRET`` and
+    ``Z4J_PREVIOUS_SECRETS`` the brain reads, parsed by ``Settings`` itself so
+    the two can never disagree, without constructing ``Settings`` here: its
+    other validations belong to each command's own construction, which is
+    where they refuse. The management modules bind again from the
+    ``Settings`` they build, so in-process callers do not depend on this.
+    Idempotent: the same values bind the same keyring.
+    """
+    from pydantic import SecretStr
+
+    from z4j_brain.domain.secret_fields import SecretKeyring, bind_keyring
+    from z4j_brain.settings import Settings
+
+    current = str(snapshot.values.get("Z4J_SECRET") or "")
+    if not current:
+        # Only reset-setup's absent-database exemption gets here; there is
+        # no database to read.
+        return
+    previous_raw = snapshot.values.get("Z4J_PREVIOUS_SECRETS")
+    previous = Settings._parse_secret_list(
+        SecretStr(str(previous_raw)) if previous_raw else None,
+    )
+    bind_keyring(SecretKeyring(current=current.encode("utf-8"), previous=tuple(previous)))
 
 
 def _build_settings_from_env() -> tuple[Any, Any]:
     """Shared bootstrap for commands that need a DB engine.
 
     Calls :func:`_bootstrap_env_for_management_commands` then
-    constructs ``Settings`` + an ``AsyncEngine``.
+    constructs ``Settings`` + an ``AsyncEngine``, and binds the secret
+    keyring from that exact ``Settings`` (the bootstrap bound the same
+    values already; this is the authoritative copy).
     """
     snapshot = _bootstrap_env_for_management_commands()
 
     from z4j_brain.configuration import settings_from_snapshot
+    from z4j_brain.domain.secret_fields import bind_keyring_from_settings
     from z4j_brain.persistence.database import create_engine_from_settings
 
     settings = settings_from_snapshot(snapshot)
+    bind_keyring_from_settings(settings)
     engine = create_engine_from_settings(settings)
     return settings, engine
 
@@ -6159,6 +6620,229 @@ def _run_changepassword(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+async def _secrets_rewrap_schema_refusal(db: Any) -> str | None:
+    """Why ``secrets rewrap`` must not touch this database, or ``None``.
+
+    The channel ``config`` columns hold encrypted text only from
+    ``ENCRYPTED_JSON_COLUMNS_REVISION`` on; below it they are ``JSON``
+    (``JSONB`` on Postgres) and the plaintext repair would write the
+    ``z4jenc1:`` string into a JSON column. The database's head is placed
+    on the chain the shipped scripts describe, the way the readiness probe
+    places a head it does not boot on (``iterate_revisions`` from the head
+    down to base), so the answer follows the chain and not string order. A
+    head below the revision, a head the scripts do not know and a database
+    with no head at all are all refused; so is a missing ``alembic.ini``,
+    since without it nothing can be placed.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import text
+
+    from z4j_brain.domain.secret_fields import ENCRYPTED_JSON_COLUMNS_REVISION
+
+    remedy = (
+        "run `z4j migrate upgrade head` first: the channel config columns hold "
+        f"encrypted text only from migration {ENCRYPTED_JSON_COLUMNS_REVISION} on, "
+        "and encrypting a row below it would write ciphertext into a JSON column. "
+        "Nothing was written."
+    )
+    try:
+        async with db.session() as session:
+            heads = [
+                str(head)
+                for head in (
+                    await session.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalars()
+            ]
+    except Exception:
+        return (
+            "refused; the database has no alembic_version table, so it was never "
+            f"migrated; {remedy}"
+        )
+    if len(heads) != 1:
+        return f"refused; alembic_version holds {heads!r}, not one migration head; {remedy}"
+    db_head = heads[0]
+    config_path = _find_alembic_config_path()
+    if config_path is None:
+        return (
+            f"refused; alembic.ini not found, so the database's head {db_head!r} cannot be "
+            "placed on the migration chain; set Z4J_ALEMBIC_INI or install the bundled "
+            "migration package. Nothing was written."
+        )
+    try:
+        script = ScriptDirectory.from_config(Config(str(config_path)))
+        applied = any(
+            entry.revision == ENCRYPTED_JSON_COLUMNS_REVISION
+            for entry in script.iterate_revisions(db_head, "base")
+        )
+    except Exception as exc:
+        return (
+            f"refused; the database is stamped {db_head!r}, which the shipped migration "
+            f"scripts do not know ({exc}); it was migrated by a different z4j build. "
+            "Nothing was written."
+        )
+    if applied:
+        return None
+    return (
+        f"refused; the database is stamped {db_head!r}, below migration "
+        f"{ENCRYPTED_JSON_COLUMNS_REVISION}; {remedy}"
+    )
+
+
+def _run_secrets_rewrap(args: argparse.Namespace) -> int:
+    """Re-wrap every value encrypted under ``Z4J_SECRET`` with the current one.
+
+    Walks ``notification_channels.config``, ``user_channels.config`` and
+    ``users.mfa_secret_encrypted``. A value that decrypts under the current
+    master is counted and left alone; one that decrypts only under a
+    ``Z4J_PREVIOUS_SECRETS`` entry is re-encrypted under the current master
+    in the same transaction, and a channel row stored as plaintext (no
+    ``z4jenc1:`` prefix: written by a brain from before the column was
+    encrypted, or by hand) is encrypted and reported as ``plaintext``. The
+    report is what makes dropping a previous secret safe: when every row is
+    current, nothing depends on the old value any more. Each write is
+    guarded by the value the walk read, so an edit a running brain commits
+    meanwhile wins and the row is reported as ``changed under us``.
+
+    Exit codes: 0 when every stored secret is now encrypted under the
+    current master; 1 when at least one row was left as it is (it decrypted
+    under no listed secret, is not JSON, or changed under the run to a value
+    not under the current master; the others were still written, the ids
+    are printed, and the previous secret those rows need has to go back
+    before the next run); also 1, with nothing written, when encrypted rows
+    exist and not one of them decrypts, which means this process is not
+    running with the keys the database was written under; 2 when the
+    configuration fails to load, and 2 with nothing written when the
+    database's migration head is below the revision that made the channel
+    ``config`` columns encrypted text (see
+    :func:`_secrets_rewrap_schema_refusal`). Writes a ``secrets.rewrap``
+    audit row attributed to the OS user.
+    """
+    import asyncio
+    import getpass
+    import os as _os
+    import sys
+
+    from z4j_brain.domain.secret_fields import (
+        SecretKeyring,
+        bind_keyring,
+        rewrap_all_secret_fields,
+    )
+
+    try:
+        settings, engine = _build_settings_from_env()
+    except Exception as exc:  # one readable line for any configuration failure
+        print(f"z4j secrets rewrap: configuration failed to load: {exc}", file=sys.stderr)  # noqa: T201
+        return 2
+    keyring = SecretKeyring.from_settings(settings)
+    bind_keyring(keyring)
+    dry_run = bool(args.dry_run)
+
+    try:
+        operator_label = getpass.getuser() or "unknown"
+    except (OSError, KeyError):
+        operator_label = _os.environ.get("USER") or "unknown"
+
+    async def _run() -> int:
+        from z4j_brain.domain.audit_service import AuditService
+        from z4j_brain.persistence.database import DatabaseManager
+        from z4j_brain.persistence.repositories import AuditLogRepository
+
+        db = DatabaseManager(engine)
+        try:
+            refusal = await _secrets_rewrap_schema_refusal(db)
+            if refusal is not None:
+                print(f"z4j secrets rewrap: {refusal}", file=sys.stderr)  # noqa: T201
+                return 2
+            async with db.session(write=True) as db_session:
+                connection = await db_session.connection()
+                report = await connection.run_sync(
+                    lambda sync_conn: rewrap_all_secret_fields(
+                        sync_conn,
+                        keyring=keyring,
+                        dry_run=dry_run,
+                    ),
+                )
+                for column in report.columns:
+                    print(  # noqa: T201
+                        f"{column.table}.{column.column}: scanned {column.scanned}, "
+                        f"already current {column.already_current}, "
+                        f"{'would re-wrap' if dry_run else 're-wrapped'} {column.rewrapped}, "
+                        f"plaintext {column.plaintext}, "
+                        f"changed under us {column.changed_under_us}, "
+                        f"undecryptable {len(column.failed)}"
+                        + (f" ({', '.join(column.failed)})" if column.failed else ""),
+                    )
+                if report.refused:
+                    await db_session.rollback()
+                    print(  # noqa: T201
+                        "z4j secrets rewrap: refused; encrypted rows exist and none of "
+                        "them decrypts under Z4J_SECRET or any Z4J_PREVIOUS_SECRETS "
+                        "entry. This process is not running with the keys the "
+                        "database was written under; nothing was written.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                if dry_run:
+                    await db_session.rollback()
+                    print(  # noqa: T201
+                        "z4j secrets rewrap: dry run, nothing written; "
+                        f"{report.rewrapped} row(s) would be re-wrapped and "
+                        f"{report.plaintext} plaintext row(s) encrypted",
+                    )
+                    return 1 if report.failed else 0
+                await AuditService(settings).record(
+                    AuditLogRepository(db_session),
+                    action="secrets.rewrap",
+                    target_type="system",
+                    target_id="secret_fields",
+                    result="success" if not report.failed else "failed",
+                    outcome="allow" if not report.failed else "failure",
+                    source_ip="127.0.0.1",
+                    metadata={
+                        "via": "cli",
+                        "operator": operator_label,
+                        "scanned": report.scanned,
+                        "rewrapped": report.rewrapped,
+                        "plaintext_encrypted": report.plaintext,
+                        "changed_under_us": report.changed_under_us,
+                        "undecryptable": report.failed,
+                        "previous_secrets_listed": len(keyring.previous),
+                    },
+                )
+                await db_session.commit()
+                if report.failed:
+                    print(  # noqa: T201
+                        f"z4j secrets rewrap: {report.failed} row(s) were left as they "
+                        "are: they decrypt under no listed secret, are not JSON, or "
+                        "changed under this run to a value not under the current "
+                        "master. Put the secret they were written under back in "
+                        "Z4J_PREVIOUS_SECRETS and run again; do not drop any previous "
+                        "secret yet.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                changed = (
+                    f" {report.changed_under_us} row(s) changed under this run and were "
+                    "left as they are, already under the current master."
+                    if report.changed_under_us
+                    else ""
+                )
+                print(  # noqa: T201
+                    f"z4j secrets rewrap: {report.rewrapped} row(s) re-wrapped, "
+                    f"{report.plaintext} plaintext row(s) encrypted, "
+                    f"{report.scanned} scanned; every stored secret is now encrypted "
+                    "under the current Z4J_SECRET. Z4J_PREVIOUS_SECRETS entries are no "
+                    "longer needed for stored secrets (agents and the audit transition "
+                    "tools have their own clocks)." + changed,
+                )
+                return 0
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_run())
+
+
 def _run_reset_mfa(args: argparse.Namespace) -> int:
     """Operator escape hatch: clear a user's MFA state from the CLI.
 
@@ -6297,11 +6981,23 @@ def _run_reset_mfa(args: argparse.Namespace) -> int:
 
 
 def _read_password_from_args(args: argparse.Namespace) -> str | None:
-    """Shared helper for password reading (stdin vs flag)."""
+    """Password for ``changepassword``: ``--password-stdin`` or ``--password``.
+
+    ``--password-stdin`` on a terminal prompts without echo (``getpass``), so
+    the documented "never echoed" holds for an operator typing it; on a pipe
+    it reads stdin once and drops only the trailing line ending, so a value
+    piped from a secret manager keeps any leading or trailing spaces it has.
+    """
     import sys
 
     if getattr(args, "password_stdin", False):
-        password = sys.stdin.read().strip()
+        if sys.stdin.isatty():
+            import getpass
+
+            password = getpass.getpass("z4j changepassword: new password: ")
+        else:
+            password = sys.stdin.read()
+        password = password.rstrip("\r\n")
         if not password:
             print(  # noqa: T201
                 "error: empty password from stdin",
@@ -6418,7 +7114,55 @@ def _run_check(args: argparse.Namespace) -> int:
     return rc
 
 
-def _run_status(args: argparse.Namespace) -> int:
+def _restore_fence_in(exc: BaseException) -> Any:
+    """The ``DatabaseRestorePending`` in this exception's chain, or ``None``.
+
+    SQLite raises it at engine creation; PostgreSQL raises it from the
+    connect hook, which can reach a query wrapped in a driver error.
+    """
+    from z4j_brain.management_restore import DatabaseRestorePending
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, DatabaseRestorePending):
+            return current
+        orig = getattr(current, "orig", None)
+        if isinstance(orig, DatabaseRestorePending):
+            return orig
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _report_restore_fence(command: str, exc: BaseException) -> int:
+    """One line naming the pending operation and both exits; exit 2.
+
+    Before this the SQLite fence was a traceback under ``status`` and the
+    PostgreSQL one was swallowed into "n/a" row counts.
+    """
+    print(f"z4j {command}: {exc}", file=sys.stderr)  # noqa: T201
+    return 2
+
+
+def _database_url_for_display(database_url: str) -> str:
+    """The DSN with the password masked and the query string dropped.
+
+    A DSN carries a credential in two shapes: ``user:pass@host`` and a
+    ``?password=...`` query parameter (``sslpassword`` and token
+    parameters are the same shape). SQLAlchemy masks the first;
+    dropping the query removes the second.
+    """
+    from sqlalchemy.engine import make_url
+
+    try:
+        url = make_url(database_url)
+    except Exception:
+        return "(unparseable database URL)"
+    return url.set(query={}).render_as_string(hide_password=True)
+
+
+def _run_status(args: argparse.Namespace) -> int:  # noqa: PLR0915 - the restore fence is caught at three sites by design
     """Print a high-level summary of brain state.
 
     Intended for quick "what's going on" visibility - not a full
@@ -6431,7 +7175,12 @@ def _run_status(args: argparse.Namespace) -> int:
 
     from sqlalchemy import func, select, text
 
-    settings, engine = _build_settings_from_env()
+    from z4j_brain.management_restore import DatabaseRestorePending
+
+    try:
+        settings, engine = _build_settings_from_env()
+    except DatabaseRestorePending as exc:
+        return _report_restore_fence("status", exc)
 
     async def _run() -> int:
         from z4j_brain.persistence.database import DatabaseManager
@@ -6464,7 +7213,10 @@ def _run_status(args: argparse.Namespace) -> int:
                                 )
                             ).scalar_one()
                             return int(row or 0)
-                    except Exception:
+                    except Exception as exc:
+                        fence = _restore_fence_in(exc)
+                        if fence is not None:
+                            raise fence from None
                         return "n/a"
 
                 users = await _count(User)
@@ -6483,7 +7235,10 @@ def _run_status(args: argparse.Namespace) -> int:
                         )
                     ).first()
                     rev = rev_row[0] if rev_row else "(none)"
-                except Exception:
+                except Exception as exc:
+                    fence = _restore_fence_in(exc)
+                    if fence is not None:
+                        raise fence from None
                     rev = "(alembic_version missing)"
 
             def _fmt(v: int | str) -> str:
@@ -6498,7 +7253,7 @@ def _run_status(args: argparse.Namespace) -> int:
             print(f"  version             {__version__}")  # noqa: T201
             print(f"  alembic revision    {rev}")  # noqa: T201
             print(f"  environment         {settings.environment}  {env_tag}")  # noqa: T201
-            print(f"  database            {settings.database_url.split('@')[-1]}")  # noqa: T201
+            print(f"  database            {_database_url_for_display(settings.database_url)}")  # noqa: T201
             print("")  # noqa: T201
             print("  row counts:")  # noqa: T201
             print(f"    users             {_fmt(users)}")  # noqa: T201
@@ -6516,7 +7271,10 @@ def _run_status(args: argparse.Namespace) -> int:
         finally:
             await db.dispose()
 
-    return asyncio.run(_run())
+    try:
+        return asyncio.run(_run())
+    except DatabaseRestorePending as exc:
+        return _report_restore_fence("status", exc)
 
 
 def _canonical_admin_lookup(raw: str) -> str:

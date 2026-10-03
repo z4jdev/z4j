@@ -49,7 +49,13 @@ from z4j_brain.settings import Settings
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # The brain runs this file in-process (``z4j serve`` auto-migrates before
+    # it builds the app, ``z4j migrate`` runs it in the CLI process), and
+    # ``fileConfig`` disables every logger that already exists unless told
+    # otherwise: the loggers of the modules imported above, and of whatever
+    # the caller imported first, would stay silent for the rest of the
+    # process, including the secret store's and the configuration's warnings.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 _supplied_snapshot = config.attributes.get("z4j_configuration_snapshot")

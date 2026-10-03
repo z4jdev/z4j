@@ -1,5 +1,6 @@
-import type { ProjectRole } from "@/hooks/use-memberships";
+import { canProjectRole, type ProjectRole } from "@/hooks/use-memberships";
 import {
+  BellRing,
   Bug,
   ClipboardList,
   Cpu,
@@ -7,9 +8,11 @@ import {
   Layers,
   LayoutDashboard,
   LineChart,
+  MailX,
   Network,
   Shield,
   Terminal,
+  Users,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -20,6 +23,49 @@ export interface ProjectNavItem {
   icon: LucideIcon;
   group: "Monitor" | "Infrastructure" | "Control";
   shortcut?: string;
+}
+
+export interface ProjectSettingsNavItem {
+  label: string;
+  /** Route path with the ``$slug`` parameter, for a typed router Link. */
+  to:
+    | "/projects/$slug/settings/members"
+    | "/projects/$slug/settings/notifications";
+  icon: LucideIcon;
+}
+
+/**
+ * Project settings entries the role may open.
+ *
+ * Every page under project settings reads an admin-only collection: the
+ * brain refuses the memberships and invitations lists, and the notification
+ * routing, below the admin role. Offering the entry to a viewer led to
+ * "Unable to load members" and a silently empty invitations block, so the
+ * rail's Project Settings link follows this list and disappears with it.
+ */
+export function projectSettingsNavigation(
+  role: ProjectRole | null,
+): ProjectSettingsNavItem[] {
+  return [
+    ...(canProjectRole(role, "manage_members")
+      ? [
+          {
+            label: "Members",
+            to: "/projects/$slug/settings/members" as const,
+            icon: Users,
+          },
+        ]
+      : []),
+    ...(canProjectRole(role, "manage_channels")
+      ? [
+          {
+            label: "Notifications",
+            to: "/projects/$slug/settings/notifications" as const,
+            icon: BellRing,
+          },
+        ]
+      : []),
+  ];
 }
 
 /** One navigation model for the rail, command palette and keyboard shortcuts. */
@@ -43,6 +89,12 @@ export function projectNavigation(
       icon: ClipboardList,
       group: "Monitor",
       shortcut: "t",
+    },
+    {
+      label: "Dead letters",
+      to: `${base}/dead-letters`,
+      icon: MailX,
+      group: "Monitor",
     },
     {
       label: "Issues",
@@ -100,7 +152,7 @@ export function projectNavigation(
       icon: Terminal,
       group: "Control",
     },
-    ...(role === "admin"
+    ...(canProjectRole(role, "read_audit")
       ? [
           {
             label: "Audit log",

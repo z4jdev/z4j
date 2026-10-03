@@ -25,7 +25,7 @@ Thanks for contributing to z4j. Please fill this template out.
 - [ ] `uv run ruff check .` and `uv run ruff format --check .` pass locally
 - [ ] `uv run pytest -xvs tests/unit/` passes locally
 - [ ] If this touches Postgres-only paths: `uv run pytest -xvs tests/integration/` passes locally against Postgres 18
-- [ ] Docs updated if user-visible behavior changed (z4j.dev for operator docs, z4j.com for marketing)
+- [ ] Docs updated if user-visible behavior changed (docs.z4j.com for operator docs, z4j.com for marketing)
 - [ ] `CHANGELOG.md` entry added under `[Unreleased]`
 - [ ] No `# type: ignore` without a comment explaining why
 - [ ] No `print()` / `console.log` left in code

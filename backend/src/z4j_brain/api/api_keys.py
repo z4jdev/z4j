@@ -67,6 +67,13 @@ class ApiKeyPublic(BaseModel):
     revoked_at: datetime | None
     revoked_reason: str | None
     created_at: datetime
+    allowed_cidrs: list[str] | None = Field(
+        default=None,
+        description=(
+            "Per-key source-address allowlist (canonical CIDRs). Null or "
+            "empty means the key is bound only by Z4J_API_IP_ALLOWLIST."
+        ),
+    )
 
 
 class ApiKeyCreated(ApiKeyPublic):
@@ -121,6 +128,56 @@ class CreateApiKeyRequest(BaseModel):
         le=3650,
         description="Key lifetime in days. Null means never expires.",
     )
+    allowed_cidrs: list[str] | None = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "Optional per-key source-address allowlist: IPv4/IPv6 CIDRs "
+            "(a bare address means one host). When set, requests with "
+            "this key must come from one of them, in addition to "
+            "Z4J_API_IP_ALLOWLIST. Null or empty means no per-key "
+            "restriction. Loopback is not implicitly allowed."
+        ),
+    )
+
+    @field_validator("allowed_cidrs")
+    @classmethod
+    def _canonicalise_cidrs(cls, v: list[str] | None) -> list[str] | None:
+        return _validated_cidrs(v)
+
+
+class UpdateApiKeyRequest(BaseModel):
+    """``PATCH /api-keys/{key_id}``: the per-key allowlist is the one mutable field.
+
+    Name, scopes, project binding and expiry are fixed at mint time;
+    changing any of them is a new key. The allowlist is operational
+    (an office moved, a runner got a new egress) and editing it must
+    not force a token rotation.
+    """
+
+    allowed_cidrs: list[str] | None = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "Replacement per-key allowlist. Null or empty clears it; the "
+            "global Z4J_API_IP_ALLOWLIST still applies."
+        ),
+    )
+
+    @field_validator("allowed_cidrs")
+    @classmethod
+    def _canonicalise_cidrs(cls, v: list[str] | None) -> list[str] | None:
+        return _validated_cidrs(v)
+
+
+def _validated_cidrs(v: list[str] | None) -> list[str] | None:
+    """Canonical CIDR list, or ``None`` when nothing restrictive was given."""
+    from z4j_brain.domain.ip_allowlist import parse_cidr_list
+
+    if v is None:
+        return None
+    cidrs = parse_cidr_list(v, field_name="allowed_cidrs")
+    return cidrs or None
 
 
 class ScopeCatalogue(BaseModel):
@@ -180,6 +237,7 @@ def _key_payload(
         revoked_at=key.revoked_at,
         revoked_reason=key.revoked_reason,
         created_at=key.created_at,
+        allowed_cidrs=list(key.allowed_cidrs) if key.allowed_cidrs else None,
     )
 
 
@@ -344,6 +402,7 @@ async def create_api_key(
         scopes=accepted,
         project_id=body.project_id,
         expires_at=expires_at,
+        allowed_cidrs=body.allowed_cidrs,
     )
 
     await audit.record(
@@ -360,6 +419,7 @@ async def create_api_key(
             "name": body.name.strip(),
             "scopes": accepted,
             "project_scoped": body.project_id is not None,
+            "allowed_cidrs": body.allowed_cidrs or [],
         },
     )
     await db_session.commit()
@@ -377,8 +437,68 @@ async def create_api_key(
         revoked_at=api_key.revoked_at,
         revoked_reason=api_key.revoked_reason,
         created_at=api_key.created_at,
+        allowed_cidrs=body.allowed_cidrs,
         token=plaintext,
     )
+
+
+@router.patch(
+    "/{key_id}",
+    response_model=ApiKeyPublic,
+    dependencies=[Depends(require_csrf), Depends(require_fresh_mfa)],
+)
+async def update_api_key(
+    key_id: uuid.UUID,
+    body: UpdateApiKeyRequest,
+    user: User = Depends(get_current_user),
+    audit: AuditService = Depends(get_audit_service),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    db_session: AsyncSession = Depends(get_session),
+    ip: str = Depends(get_client_ip),
+) -> ApiKeyPublic:
+    """Replace a key's per-key source-address allowlist.
+
+    Only the caller's own active keys are editable. The new list takes
+    effect on the next request with the key; ``null`` or ``[]`` clears
+    it, after which only ``Z4J_API_IP_ALLOWLIST`` applies.
+    """
+    from z4j_brain.errors import NotFoundError
+    from z4j_brain.persistence.repositories import ProjectRepository
+    from z4j_brain.persistence.repositories.api_keys import ApiKeyRepository
+
+    repo = ApiKeyRepository(db_session)
+    key = await repo.get_active_for_user(key_id, user.id)
+    if key is None:
+        raise NotFoundError(
+            "api key not found",
+            details={"key_id": str(key_id)},
+        )
+    previous = list(key.allowed_cidrs or [])
+    await repo.set_allowed_cidrs(key_id, user.id, allowed_cidrs=body.allowed_cidrs)
+    project_slug: str | None = None
+    if key.project_id is not None:
+        project = await ProjectRepository(db_session).get(key.project_id)
+        project_slug = project.slug if project is not None else None
+
+    await audit.record(
+        audit_log,
+        action="api_key.updated",
+        target_type="api_key",
+        target_id=str(key_id),
+        result="success",
+        outcome="allow",
+        user_id=user.id,
+        project_id=key.project_id,
+        source_ip=ip,
+        metadata={
+            "field": "allowed_cidrs",
+            "previous": previous,
+            "allowed_cidrs": body.allowed_cidrs or [],
+        },
+    )
+    await db_session.commit()
+    await db_session.refresh(key)
+    return _key_payload(key, project_slug=project_slug)
 
 
 @router.delete(

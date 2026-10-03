@@ -69,6 +69,7 @@ import sqlalchemy as sa
 from alembic import op
 from alembic.util import CommandError
 from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.types import jsonb
 
 # ---------------------------------------------------------------------------
 # Alembic revision identifiers
@@ -184,6 +185,66 @@ _POST_1_3_0_TABLES: frozenset[str] = frozenset(
 )
 
 _HISTORICAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "api_keys": (
+        "user_id",
+        "name",
+        "token_hash",
+        "prefix",
+        "last_used_at",
+        "last_used_ip",
+        "expires_at",
+        "revoked_at",
+        "revoked_reason",
+        "scopes",
+        "project_id",
+        "id",
+        "created_at",
+        "updated_at",
+    ),
+    "export_jobs": (
+        "user_id",
+        "project_id",
+        "export_type",
+        "format",
+        "filters",
+        "status",
+        "row_count",
+        "file_path",
+        "error",
+        "completed_at",
+        "id",
+        "created_at",
+        "updated_at",
+    ),
+    "memberships": (
+        "user_id",
+        "project_id",
+        "role",
+        "id",
+        "created_at",
+        "updated_at",
+    ),
+    "notification_channels": (
+        "project_id",
+        "name",
+        "type",
+        "config",
+        "is_active",
+        "id",
+        "created_at",
+        "updated_at",
+    ),
+    "user_channels": (
+        "user_id",
+        "name",
+        "type",
+        "config",
+        "is_verified",
+        "is_active",
+        "id",
+        "created_at",
+        "updated_at",
+    ),
     "agent_workers": (
         "agent_id",
         "project_id",
@@ -405,11 +466,28 @@ _HISTORICAL_INITIAL_TABLE_ORDER: tuple[str, ...] = (
 )
 
 
+#: The ``project_role`` labels every release before 1.12 shipped, in their
+#: declaration order; ``v1_12_auditor_role`` appends ``auditor`` to them.
+_HISTORICAL_PROJECT_ROLES: tuple[str, ...] = ("viewer", "operator", "admin")
+
+
 def _copy_historical_columns(
     table_name: str,
+    *,
+    overrides: dict[str, sa.Column[object]] | None = None,
 ) -> list[sa.Column[object]]:
+    """Copy the frozen column inventory of ``table_name`` from the live model.
+
+    ``overrides`` substitutes a column whose live TYPE changed after 1.3 (a
+    frozen name list alone cannot express that), keeping its position.
+    """
+
     source = Base.metadata.tables[table_name]
-    return [source.c[column_name]._copy() for column_name in _HISTORICAL_TABLE_COLUMNS[table_name]]
+    replaced = overrides or {}
+    return [
+        replaced[column_name] if column_name in replaced else source.c[column_name]._copy()
+        for column_name in _HISTORICAL_TABLE_COLUMNS[table_name]
+    ]
 
 
 def _historical_initial_metadata() -> sa.MetaData:
@@ -422,8 +500,6 @@ def _historical_initial_metadata() -> sa.MetaData:
     # for SQLAlchemy resolution. These declarations are name/type
     # placeholders only; upgrade() never creates them from this metadata.
     for table_name in (
-        "notification_channels",
-        "user_channels",
         "user_subscriptions",
         "users",
     ):
@@ -459,6 +535,136 @@ def _historical_initial_metadata() -> sa.MetaData:
     )
     sa.Index("ix_agents_project_state", agents.c.project_id, agents.c.state)
     sa.Index("ix_agents_last_seen_at", agents.c.last_seen_at)
+
+    # ``api_keys`` gained ``allowed_cidrs`` in ``v1_12_api_key_allowed_cidrs``;
+    # the 1.3-era shape is frozen here so replaying the chain does not
+    # teach the initial revision that column.
+    api_keys = sa.Table(
+        "api_keys",
+        metadata,
+        *_copy_historical_columns("api_keys"),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_api_keys_user_id_users",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_api_keys_project_id_projects",
+            ondelete="CASCADE",
+        ),
+    )
+    sa.Index("ix_api_keys_token_hash", api_keys.c.token_hash)
+    sa.Index("ix_api_keys_user_id", api_keys.c.user_id)
+    sa.Index("ix_api_keys_project_id", api_keys.c.project_id)
+
+    # ``export_jobs`` gained ``sink``, ``size_bytes`` and ``started_at`` in
+    # ``v1_12_export_jobs_sink``.  Frozen so a replayed chain appends them
+    # there, after the mixin columns, exactly where an upgraded database has
+    # them; emitting the live model here would put them before ``id`` and
+    # give a fresh install a different column order from every upgrade.
+    sa.Table(
+        "export_jobs",
+        metadata,
+        *_copy_historical_columns("export_jobs"),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_export_jobs_user_id_users",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_export_jobs_project_id_projects",
+            ondelete="CASCADE",
+        ),
+    )
+
+    # ``memberships.role`` is the native ``project_role`` enum, which
+    # ``v1_12_auditor_role`` extends by one label.  The type is created here
+    # with the labels every release before 1.12 shipped, so the replayed
+    # chain and a real upgrade both append ``auditor`` last and archive the
+    # same type definition.  The copied ``user_id`` and ``project_id`` keep
+    # their ``index=True`` and so recreate the two single-column indexes.
+    sa.Table(
+        "memberships",
+        metadata,
+        *_copy_historical_columns(
+            "memberships",
+            overrides={
+                "role": sa.Column(
+                    "role",
+                    sa.Enum(
+                        *_HISTORICAL_PROJECT_ROLES,
+                        name="project_role",
+                        native_enum=True,
+                        create_type=True,
+                    ),
+                    nullable=False,
+                    server_default="viewer",
+                ),
+            },
+        ),
+        sa.UniqueConstraint(
+            "user_id",
+            "project_id",
+            name="uq_memberships_user_project",
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_memberships_user_id_users",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_memberships_project_id_projects",
+            ondelete="CASCADE",
+        ),
+    )
+
+    # ``notification_channels.config`` and ``user_channels.config`` were the
+    # portable JSON type until ``v1_12_channel_config_encrypted`` moved them
+    # to encrypted TEXT.  The frozen shape keeps the JSON column so the
+    # replayed chain performs the same type change (and, on SQLite, the same
+    # table rebuild) a real upgrade does.
+    sa.Table(
+        "notification_channels",
+        metadata,
+        *_copy_historical_columns(
+            "notification_channels",
+            overrides={"config": sa.Column("config", jsonb(), nullable=False)},
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_notification_channels_project_id_projects",
+            ondelete="CASCADE",
+        ),
+    )
+    sa.Table(
+        "user_channels",
+        metadata,
+        *_copy_historical_columns(
+            "user_channels",
+            overrides={"config": sa.Column("config", jsonb(), nullable=False)},
+        ),
+        sa.UniqueConstraint(
+            "user_id",
+            "name",
+            name="uq_user_channel_name",
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_user_channels_user_id_users",
+            ondelete="CASCADE",
+        ),
+    )
 
     audit_log = sa.Table(
         "audit_log",

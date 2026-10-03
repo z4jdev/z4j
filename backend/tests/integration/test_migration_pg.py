@@ -7,7 +7,7 @@ the partial indexes, the GIN indexes, the partition pre-create,
 and the audit_log triggers all run for real.
 
 It also covers the bidirectional contract documented in
-``z4j.dev/operations/database-migrations``: every additive 1.4.x
+``docs.z4j.com/operations/database-migrations``: every additive 1.4.x
 migration must round-trip ``upgrade head -> downgrade base ->
 upgrade head`` against a populated database without leaving stray
 objects behind. ``TestMigrationRoundTrip`` enforces that.
@@ -2129,7 +2129,7 @@ class TestMigrationStructure:
 # pre-F head. This is the load-bearing test for the
 # 1.4.x compatibility-floor promise that schema migrations are
 # bidirectional. If this ever fails, the bidirectional claim in
-# z4j.dev/operations/database-migrations is no longer true.
+# docs.z4j.com/operations/database-migrations is no longer true.
 # ---------------------------------------------------------------------------
 
 

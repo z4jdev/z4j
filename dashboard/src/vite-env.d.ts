@@ -5,7 +5,7 @@ interface ImportMetaEnv {
    * When "true", the build was produced by `pnpm build:demo` and the
    * SPA loads the in-browser mock-fetch interceptor at
    * src/lib/api.demo.ts instead of talking to a real backend. Used
-   * by the demo.z4j.dev deployment. See DEMO-Z4J-DEV-DESIGN.md.
+   * by the demo.z4j.com deployment. See DEMO-Z4J-DEV-DESIGN.md.
    */
   readonly VITE_Z4J_DEMO_MODE?: string;
 

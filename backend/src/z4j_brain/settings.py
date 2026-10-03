@@ -13,15 +13,27 @@ of monkey-patching environment variables.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from z4j_brain.postgres_tls import (
     PostgresTLSConfigurationError,
     parse_asyncpg_tls_options,
 )
+
+#: Audit retention windows longer than this (ten years) are accepted but
+#: named in a startup WARNING, because a window that long is usually a typo
+#: rather than an obligation, and the table it governs grows without bound.
+AUDIT_RETENTION_WARN_DAYS = 3650
+
+#: Shape of a key in ``audit_retention_by_class``: the first dotted segment
+#: of an action name, as the audit service writes them (``auth``,
+#: ``command``, ``dead_letters``). Dots are refused because a key that
+#: names a whole action would silently match nothing.
+_AUDIT_ACTION_CLASS_RX = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 
 class ConfigError(ValueError):
@@ -162,32 +174,35 @@ class Settings(BaseSettings):
     #: re-credential itself.
     #:
     #: WHEN IT IS SAFE TO DROP THIS, which is NOT when the agents are
-    #: done: stored TOTP secrets are encrypted under a key derived from the
-    #: master and are re-encrypted under the new one only after that user
-    #: successfully verifies a TOTP code. A trusted-device login or recovery-
-    #: code login does not re-wrap the stored secret. There is no bulk
-    #: re-wrap. Keep this value until every MFA-enrolled user has completed a
-    #: successful TOTP verification since the rotation, reset MFA, or
-    #: re-enrolled. Also complete and verify any outstanding legacy audit
-    #: activation or reseal work before retirement. Dropping it sooner orphans
-    #: dormant users' TOTP enrolments, and the symptom is an opaque 500 on MFA
-    #: verify rather than a readable error. Recoverable three ways: put the old
-    #: value back and restart every brain process (so keep it in the secret
-    #: store rather than destroying it), sign in with a recovery code
-    #: (argon2id, master-independent) and re-enrol, or run ``z4j reset-mfa
-    #: <email>``.
+    #: done: stored TOTP secrets and notification channel configs are
+    #: encrypted under a key derived from the master (``domain.mfa.crypto``
+    #: and ``domain.secret_fields``). On their own they are re-encrypted
+    #: under the new one only when the row is next written: a TOTP secret
+    #: after that user successfully verifies a TOTP code (a trusted-device
+    #: or recovery-code login does not re-wrap it), a channel config when
+    #: that channel is next edited. ``z4j secrets rewrap`` re-encrypts every
+    #: such row under the current master in one run; keep this value until
+    #: that command exits 0, and until any outstanding legacy audit
+    #: activation or reseal work is verified. Dropping it sooner orphans
+    #: the rows still under the old master: an opaque 500 on MFA verify, a
+    #: channel that no longer loads or dispatches. Recoverable by putting
+    #: the old value back and restarting every brain process (so keep it in
+    #: the secret store rather than destroying it), then running the rewrap;
+    #: for one user, a recovery-code sign-in and re-enrolment or ``z4j
+    #: reset-mfa <email>``; for one channel, re-entering its credentials.
     #: Empty (default) = no rotation in progress.
     previous_secrets: SecretStr | None = Field(
         default=None,
         description=(
             "Comma-separated previous master secrets accepted for agent "
-            "bearer verification, stored TOTP decryption, and legacy audit "
-            "verification and activation/reseal during rotation. "
-            "Does NOT cover API keys, invitation or password-reset tokens, "
-            "or frame signing. Keep until every MFA enrolment has completed "
-            "a successful TOTP verification since rotation, been reset, or "
-            "been re-enrolled, and any legacy audit transition is verified. "
-            "Each entry must be >=32 bytes."
+            "bearer verification, decryption of stored TOTP secrets and "
+            "notification channel configs, and legacy audit verification "
+            "and activation/reseal during rotation. Does NOT cover API keys, "
+            "invitation or password-reset tokens, or frame signing. Keep "
+            "until `z4j secrets rewrap` exits 0 (or every stored TOTP secret "
+            "has seen a successful TOTP verification, been reset or been "
+            "re-enrolled) and any legacy audit transition is verified. Each "
+            "entry must be >=32 bytes."
         ),
     )
     session_secret: SecretStr = Field(
@@ -234,7 +249,24 @@ class Settings(BaseSettings):
     # Retention + worker cadence
     # ------------------------------------------------------------------
     event_retention_days: int = Field(default=30, ge=1, le=3650)
-    audit_retention_days: int = Field(default=90, ge=1, le=3650)
+    #: Days an ``audit_log`` row lives before the retention sweep and
+    #: ``z4j audit prune`` remove it. There is deliberately no ceiling: a
+    #: legal obligation can run past ten years. Startup logs a WARNING above
+    #: :data:`AUDIT_RETENTION_WARN_DAYS` instead of refusing (see
+    #: :meth:`retention_windows_over_ten_years`).
+    audit_retention_days: int = Field(default=90, ge=1)
+    #: Retention by action class. A JSON object mapping the first dotted
+    #: segment of an action name (``auth`` for ``auth.login``, ``command``
+    #: for ``command.issue.requeue_dead_letter``) to days; a class that is
+    #: not listed uses ``audit_retention_days``. Empty by default. A class
+    #: window may be longer or shorter than the global one.
+    #:
+    #: The HMAC chain only ever prunes a contiguous oldest-first prefix, so
+    #: the oldest row whose class still keeps it stops the sweep: a longer
+    #: class window holds every row written after that row, and a shorter
+    #: one only takes effect on rows older than every retained neighbour.
+    #: See ``audit_retention.RetentionCutoffs`` for the exact rule.
+    audit_retention_by_class: dict[str, int] = Field(default_factory=dict)
     #: Verify the audit chain on a schedule rather than only on demand.
     #:
     #: Off by default. Verification takes a share lock and walks every
@@ -389,6 +421,22 @@ class Settings(BaseSettings):
     # Safety limits
     # ------------------------------------------------------------------
     max_payload_size_bytes: int = Field(default=8_192, ge=128)
+    #: Extra key-name regexes for the brain-side redaction pass over every
+    #: inbound event, on top of the built-in patterns. A JSON array of
+    #: regex strings (``["^x_token$", "customer_ssn"]``), matched
+    #: case-insensitively against each key of task args, kwargs, results
+    #: and exception payloads. Validated at construction: an invalid regex
+    #: refuses to start rather than silently disabling the pattern. The
+    #: agent-side variable of the same name is comma-separated and governs
+    #: the agent's own first pass; this one governs the brain's second
+    #: pass, which runs on what arrives regardless of the agent's config.
+    redaction_extra_key_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "JSON array of extra key-name regexes the brain's redaction pass "
+            "applies to every inbound event in addition to the built-in patterns."
+        ),
+    )
     max_ws_frame_bytes: int = Field(
         default=1_048_576,
         ge=1024,
@@ -660,28 +708,132 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     #: Receiver URL for the audit-forwarder. Empty / unset disables
     #: the forwarder entirely; even with the URL set, the brain's
-    #: primary audit log remains the source of truth and forwarding
-    #: is best-effort. SecretStr so a path-embedded token (Splunk HEC,
-    #: Datadog logs intake) does not land in startup logs.
+    #: primary audit log remains the source of truth and the mirror
+    #: is delivered at least once from a durable cursor. SecretStr so
+    #: a path-embedded token (Splunk HEC, Datadog logs intake) does
+    #: not land in startup logs.
     audit_webhook_url: SecretStr | None = None
     #: HMAC-SHA256 secret used to sign forwarded audit-row bodies.
     #: REQUIRED when ``audit_webhook_url`` is set; the brain refuses
     #: to start otherwise (see ``_enforce_security_invariants``).
     #: Receivers verify by recomputing
-    #: ``hmac.new(secret, body, sha256).hexdigest()`` and comparing
-    #: constant-time to the value in ``X-Z4J-Audit-Signature``.
+    #: ``hmac.new(secret, f"{timestamp}.".encode() + body, sha256).hexdigest()``
+    #: with the ``X-Z4J-Audit-Timestamp`` value and comparing constant-time
+    #: to the value in ``X-Z4J-Audit-Signature`` (``domain/audit_forwarder.py``).
     audit_webhook_hmac_secret: SecretStr | None = None
     #: Per-row POST timeout in seconds. Default 10s matches the
     #: notification dispatcher. A slow receiver does not block the
-    #: brain's audit write path because the forwarder runs in a
-    #: background drain task.
+    #: brain's audit write path because the forwarder is a background
+    #: worker reading from the audit log, not a hook on the write.
     audit_webhook_timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
-    #: In-memory queue size between the audit-write hook and the
-    #: drain task. Spikes above this cause rows to be dropped with
-    #: a WARNING + a swallowed-exception metric bump. Raise on
-    #: high-volume brains; the buffer is shared across all
-    #: AuditService writers in this process.
+    #: Inert. The forwarder no longer buffers rows in memory: it
+    #: delivers from a durable cursor in ``audit_forward_state`` and
+    #: drops nothing. Still declared so configurations that set it
+    #: keep loading; the value is read by nothing.
     audit_webhook_buffer_size: int = Field(default=1000, ge=10, le=100_000)
+    #: Rows read past the cursor per forwarder pass, each POSTed in
+    #: chain order. A pass that delivers a full batch runs again at
+    #: once, so this bounds how long one leader-locked pass can take
+    #: rather than throughput.
+    audit_webhook_batch_size: int = Field(default=100, ge=1, le=1000)
+    #: How often the forwarder looks for rows past the cursor when it
+    #: is caught up. Delivery latency for a quiet brain is at most this.
+    audit_webhook_poll_interval_seconds: float = Field(default=5.0, ge=1.0, le=300.0)
+    #: Ceiling on the wait between attempts after consecutive failures.
+    #: The wait starts at one second and doubles per failure; the
+    #: counter is persisted with the cursor so a restart does not
+    #: reset it. A success resets it.
+    audit_webhook_max_backoff_seconds: float = Field(default=300.0, ge=1.0, le=3600.0)
+
+    def audit_forwarder_enabled(self) -> bool:
+        """Whether the audit webhook forwarder is configured to run."""
+        if self.audit_webhook_url is None:
+            return False
+        return bool(self.audit_webhook_url.get_secret_value().strip())
+
+    # ------------------------------------------------------------------
+    # Export sink: background exports of any size, scheduled head export
+    # ------------------------------------------------------------------
+    #: Where background export jobs (``POST .../audit/export-jobs``) and
+    #: the scheduled audit-chain head export are written. ``none`` (the
+    #: default) disables both: the API answers 409 to a job request and
+    #: the export-jobs worker is not started. ``local`` writes under
+    #: :attr:`export_sink_path`; ``s3`` streams to an S3-compatible bucket
+    #: through the optional ``z4j[s3]`` extra.
+    export_sink: Literal["none", "local", "s3"] = "none"
+    #: Directory for the local sink. Must exist, must not be a symlink.
+    #: Files are created 0640 and written atomically.
+    export_sink_path: str | None = Field(default=None, max_length=1024)
+    #: Bucket for the s3 sink. Required when ``export_sink`` is ``s3``.
+    export_sink_s3_bucket: str | None = Field(default=None, max_length=255)
+    #: Key prefix inside the bucket. Objects land under
+    #: ``<prefix>/audit/<slug>/...`` and ``<prefix>/audit-head/...``.
+    export_sink_s3_prefix: str = Field(default="z4j-exports", max_length=512)
+    #: Endpoint URL for S3-compatible stores (MinIO, Ceph RGW, B2). Unset
+    #: means AWS.
+    export_sink_s3_endpoint_url: str | None = Field(default=None, max_length=512)
+    #: Region name passed to the client. Unset defers to the AWS environment.
+    export_sink_s3_region: str | None = Field(default=None, max_length=64)
+    #: Explicit credentials. Both or neither: with neither set the client
+    #: uses the standard AWS chain (environment, shared config, instance
+    #: role). SecretStr so they never land in startup logs or ``z4j doctor``.
+    export_sink_s3_access_key_id: SecretStr | None = None
+    export_sink_s3_secret_access_key: SecretStr | None = None
+    #: How often the export-jobs worker looks for queued jobs. A finished
+    #: tick with more work waiting re-runs sooner than this.
+    export_jobs_poll_interval_seconds: int = Field(default=5, ge=1, le=300)
+    #: Rows fetched per page while streaming a job. Larger pages mean
+    #: fewer round trips and more memory per page; the whole result is
+    #: never held.
+    export_jobs_page_size: int = Field(default=2000, ge=100, le=20_000)
+    #: Write the authenticated audit-chain head to the sink every this many
+    #: seconds, under ``audit-head/current.json`` plus a dated copy. ``0``
+    #: (the default) disables it. Requires a sink and the audit-chain key.
+    #: This is the documented known-head mitigation without an operator
+    #: cron: ``z4j audit verify --known-head`` reads the exported file.
+    audit_head_export_interval_seconds: int = Field(default=0, ge=0, le=604_800)
+
+    def _enforce_export_sink_invariants(self) -> None:
+        """The sink named must be configured, and the head export needs one.
+
+        Called from ``__init__`` after validation, like
+        :meth:`_enforce_security_invariants`, so a refusal raises a
+        :class:`ConfigError` with a message we control rather than a
+        pydantic error that prints the input (secrets included).
+        """
+        if self.export_sink == "local" and not (self.export_sink_path or "").strip():
+            raise ConfigError("Z4J_EXPORT_SINK=local requires Z4J_EXPORT_SINK_PATH")
+        if self.export_sink == "s3" and not (self.export_sink_s3_bucket or "").strip():
+            raise ConfigError("Z4J_EXPORT_SINK=s3 requires Z4J_EXPORT_SINK_S3_BUCKET")
+        # The endpoint is a plain string that ``z4j config show`` and the
+        # admin settings page render in clear. aiohttp refuses a URL with
+        # userinfo at connect time, so ``user:pass@host`` can only leak,
+        # never work; the credentials belong in the two key settings.
+        endpoint_authority = (self.export_sink_s3_endpoint_url or "").split("://", 1)[-1]
+        endpoint_authority = re.split(r"[/?#]", endpoint_authority, maxsplit=1)[0]
+        if "@" in endpoint_authority:
+            raise ConfigError(
+                "Z4J_EXPORT_SINK_S3_ENDPOINT_URL must not contain embedded userinfo "
+                "(user@host); put the credentials in Z4J_EXPORT_SINK_S3_ACCESS_KEY_ID "
+                "and Z4J_EXPORT_SINK_S3_SECRET_ACCESS_KEY",
+            )
+        has_key = self.export_sink_s3_access_key_id is not None
+        has_secret = self.export_sink_s3_secret_access_key is not None
+        if has_key != has_secret:
+            raise ConfigError(
+                "Z4J_EXPORT_SINK_S3_ACCESS_KEY_ID and "
+                "Z4J_EXPORT_SINK_S3_SECRET_ACCESS_KEY must be set together",
+            )
+        if self.audit_head_export_interval_seconds > 0:
+            if self.export_sink == "none":
+                raise ConfigError(
+                    "Z4J_AUDIT_HEAD_EXPORT_INTERVAL_SECONDS needs an export sink; "
+                    "set Z4J_EXPORT_SINK to local or s3",
+                )
+            if self.audit_head_export_interval_seconds < 60:
+                raise ConfigError(
+                    "Z4J_AUDIT_HEAD_EXPORT_INTERVAL_SECONDS must be 0 (off) or at least 60",
+                )
 
     # ------------------------------------------------------------------
     # Auth - passwords
@@ -691,7 +843,7 @@ class Settings(BaseSettings):
     argon2_parallelism: int = Field(default=4, ge=1, le=16)
     #: Minimum allowed password length. 1.6.5 advisory F4 raises the
     #: default from 8 to 12 to match the docs and the password-policy
-    #: page on z4j.dev. Existing passwords are grandfathered; the
+    #: page on docs.z4j.com. Existing passwords are grandfathered; the
     #: policy only runs on write paths (signup, change-password,
     #: reset). Operators with strict compliance needs raise this
     #: further; minimum 8 is the floor (NIST 800-63B floor for
@@ -880,14 +1032,32 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Network - host + proxy + body + timeouts
     # ------------------------------------------------------------------
-    #: Allowed Host headers. Production must populate this. Empty
-    #: list in dev defaults to ``["localhost", "127.0.0.1"]`` via the
-    #: model validator below.
+    #: Allowed Host headers. Production must populate this. The value is
+    #: stored as given; in dev ``middleware/host_validation.py`` adds
+    #: ``localhost``, ``127.0.0.1``, ``[::1]`` and ``testserver`` to the
+    #: effective set when it builds the middleware, not a validator here.
     allowed_hosts: list[str] = Field(default_factory=list)
     #: CIDR list of reverse-proxy IPs whose ``X-Forwarded-For`` we
     #: trust. Empty list = trust no proxies (audit logs use the raw
-    #: socket peer address). Defaults are dev-only.
+    #: socket peer address). Defaults are dev-only. Validated at
+    #: construction like the allowlists below (malformed refuses to
+    #: start, entries are stored canonical); a catch-all entry
+    #: (``0.0.0.0/0`` or ``::/0``) is honoured but named in a startup
+    #: WARNING, see :meth:`catch_all_trusted_proxies`.
     trusted_proxies: list[str] = Field(default_factory=list)
+    #: Source-address allowlists, one per authenticated surface. Each is a
+    #: JSON array of IPv4/IPv6 CIDRs (a bare address means one host),
+    #: validated at construction and matched against the client IP AFTER
+    #: ``trusted_proxies`` resolution. Empty = no restriction. Loopback is
+    #: never implicitly exempt. See :mod:`z4j_brain.domain.ip_allowlist`.
+    #:
+    #: The login route and every session-cookie request.
+    dashboard_ip_allowlist: list[str] = Field(default_factory=list)
+    #: Every Bearer API-key request; a key's own ``allowed_cidrs`` narrows
+    #: this further.
+    api_ip_allowlist: list[str] = Field(default_factory=list)
+    #: The agent transports (WebSocket and long-poll).
+    agent_ip_allowlist: list[str] = Field(default_factory=list)
     #: Reserved compatibility setting. There is no process-wide request
     #: cancellation middleware; individual I/O paths carry their own deadlines.
     request_timeout_seconds: int = Field(
@@ -925,6 +1095,17 @@ class Settings(BaseSettings):
     db_statement_timeout_ms: int = Field(default=10_000, ge=100, le=600_000)
     db_lock_timeout_ms: int = Field(default=3_000, ge=100, le=600_000)
     db_idle_in_tx_timeout_ms: int = Field(default=30_000, ge=100, le=600_000)
+    #: How long one starting worker may wait for a sibling's Boundary-F
+    #: startup walk (milliseconds). Every uvicorn worker verifies the audit
+    #: chain before it serves, under the chain advisory lock and a SHARE lock
+    #: on ``audit_log``, so the workers verify one after another, and the
+    #: per-request ``db_lock_timeout_ms`` is far too short for the last
+    #: worker in that queue on a large trail: a worker that gives up takes
+    #: the whole server down with it. Applied with ``SET LOCAL`` inside the
+    #: verifying transaction only, as both ``lock_timeout`` and
+    #: ``statement_timeout`` (PostgreSQL counts a lock wait against both),
+    #: and never below the per-request bounds. Ignored on SQLite.
+    startup_verify_lock_timeout_ms: int = Field(default=600_000, ge=1_000, le=3_600_000)
     #: When True, refuse a Postgres URL that disables SSL
     #: (``sslmode=disable`` or no sslmode at all). Auto-relaxed when
     #: ``environment="dev"``.
@@ -1070,7 +1251,7 @@ class Settings(BaseSettings):
     disable_spa_fallback: bool = False
 
     # ------------------------------------------------------------------
-    # z4j-scheduler gRPC service (docs/SCHEDULER.md §22)
+    # z4j-scheduler gRPC service (docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §22)
     # ------------------------------------------------------------------
     # Off by default - operators opt in once they deploy a
     # ``z4j-scheduler`` companion process. When disabled the brain
@@ -1104,9 +1285,10 @@ class Settings(BaseSettings):
     scheduler_grpc_tls_ca: str | None = None
     #: DEV / TEST ONLY: bind the scheduler gRPC port WITHOUT TLS.
     #: Mirrors the scheduler-side ``insecure_grpc`` opt-in. Refused
-    #: when ``environment`` is ``"production"``: the scheduler
-    #: channel is the brain's most-privileged inbound surface, so
-    #: insecure transport is never acceptable in production.
+    #: unless ``is_dev`` (``environment`` exactly ``"dev"``; every other
+    #: value is treated as production, ``scheduler_grpc/server.py``): the
+    #: scheduler channel is the brain's most-privileged inbound surface,
+    #: so insecure transport is never acceptable outside dev.
     #: Use only on trusted loopback or container-internal networks
     #: (e.g. local docker-compose dev stacks where provisioning a
     #: cert chain would be friction without security benefit).
@@ -1364,7 +1546,7 @@ class Settings(BaseSettings):
     scheduler_trigger_tls_ca: str | None = None
 
     # ------------------------------------------------------------------
-    # Embedded scheduler sidecar (docs/SCHEDULER.md §21.3)
+    # Embedded scheduler sidecar (docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §21.3)
     # ------------------------------------------------------------------
     #: When True, brain spawns a ``z4j-scheduler serve`` subprocess
     #: in its own lifespan and supervises it (auto-restart on crash,
@@ -1560,6 +1742,7 @@ class Settings(BaseSettings):
         """
         super().__init__(**values)
         self._enforce_security_invariants()
+        self._enforce_export_sink_invariants()
 
     @property
     def is_dev(self) -> bool:
@@ -1613,6 +1796,10 @@ class Settings(BaseSettings):
         ]
         if self.audit_chain_verify_enabled:
             names.append("audit_chain_verifier_worker")
+        if self.audit_forwarder_enabled():
+            names.append("audit_forwarder_worker")
+        if self.export_sink != "none":
+            names.append("export_jobs_worker")
         if self.scheduler_grpc_enabled or self.embedded_scheduler:
             names.extend(
                 (
@@ -1891,6 +2078,155 @@ class Settings(BaseSettings):
             seen.add(entry)
             out.append(entry.encode("utf-8"))
         return out
+
+    @field_validator("audit_retention_by_class", mode="before")
+    @classmethod
+    def _parse_audit_retention_by_class(cls, v: Any) -> Any:
+        """Parse and validate ``Z4J_AUDIT_RETENTION_BY_CLASS``.
+
+        Operators set it via env as JSON (``'{"auth": 365, "command": 30}'``);
+        pydantic-settings forwards the raw string here. The parsed dict form
+        is accepted too so in-process ``Settings(...)`` works without a JSON
+        round trip. Validation is strict on purpose: pydantic would otherwise
+        coerce ``true`` to 1 and ``"30"`` to 30, and a retention window is
+        not a place for a silent coercion. Every key must look like an
+        action class and every value must be a positive whole number of days.
+        """
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            import json
+
+            try:
+                parsed = json.loads(v)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "audit_retention_by_class must be a JSON object mapping an "
+                    f"action class (auth, command, schedule, ...) to days; got {exc}",
+                ) from exc
+            v = parsed
+        if not isinstance(v, dict):
+            raise ValueError(  # noqa: TRY004  pydantic validator must raise ValueError
+                "audit_retention_by_class must be a JSON object mapping an "
+                "action class (auth, command, schedule, ...) to days",
+            )
+        out: dict[str, int] = {}
+        for key, days in v.items():
+            if not isinstance(key, str) or not _AUDIT_ACTION_CLASS_RX.match(key):
+                raise ValueError(
+                    f"audit_retention_by_class key {key!r} is not an action class: "
+                    "use the first dotted segment of an action name, lower-case "
+                    "letters, digits and underscores only (auth, command, "
+                    "dead_letters)",
+                )
+            if isinstance(days, bool) or not isinstance(days, int):
+                raise ValueError(  # noqa: TRY004  pydantic validator must raise ValueError
+                    f"audit_retention_by_class[{key!r}] must be a whole number of "
+                    f"days, got {days!r}",
+                )
+            if days < 1:
+                raise ValueError(
+                    f"audit_retention_by_class[{key!r}] must be at least 1 day, got {days}",
+                )
+            out[key] = days
+        return out
+
+    def retention_windows_over_ten_years(self) -> list[str]:
+        """Name every audit retention window above ten years.
+
+        The ceiling on ``audit_retention_days`` was removed because an
+        obligation can exceed it; this is what replaced it. ``main.py`` logs
+        one WARNING naming each entry at startup. Returns an empty list when
+        nothing is over the line. Settings are read from the environment
+        only: there is no write-back path, so changing a window is a restart.
+        """
+        over: list[str] = []
+        if self.audit_retention_days > AUDIT_RETENTION_WARN_DAYS:
+            over.append(f"Z4J_AUDIT_RETENTION_DAYS={self.audit_retention_days}")
+        for action_class, days in sorted(self.audit_retention_by_class.items()):
+            if days > AUDIT_RETENTION_WARN_DAYS:
+                over.append(f"Z4J_AUDIT_RETENTION_BY_CLASS[{action_class}]={days}")
+        return over
+
+    @field_validator("redaction_extra_key_patterns")
+    @classmethod
+    def _compile_redaction_patterns(cls, patterns: list[str]) -> list[str]:
+        """Refuse an extra redaction pattern that does not compile or that backtracks.
+
+        The redaction engine would raise the same errors at app build time,
+        but here the message names the setting and the offending entry, and
+        ``z4j config validate`` catches it before a restart does.
+
+        The cost check is the engine's own probe: each pattern is timed
+        against adversarial keys built from the characters it mentions,
+        growing to the longest key an extra pattern is ever matched against,
+        and refused when one key takes over 20 ms or the probe set over
+        100 ms. The brain runs these patterns on the event loop for every
+        key of every inbound event, so a pattern such as ``(a+)+$`` would let
+        any agent stall a worker with one crafted frame.
+        """
+        from z4j_core.redaction.patterns import probe_key_pattern
+
+        for index, pattern in enumerate(patterns):
+            if not isinstance(pattern, str) or not pattern:
+                raise ValueError(
+                    f"redaction_extra_key_patterns[{index}] must be a non-empty regex string",
+                )
+            try:
+                compiled = re.compile(pattern, re.IGNORECASE)
+            except re.error as exc:
+                raise ValueError(
+                    f"redaction_extra_key_patterns[{index}] is not a valid regex: {exc}",
+                ) from exc
+            reason = probe_key_pattern(compiled)
+            if reason is not None:
+                raise ValueError(f"redaction_extra_key_patterns[{index}] is refused: {reason}")
+        return list(patterns)
+
+    @field_validator("dashboard_ip_allowlist", "api_ip_allowlist", "agent_ip_allowlist")
+    @classmethod
+    def _validate_ip_allowlists(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        """Refuse a malformed CIDR at construction and store the canonical form.
+
+        A list that only fails at request time would fail as a 500 on the
+        first authenticated request, which is the worst moment to learn
+        that ``10.0.0/8`` is not a network. Canonical entries also mean the
+        matcher never re-parses them per request.
+        """
+        from z4j_brain.domain.ip_allowlist import parse_cidr_list
+
+        return parse_cidr_list(v, field_name=info.field_name or "ip_allowlist")
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _validate_trusted_proxies(cls, v: list[str]) -> list[str]:
+        """Refuse a malformed trusted-proxy CIDR at construction; store it canonical.
+
+        The resolver that consumes the list would refuse the same entry when
+        the app is built, but that is after ``z4j config validate`` has said
+        the configuration is fine. Same parser, same leniency and the same
+        zone-id refusal as the three allowlists, so the four lists agree on
+        what an entry is. A catch-all entry is accepted here; it is a
+        legitimate shape behind a service mesh, and :meth:`catch_all_trusted_proxies`
+        is what names it at startup.
+        """
+        from z4j_brain.domain.ip_allowlist import parse_cidr_list
+
+        return parse_cidr_list(v, field_name="trusted_proxies")
+
+    def catch_all_trusted_proxies(self) -> list[str]:
+        """The ``trusted_proxies`` entries that trust every peer.
+
+        ``0.0.0.0/0`` or ``::/0`` in the list lets ANY socket peer choose
+        its own client address through ``X-Forwarded-For``: that address
+        is what the agent connect bucket keys on and what the three
+        allowlists match, so both are bypassed by a header. ``main.py``
+        logs one WARNING naming each such entry at startup rather than
+        refusing it, because a brain that only ever sees a mesh sidecar
+        as its peer may have no narrower range to write. Entries are
+        canonical by the time this runs, so the comparison is textual.
+        """
+        return [cidr for cidr in self.trusted_proxies if cidr in ("0.0.0.0/0", "::/0")]
 
     @field_validator("scheduler_grpc_cn_project_bindings", mode="before")
     @classmethod

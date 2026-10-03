@@ -12,8 +12,23 @@ connection:
 
 We set them via a ``connect`` event on the engine, NOT via
 ``SET LOCAL ...`` per-statement, because (a) per-statement is
-overhead-heavy and (b) the connect-time setting persists across
-the connection's lifetime which matches what we actually want.
+overhead-heavy and (b) a session-level setting lasts for the
+connection's lifetime, which matches what we actually want.
+
+Session-level means issued OUTSIDE any transaction. PostgreSQL discards
+a plain ``SET`` run inside a transaction that is later rolled back, and
+SQLAlchemy's asyncpg adapter opens its implicit transaction before the
+first cursor statement on a new connection. Issued through a cursor, the
+three SETs therefore lasted only until that connection's first rollback
+(the pool's reset-on-return is one), after which the connection ran with
+none of the bounds for the rest of its life; a connection whose first unit
+of work happened to commit kept them, so which pooled connections were
+bounded depended on what they served first. The listener runs the SETs on
+the raw asyncpg connection instead, through the adapted connection's
+``run_async``: outside a transaction block asyncpg's ``execute``
+autocommits, so the values are session-level and survive every rollback,
+reset and ``SET LOCAL`` (startup verification widens its lock wait that
+way, and the connection goes back to the pool with these values intact).
 
 ``idle_in_transaction_session_timeout`` applies to every connection
 this engine hands out, including one that is not doing work itself
@@ -30,7 +45,7 @@ SQLite has none of these knobs - the function is a no-op there.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import event
 
@@ -57,26 +72,45 @@ def install_statement_timeouts(
     """
     sync_engine = getattr(engine, "sync_engine", engine)
 
-    statement_ms = settings.db_statement_timeout_ms
-    lock_ms = settings.db_lock_timeout_ms
-    idle_ms = settings.db_idle_in_tx_timeout_ms
+    # Session-level only if issued outside a transaction; see the module
+    # docstring. Order is the one the settings are documented in.
+    statements = (
+        f"SET statement_timeout = {int(settings.db_statement_timeout_ms)}",
+        f"SET lock_timeout = {int(settings.db_lock_timeout_ms)}",
+        f"SET idle_in_transaction_session_timeout = {int(settings.db_idle_in_tx_timeout_ms)}",
+    )
+
+    async def _apply_on_raw_connection(raw_connection: Any) -> None:
+        # asyncpg's ``execute`` outside a transaction block autocommits, and
+        # a new connection has no transaction yet: the adapter opens its
+        # implicit one at the first cursor statement, which this is not.
+        for statement in statements:
+            await raw_connection.execute(statement)
 
     @event.listens_for(sync_engine, "connect")
-    def _on_connect(dbapi_connection, connection_record) -> None:  # type: ignore[no-untyped-def]
+    def _on_connect(dbapi_connection: Any, connection_record: Any) -> None:
         # Determine dialect from the engine, not the dbapi
         # connection (which doesn't carry that info uniformly).
         dialect_name = sync_engine.dialect.name
         if dialect_name != "postgresql":
             return
+        run_async = getattr(dbapi_connection, "run_async", None)
+        if run_async is not None:
+            # SQLAlchemy's asyncpg adapter: ``run_async`` hands the raw
+            # driver connection to the coroutine, bypassing the adapter's
+            # cursor and the transaction it would open.
+            run_async(_apply_on_raw_connection)
+            return
+        # A synchronous DBAPI connection (psycopg) runs the cursor inside the
+        # driver's implicit transaction; committing it is what makes the
+        # SETs session-level there. No shipped engine takes this path today.
         cursor = dbapi_connection.cursor()
         try:
-            cursor.execute(f"SET statement_timeout = {int(statement_ms)}")
-            cursor.execute(f"SET lock_timeout = {int(lock_ms)}")
-            cursor.execute(
-                f"SET idle_in_transaction_session_timeout = {int(idle_ms)}",
-            )
+            for statement in statements:
+                cursor.execute(statement)
         finally:
             cursor.close()
+        dbapi_connection.commit()
 
 
 __all__ = ["install_statement_timeouts"]

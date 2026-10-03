@@ -1,8 +1,14 @@
-"""Tests for the v1.6 out-of-band audit-log forwarder."""
+"""Tests for the out-of-band audit-log forwarder: settings, wire shape, signing.
+
+Delivery through the durable cursor (ordering, backoff, restart, the
+leader lease) lives in ``test_audit_forwarder_cursor.py``. This file pins
+the parts that did not change when the in-memory queue went away: the
+settings surface, the payload rendering, the signature, and what one
+``_send_one`` call does with each kind of answer.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -21,6 +27,7 @@ from z4j_brain.domain.audit_forwarder import (
     AUDIT_TIMESTAMP_HEADER,
     AuditForwarder,
     _row_to_payload,
+    encode_payload,
     row_to_payload,
     sign_payload,
 )
@@ -41,6 +48,9 @@ def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "Z4J_AUDIT_WEBHOOK_HMAC_SECRET",
         "Z4J_AUDIT_WEBHOOK_TIMEOUT_SECONDS",
         "Z4J_AUDIT_WEBHOOK_BUFFER_SIZE",
+        "Z4J_AUDIT_WEBHOOK_BATCH_SIZE",
+        "Z4J_AUDIT_WEBHOOK_POLL_INTERVAL_SECONDS",
+        "Z4J_AUDIT_WEBHOOK_MAX_BACKOFF_SECONDS",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -74,6 +84,17 @@ def _fake_row(**overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
+def _forwarder(**overrides: Any) -> AuditForwarder:
+    """A forwarder whose database is never touched: ``_send_one`` only."""
+    kwargs: dict[str, Any] = {
+        "db": SimpleNamespace(),
+        "webhook_url": "https://siem.example/ingest",
+        "hmac_secret": b"x" * 32,
+    }
+    kwargs.update(overrides)
+    return AuditForwarder(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
@@ -82,85 +103,85 @@ def _fake_row(**overrides: Any) -> SimpleNamespace:
 class TestAuditWebhookSettings:
     def test_defaults_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _base_env(monkeypatch)
-        s = Settings()  # type: ignore[call-arg]
+        s = Settings()
         assert s.audit_webhook_url is None
         assert s.audit_webhook_hmac_secret is None
         assert s.audit_webhook_timeout_seconds == 10.0
         assert s.audit_webhook_buffer_size == 1000
+        assert s.audit_webhook_batch_size == 100
+        assert s.audit_webhook_poll_interval_seconds == 5.0
+        assert s.audit_webhook_max_backoff_seconds == 300.0
+        assert s.audit_forwarder_enabled() is False
 
     def test_url_is_secretstr(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _base_env(monkeypatch)
-        monkeypatch.setenv(
-            "Z4J_AUDIT_WEBHOOK_URL",
-            "https://siem.internal/ingest?token=embedded",
-        )
-        monkeypatch.setenv(
-            "Z4J_AUDIT_WEBHOOK_HMAC_SECRET",
-            secrets.token_urlsafe(48),
-        )
-        s = Settings()  # type: ignore[call-arg]
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_URL", "https://siem.example/ingest?token=abc")
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_HMAC_SECRET", "k" * 48)
+        s = Settings()
         assert isinstance(s.audit_webhook_url, SecretStr)
-        assert "embedded" not in str(s.audit_webhook_url)
+        assert "abc" not in repr(s.audit_webhook_url)
+        assert s.audit_forwarder_enabled() is True
 
-    def test_url_without_hmac_secret_rejected(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_blank_url_counts_as_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _base_env(monkeypatch)
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_URL", "   ")
+        assert Settings().audit_forwarder_enabled() is False
+
+    def test_url_without_hmac_secret_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _base_env(monkeypatch)
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_URL", "https://siem.example/ingest")
+        with pytest.raises(ConfigError, match="audit_webhook_hmac_secret"):
+            Settings()
+
+    def test_short_hmac_secret_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _base_env(monkeypatch)
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_URL", "https://siem.example/ingest")
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_HMAC_SECRET", "short")
+        with pytest.raises(ConfigError, match="at least 32 bytes"):
+            Settings()
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("Z4J_AUDIT_WEBHOOK_TIMEOUT_SECONDS", "0.5"),
+            ("Z4J_AUDIT_WEBHOOK_TIMEOUT_SECONDS", "121"),
+            ("Z4J_AUDIT_WEBHOOK_BATCH_SIZE", "0"),
+            ("Z4J_AUDIT_WEBHOOK_BATCH_SIZE", "1001"),
+            ("Z4J_AUDIT_WEBHOOK_POLL_INTERVAL_SECONDS", "0.5"),
+            ("Z4J_AUDIT_WEBHOOK_MAX_BACKOFF_SECONDS", "0"),
+            ("Z4J_AUDIT_WEBHOOK_MAX_BACKOFF_SECONDS", "3601"),
+        ],
+    )
+    def test_out_of_range_values_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, name: str, value: str
     ) -> None:
         _base_env(monkeypatch)
-        monkeypatch.setenv(
-            "Z4J_AUDIT_WEBHOOK_URL",
-            "https://siem.internal/ingest",
-        )
-        with pytest.raises(ConfigError):
-            Settings()  # type: ignore[call-arg]
-
-    def test_short_hmac_secret_rejected(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _base_env(monkeypatch)
-        monkeypatch.setenv(
-            "Z4J_AUDIT_WEBHOOK_URL",
-            "https://siem.internal/ingest",
-        )
-        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_HMAC_SECRET", "too-short")
-        with pytest.raises(ConfigError):
-            Settings()  # type: ignore[call-arg]
-
-    @pytest.mark.parametrize("bad", ["0", "0.5", "121", "0.05"])
-    def test_timeout_out_of_range_rejected(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        bad: str,
-    ) -> None:
-        _base_env(monkeypatch)
-        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_TIMEOUT_SECONDS", bad)
+        monkeypatch.setenv(name, value)
         with pytest.raises(ValidationError):
-            Settings()  # type: ignore[call-arg]
+            Settings()
 
-    @pytest.mark.parametrize("ok", ["1.0", "5", "10.0", "120.0"])
-    def test_timeout_in_range_accepted(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        ok: str,
-    ) -> None:
+    def test_in_range_values_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _base_env(monkeypatch)
-        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_TIMEOUT_SECONDS", ok)
-        s = Settings()  # type: ignore[call-arg]
-        assert s.audit_webhook_timeout_seconds == float(ok)
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_TIMEOUT_SECONDS", "30")
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_BATCH_SIZE", "250")
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_POLL_INTERVAL_SECONDS", "2")
+        monkeypatch.setenv("Z4J_AUDIT_WEBHOOK_MAX_BACKOFF_SECONDS", "60")
+        s = Settings()
+        assert s.audit_webhook_timeout_seconds == 30.0
+        assert s.audit_webhook_batch_size == 250
+        assert s.audit_webhook_poll_interval_seconds == 2.0
+        assert s.audit_webhook_max_backoff_seconds == 60.0
 
 
 # ---------------------------------------------------------------------------
-# Pure helpers
+# Payload rendering
 # ---------------------------------------------------------------------------
 
 
 class TestRowToPayload:
     def test_canonical_shape(self) -> None:
-        row = _fake_row()
-        payload = _row_to_payload(row)
-        # Every field a downstream parser expects.
-        for key in (
+        payload = row_to_payload(_fake_row())
+        assert set(payload) == {
             "id",
             "action",
             "target_type",
@@ -177,61 +198,94 @@ class TestRowToPayload:
             "occurred_at",
             "prev_row_hmac",
             "row_hmac",
-        ):
-            assert key in payload, f"missing {key}"
+            "hmac_version",
+            "hmac_key_id",
+            "chain_generation",
+            "legacy_frozen",
+            "legacy_integrity_class",
+            "legacy_origin",
+        }
+        assert payload["action"] == "user.password_changed"
+        assert payload["metadata"] == {"some": "value"}
 
     def test_uuid_stringified(self) -> None:
-        row = _fake_row()
-        payload = _row_to_payload(row)
+        payload = row_to_payload(_fake_row())
         assert payload["id"] == "00000000-0000-0000-0000-00000000abcd"
         assert payload["user_id"] == "00000000-0000-0000-0000-0000000000aa"
 
     def test_none_fields_pass_through_as_null(self) -> None:
-        row = _fake_row()
-        payload = _row_to_payload(row)
+        payload = row_to_payload(_fake_row(target_id=None, source_ip=None))
+        assert payload["target_id"] is None
+        assert payload["source_ip"] is None
         assert payload["event_id"] is None
-        assert payload["api_key_id"] is None
 
     def test_occurred_at_iso_with_microseconds(self) -> None:
-        row = _fake_row()
-        payload = _row_to_payload(row)
+        payload = row_to_payload(_fake_row())
         assert payload["occurred_at"] == "2026-05-12T12:00:00.000000+00:00"
 
     def test_row_hmac_included(self) -> None:
-        """The receiver can re-verify against its own cached secret
-        OR trust the brain's HMAC chain directly. Pin the field is
-        on-wire."""
-        row = _fake_row(row_hmac="c" * 64)
-        payload = _row_to_payload(row)
-        assert payload["row_hmac"] == "c" * 64
+        payload = row_to_payload(_fake_row())
+        assert payload["row_hmac"] == "b" * 64
+        assert payload["prev_row_hmac"] == "a" * 64
+
+    def test_underscore_alias_is_the_same_function(self) -> None:
+        assert _row_to_payload is row_to_payload
+
+    def test_encode_payload_is_canonical_sorted_compact_utf8(self) -> None:
+        body = encode_payload({"b": 1, "a": "café", "n": None})
+        assert body == '{"a":"café","b":1,"n":null}'.encode()
+
+
+# ---------------------------------------------------------------------------
+# Signing
+# ---------------------------------------------------------------------------
 
 
 class TestSignPayload:
     def test_signature_shape(self) -> None:
-        sig = sign_payload(b"secret", b"payload")
+        sig = sign_payload(b"k" * 32, b"{}")
         assert sig.startswith("sha256=")
-        assert len(sig) == len("sha256=") + 64  # hex of sha256
+        assert len(sig) == len("sha256=") + 64
 
     def test_signature_matches_manual_hmac(self) -> None:
-        body = b'{"id":"x"}'
-        secret = b"the-shared-key"
+        secret = b"k" * 32
+        body = b'{"a":1}'
         expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
         assert sign_payload(secret, body) == expected
 
     def test_signature_is_deterministic(self) -> None:
-        assert sign_payload(b"k", b"m") == sign_payload(b"k", b"m")
+        assert sign_payload(b"k" * 32, b"x") == sign_payload(b"k" * 32, b"x")
 
     def test_signature_changes_with_body(self) -> None:
-        a = sign_payload(b"k", b"x")
-        b = sign_payload(b"k", b"y")
-        assert a != b
+        assert sign_payload(b"k" * 32, b"x") != sign_payload(b"k" * 32, b"y")
 
     def test_signature_changes_with_secret(self) -> None:
-        assert sign_payload(b"k1", b"m") != sign_payload(b"k2", b"m")
+        assert sign_payload(b"k" * 32, b"x") != sign_payload(b"j" * 32, b"x")
+
+
+class TestSignPayloadTimestamp:
+    """The HMAC input is ``<timestamp>.<body>`` when a timestamp is given."""
+
+    def test_signature_changes_with_timestamp(self) -> None:
+        secret, body = b"k" * 32, b"{}"
+        assert sign_payload(secret, body, timestamp="1") != sign_payload(
+            secret, body, timestamp="2"
+        )
+
+    def test_signature_without_timestamp_distinct_from_with(self) -> None:
+        secret, body = b"k" * 32, b"{}"
+        assert sign_payload(secret, body) != sign_payload(secret, body, timestamp="1715515200")
+
+    def test_signature_with_timestamp_is_reproducible(self) -> None:
+        secret, body, ts = b"k" * 32, b'{"a":1}', "1715515200"
+        expected = (
+            "sha256=" + hmac.new(secret, ts.encode() + b"." + body, hashlib.sha256).hexdigest()
+        )
+        assert sign_payload(secret, body, timestamp=ts) == expected
 
 
 # ---------------------------------------------------------------------------
-# AuditForwarder
+# One send
 # ---------------------------------------------------------------------------
 
 
@@ -260,79 +314,16 @@ async def _noop_resolve_and_pin(_url: str) -> tuple[str | None, str | None]:
     return None, "203.0.113.10"
 
 
-class TestAuditForwarderQueue:
-    def test_enqueue_returns_true_for_normal_row(self) -> None:
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        assert fwd.enqueue(_fake_row()) is True
-        assert fwd._queue.qsize() == 1
-
-    def test_enqueue_drops_when_queue_full(self) -> None:
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-            buffer_size=2,
-        )
-        for _ in range(2):
-            assert fwd.enqueue(_fake_row()) is True
-        # Third enqueue must drop, not block.
-        assert fwd.enqueue(_fake_row()) is False
-        assert fwd.dropped_count == 1
-
-    def test_enqueue_after_stop_returns_false(self) -> None:
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        fwd._stopped = True
-        assert fwd.enqueue(_fake_row()) is False
-
-    def test_invalid_buffer_size_rejected(self) -> None:
-        with pytest.raises(ValueError):
-            AuditForwarder(
-                webhook_url="https://siem.example/ingest",
-                hmac_secret=b"x" * 32,
-                buffer_size=0,
-            )
-
-    def test_misshapen_row_does_not_crash_enqueue(self) -> None:
-        """An object the payload builder can't handle returns False,
-        not an exception. Audit writes MUST never fail because a
-        downstream mirror's serialisation broke."""
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        # A bare object has no attributes the row->payload helper
-        # cares about; the lookup of ``id`` etc raises AttributeError
-        # which the forwarder swallows.
-
-        class _Broken:
-            pass
-
-        assert fwd.enqueue(_Broken()) is False
-
-
 class TestAuditForwarderSendOne:
-    @pytest.mark.asyncio
-    async def test_happy_path_posts_signed_body(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    async def test_happy_path_posts_signed_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
         recorder = _RecordingPost(status_code=200)
         monkeypatch.setattr(af_mod, "_post", recorder)
         monkeypatch.setattr(af_mod, "resolve_and_pin", _noop_resolve_and_pin)
 
         secret = b"a" * 48
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=secret,
-            timeout_seconds=15.0,
-        )
+        fwd = _forwarder(hmac_secret=secret, timeout_seconds=15.0)
         payload = _row_to_payload(_fake_row())
-        await fwd._send_one(payload)
+        assert await fwd._send_one(payload) is True
 
         assert len(recorder.calls) == 1
         call = recorder.calls[0]
@@ -340,31 +331,28 @@ class TestAuditForwarderSendOne:
         assert call["kwargs"]["pin_ip"] == "203.0.113.10"
         headers = call["kwargs"]["headers"]
         assert headers["Content-Type"] == "application/json"
-        # v1.6 audit C5: per-call timeout MUST be threaded through.
+        # Per-call timeout MUST be threaded through.
         assert call["kwargs"].get("timeout") == 15.0
         assert AUDIT_SIGNATURE_HEADER in headers
-        # v1.6 audit H10: timestamp header MUST be set and the
-        # signature MUST cover (timestamp, body), not body alone.
+        # Timestamp header MUST be set and the signature MUST cover
+        # (timestamp, body), not body alone.
         assert AUDIT_TIMESTAMP_HEADER in headers
         timestamp = headers[AUDIT_TIMESTAMP_HEADER]
         assert timestamp.isdigit() and len(timestamp) >= 10
         body = call["kwargs"]["content"]
+        assert body == encode_payload(payload)
         expected_sig = sign_payload(secret, body, timestamp=timestamp)
         assert headers[AUDIT_SIGNATURE_HEADER] == expected_sig
         # The timestamp-less sig MUST be different (proves replay
         # protection actually changes the digest input).
-        body_only_sig = sign_payload(secret, body)
-        assert body_only_sig != expected_sig
-        # Receiver-side reproduction of the signature must match.
+        assert sign_payload(secret, body) != expected_sig
         decoded = json.loads(body.decode("utf-8"))
         assert decoded["action"] == "user.password_changed"
         assert fwd.sent_count == 1
         assert fwd.failed_count == 0
 
-    @pytest.mark.asyncio
-    async def test_ssrf_rejection_increments_failed_count(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+    async def test_ssrf_rejection_is_a_failed_attempt_not_a_drop(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         recorder = _RecordingPost()
         monkeypatch.setattr(af_mod, "_post", recorder)
@@ -373,196 +361,90 @@ class TestAuditForwarderSendOne:
             return "blocked: loopback", None
 
         monkeypatch.setattr(af_mod, "resolve_and_pin", _block)
-        fwd = AuditForwarder(
-            webhook_url="http://127.0.0.1:9000/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        await fwd._send_one(_row_to_payload(_fake_row()))
+        fwd = _forwarder(webhook_url="http://127.0.0.1:9000/ingest")
+        assert await fwd._send_one(_row_to_payload(_fake_row())) is False
         assert len(recorder.calls) == 0
         assert fwd.failed_count == 1
         assert fwd.sent_count == 0
 
-    @pytest.mark.asyncio
-    async def test_5xx_response_marked_failed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    async def test_5xx_response_marked_failed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         recorder = _RecordingPost(status_code=503)
         monkeypatch.setattr(af_mod, "_post", recorder)
         monkeypatch.setattr(af_mod, "resolve_and_pin", _noop_resolve_and_pin)
 
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        await fwd._send_one(_row_to_payload(_fake_row()))
+        fwd = _forwarder()
+        assert await fwd._send_one(_row_to_payload(_fake_row())) is False
         assert fwd.failed_count == 1
         assert fwd.sent_count == 0
 
-    @pytest.mark.asyncio
-    async def test_post_raises_failed_count(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    async def test_post_raises_failed_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def _raising_post(_url: str, **_: Any) -> httpx.Response:
             raise RuntimeError("connection refused")
 
         monkeypatch.setattr(af_mod, "_post", _raising_post)
         monkeypatch.setattr(af_mod, "resolve_and_pin", _noop_resolve_and_pin)
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        await fwd._send_one(_row_to_payload(_fake_row()))
+        fwd = _forwarder()
+        assert await fwd._send_one(_row_to_payload(_fake_row())) is False
         assert fwd.failed_count == 1
 
-
-class TestSignPayloadTimestamp:
-    """v1.6 audit H10: replay protection via timestamp folded into
-    HMAC input."""
-
-    def test_signature_changes_with_timestamp(self) -> None:
-        s = sign_payload(b"k", b"m", timestamp="1700000000")
-        s2 = sign_payload(b"k", b"m", timestamp="1700000001")
-        assert s != s2
-
-    def test_signature_without_timestamp_distinct_from_with(self) -> None:
-        with_ts = sign_payload(b"k", b"m", timestamp="1700000000")
-        no_ts = sign_payload(b"k", b"m")
-        assert with_ts != no_ts
-
-    def test_signature_with_timestamp_is_reproducible(self) -> None:
-        a = sign_payload(b"k", b"m", timestamp="1700000000")
-        b = sign_payload(b"k", b"m", timestamp="1700000000")
-        assert a == b
-
-
-class TestEnqueueAcceptsDict:
-    """v1.6 audit C6/H11: hook contract is now dict-based. ORM rows
-    are still accepted for backwards-compat with the prior hook
-    shape, but dicts are the preferred path."""
-
-    def test_enqueue_dict_payload(self) -> None:
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        payload = row_to_payload(_fake_row())
-        assert fwd.enqueue(payload) is True
-        assert fwd._queue.qsize() == 1
-
-    def test_enqueue_orm_row_back_compat(self) -> None:
-        """Old callers may still pass a row object directly. The
-        forwarder must materialise it inline rather than raising."""
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        assert fwd.enqueue(_fake_row()) is True
-
-
-class TestShutdownDrainAccounting:
-    """v1.6 audit H8: rows enqueued between empty-check and cancel
-    must be accounted for, not silently lost."""
-
-    @pytest.mark.asyncio
-    async def test_residual_after_cancel_counted(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+    async def test_every_failure_kind_is_counted_by_reason(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Use a never-resolving send so rows queued during stop()
-        # cannot drain.
-        async def _stuck_post(*_args: Any, **_kwargs: Any) -> httpx.Response:
-            # Block forever -- the drain task will be cancelled
-            # while awaiting this.
-            await asyncio.Event().wait()
-            raise AssertionError("unreachable")
+        reasons: list[str] = []
+        monkeypatch.setattr(af_mod, "_observe_failure", reasons.append)
+        payload = _row_to_payload(_fake_row())
 
-        monkeypatch.setattr(af_mod, "_post", _stuck_post)
+        async def _block(_url: str) -> tuple[str | None, str | None]:
+            return "blocked: loopback", None
+
+        monkeypatch.setattr(af_mod, "resolve_and_pin", _block)
+        await _forwarder()._send_one(payload)
+
         monkeypatch.setattr(af_mod, "resolve_and_pin", _noop_resolve_and_pin)
 
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-            buffer_size=10,
-        )
-        fwd.start()
-        # Let the drain task pick up one row + block on the stuck _post.
-        fwd.enqueue(_fake_row())
-        await asyncio.sleep(0.05)
-        # Enqueue two more while the drain task is parked.
-        fwd.enqueue(_fake_row())
-        fwd.enqueue(_fake_row())
-        # Stop with a short deadline so the queued rows stay
-        # unsent. After the Round 2 in-flight tracking fix, the
-        # count is 3: 2 queued + 1 in-flight (the row the drain
-        # task pulled and parked on _send_one).
-        await fwd.stop(drain_timeout=0.1)
-        assert fwd.shutdown_lost == 3
+        async def _raising_post(_url: str, **_: Any) -> httpx.Response:
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr(af_mod, "_post", _raising_post)
+        await _forwarder()._send_one(payload)
+
+        monkeypatch.setattr(af_mod, "_post", _RecordingPost(status_code=500))
+        await _forwarder()._send_one(payload)
+
+        assert reasons == ["ssrf_or_dns", "post_raised", "non_2xx"]
+
+
+# ---------------------------------------------------------------------------
+# AuditService hook registry (the forwarder no longer registers one)
+# ---------------------------------------------------------------------------
 
 
 class TestUnregisterHook:
-    """v1.6 audit H9: AuditService must support unregistering a
-    previously-registered hook so the lifespan teardown can remove
-    the forwarder's enqueue callable before stopping the drain task.
-    The contract lives on AuditService, but the forwarder tests pin
-    that the function returns True on success / False on missing
-    hook (defensive check; the lifespan calls it before stop()).
+    """``AuditService`` still supports unregistering a post-write hook.
+
+    The forwarder no longer registers one: it reads the audit log past its
+    cursor instead of being handed rows at commit time. The registry stays
+    for other consumers, so its contract is pinned here with a plain
+    callable.
     """
 
     def test_unregister_returns_true_on_known_hook(self) -> None:
-        # Local stub mirroring the AuditService API surface so this
-        # test doesn't require a full AuditService instance.
         from z4j_brain.domain.audit_service import AuditService
-
-        # Construct a minimal AuditService via a stub settings.
-        class _Stub:
-            class secret:  # noqa: N801  mirrors Settings.secret attribute name
-                @staticmethod
-                def get_secret_value() -> str:
-                    return "x" * 48
-
-            @staticmethod
-            def all_secrets_for_verification() -> list[bytes]:
-                return [b"x" * 48]
 
         svc = AuditService.__new__(AuditService)
         svc._secret = b"x" * 48
         svc._verify_secrets = [b"x" * 48]
         svc._post_write_hooks = []
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        svc.register_post_write_hook(fwd.enqueue)
-        assert svc.unregister_post_write_hook(fwd.enqueue) is True
+
+        def hook(_payload: dict[str, Any]) -> None:
+            return None
+
+        svc.register_post_write_hook(hook)
+        assert svc.unregister_post_write_hook(hook) is True
         # Second unregister is a no-op returning False.
-        assert svc.unregister_post_write_hook(fwd.enqueue) is False
+        assert svc.unregister_post_write_hook(hook) is False
 
-
-class TestAuditForwarderRunForever:
-    @pytest.mark.asyncio
-    async def test_start_drains_queue_through_send(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        recorder = _RecordingPost(status_code=202)
-        monkeypatch.setattr(af_mod, "_post", recorder)
-        monkeypatch.setattr(af_mod, "resolve_and_pin", _noop_resolve_and_pin)
-
-        fwd = AuditForwarder(
-            webhook_url="https://siem.example/ingest",
-            hmac_secret=b"x" * 32,
-        )
-        for _ in range(3):
-            fwd.enqueue(_fake_row())
-
-        fwd.start()
-        # Give the drain task a moment to pick up the queue.
-        for _ in range(50):
-            if fwd._queue.empty() and fwd.sent_count == 3:
-                break
-            await asyncio.sleep(0.01)
-        await fwd.stop(drain_timeout=1.0)
-        assert fwd.sent_count == 3
-        assert len(recorder.calls) == 3
+    def test_forwarder_has_no_enqueue_surface(self) -> None:
+        fwd = _forwarder()
+        assert not hasattr(fwd, "enqueue")
+        assert not hasattr(fwd, "queue_depth")

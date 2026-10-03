@@ -102,6 +102,8 @@ _LEGACY_SOURCE_HEAD = "v1_7_security_hardening"
 _PREVIOUS_RELEASE_HEAD = "v1_8_schedule_cursor_repair"
 # Published 1.9/1.10 schema, before the 1.11 append-tally migration.
 _PRE_TALLY_RELEASE_HEAD = "v1_9_audit_action_pattern"
+# Published 1.11 schema: the append-tally head, before the 1.12 migrations.
+_TALLY_RELEASE_HEAD = "v1_11_audit_append_tally"
 _AUDIT_PREPARATION_HEAD = "v1_8_audit_chain_prepare"
 # The legacy value is an external oracle captured from the immutable 6b12719c
 # release baseline.  It must never be derived by running current migrations.
@@ -116,6 +118,8 @@ _AUDIT_PREPARATION_HEAD = "v1_8_audit_chain_prepare"
 #: silently invalidate every existing backup.
 _SQLITE_SOURCE_SCHEMA_DIGESTS = {
     RELEASE_MIGRATION_HEAD: SQLITE_RELEASE_SCHEMA_CONTRACT_DIGEST,
+    # The 1.11 release digest, carried over verbatim when the head moved on.
+    _TALLY_RELEASE_HEAD: ("e9699a59170cbc24e95d9d700adc8f9037f2dcd0ecb20e4884bdf109be31550b"),
     _PRE_TALLY_RELEASE_HEAD: ("0c22ea7e3680cc7620ee582a1212157e9999be106c6cb8e99179448e91a75911"),
     _PREVIOUS_RELEASE_HEAD: ("0778f20252e9b32f7a859d85e2de29c446409e40b602fa63cd2ec143ac537640"),
     _LEGACY_SOURCE_HEAD: ("f41f542e03cf81562c1eb3167041549fff0623eca9de919c1d0ffd91619933c8"),
@@ -1337,6 +1341,7 @@ _SQLITE_SOURCE_MANIFEST_BUILDERS: dict[
     _LEGACY_SOURCE_HEAD: _legacy_source_boundary_authority,
     _PREVIOUS_RELEASE_HEAD: _activated_source_boundary_authority,
     _PRE_TALLY_RELEASE_HEAD: _activated_source_boundary_authority,
+    _TALLY_RELEASE_HEAD: _activated_source_boundary_authority,
 }
 
 #: How a candidate staged at each pre-current head reaches the current head.
@@ -1349,6 +1354,7 @@ _SQLITE_SOURCE_UPGRADE_MODES = {
     _LEGACY_SOURCE_HEAD: "audit_preparation",
     _PREVIOUS_RELEASE_HEAD: "direct",
     _PRE_TALLY_RELEASE_HEAD: "direct",
+    _TALLY_RELEASE_HEAD: "direct",
 }
 
 
@@ -1761,6 +1767,24 @@ def _portable_restore_manifest_digest(
     return release_manifest_digest(portable)
 
 
+def _bind_secret_keyring(settings: Settings) -> None:
+    """Bind the keyring the encrypted channel-config columns decrypt with.
+
+    The snapshot and the finalization read every table through the
+    ORM-typed Core tables, and the two channel ``config`` columns are
+    decrypted on read; without a bound keyring the first channel row raises
+    ``SecretKeyringUnbound`` after the target has already been cleared and
+    loaded. The CLI binds one in its bootstrap; the ceremony binds it again
+    from the ``Settings`` it builds or is handed so an in-process caller
+    does not depend on the CLI path. Binding again from the same values is
+    a no-op in effect.
+    """
+
+    from z4j_brain.domain.secret_fields import bind_keyring_from_settings
+
+    bind_keyring_from_settings(settings)
+
+
 async def authenticated_database_snapshot(
     database_url: str,
     settings: Settings,
@@ -1772,6 +1796,7 @@ async def authenticated_database_snapshot(
         raise DatabaseRestoreRefused(
             "restore snapshot received both a connection and a session",
         )
+    _bind_secret_keyring(settings)
     engine = (
         create_async_engine_from_url(database_url)
         if connection is None and session is None
@@ -1903,6 +1928,7 @@ async def finalize_restored_database(  # noqa: PLR0912, PLR0915
     known_head: Mapping[str, Any] | None,
     ceremony_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    _bind_secret_keyring(settings)
     engine = create_async_engine_from_url(database_url) if connection is None else None
     database = DatabaseManager(engine) if engine is not None else None
     try:
@@ -2821,6 +2847,7 @@ def restore_sqlite_database(  # noqa: PLR0912, PLR0915
 
     with audit_bootstrap_coordinator(target.parent):
         settings = Settings()  # type: ignore[call-arg]
+        _bind_secret_keyring(settings)
         try:
             target_lstat = target.lstat()
         except FileNotFoundError:
@@ -3781,6 +3808,7 @@ def rollback_sqlite_database(
             )
         source_digest = str(phase["source_digest"])
         settings = Settings()  # type: ignore[call-arg]
+        _bind_secret_keyring(settings)
         import asyncio
 
         # The rollback marker commits into the live database before the phase

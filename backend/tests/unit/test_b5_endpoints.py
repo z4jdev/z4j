@@ -370,18 +370,36 @@ class TestAuditRouter:
 
         # Use small ceilings to exercise the route without manufacturing
         # tens of thousands of rows. CSV/JSON retain the larger general cap;
-        # XLSX fails at its lower in-memory-workbook cap.
-        monkeypatch.setattr(audit_api, "_EXPORT_ROW_CAP", 2)
+        # XLSX fails at its lower in-memory-workbook cap. A served export
+        # writes its own ``audit.export`` row into the project's trail, so
+        # the general cap is three: two seeded rows for the CSV, and those
+        # plus the CSV's own row for the JSON. A refused export writes none.
+        monkeypatch.setattr(audit_api, "_EXPORT_ROW_CAP", 3)
         monkeypatch.setattr(audit_api, "XLSX_ROW_CAP", 1)
+
+        async def _export_rows() -> int:
+            from sqlalchemy import func, select
+
+            async with brain_app.state.db.session() as s:
+                return int(
+                    await s.scalar(
+                        select(func.count(AuditLog.id)).where(AuditLog.action == "audit.export")
+                    )
+                    or 0
+                )
 
         xlsx = await client.get("/api/v1/projects/default/audit?format=xlsx")
         assert xlsx.status_code == 422
         assert "xlsx audit export is capped at 1 rows" in xlsx.text
+        assert await _export_rows() == 0
 
         csv = await client.get("/api/v1/projects/default/audit?format=csv")
         assert csv.status_code == 200
+        assert await _export_rows() == 1
         json_response = await client.get("/api/v1/projects/default/audit?format=json")
         assert json_response.status_code == 200
+        assert len(json_response.json()) == 3
+        assert await _export_rows() == 2
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +575,28 @@ class TestUsersRouter:
         )
         assert r.status_code == 201
         assert r.json()["email"] == "bob@example.com"
+
+    async def test_create_user_accepts_a_reserved_test_domain(self, client, seeded) -> None:
+        """The same validation as setup and login: an admin bootstrapped as
+        ``admin@test.local`` can create ``viewer@test.local``, canonicalised
+        the way the login path will look it up."""
+        r = await client.post(
+            "/api/v1/users",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={"email": "Viewer@Test.local", "password": "correct horse battery staple 9"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["email"] == "viewer@test.local"
+
+    @pytest.mark.parametrize("email", ["not-an-email", "viewer@nodot", "two words@example.com"])
+    async def test_create_user_rejects_a_malformed_email(self, client, seeded, email: str) -> None:
+        r = await client.post(
+            "/api/v1/users",
+            headers={"X-CSRF-Token": seeded["csrf"]},
+            json={"email": email, "password": "correct horse battery staple 9"},
+        )
+        assert r.status_code == 422, r.text
+        assert "email" in r.text
 
     async def test_create_user_weak_password_rejected(
         self,

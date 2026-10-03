@@ -11,12 +11,14 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import structlog
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field, field_validator
 
 from z4j_brain.api.deps import (
     get_audit_log_repo,
     get_audit_service,
+    get_brain_registry,
     get_client_ip,
     get_current_user,
     get_membership_repo,
@@ -41,10 +43,12 @@ if TYPE_CHECKING:
         ProjectRepository,
     )
     from z4j_brain.settings import Settings
+    from z4j_brain.websocket.registry import BrainRegistry
 
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$")
 
+logger = structlog.get_logger("z4j.brain.api.projects")
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -491,12 +495,20 @@ async def archive_project(
     audit_log: AuditLogRepository = Depends(get_audit_log_repo),
     db_session: AsyncSession = Depends(get_session),
     ip: str = Depends(get_client_ip),
+    registry: BrainRegistry = Depends(get_brain_registry),
 ) -> None:
     """Soft-archive a project (sets ``is_active=False``).
 
     We never hard-delete projects - that would cascade across the
     audit log and break the historical record. The archived
     project is hidden from list views but its rows survive.
+
+    The agents survive too, tokens included, so the archive has to
+    disconnect them itself: once the flag commits, every replica
+    closes the sockets it holds for the project with the revoked-agent
+    close code, and the hello path and the long-poll routes refuse the
+    project's agents until it is active again. Reactivation needs
+    nothing further; the agents reconnect on their next retry.
     """
     project = await projects.get_by_slug(slug)
     if project is None:
@@ -514,20 +526,36 @@ async def archive_project(
             details={"slug": slug},
         )
 
+    project_id = project.id
     project.is_active = False
     project.updated_at = datetime.now(UTC)
     await audit.record(
         audit_log,
         action="project.archived",
         target_type="project",
-        target_id=str(project.id),
+        target_id=str(project_id),
         result="success",
         outcome="allow",
         user_id=admin.id,
-        project_id=project.id,
+        project_id=project_id,
         source_ip=ip,
     )
     await db_session.commit()
+
+    # Same contract as the agent-revoke route's kick: called AFTER the
+    # commit so the cluster never kicks on a transaction that rolls back,
+    # best-effort across replicas (Postgres NOTIFY on the multi-replica
+    # backend), and never bubbling into the response. The archive itself
+    # has committed and the audit row above records the operator's intent;
+    # an agent a lost kick leaves connected is refused on its next hello
+    # or long-poll request anyway.
+    try:
+        await registry.kick_project(project_id)
+    except Exception:
+        logger.exception(
+            "z4j: agent kick after project archive failed (archive itself succeeded)",
+            project_id=str(project_id),
+        )
 
 
 __all__ = [

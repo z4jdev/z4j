@@ -82,7 +82,11 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload filesystem SARIF
-        if: always()
+        # Upload only a report the scan actually wrote. A finding fails the
+        # scan step with the SARIF in place, and that failure is the job's
+        # verdict; a scan that never ran leaves no file, and uploading a
+        # missing path would stack a second, misleading failure on top.
+        if: always() && hashFiles('trivy-fs.sarif') != ''
         uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # immutable ref; audited 2026-08-20
         with:
           sarif_file: trivy-fs.sarif
@@ -118,7 +122,10 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload image SARIF
-        if: always()
+        # Same guard as the filesystem upload. When the filesystem scan
+        # fails, the build and image scan above are skipped and this file
+        # never exists; the job must fail for the finding alone.
+        if: always() && hashFiles('trivy-image.sarif') != ''
         uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # immutable ref; audited 2026-08-20
         with:
           sarif_file: trivy-image.sarif
