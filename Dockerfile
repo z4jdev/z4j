@@ -55,7 +55,7 @@
 # here changes the fingerprint and the image would negotiate schedule firing
 # differently from the wheels published beside it. 1.8.x pinned only the 3.14
 # tag here and took whatever patch the tag pointed at on the day of the build.
-FROM docker.io/library/python:3.14.7-slim-trixie@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83 AS runtime
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS runtime
 
 # OCI image metadata -- consumed by Docker Hub UI, GitHub Container
 # Registry, Syft, Trivy, Docker Scout, etc.
@@ -215,9 +215,9 @@ RUN set -eux; \
 #   * the interpreter really is 3.14.7, because the runtime fingerprint
 #     hashes sys.version_info[:3];
 #   * the five cadence-affecting distributions resolved to the exact versions
-#     both pyproject.toml files pin with ``==`` (tzdata 2026.3 in particular:
-#     2026a computes fire times an hour wrong for seven zones with future
-#     effect);
+#     both pyproject.toml files pin with ``==`` (tzdata 2026.5 in particular:
+#     2026c computes fire times an hour wrong for four zones from
+#     2026-11-01);
 #   * z4j and z4j-scheduler agree on semantics version, behavior vector,
 #     tzdata tree digest and runtime fingerprint;
 #   * the fingerprint this image computes equals the one the installed brain
@@ -243,10 +243,10 @@ if actual_python != expected_python:
 
 pinned = {
     "astral": "3.2",
-    "croniter": "6.2.2",
+    "croniter": "6.2.4",
     "python-dateutil": "2.9.0.post0",
     "six": "1.17.0",
-    "tzdata": "2026.3",
+    "tzdata": "2026.5",
 }
 for name, want in sorted(pinned.items()):
     got = metadata.version(name)

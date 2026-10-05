@@ -8,14 +8,15 @@
 # those of the immutable CPython 3.14.7 carrier. There is deliberately no
 # package-manager or network operation in this file.
 #
-# tzdata is the one distribution NOT taken from the released image, and the
-# reason is the same one that makes this image exist at all. Unchanged 1.8
-# code accepts exactly one local cadence fingerprint, so the rollback ceremony
-# can only restamp cursors this carrier will agree with if the carrier's
-# cadence closure equals the candidate's. That is already why the interpreter
-# is 3.14.7 rather than the 3.14.6 the released image shipped. The candidate
-# pins IANA 2026c, so this carrier carries the same bytes, supplied as a
-# digest-pinned wheel in the build context. The application tree is untouched.
+# croniter and tzdata are the two distributions NOT taken from the released
+# image, and the reason is the same one that makes this image exist at all.
+# Unchanged 1.8 code accepts exactly one local cadence fingerprint, so the
+# rollback ceremony can only restamp cursors this carrier will agree with if
+# the carrier's cadence closure equals the candidate's. That is already why
+# the interpreter is 3.14.7 rather than the 3.14.6 the released image shipped.
+# The candidate pins croniter 6.2.4 and IANA 2026e, so this carrier carries
+# the same bytes, each supplied as a digest-pinned wheel in the build context.
+# The application tree is untouched.
 #
 # Do not retag this image as 1.8.2, 1.8, or latest. Its only permitted public
 # tag is locked in manifest.json and the release workflow; rollback runbooks
@@ -71,21 +72,28 @@ RUN rm -rf /usr/local/lib/python3.14/site-packages \
 # tree is copied.
 COPY --from=released /usr/local/lib/python3.14/site-packages/ /usr/local/lib/python3.14/site-packages/
 
-# The single deliberate deviation from the released image's site-packages.
-# The wheel is content-addressed: the build refuses if its bytes are not the
-# exact reviewed artifact, so this cannot silently become a different tzdb.
-COPY tzdata-2026.3-py2.py3-none-any.whl /tmp/tzdata.whl
+# The two deliberate deviations from the released image's site-packages.
+# Each wheel is content-addressed: the build refuses if its bytes are not the
+# exact reviewed artifact, so this cannot silently become a different croniter
+# or a different tzdb.
+COPY croniter-6.2.4-py3-none-any.whl /tmp/croniter.whl
+COPY tzdata-2026.5-py2.py3-none-any.whl /tmp/tzdata.whl
 RUN set -eu \
-    && echo "dc096730c87af6cab1b171c9d532be840741ff5d459015e7f6947bd7d7e54931  /tmp/tzdata.whl" | sha256sum -c - \
-    && rm -rf /usr/local/lib/python3.14/site-packages/tzdata \
+    && echo "8ef3d544107a5c05a150a2d78f8bf5a8eb9c5c4d93405a736b824109574e3f4d  /tmp/croniter.whl" | sha256sum -c - \
+    && echo "b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac  /tmp/tzdata.whl" | sha256sum -c - \
+    && rm -rf /usr/local/lib/python3.14/site-packages/croniter \
+              /usr/local/lib/python3.14/site-packages/croniter-6.2.2.dist-info \
+              /usr/local/lib/python3.14/site-packages/tzdata \
               /usr/local/lib/python3.14/site-packages/tzdata-2026.1.dist-info \
-    && python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
-              /tmp/tzdata.whl /usr/local/lib/python3.14/site-packages \
-    && rm -f /tmp/tzdata.whl \
-    && find /usr/local/lib/python3.14/site-packages/tzdata \
-            /usr/local/lib/python3.14/site-packages/tzdata-2026.3.dist-info \
+    && python -c "import zipfile,sys; [zipfile.ZipFile(wheel).extractall(sys.argv[1]) for wheel in sys.argv[2:]]" \
+              /usr/local/lib/python3.14/site-packages /tmp/croniter.whl /tmp/tzdata.whl \
+    && rm -f /tmp/croniter.whl /tmp/tzdata.whl \
+    && find /usr/local/lib/python3.14/site-packages/croniter \
+            /usr/local/lib/python3.14/site-packages/croniter-6.2.4.dist-info \
+            /usr/local/lib/python3.14/site-packages/tzdata \
+            /usr/local/lib/python3.14/site-packages/tzdata-2026.5.dist-info \
             -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} + \
-    && python -c "import importlib.metadata as m; assert m.version('tzdata') == '2026.3', m.version('tzdata')"
+    && python -c "import importlib.metadata as m; assert m.version('croniter') == '6.2.4', m.version('croniter'); assert m.version('tzdata') == '2026.5', m.version('tzdata')"
 
 # RECORD-owned entry points are copied explicitly. The generated bin
 # __pycache__/vba_extract.cpython-314.pyc is not authority and is not copied.

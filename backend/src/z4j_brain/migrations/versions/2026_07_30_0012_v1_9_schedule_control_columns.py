@@ -93,7 +93,7 @@ _OVERLAP_VALUES = ("allow", "skip", "queue")
 
 _ROLLBACK_AUDIT_ACTION = "system.prepare_runtime_rollback"
 _ROLLBACK_TARGET_RELEASE = "1.8.2"
-_ROLLBACK_TARGET_FINGERPRINT = "5e63a2ae8ec66ec9b86f64828b7ac2499c9254531d2ceb33e32ac3a80c344ef4"
+_ROLLBACK_TARGET_FINGERPRINT = "8737a662e8907492f325dd2e1d9f419bb29d150240563d94fa29945205c6678c"
 _ROLLBACK_IMAGE_PATTERN = re.compile(r"docker[.]io/z4jdev/z4j@sha256:[0-9a-f]{64}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 

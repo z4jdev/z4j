@@ -46,7 +46,7 @@
 # cosmetic: the cadence runtime fingerprint hashes sys.version_info[:3]
 # (packages/z4j/docker/production/probe.py), and .python-version at the
 # repo root says 3.14.7. Bumping the patch here changes that fingerprint.
-FROM docker.io/library/python:3.14.7-slim-trixie@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83 AS python-builder
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS python-builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -138,9 +138,9 @@ RUN uv venv --python /usr/local/bin/python /opt/venv \
 #   * the interpreter really is 3.14.7, because the runtime fingerprint
 #     hashes sys.version_info[:3];
 #   * the five cadence-affecting distributions resolved to the exact
-#     versions both pyproject.toml files pin with ``==`` (tzdata 2026.3
-#     in particular: 2026a computes fire times an hour wrong for seven
-#     zones with future effect);
+#     versions both pyproject.toml files pin with ``==`` (tzdata 2026.5
+#     in particular: 2026c computes fire times an hour wrong for four
+#     zones from 2026-11-01);
 #   * z4j and z4j-scheduler agree on semantics version, behavior vector,
 #     tzdata tree digest and runtime fingerprint.
 #
@@ -160,10 +160,10 @@ if actual_python != expected_python:
 
 pinned = {
     "astral": "3.2",
-    "croniter": "6.2.2",
+    "croniter": "6.2.4",
     "python-dateutil": "2.9.0.post0",
     "six": "1.17.0",
-    "tzdata": "2026.3",
+    "tzdata": "2026.5",
 }
 for name, want in sorted(pinned.items()):
     got = metadata.version(name)
@@ -257,7 +257,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Stage 2 - runtime
 # ---------------------------------------------------------------------------
-FROM docker.io/library/python:3.14.7-slim-trixie@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83 AS runtime
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS runtime
 
 # OCI image metadata. Version is injected at build time via --build-arg
 # Z4J_VERSION=... so we never have to keep a hardcoded version in sync
@@ -459,7 +459,7 @@ CMD ["serve"]
 #
 # This stage exists so contributors can run the brain in Docker
 # without paying the dashboard build cost on every restart.
-FROM docker.io/library/python:3.14.7-slim-trixie@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83 AS dev-runtime
+FROM docker.io/library/python:3.14.7-slim-trixie@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS dev-runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

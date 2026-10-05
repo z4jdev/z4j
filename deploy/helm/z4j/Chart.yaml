@@ -12,8 +12,8 @@ type: application
 # wave. Both lines are release carriers: ``make stamp-version`` rewrites
 # them and scripts/check-version-carriers.py refuses a release in which
 # either disagrees with VERSION.
-version: "1.12.0"
-appVersion: "1.12.0"
+version: "1.12.1"
+appVersion: "1.12.1"
 kubeVersion: ">=1.28.0-0"
 home: https://z4j.com
 sources:

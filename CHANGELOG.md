@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.12.1 (2026-10-05)
+
+- The cadence closure moves to `croniter==6.2.4` and `tzdata==2026.5` (IANA
+  2026e), together with `z4j-scheduler` and the rollback target fingerprint.
+  Under IANA 2026c fire times are an hour wrong from 2026-11-01 for
+  America/Winnipeg, Canada/Central, America/Rainy_River and America/Inuvik. A
+  1.12.1 brain and a 1.12.0 scheduler refuse each other until both are
+  upgraded: stop the scheduler, upgrade the brain, then the scheduler.
+- No requirement caps a third-party major: `sentry-sdk>=2.8.0`,
+  `aiobotocore>=2.21`, the `test` extra's `pytest>=9.1.1` and the `huey>=2.4`
+  extras lose their upper bounds.
+- A brain that has begun shutting down answers `FireSchedule` with
+  `UNAVAILABLE` instead of accepting a fire it can no longer deliver; the
+  scheduler retries the slot against the next brain.
+- `z4j status` composes the database address itself, so a Windows SQLite path
+  reads as written on SQLAlchemy 2.1 (it printed `C%3A/...`).
+- The image's Python base follows the `3.14.7-slim-trixie` tag to its current
+  digest; the Caddy overlay moves to 2.11.6; the Helm chart publisher logs in
+  to the registry before signing.
+
 ## 1.12.0 (2026-10-03)
 
 - Add `GET /api/v1/projects/{slug}/dead-letters`. The brain picks an online

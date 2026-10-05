@@ -140,7 +140,7 @@ spec:
         - name: scheduler
           # The brain image includes the z4j-scheduler executable. Pin this
           # release tag to a digest before production rollout if possible.
-          image: "z4jdev/z4j:1.12.0"
+          image: "z4jdev/z4j:1.12.1"
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

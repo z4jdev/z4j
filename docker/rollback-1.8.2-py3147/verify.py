@@ -1073,10 +1073,11 @@ def run_checked(command: Sequence[str], *, timeout: float = 45.0) -> str:
 def verify_dependency_consistency(substitutions: Sequence[Mapping[str, Any]]) -> None:
     """Require pip's only complaints to be the declared substitutions.
 
-    The carrier deliberately installs a tzdata the published 1.8 metadata does
-    not permit, so ``pip check`` reports that pin as unsatisfied.  Rewriting
-    1.8's dist-info to agree would make the carrier misreport what 1.8
-    declared, so the mismatch is expected and is verified rather than hidden.
+    The carrier deliberately installs a croniter and a tzdata the published 1.8
+    metadata does not permit, so ``pip check`` reports those pins as
+    unsatisfied.  Rewriting 1.8's dist-info to agree would make the carrier
+    misreport what 1.8 declared, so the mismatch is expected and is verified
+    rather than hidden.
     Every other inconsistency is still fatal, and a declared substitution only
     excuses a line naming that exact distribution at that exact version.
     """

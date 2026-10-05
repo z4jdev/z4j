@@ -228,10 +228,10 @@ EXPECTED_NODE_IMAGE = (
 )
 EXPECTED_CADENCE = {
     "astral": "3.2",
-    "croniter": "6.2.2",
+    "croniter": "6.2.4",
     "python-dateutil": "2.9.0.post0",
     "six": "1.17.0",
-    "tzdata": "2026.3",
+    "tzdata": "2026.5",
 }
 LOCAL_DISTRIBUTIONS = {"z4j", "z4j-core", "z4j-scheduler"}
 EXPECTED_MATERIAL_AUTHORITY_POLICIES = {

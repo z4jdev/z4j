@@ -7150,8 +7150,14 @@ def _database_url_for_display(database_url: str) -> str:
 
     A DSN carries a credential in two shapes: ``user:pass@host`` and a
     ``?password=...`` query parameter (``sslpassword`` and token
-    parameters are the same shape). SQLAlchemy masks the first;
-    dropping the query removes the second.
+    parameters are the same shape). The password is replaced by ``***``
+    and the query is dropped.
+
+    The string is composed here from the parsed parts rather than rendered
+    by SQLAlchemy: its renderer percent-encodes the database part from one
+    release line on, which turned a Windows SQLite path into ``C%3A/...``.
+    This is a line for an operator to read, so the parts are shown as they
+    were written.
     """
     from sqlalchemy.engine import make_url
 
@@ -7159,7 +7165,20 @@ def _database_url_for_display(database_url: str) -> str:
         url = make_url(database_url)
     except Exception:
         return "(unparseable database URL)"
-    return url.set(query={}).render_as_string(hide_password=True)
+    authority = ""
+    if url.username is not None:
+        authority = url.username
+        if url.password is not None:
+            authority += ":***"
+        authority += "@"
+    if url.host:
+        authority += f"[{url.host}]" if ":" in url.host else url.host
+    if url.port is not None:
+        authority += f":{url.port}"
+    rendered = f"{url.drivername}://{authority}"
+    if url.database is not None:
+        rendered += f"/{url.database}"
+    return rendered
 
 
 def _run_status(args: argparse.Namespace) -> int:  # noqa: PLR0915 - the restore fence is caught at three sites by design

@@ -387,14 +387,29 @@
     "substitution_rule": "every distribution is the released image's bytes except those listed in substituted_distributions, which the recipe replaces from a digest-pinned wheel in the build context. The carrier exists to equal the CANDIDATE's cadence closure, not the released image's runtime, which is already why the interpreter is 3.14.7 rather than the 3.14.6 that image shipped. A substitution is admissible only when it is required for that equality and leaves application_content unchanged.",
     "substituted_distributions": [
       {
+        "name": "croniter",
+        "released_image_version": "6.2.2",
+        "carrier_version": "6.2.4",
+        "reason": "the candidate pins croniter 6.2.4; unchanged 1.8 code accepts exactly one local cadence fingerprint, so the restamp ceremony is only honest when carrier and candidate compute the same one",
+        "wheel": {
+          "filename": "croniter-6.2.4-py3-none-any.whl",
+          "sha256": "8ef3d544107a5c05a150a2d78f8bf5a8eb9c5c4d93405a736b824109574e3f4d",
+          "size": 46677
+        },
+        "replaced_paths": [
+          "/usr/local/lib/python3.14/site-packages/croniter",
+          "/usr/local/lib/python3.14/site-packages/croniter-6.2.2.dist-info"
+        ]
+      },
+      {
         "name": "tzdata",
         "released_image_version": "2026.1",
-        "carrier_version": "2026.3",
-        "reason": "the candidate pins IANA 2026c; unchanged 1.8 code accepts exactly one local cadence fingerprint, so the restamp ceremony is only honest when carrier and candidate compute the same one",
+        "carrier_version": "2026.5",
+        "reason": "the candidate pins IANA 2026e; unchanged 1.8 code accepts exactly one local cadence fingerprint, so the restamp ceremony is only honest when carrier and candidate compute the same one",
         "wheel": {
-          "filename": "tzdata-2026.3-py2.py3-none-any.whl",
-          "sha256": "dc096730c87af6cab1b171c9d532be840741ff5d459015e7f6947bd7d7e54931",
-          "size": 348168
+          "filename": "tzdata-2026.5-py2.py3-none-any.whl",
+          "sha256": "b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac",
+          "size": 347996
         },
         "replaced_paths": [
           "/usr/local/lib/python3.14/site-packages/tzdata",
@@ -404,18 +419,18 @@
     ],
     "carrier_site_packages": {
       "amd64": {
-        "sha256": "e8a771ec580ede73183e9f3256a0f6735388d542699c34d671482f7589942cbd",
-        "files": 4878,
-        "directories": 578,
+        "sha256": "c59ff2764e23ba42ea4f3b0eb12ea8c3a9153eac05b4f4f65ad9d9604ac6d76f",
+        "files": 4885,
+        "directories": 579,
         "symlinks": 0,
-        "bytes": 159122638
+        "bytes": 159276918
       },
       "arm64": {
-        "sha256": "15a38efefcca01f49c6c3c1b98675d56ec70e7f906b5be2e7a4e79c2a3e9879c",
-        "files": 4879,
-        "directories": 578,
+        "sha256": "40f1a6d7298a830a1da95f314bd3b9d71a8f0f261663d21ca7263555553572a4",
+        "files": 4886,
+        "directories": 579,
         "symlinks": 0,
-        "bytes": 165862903
+        "bytes": 166017183
       }
     },
     "site_tree_framing": "sorted entries: L\\0rel\\0mode-octal\\0target\\n; D\\0rel\\0mode-octal\\n; F\\0rel\\0mode-octal\\0length-decimal\\0sha256-hex\\n",
@@ -514,7 +529,7 @@
       },
       {
         "name": "croniter",
-        "version": "6.2.2"
+        "version": "6.2.4"
       },
       {
         "name": "cryptography",
@@ -674,7 +689,7 @@
       },
       {
         "name": "tzdata",
-        "version": "2026.3"
+        "version": "2026.5"
       },
       {
         "name": "uvicorn",
@@ -887,13 +902,13 @@
     "payload_format": "z4j-cadence-runtime-v1",
     "semantics_version": 1,
     "dependencies": {
-      "croniter": "6.2.2",
+      "croniter": "6.2.4",
       "astral": "3.2",
-      "tzdata": "2026.3",
+      "tzdata": "2026.5",
       "python-dateutil": "2.9.0.post0",
       "six": "1.17.0"
     },
-    "tzdata_tree_sha256": "864e13548b97e0e7be6bd2d4dd5e8b4a04cea0b570066ef5dfa40a424300cb0c",
+    "tzdata_tree_sha256": "b5f5d4f30d51ff1dcae7101441c02b171f26fc3b1fedbdf6f13a6e08bb568250",
     "python": {
       "implementation": "CPython",
       "version": [
@@ -903,7 +918,7 @@
       ]
     },
     "behavior_vector_sha256": "8e2ec76becf6ca6263805221e930c98962713ba0419c2a7e320e1dc928014a15",
-    "expected_runtime_fingerprint": "5e63a2ae8ec66ec9b86f64828b7ac2499c9254531d2ceb33e32ac3a80c344ef4",
+    "expected_runtime_fingerprint": "8737a662e8907492f325dd2e1d9f419bb29d150240563d94fa29945205c6678c",
     "source_image_python_3_14_6_fingerprint": "7d4e2328ee3298801d5fa2151ebf771b0b5ed186dded7ba7b7211bceabb043a1",
     "acceptance_rule": "compute actual payload and fingerprint in the compatibility image; never alias the source-image fingerprint"
   },

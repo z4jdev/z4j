@@ -44,6 +44,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from sqlalchemy.engine import make_url
 
 from z4j_brain.postgres_tls import asyncpg_tls_connect_args
+from z4j_brain.scheduler_grpc.admission import FireAdmission
 from z4j_brain.scheduler_grpc.proto import scheduler_pb2 as pb
 from z4j_brain.scheduler_grpc.proto import scheduler_pb2_grpc as pb_grpc
 
@@ -244,6 +245,7 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         db: DatabaseManager,
         command_dispatcher: CommandDispatcher,
         audit_service: AuditService,
+        fire_admission: FireAdmission | None = None,
     ) -> None:
         from collections import defaultdict
 
@@ -251,6 +253,10 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
             SchedulerRateLimiter,
         )
 
+        # Shared with the server that owns this servicer, which closes it the
+        # moment the process begins shutting down. A servicer built on its own
+        # (tests) gets an admission nobody closes.
+        self._fire_admission = fire_admission if fire_admission is not None else FireAdmission()
         self._settings = settings
         self._db = db
         self._dispatcher = command_dispatcher
@@ -1533,6 +1539,26 @@ class SchedulerServiceImpl(pb_grpc.SchedulerServiceServicer):
         request: pb.FireScheduleRequest,
         context: grpc.aio.ServicerContext,
     ) -> pb.FireScheduleResponse:
+        # First, before the rate-limit bucket and every other database touch:
+        # a process that has begun shutting down accepts no new fire, because
+        # it can no longer deliver the command it would create. UNAVAILABLE is
+        # what a scheduler already gets from a brain that is gone. It retries
+        # the same slot, latches nothing and reports nothing, and no row is
+        # written here. A typed disposition would be the wrong tool: the
+        # pre-control wire has none, and a refusal carried in a response body
+        # is acknowledged back as a failed fire.
+        if self._fire_admission.closed:
+            if self._fire_admission.count_refusal() == 1:
+                logger.info(
+                    "z4j.brain.scheduler_grpc: shutdown has begun; FireSchedule "
+                    "is refused as UNAVAILABLE from here on, so the scheduler "
+                    "retries each slot against the next brain",
+                )
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "brain is shutting down; retry this fire after it restarts",
+            )
+            return pb.FireScheduleResponse()  # unreachable; abort raises
         try:
             schedule_id = UUID(request.schedule_id)
             fire_id = UUID(request.fire_id)

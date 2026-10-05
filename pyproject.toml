@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.12.0"
+version = "1.12.1"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -130,26 +130,26 @@ dependencies = [
     # independent implementation.  These exact pins are the complete
     # cadence-affecting closure and intentionally match z4j-scheduler.
     #
-    # tzdata is IANA 2026c. 2026a computes fire times an hour wrong for seven
-    # zones with future effect: Africa/Casablanca and Africa/El_Aaiun from
-    # 2026-09-20, and America/Edmonton, America/Vancouver, America/Yellowknife,
-    # Canada/Mountain and Canada/Pacific from 2026-11-01.
+    # tzdata is IANA 2026e. Zones load only from this wheel, never from the
+    # host tzdb, so the pin decides every local fire time: 2026c computes them
+    # an hour wrong from 2026-11-01 for America/Winnipeg, Canada/Central,
+    # America/Rainy_River and America/Inuvik.
     #
     # A change to this closure changes the cadence runtime fingerprint, and the
     # rollback compatibility carrier must keep computing the same value or the
     # prepare-runtime-rollback ceremony cannot honestly restamp a cursor. The
-    # carrier therefore carries this same tzdata, so the sealed rollback target
-    # stays byte-equal to this closure. Published 1.8 is untouched: its own
-    # bytes are unchanged and it is never asked to agree with this closure
-    # except through that ceremony.
+    # carrier therefore carries this same croniter and tzdata, so the sealed
+    # rollback target stays byte-equal to this closure. Published 1.8 is
+    # untouched: its own bytes are unchanged and it is never asked to agree
+    # with this closure except through that ceremony.
     #
     # Both distributions move together or the closure is not exact, and the
     # carrier moves with them or the rollback target is not reachable.
-    "croniter==6.2.2",
+    "croniter==6.2.4",
     "python-dateutil==2.9.0.post0",
     "six==1.17.0",
     "astral==3.2",
-    "tzdata==2026.3",
+    "tzdata==2026.5",
 ]
 
 [project.optional-dependencies]
@@ -193,7 +193,7 @@ postgres = [
 # is logged at WARNING and discarded).
 # ------------------------------------------------------------------
 sentry = [
-    "sentry-sdk>=2.8.0,<3",
+    "sentry-sdk>=2.8.0",
     # urllib3 is what sentry-sdk, botocore and testcontainers carry; at
     # the floors an installer could otherwise resolve 2.7.0, three
     # advisories behind 2.8.0. The brain never imports urllib3; the
@@ -208,11 +208,12 @@ sentry = [
 # this extra the brain runs unchanged and the s3 sink reports the
 # missing package with the install line when it is first used.
 # The sink uses the session, create_client, put_object and the four
-# multipart calls only, all unchanged across the 2.x and 3.x series;
-# a "<3" cap here held wrapt at 1.x and botocore ten months back.
+# multipart calls only, a surface that has not changed across aiobotocore
+# majors, so the requirement is a floor with no upper cap: a cap on
+# aiobotocore also holds botocore and wrapt back for the whole environment.
 # ------------------------------------------------------------------
 s3 = [
-    "aiobotocore>=2.21,<4",
+    "aiobotocore>=2.21",
     # See the urllib3 note on the sentry extra.
     "urllib3>=2.8.0",
 ]
@@ -254,7 +255,7 @@ scheduler-grpc = [
 # Test extras (was z4j-brain[test] / [test-integration]).
 # ------------------------------------------------------------------
 test = [
-    "pytest>=9.1.1,<10",
+    "pytest>=9.1.1",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
     "httpx>=0.28.1",

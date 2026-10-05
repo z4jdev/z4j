@@ -20,7 +20,7 @@ exercised independently in tests:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -1263,6 +1263,21 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
         # gates on this flag so k8s readiness doesn't flip "ready"
         # until the brain is genuinely able to serve traffic.
         app.state.lifespan_ready = True
+        # The ASGI server drains its HTTP and WebSocket connections before it
+        # runs the teardown below, and the scheduler gRPC listener stays up
+        # for all of that time. A fire accepted then is committed and can no
+        # longer be delivered by this process, so admission closes at the
+        # stop signal itself. Chained in front of the handler the server
+        # installed, which still runs; skipped wherever a handler cannot be
+        # installed (a lifespan run off the main thread), where the teardown
+        # is the only notice there is.
+        restore_shutdown_signals: Callable[[], None] | None = None
+        if scheduler_grpc_server is not None:
+            from z4j_brain.shutdown_signals import notify_on_shutdown_signals
+
+            restore_shutdown_signals = notify_on_shutdown_signals(
+                scheduler_grpc_server.begin_shutdown,
+            )
         try:
             yield
         finally:
@@ -1270,9 +1285,18 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
             # so /health/ready returns 503 and load balancers
             # stop sending new traffic.
             app.state.lifespan_ready = False
+            # Backstop for every stop that did not come through a chained
+            # signal handler: no new fire is admitted from here on.
+            if scheduler_grpc_server is not None:
+                scheduler_grpc_server.begin_shutdown()
+            if restore_shutdown_signals is not None:
+                restore_shutdown_signals()
             # Stop the embedded scheduler subprocess FIRST so it can
             # cleanly drain any in-flight RPC against the gRPC
             # server before the gRPC server itself is torn down.
+            # Admission is already closed, so what drains is what was
+            # admitted before the stop; a new fire from the child is
+            # refused as retry-later like one from any other scheduler.
             if embedded_supervisor is not None:
                 try:
                     await embedded_supervisor.stop()

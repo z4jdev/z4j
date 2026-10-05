@@ -182,7 +182,7 @@ spec:
       initContainers:
         - name: fix-data-permissions
           # CHANGE ME - keep this the same tag as the brain container.
-          image: "z4jdev/z4j:1.12.0"
+          image: "z4jdev/z4j:1.12.1"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
@@ -216,7 +216,7 @@ spec:
         - name: brain
           # CHANGE ME - pin this release tag to a digest before production
           # rollout if possible.
-          image: "z4jdev/z4j:1.12.0"
+          image: "z4jdev/z4j:1.12.1"
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

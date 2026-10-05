@@ -214,6 +214,14 @@ _DSN_QUERY = "postgresql+asyncpg://alice@db.example/z4j?password=swordfish&sslmo
         (_DSN_USERINFO, "postgresql+asyncpg://alice:***@db.example/z4j"),
         (_DSN_QUERY, "postgresql+asyncpg://alice@db.example/z4j"),
         ("sqlite+aiosqlite:///C:/x/brain.db", "sqlite+aiosqlite:///C:/x/brain.db"),
+        ("sqlite+aiosqlite:////var/lib/z4j/brain.db", "sqlite+aiosqlite:////var/lib/z4j/brain.db"),
+        ("sqlite+aiosqlite:///relative.db", "sqlite+aiosqlite:///relative.db"),
+        ("sqlite+aiosqlite://", "sqlite+aiosqlite://"),
+        (
+            "postgresql+asyncpg://alice:swordfish@[2001:db8::7]:6432/z4j prod",
+            "postgresql+asyncpg://alice:***@[2001:db8::7]:6432/z4j prod",
+        ),
+        ("postgresql+asyncpg://db.example/z4j", "postgresql+asyncpg://db.example/z4j"),
         ("not a dsn at all", "(unparseable database URL)"),
     ],
 )

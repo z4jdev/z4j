@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 import grpc
 
+from z4j_brain.scheduler_grpc.admission import FireAdmission
 from z4j_brain.scheduler_grpc.auth import SchedulerAllowlistInterceptor
 from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
 from z4j_brain.scheduler_grpc.proto import scheduler_pb2_grpc as pb_grpc
@@ -72,6 +73,10 @@ class SchedulerGrpcServer:
         self._dispatcher = command_dispatcher
         self._audit = audit_service
         self._server: grpc.aio.Server | None = None
+        # Closed by :meth:`begin_shutdown`; the servicer reads it at the top
+        # of FireSchedule. Created here, not in :meth:`start`, so the signal
+        # chain can be wired before the listener exists.
+        self._fire_admission = FireAdmission()
         # Captured from ``add_secure_port`` so callers binding to an
         # ephemeral port (e.g. integration tests passing port=0) can
         # discover the actual port the OS assigned.
@@ -87,6 +92,23 @@ class SchedulerGrpcServer:
         to request an ephemeral port from the OS).
         """
         return self._bound_port
+
+    @property
+    def admitting_fires(self) -> bool:
+        """False once this process has begun shutting down."""
+        return not self._fire_admission.closed
+
+    def begin_shutdown(self) -> None:
+        """Stop admitting new fires; everything else keeps being served.
+
+        Called from the stop-signal handler of the process and again first
+        thing in the lifespan teardown. It is one attribute store with no
+        logging, no lock and no await, because the first caller is a signal
+        handler. RPCs already admitted run to completion, and the read,
+        stream, cursor and acknowledgement RPCs are untouched: none of them
+        creates work this process would still have to deliver.
+        """
+        self._fire_admission.close()
 
     async def start(self) -> None:
         """Bind the gRPC port and start serving.
@@ -215,6 +237,7 @@ class SchedulerGrpcServer:
             db=self._db,
             command_dispatcher=self._dispatcher,
             audit_service=self._audit,
+            fire_admission=self._fire_admission,
         )
         pb_grpc.add_SchedulerServiceServicer_to_server(servicer, server)
 
@@ -249,6 +272,9 @@ class SchedulerGrpcServer:
         Idempotent: safe to call multiple times or before
         :meth:`start`.
         """
+        # A caller that stops the server without the lifespan (tests, an
+        # embedding host) still closes admission before the drain begins.
+        self._fire_admission.close()
         if self._server is None:
             return
         grace = float(self._settings.scheduler_grpc_grace_seconds)
@@ -259,7 +285,15 @@ class SchedulerGrpcServer:
                 "z4j.brain.scheduler_grpc: server.stop crashed",
             )
         self._server = None
-        logger.info("z4j.brain.scheduler_grpc: stopped")
+        refused = self._fire_admission.refused
+        if refused:
+            logger.info(
+                "z4j.brain.scheduler_grpc: stopped; %d FireSchedule call(s) "
+                "were refused as UNAVAILABLE after shutdown began",
+                refused,
+            )
+        else:
+            logger.info("z4j.brain.scheduler_grpc: stopped")
 
 
 def _build_server_credentials(settings: Settings) -> grpc.ServerCredentials:
