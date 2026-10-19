@@ -28,8 +28,7 @@ const OPTIONS = [
 export function ThemeToggle() {
   const { theme, setTheme, resolvedTheme } = useTheme();
 
-  // Trigger icon: shows the resolved theme so a "system" pick still
-  // gives a meaningful glyph instead of a generic monitor.
+  // Show the monitor for system mode, otherwise the selected theme.
   const triggerIcon =
     theme === "system" ? Monitor : resolvedTheme === "dark" ? Moon : Sun;
   const TriggerIcon = triggerIcon;

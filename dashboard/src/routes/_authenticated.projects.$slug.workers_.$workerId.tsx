@@ -88,9 +88,31 @@ function WorkerDetailPage() {
   // UI mirror.
   const canOperate = useCan(slug, "bulk_action");
 
-  // Pick the first online agent for this project.
-  const agentId =
-    agents?.find((a) => a.state === "online")?.id ?? agents?.[0]?.id;
+  // A capability says what an agent can do, not which worker it reports.
+  // Missing/ambiguous retained provenance never falls back to another agent.
+  const agent = agents?.find((candidate) => candidate.id === worker?.agent_id);
+  const agentId = agent?.id;
+  const supportsControl = (action: string) => {
+    if (!canOperate || !worker || agent?.state !== "online") return false;
+    const advertised = agent.capabilities[worker.engine];
+    return (
+      agent.engine_adapters.includes(worker.engine) &&
+      Array.isArray(advertised) &&
+      advertised.includes(action)
+    );
+  };
+  const canGrow = supportsControl("pool_grow");
+  const canShrink = supportsControl("pool_shrink");
+  const canAdd = supportsControl("add_consumer");
+  const canRemove = supportsControl("cancel_consumer");
+  const canRestart = supportsControl("restart_worker");
+  const controlNotice = !worker?.agent_id
+    ? "Controls unavailable: retained worker reports do not identify a single reporting agent."
+    : !agent || agent.state !== "online"
+      ? "Controls unavailable: the reporting agent is not online."
+      : ![canGrow, canShrink, canAdd, canRemove, canRestart].every(Boolean)
+        ? "Some controls unavailable: the reporting agent has not advertised the required native actions for this engine."
+        : null;
 
   // Command mutations
   const poolResize = usePoolResize(slug);
@@ -112,6 +134,7 @@ function WorkerDetailPage() {
   // --- Command handlers ---
 
   async function onPoolResize(delta: number) {
+    if (!(delta > 0 ? canGrow : canShrink)) return;
     if (!agentId || !worker) {
       toast.error("No agent available for this project");
       return;
@@ -119,6 +142,7 @@ function WorkerDetailPage() {
     try {
       await poolResize.mutateAsync({
         agent_id: agentId,
+        engine: worker.engine,
         worker_name: worker.name,
         delta,
       });
@@ -134,6 +158,7 @@ function WorkerDetailPage() {
 
   async function onAddQueue(e: React.FormEvent) {
     e.preventDefault();
+    if (!canAdd) return;
     if (!agentId || !worker) {
       toast.error("No agent available for this project");
       return;
@@ -143,6 +168,7 @@ function WorkerDetailPage() {
     try {
       await addConsumer.mutateAsync({
         agent_id: agentId,
+        engine: worker.engine,
         worker_name: worker.name,
         queue: name,
       });
@@ -157,6 +183,7 @@ function WorkerDetailPage() {
   }
 
   async function onCancelConsumer(queue: string) {
+    if (!canOperate || !canRemove) return;
     if (!agentId || !worker) {
       toast.error("No agent available for this project");
       return;
@@ -164,6 +191,7 @@ function WorkerDetailPage() {
     try {
       await cancelConsumer.mutateAsync({
         agent_id: agentId,
+        engine: worker.engine,
         worker_name: worker.name,
         queue,
       });
@@ -176,6 +204,7 @@ function WorkerDetailPage() {
   }
 
   async function onRestartWorker() {
+    if (!canRestart) return;
     if (!agentId || !worker) {
       toast.error("No agent available for this project");
       return;
@@ -183,6 +212,7 @@ function WorkerDetailPage() {
     try {
       await restartWorker.mutateAsync({
         agent_id: agentId,
+        engine: worker.engine,
         worker_name: worker.name,
       });
       toast.success("Restart worker command issued");
@@ -271,7 +301,7 @@ function WorkerDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={commandInFlight || !agentId}
+              disabled={commandInFlight || !canGrow}
               onClick={() => onPoolResize(1)}
             >
               <Plus className="mr-1 size-3.5" />
@@ -280,7 +310,7 @@ function WorkerDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={commandInFlight || !agentId}
+              disabled={commandInFlight || !canShrink}
               onClick={() => onPoolResize(-1)}
             >
               <Minus className="mr-1 size-3.5" />
@@ -289,7 +319,7 @@ function WorkerDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={commandInFlight || !agentId}
+              disabled={commandInFlight || !canAdd}
               onClick={() => {
                 setQueueName("");
                 setAddQueueOpen(true);
@@ -302,12 +332,17 @@ function WorkerDetailPage() {
               variant="outline"
               size="sm"
               className="text-destructive"
-              disabled={commandInFlight || !agentId}
+              disabled={commandInFlight || !canRestart}
               onClick={() => setRestartOpen(true)}
             >
               <RefreshCw className="mr-1 size-3.5" />
               Restart Worker
             </Button>
+            {controlNotice && (
+              <p className="w-full text-sm text-muted-foreground">
+                {controlNotice}
+              </p>
+            )}
           </div>
         )}
 
@@ -429,7 +464,9 @@ function WorkerDetailPage() {
                             <Button
                               variant="ghost"
                               size="sm"
-                              disabled={commandInFlight || !agentId}
+                              disabled={
+                                !canOperate || commandInFlight || !canRemove
+                              }
                               onClick={() => onCancelConsumer(String(q.name))}
                             >
                               <Trash2 className="mr-1 size-3.5 text-destructive" />
@@ -584,7 +621,8 @@ function WorkerDetailPage() {
             <DialogHeader>
               <DialogTitle>Add queue consumer</DialogTitle>
               <DialogDescription>
-                The worker will start consuming from this queue.
+                Asks the worker to start consuming from this queue. Celery
+                sends no confirmation; check Active queues on the Queues tab.
               </DialogDescription>
             </DialogHeader>
             <div className="my-6 space-y-2">
@@ -605,7 +643,7 @@ function WorkerDetailPage() {
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={addConsumer.isPending}>
+              <Button type="submit" disabled={addConsumer.isPending || !canAdd}>
                 Add consumer
               </Button>
             </DialogFooter>
@@ -622,34 +660,16 @@ function WorkerDetailPage() {
               <DialogDescription>
                 This broadcasts Celery's{" "}
                 <span className="font-mono">pool_restart</span> to the worker.
-                Child processes finish their in-flight tasks, then are respawned
-                with fresh code - zero task loss. Continue?
+                It takes effect only when the worker enables{" "}
+                <span className="font-mono">worker_pool_restarts</span>, is not
+                reliable on gevent or eventlet pools, and z4j cannot confirm the
+                restart. Continue?
               </DialogDescription>
             ) : (
               <DialogDescription>
-                <span className="font-semibold text-warning">Heads-up:</span>{" "}
-                <span className="font-mono">
-                  {worker?.engine ?? "this engine"}
-                </span>{" "}
-                has no graceful pool-restart primitive (only Celery does). The
-                agent will emit a{" "}
-                <span className="font-mono">worker.offline</span> event, then
-                call <span className="font-mono">os._exit(0)</span> - your host
-                process supervisor (docker / k8s / systemd / supervisor)
-                respawns it per its restart policy.
-                <br />
-                <br />
-                <span className="font-semibold">
-                  In-flight tasks will be killed
-                </span>{" "}
-                and re-delivered by the broker. Only proceed if your tasks are
-                safe to run twice (idempotent).
-                <br />
-                <br />
-                If the worker isn't running under a supervisor, the restart will
-                be refused with a clean error - set{" "}
-                <span className="font-mono">Z4J_ORCHESTRATED=1</span> to opt in
-                explicitly.
+                This asks the reporting agent to restart the named worker using
+                this engine's native control. Running tasks may be interrupted.
+                Continue?
               </DialogDescription>
             )}
           </DialogHeader>
@@ -663,10 +683,10 @@ function WorkerDetailPage() {
             </Button>
             <Button
               variant="destructive"
-              disabled={restartWorker.isPending}
+              disabled={restartWorker.isPending || !canRestart}
               onClick={onRestartWorker}
             >
-              {worker?.engine === "celery" ? "Restart pool" : "Kill + respawn"}
+              {worker?.engine === "celery" ? "Restart pool" : "Restart worker"}
             </Button>
           </DialogFooter>
         </DialogContent>

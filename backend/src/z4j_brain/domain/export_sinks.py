@@ -6,8 +6,9 @@ somewhere an operator can fetch it from. Two are shipped:
 * :class:`LocalDirectorySink` (``Z4J_EXPORT_SINK=local``) writes under one
   directory. Every object is written through a temporary file in the same
   directory and renamed into place, so a reader never sees a partial file
-  and a failed job leaves nothing behind. Files are created ``0640`` and
-  the sink refuses to write through a symlink, at the directory or at the
+  and a failed streaming write removes its temporary file. POSIX files are
+  created ``0640``; Windows files receive an owner-private ACL. The sink
+  refuses to write through a symlink, at the directory or at the
   target, because an export directory is the kind of path an unprivileged
   account on the same host could otherwise point somewhere it should not.
 
@@ -46,11 +47,17 @@ import contextlib
 import os
 import re
 import stat
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
+
+if os.name == "nt":
+    import msvcrt
+
+    from z4j_brain import _windows_secure_io as winio
 
 import structlog
 
@@ -154,11 +161,12 @@ class LocalDirectorySink:
     downloadable = True
 
     def __init__(self, base: Path) -> None:
-        self._base = Path(base)
-        if self._base.is_symlink():
-            raise ExportSinkError(f"export directory {self._base} is a symlink")
-        if not self._base.is_dir():
-            raise ExportSinkError(f"export directory {self._base} does not exist")
+        self._base = Path(base).absolute()
+        try:
+            handle, self._base_identity = self._open_base()
+            self._close_directory(handle)
+        except OSError as exc:
+            raise ExportSinkError("export directory is missing or unsafe") from exc
 
     @property
     def base(self) -> Path:
@@ -167,23 +175,89 @@ class LocalDirectorySink:
     def describe(self) -> str:
         return str(self._base)
 
-    def _target_for(self, key: str) -> Path:
-        """Resolve ``key`` below the base, refusing every symlinked step."""
+    def _open_base(self) -> tuple[int, tuple[int, int]]:
+        if os.name == "nt":
+            return winio.open_directory(self._base, require_private=False)
+        handle = os.open(self._base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(handle)
+            return handle, (info.st_dev, info.st_ino)
+        except BaseException:
+            os.close(handle)
+            raise
+
+    @staticmethod
+    def _close_directory(handle: int) -> None:
+        if os.name == "nt":
+            winio.close_handle(handle)
+        else:
+            os.close(handle)
+
+    @staticmethod
+    def _identity(handle: int) -> tuple[int, int]:
+        if os.name == "nt":
+            return winio.handle_identity(handle)
+        info = os.fstat(handle)
+        return info.st_dev, info.st_ino
+
+    @contextlib.contextmanager
+    def _parent_for(self, key: str, *, create: bool = False) -> Iterator[int]:
+        """Hold the original base and every child directory during file I/O."""
         validate_key(key)
-        current = self._base
-        parts = key.split("/")
-        for directory in parts[:-1]:
-            current = current / directory
-            if current.is_symlink():
-                raise ExportSinkError(f"refusing to write through symlink {current}")
-            if not current.exists():
-                current.mkdir(mode=LOCAL_DIR_MODE)
-            elif not current.is_dir():
-                raise ExportSinkError(f"{current} is not a directory")
-        target = current / parts[-1]
-        if target.is_symlink():
-            raise ExportSinkError(f"refusing to replace symlink {target}")
-        return target
+        held: list[int] = []
+        try:
+            parent, identity = self._open_base()
+            held.append(parent)
+            if identity != self._base_identity:
+                raise ExportSinkError("export directory identity changed")
+            for name in key.split("/")[:-1]:
+                if os.name == "nt":
+                    child, _ = winio.open_relative_directory(
+                        parent, name, create=create, require_private=False
+                    )
+                else:
+                    if create:
+                        with contextlib.suppress(FileExistsError):
+                            os.mkdir(name, LOCAL_DIR_MODE, dir_fd=parent)
+                    child = os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=parent,
+                    )
+                held.append(child)
+                parent = child
+            yield parent
+        except OSError as exc:
+            raise ExportSinkError("export path is missing or unsafe") from exc
+        finally:
+            for handle in reversed(held):
+                self._close_directory(handle)
+
+    def _check_parent(self, key: str, parent: int) -> None:
+        # Detect a persistent rename during an awaited write. The subsequent
+        # operation still uses the held handle, even if the name changes again.
+        with self._parent_for(key) as current:
+            if self._identity(current) != self._identity(parent):
+                raise ExportSinkError("export parent directory identity changed")
+
+    @staticmethod
+    def _check_target(parent: int, name: str) -> None:
+        if os.name == "nt":
+            winio.relative_file_identity(parent, name, require_private=False)
+            return
+        try:
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(info.st_mode):
+            raise ExportSinkError("export target is not a regular file")
+
+    @staticmethod
+    def _unlink(parent: int, name: str) -> None:
+        if os.name == "nt":
+            winio.delete_relative(parent, name, require_private=False)
+        else:
+            os.unlink(name, dir_fd=parent)
 
     async def write(
         self,
@@ -193,43 +267,57 @@ class LocalDirectorySink:
         content_type: str,
     ) -> SinkWriteResult:
         del content_type  # the filesystem keeps no media type
-        target = self._target_for(key)
-        staged = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-        fd = os.open(staged, flags, LOCAL_FILE_MODE)
         size = 0
-        try:
-            if hasattr(os, "fchmod"):
-                # The umask may have taken bits off at creation; the mode
-                # the docs promise is exact, not "at most".
-                os.fchmod(fd, LOCAL_FILE_MODE)
-            async for chunk in chunks:
-                if not chunk:
-                    continue
-                await asyncio.to_thread(_write_all, fd, chunk)
-                size += len(chunk)
-            await asyncio.to_thread(os.fsync, fd)
-        except BaseException:
-            os.close(fd)
-            with contextlib.suppress(OSError):
-                staged.unlink()
-            raise
-        os.close(fd)
-        if target.is_symlink():
-            with contextlib.suppress(OSError):
-                staged.unlink()
-            raise ExportSinkError(f"refusing to replace symlink {target}")
-        staged.replace(target)
-        info = os.lstat(target)
-        if not stat.S_ISREG(info.st_mode):
-            raise ExportSinkError(f"{target} is not a regular file after write")
-        return SinkWriteResult(location=str(target), size_bytes=size, key=key)
+        with self._parent_for(key, create=True) as parent:
+            name = key.rsplit("/", maxsplit=1)[-1]
+            staged = f".{name}.{uuid4().hex}.tmp"
+            self._check_target(parent, name)
+            if os.name == "nt":
+                raw, _, _ = winio.create_relative_stream_file(parent, staged, ())
+                try:
+                    fd = msvcrt.open_osfhandle(raw, os.O_RDWR | os.O_BINARY)
+                except BaseException:
+                    winio.close_handle(raw)
+                    self._unlink(parent, staged)
+                    raise
+            else:
+                fd = os.open(
+                    staged,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    LOCAL_FILE_MODE,
+                    dir_fd=parent,
+                )
+            published = False
+            try:
+                if os.name != "nt":
+                    os.fchmod(fd, LOCAL_FILE_MODE)
+                async for chunk in chunks:
+                    if chunk:
+                        await _finish_io(_write_all, fd, chunk)
+                        size += len(chunk)
+                await _finish_io(os.fsync, fd)
+                self._check_parent(key, parent)
+                self._check_target(parent, name)
+                if os.name == "nt":
+                    winio.replace_open_handle(msvcrt.get_osfhandle(fd), parent, name)
+                else:
+                    os.replace(staged, name, src_dir_fd=parent, dst_dir_fd=parent)
+                    os.fsync(parent)
+                published = True
+            finally:
+                os.close(fd)
+                if not published:
+                    with contextlib.suppress(OSError):
+                        self._unlink(parent, staged)
+        return SinkWriteResult(location=str(self._base / key), size_bytes=size, key=key)
 
     async def discard(self, key: str) -> None:
         try:
-            path = self.resolve_download(key)
-            await asyncio.to_thread(path.unlink)
+            key = self.key_for(key)
+            with self._parent_for(key) as parent:
+                name = key.split("/")[-1]
+                self._check_target(parent, name)
+                self._unlink(parent, name)
         except ExportSinkError:
             return
         except OSError:
@@ -261,61 +349,58 @@ class LocalDirectorySink:
         return stored if Path(stored).is_absolute() else str(self._base / stored)
 
     def resolve_download(self, location: str) -> Path:
-        """Return the file for ``location`` once it is proven to be ours.
+        """Inspect a stored location and return its display path.
 
-        The location came from the job row. The row is not trusted: the
-        base directory may have been moved since, the file may have been
-        swapped for a link, and a writer of the row may have pointed it
-        anywhere. The file returned is below the configured base both
-        lexically (:meth:`key_for`) and physically (``resolve(strict=True)``
-        of base and target), a regular file, reached through no symlink.
+        A path cannot retain filesystem authority after this method returns.
+        Call :meth:`open_download` for I/O; it serves an already-opened handle.
         """
-        key = self.key_for(location)
-        try:
-            base = self._base.resolve(strict=True)
-        except OSError as exc:
-            raise ExportSinkError("export directory is missing") from exc
-        current = self._base
-        for part in key.split("/"):
-            current = current / part
-            if current.is_symlink():
-                raise ExportSinkError("export path crosses a symlink")
-        try:
-            target = current.resolve(strict=True)
-            info = os.lstat(current)
-        except OSError as exc:
-            raise ExportSinkError("export file is missing") from exc
-        if not target.is_relative_to(base):
-            raise ExportSinkError("export is not under the configured directory")
-        if not stat.S_ISREG(info.st_mode):
-            raise ExportSinkError("export file is missing")
-        return current
+        opened = self.open_download(location)
+        opened.file.close()
+        return self._base / self.key_for(location)
 
     def open_download(self, location: str) -> OpenedExport:
-        """Open the file for ``location`` for serving, following no symlink.
+        """Open a regular file relative to verified, held directory handles."""
+        key = self.key_for(location)
+        with self._parent_for(key) as parent:
+            name = key.split("/")[-1]
+            if os.name == "nt":
+                opened = winio.open_relative_file(parent, name, require_private=False)
+                if opened is None:
+                    raise ExportSinkError("export file is missing")
+                raw, _, _ = opened
+                try:
+                    fd = msvcrt.open_osfhandle(raw, os.O_RDONLY | os.O_BINARY)
+                except BaseException:
+                    winio.close_handle(raw)
+                    raise
+            else:
+                # NONBLOCK lets fstat reject a FIFO without hanging this request.
+                fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                    dir_fd=parent,
+                )
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ExportSinkError("export file is not a regular file")  # noqa: TRY301
+                self._check_parent(key, parent)
+                return OpenedExport(file=os.fdopen(fd, "rb"), size_bytes=int(info.st_size))
+            except BaseException:
+                os.close(fd)
+                raise
 
-        :meth:`resolve_download` proves the path; the open itself carries
-        ``O_NOFOLLOW`` where the platform has it, so a link swapped in
-        between the check and the open is refused rather than followed,
-        and what is served is the opened handle, not a path reopened later.
-        """
-        path = self.resolve_download(location)
-        flags = os.O_RDONLY
-        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-        flags |= getattr(os, "O_CLOEXEC", 0)
+
+async def _finish_io(function: Callable[..., Any], *args: Any) -> Any:
+    """Keep a descriptor alive until its thread finishes, including cancellation."""
+    operation = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
         try:
-            fd = os.open(path, flags)
-        except OSError as exc:
-            raise ExportSinkError("export file is missing") from exc
-        try:
-            info = os.fstat(fd)
-        except OSError as exc:
-            os.close(fd)
-            raise ExportSinkError("export file is missing") from exc
-        if not stat.S_ISREG(info.st_mode):
-            os.close(fd)
-            raise ExportSinkError("export file is missing")
-        return OpenedExport(file=os.fdopen(fd, "rb"), size_bytes=int(info.st_size))
+            await operation
+        finally:
+            raise
 
 
 def _write_all(fd: int, data: bytes) -> None:

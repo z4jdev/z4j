@@ -7,7 +7,7 @@ type AgentInventoryFields = Pick<
 type AgentCandidateFields = AgentInventoryFields &
   Pick<AgentPublic, "last_seen_at">;
 type AgentAction =
-  "retry_task" | "cancel_task" | "requeue_dead_letter" | "list_dead_letters";
+  "retry_task" | "cancel_task" | "requeue_dead_letter" | "list_dead_letters" | "rate_limit";
 
 /**
  * Whether the brain holds this agent's adapter inventory.

@@ -33,6 +33,7 @@ import logging
 import re
 import socket
 import time
+import zlib
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
@@ -89,11 +90,9 @@ def set_allow_http_webhooks(allow: bool) -> None:
     _allow_http_webhooks = bool(allow)
 
 
-#: Hard cap on response body bytes we read from a webhook target.
-#: Hostile webhooks could otherwise stream multi-GB responses
-#: within the request timeout window and exhaust dispatcher
-#: Memory. 8 KiB is more than enough to capture
-#: a useful error message.
+#: Cap on both retained wire-body bytes and decoded response bytes.
+#: A transport can yield a larger raw chunk; we copy only the bounded
+#: prefix. Compression must also be decoded with an output limit.
 _MAX_RESPONSE_BYTES = 8 * 1024
 
 
@@ -162,6 +161,65 @@ def _pin_url_to_ip(url: str, safe_ip: str) -> tuple[httpx.URL, str, int]:
     return pinned, original_host, port
 
 
+def _decode_response_preview(encoded: bytes, *, encoding: str, wire_limit_reached: bool) -> bytes:
+    """Decode a bounded preview without allocating the expanded body.
+
+    No unbounded decoder or ``flush()`` is used. A preview cut short by
+    either limit cannot validate a compression trailer beyond that limit.
+    For responses that fit, require a complete valid compressed stream.
+    """
+    if encoding in {"", "identity"}:
+        return encoded
+    if encoding not in {"gzip", "deflate"}:
+        raise httpx.DecodingError("Unsupported notification response content encoding")
+
+    decoded = bytearray()
+    remaining = encoded
+    while True:
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS if encoding == "gzip" else zlib.MAX_WBITS)
+        try:
+            decoded.extend(decoder.decompress(remaining, _MAX_RESPONSE_BYTES - len(decoded)))
+        except zlib.error as exc:
+            raise httpx.DecodingError("Invalid compressed notification response") from exc
+        if len(decoded) == _MAX_RESPONSE_BYTES:
+            return bytes(decoded)
+        if not decoder.eof:
+            if wire_limit_reached:
+                return bytes(decoded)
+            raise httpx.DecodingError("Incomplete compressed notification response")
+        remaining = decoder.unused_data
+        if not remaining:
+            return bytes(decoded)
+        if encoding != "gzip":
+            raise httpx.DecodingError("Trailing data in compressed notification response")
+        # gzip permits concatenated members. Every member shares the
+        # same encoded-input and decoded-output budgets.
+
+
+async def _read_encoded_response_preview(resp: httpx.Response) -> bytes:
+    """Retain a bounded raw prefix and close even if reading is cancelled."""
+    try:
+        if resp.is_stream_consumed:
+            raise httpx.StreamConsumed()
+        if resp.is_closed:
+            raise httpx.StreamClosed()
+        if not isinstance(resp.stream, httpx.AsyncByteStream):
+            raise TypeError("Notification response requires an async byte stream")
+        resp.is_stream_consumed = True
+        buf = bytearray()
+        # Iterate the raw transport stream directly. aiter_raw()
+        # closes implicitly at EOF without shielding: cancellation
+        # there marks the response closed before cleanup completes,
+        # preventing our finally block from retrying that cleanup.
+        async for chunk in resp.stream:
+            buf.extend(memoryview(chunk)[: _MAX_RESPONSE_BYTES - len(buf)])
+            if len(buf) >= _MAX_RESPONSE_BYTES:
+                break
+        return bytes(buf)
+    finally:
+        await asyncio.shield(resp.aclose())
+
+
 async def _post(
     url: str,
     *,
@@ -171,13 +229,13 @@ async def _post(
 ) -> httpx.Response:
     """POST ``url`` and return the response with body bounded.
 
-    Uses httpx's streaming mode so an attacker-controlled webhook
-    target streaming gigabytes back hits our ``_MAX_RESPONSE_BYTES``
-    cap instead of buffering the whole response into memory. The
-    returned response has its ``.content`` already populated with
-    the truncated bytes so callers can use ``resp.text`` /
-    ``resp.json()`` normally - they just see at most
-    ``_MAX_RESPONSE_BYTES`` of it.
+    Retains at most ``_MAX_RESPONSE_BYTES`` encoded bytes and decodes
+    at most that many output bytes. Requests identity encoding; gzip
+    and standard zlib-wrapped deflate responses are also supported.
+    Other encodings are refused. The returned response contains the
+    decoded, possibly truncated preview, with matching encoding and
+    length headers. Callers can use ``resp.text`` / ``resp.json()``
+    normally, although truncated JSON may not parse.
 
     When ``pin_ip`` is provided, the TCP connect targets that
     exact IP (DNS-rebinding defence, M15). The ``Host`` header
@@ -185,7 +243,8 @@ async def _post(
     URL's hostname so virtual-host routing and TLS cert
     verification keep working against the real domain.
     """
-    headers = kwargs.pop("headers", None) or {}
+    headers = httpx.Headers(kwargs.pop("headers", None))
+    headers["Accept-Encoding"] = "identity"
     request_url = url
     extensions: dict[str, Any] = {}
     if pin_ip is not None:
@@ -197,9 +256,8 @@ async def _post(
         # could let an attacker re-route the pinned request to a
         # different vhost on the resolved IP. The validator already
         # bans ``Host`` from incoming config, but defense-in-depth:
-        # let the trailing dict of explicit pins override caller
-        # input rather than the other way around.
-        headers = {**headers, "Host": original_host}
+        # overwrite the case-insensitive header value with the pin.
+        headers["Host"] = original_host
         # Tell httpx/httpcore to use the original hostname for TLS
         # SNI AND for certificate hostname verification, even
         # though the socket connects to ``safe_ip``.
@@ -239,22 +297,24 @@ async def _post(
             **build_kwargs,
         )
         resp = await client_owner.send(req, stream=True)
-        try:
-            buf = bytearray()
-            async for chunk in resp.aiter_raw():
-                buf.extend(chunk)
-                if len(buf) >= _MAX_RESPONSE_BYTES:
-                    del buf[_MAX_RESPONSE_BYTES:]
-                    break
-        finally:
-            await resp.aclose()
+        encoded = await _read_encoded_response_preview(resp)
+        content = _decode_response_preview(
+            encoded,
+            encoding=resp.headers.get("content-encoding", "").strip().lower(),
+            wire_limit_reached=len(encoded) == _MAX_RESPONSE_BYTES,
+        )
         # Re-attach the bounded body so callers can use the public
         # httpx API (``resp.text``, ``resp.json()``) without
-        # touching the streaming machinery themselves.
+        # touching the streaming machinery themselves. In particular,
+        # do not leave Content-Encoding here: httpx would decode again.
+        response_headers = httpx.Headers(resp.headers)
+        for name in ("content-encoding", "content-length", "transfer-encoding"):
+            response_headers.pop(name, None)
+        response_headers["Content-Length"] = str(len(content))
         return httpx.Response(
             status_code=resp.status_code,
-            headers=resp.headers,
-            content=bytes(buf),
+            headers=response_headers,
+            content=content,
             request=req,
         )
     finally:

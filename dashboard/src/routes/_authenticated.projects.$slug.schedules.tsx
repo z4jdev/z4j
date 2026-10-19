@@ -37,6 +37,10 @@ import { Switch } from "@/components/ui/switch";
 import { useCan } from "@/hooks/use-memberships";
 import {
   useCircuitBreakerThreshold,
+  useNativeScheduleCapabilities,
+  canManageNativeSchedule,
+  NATIVE_TOGGLE_UNAVAILABLE,
+  PROJECT_MISFIRE_LIMIT,
   useDeleteSchedule,
   usePauseSchedule,
   useProjectMisfires,
@@ -229,9 +233,9 @@ function SchedulesPage() {
   }
 
   // ---------------------------------------------------------------
-  // Bulk actions. Each bulk handler runs the per-row mutation in
-  // parallel via Promise.allSettled so a single failed row doesn't
-  // abort the rest. The summary toast names success + failure
+  // Native operations share one source confirmation stream. Serialize them
+  // so one accepted operation confirms before the next is issued. Independent
+  // dashboard-owned rows can run concurrently. The summary names success + failure
   // counts; the operator can re-run on the failed subset.
   //
   // The mutation hooks already invalidate the schedules query on
@@ -246,7 +250,23 @@ function SchedulesPage() {
     clearSelection: () => void,
   ) {
     if (rows.length === 0) return;
-    const results = await Promise.allSettled(rows.map(fn));
+    const native = rows.filter((row) => row.scheduler !== "z4j-scheduler");
+    const owned = rows.filter((row) => row.scheduler === "z4j-scheduler");
+    const nativeResults: PromiseSettledResult<T>[] = [];
+    const nativeWork = async () => {
+      for (const row of native) {
+        try {
+          nativeResults.push({ status: "fulfilled", value: await fn(row) });
+        } catch (reason) {
+          nativeResults.push({ status: "rejected", reason });
+        }
+      }
+    };
+    const [ownedResults] = await Promise.all([
+      Promise.allSettled(owned.map(fn)),
+      nativeWork(),
+    ]);
+    const results = [...ownedResults, ...nativeResults];
     const ok = results.filter((r) => r.status === "fulfilled").length;
     const fail = results.length - ok;
     if (fail === 0) {
@@ -293,18 +313,18 @@ function SchedulesPage() {
           This permanently removes the selected schedules. Any{" "}
           <code>pending_fires</code> rows attached to them are cascaded; fire
           history is preserved.{" "}
-          {rows.some((r) => r.source !== "dashboard") && (
+          {rows.some((r) => r.scheduler !== "z4j-scheduler") && (
             <>
-              <strong>Heads up:</strong> some selected rows have a non-dashboard
-              source, they may be re-created on the next reconcile pass unless
-              you also remove them upstream.
+              Native schedules are removed from their scheduler after source
+              confirmation. Static definitions must be changed in application
+              configuration.
             </>
           )}
         </>
       ),
       confirmLabel: `Delete ${rows.length}`,
       onConfirm: () =>
-        _runBulk(rows, "delete", (s) => deleteSched.mutateAsync(s.id), clear),
+        _runBulk(rows, "delete", (s) => deleteSched.mutateAsync(s), clear),
     });
   }
 
@@ -317,13 +337,11 @@ function SchedulesPage() {
           This permanently removes the schedule and any{" "}
           <code>pending_fires</code> rows attached to it. The schedule's fire
           history (last 30 days by default) is kept for forensics.
-          {s.source !== "dashboard" && (
+          {s.scheduler !== "z4j-scheduler" && (
             <>
               {" "}
-              <strong>Heads up:</strong> this schedule has{" "}
-              <code>source={s.source}</code>. Deleting it here will be
-              re-created on the next reconcile pass from that source unless you
-              also remove it from the upstream config.
+              This removes the native definition from its scheduler. Completion
+              is confirmed by the scheduler before this dialog reports success.
             </>
           )}
         </>
@@ -331,7 +349,7 @@ function SchedulesPage() {
       confirmLabel: "Delete",
       onConfirm: async () => {
         try {
-          await deleteSched.mutateAsync(s.id);
+          await deleteSched.mutateAsync(s);
           toast.success(`schedule "${s.name}" deleted`);
         } catch (err) {
           const message =
@@ -351,6 +369,7 @@ function SchedulesPage() {
     onDelete,
     onToggleHold,
     triggerPending: trigger.isPending,
+    togglePending: toggle.isPending,
     holdPending: pauseSchedule.isPending || resumeSchedule.isPending,
     canOperate,
     canAdminister,
@@ -474,13 +493,16 @@ function SchedulesPage() {
               <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
               <div className="min-w-0">
                 <div className="font-medium">
-                  {misfires.length}{" "}
+                  {misfires.length >= PROJECT_MISFIRE_LIMIT
+                    ? `${PROJECT_MISFIRE_LIMIT}+`
+                    : misfires.length}{" "}
                   {misfires.length === 1 ? "misfire" : "misfires"} in the last
                   24h
                 </div>
                 <div className="truncate text-xs text-muted-foreground">
-                  An enabled schedule fired late past its grace window (a dead
-                  or partitioned scheduler is the usual cause):{" "}
+                  An enabled schedule missed its expected run by more than its
+                  grace window (a dead or partitioned scheduler is the usual
+                  cause):{" "}
                   {Array.from(
                     new Set(
                       misfires
@@ -531,6 +553,7 @@ function SchedulesPage() {
         toolbar={(ctx) =>
           ctx.selectedCount > 0 ? (
             <BulkActionToolbar
+              slug={slug}
               ctx={
                 ctx as {
                   selectedRows: SchedulePublic[];
@@ -576,6 +599,7 @@ function useScheduleColumns({
   onDelete,
   onToggleHold,
   triggerPending,
+  togglePending,
   holdPending,
   canOperate,
   canAdminister,
@@ -590,6 +614,7 @@ function useScheduleColumns({
   onDelete: (s: SchedulePublic) => void;
   onToggleHold: (s: SchedulePublic) => void;
   triggerPending: boolean;
+  togglePending: boolean;
   holdPending: boolean;
   canOperate: boolean;
   canAdminister: boolean;
@@ -599,6 +624,7 @@ function useScheduleColumns({
   runsById: Map<string, ScheduleRunCell[]> | undefined;
   runsError: boolean;
 }): DataTableColumnDef<SchedulePublic>[] {
+  const { data: nativeCapabilities } = useNativeScheduleCapabilities(slug);
   return useMemo(
     () => [
       {
@@ -777,7 +803,24 @@ function useScheduleColumns({
             aria-label={`Enable schedule ${row.original.name}`}
             checked={row.original.is_enabled}
             onCheckedChange={(checked) => onToggle(row.original.id, checked)}
-            disabled={!canOperate}
+            disabled={
+              !canOperate ||
+              togglePending ||
+              !canManageNativeSchedule(
+                row.original,
+                "toggle",
+                nativeCapabilities,
+              )
+            }
+            title={
+              !canManageNativeSchedule(
+                row.original,
+                "toggle",
+                nativeCapabilities,
+              )
+                ? NATIVE_TOGGLE_UNAVAILABLE
+                : undefined
+            }
           />
         ),
         enableSorting: true,
@@ -791,19 +834,24 @@ function useScheduleColumns({
           const s = row.original;
           return (
             <div className="flex items-center justify-end gap-1">
-              {canOperate && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => onTrigger(s.id)}
-                  disabled={triggerPending}
-                  title="Trigger this schedule now"
-                >
-                  <Play className="size-3" />
-                  Run
-                </Button>
-              )}
-              {canOperate && (
+              {canOperate &&
+                canManageNativeSchedule(
+                  s,
+                  "trigger_now",
+                  nativeCapabilities,
+                ) && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onTrigger(s.id)}
+                    disabled={triggerPending}
+                    title="Trigger this schedule now"
+                  >
+                    <Play className="size-3" />
+                    Run
+                  </Button>
+                )}
+              {canOperate && s.scheduler === "z4j-scheduler" && (
                 <Button
                   size="sm"
                   variant="outline"
@@ -830,6 +878,9 @@ function useScheduleColumns({
                     variant="ghost"
                     className="w-8"
                     onClick={() => onEdit(s)}
+                    disabled={
+                      !canManageNativeSchedule(s, "update", nativeCapabilities)
+                    }
                     title="Edit"
                   >
                     <Pencil className="size-3.5" />
@@ -839,6 +890,9 @@ function useScheduleColumns({
                     variant="ghost"
                     className="w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
                     onClick={() => onDelete(s)}
+                    disabled={
+                      !canManageNativeSchedule(s, "delete", nativeCapabilities)
+                    }
                     title="Delete"
                   >
                     <Trash2 className="size-3.5" />
@@ -862,9 +916,11 @@ function useScheduleColumns({
       onDelete,
       onToggleHold,
       triggerPending,
+      togglePending,
       holdPending,
       canOperate,
       canAdminister,
+      nativeCapabilities,
     ],
   );
 }
@@ -888,6 +944,15 @@ function useScheduleColumns({
  */
 function SourceBadge({ source }: { source: string }) {
   const lower = source.toLowerCase();
+  if (lower.endsWith(":override") || lower.endsWith(":code")) {
+    return (
+      <Badge variant="outline">
+        {lower.endsWith(":override")
+          ? "Dashboard override"
+          : "Application code"}
+      </Badge>
+    );
+  }
   if (lower === "dashboard") {
     return (
       <Badge variant="outline" className="font-mono text-[10px]">
@@ -900,7 +965,7 @@ function SourceBadge({ source }: { source: string }) {
       <Badge
         variant="outline"
         className="border-amber-500/40 bg-amber-500/10 font-mono text-[10px] text-amber-700 dark:text-amber-400"
-        title="Managed by an in-process declarative reconciler. Edits via the dashboard will be reverted on next sync."
+        title="Managed by an in-process declarative reconciler. Dashboard edits stay until the definition in code changes; the next sync after that overwrites them."
       >
         {source}
       </Badge>
@@ -958,8 +1023,8 @@ export { CatchUpBadge, SourceBadge };
 
 /**
  * Renders inside the DataTable's toolbar slot when one or more
- * schedules are selected. Operations run in parallel via the
- * page-level handlers; this component is purely the UI surface.
+ * schedules are selected. Page handlers coordinate operations, serializing
+ * native mutations where required; this component supplies the controls.
  *
  * Design choices:
  *
@@ -973,6 +1038,7 @@ export { CatchUpBadge, SourceBadge };
  *   whenever at least one matching row is in the selection.
  */
 function BulkActionToolbar({
+  slug,
   ctx,
   canOperate,
   canAdminister,
@@ -981,6 +1047,7 @@ function BulkActionToolbar({
   onBulkTrigger,
   onBulkDelete,
 }: {
+  slug: string;
   ctx: {
     selectedRows: SchedulePublic[];
     selectedCount: number;
@@ -993,8 +1060,18 @@ function BulkActionToolbar({
   onBulkTrigger: (rows: SchedulePublic[]) => void;
   onBulkDelete: (rows: SchedulePublic[]) => void;
 }) {
-  const enableCount = ctx.selectedRows.filter((r) => !r.is_enabled).length;
-  const disableCount = ctx.selectedRows.filter((r) => r.is_enabled).length;
+  const { data: caps } = useNativeScheduleCapabilities(slug);
+  const togglable = ctx.selectedRows.filter((r) =>
+    canManageNativeSchedule(r, "toggle", caps),
+  );
+  const runnable = ctx.selectedRows.filter((r) =>
+    canManageNativeSchedule(r, "trigger_now", caps),
+  );
+  const deletable = ctx.selectedRows.filter((r) =>
+    canManageNativeSchedule(r, "delete", caps),
+  );
+  const enableCount = togglable.filter((r) => !r.is_enabled).length;
+  const disableCount = togglable.filter((r) => r.is_enabled).length;
   return (
     <div className="flex items-center gap-3 rounded-md bg-primary/10 px-4 py-2">
       <span className="text-sm font-medium">{ctx.selectedCount} selected</span>
@@ -1005,8 +1082,9 @@ function BulkActionToolbar({
               variant="outline"
               size="sm"
               className="gap-1"
-              onClick={() => onBulkTrigger(ctx.selectedRows)}
-              title="Fire all selected schedules now"
+              onClick={() => onBulkTrigger(runnable)}
+              disabled={runnable.length === 0}
+              title="Run selected schedules that support manual execution"
             >
               <Play className="size-3" />
               Trigger
@@ -1014,11 +1092,11 @@ function BulkActionToolbar({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => onBulkEnable(ctx.selectedRows)}
+              onClick={() => onBulkEnable(togglable)}
               disabled={enableCount === 0}
               title={
                 enableCount === 0
-                  ? "All selected schedules are already enabled"
+                  ? "No selected schedule supports a change to enabled"
                   : `Enable ${enableCount} disabled schedule${enableCount === 1 ? "" : "s"}`
               }
             >
@@ -1027,11 +1105,11 @@ function BulkActionToolbar({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => onBulkDisable(ctx.selectedRows)}
+              onClick={() => onBulkDisable(togglable)}
               disabled={disableCount === 0}
               title={
                 disableCount === 0
-                  ? "All selected schedules are already disabled"
+                  ? "No selected schedule supports a change to disabled"
                   : `Disable ${disableCount} enabled schedule${disableCount === 1 ? "" : "s"}`
               }
             >
@@ -1044,8 +1122,9 @@ function BulkActionToolbar({
             variant="outline"
             size="sm"
             className="gap-1 text-destructive hover:bg-destructive/10 hover:text-destructive"
-            onClick={() => onBulkDelete(ctx.selectedRows)}
-            title="Delete all selected schedules"
+            onClick={() => onBulkDelete(deletable)}
+            disabled={deletable.length === 0}
+            title="Delete selected schedules that support deletion"
           >
             <Trash2 className="size-3" />
             Delete

@@ -539,8 +539,9 @@ function DeleteProjectDialog({
       <DialogHeader>
         <DialogTitle>Archive Project</DialogTitle>
         <DialogDescription>
-          This will archive the project and hide it from all views. The project
-          data and audit history will be preserved.
+          Archiving disconnects every agent in this project and refuses their
+          reconnects, so task capture and commands for it stop. There is no
+          unarchive action. Project data and audit history are kept.
         </DialogDescription>
       </DialogHeader>
       <div className="mt-4 space-y-4">

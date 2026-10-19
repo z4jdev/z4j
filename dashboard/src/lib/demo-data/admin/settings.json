@@ -111,7 +111,7 @@
       "value": "https://demo.z4j.com",
       "source": "env",
       "is_secret": false,
-      "description": "Externally reachable base URL. Used for setup links and cookie scoping."
+      "description": "Externally reachable base URL used in links and MFA issuer labels. Session cookies remain host-only."
     },
     {
       "name": "ratelimit_commands_per_minute",
@@ -132,7 +132,7 @@
       "value": "True",
       "source": "default",
       "is_secret": false,
-      "description": "Refuse to start unless the database connection negotiates TLS."
+      "description": "Outside dev mode, PostgreSQL URLs must select an accepted strict TLS mode. This setting does not apply to SQLite."
     },
     {
       "name": "scheduler_grpc_bind_port",
@@ -153,21 +153,21 @@
       "value": "***",
       "source": "secret.env",
       "is_secret": true,
-      "description": "Master signing key. Derives session, agent and per-project secrets."
+      "description": "Master application key. Session-cookie signing uses the separate session_secret setting."
     },
     {
       "name": "session_absolute_lifetime_seconds",
       "value": "604800",
       "source": "default",
       "is_secret": false,
-      "description": "Hard cap on a session's lifetime measured from issue, regardless of activity."
+      "description": "Lifetime of an ordinary session. Remember-me sessions use the separate remember-me lifetime."
     },
     {
       "name": "session_idle_timeout_seconds",
       "value": "1800",
       "source": "default",
       "is_secret": false,
-      "description": "Sliding idle timeout. A session with no activity for this long is rejected."
+      "description": "Idle timeout for ordinary sessions. Remember-me sessions bypass this idle limit."
     }
   ]
 }

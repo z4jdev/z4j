@@ -7,7 +7,7 @@
  *   POST /user/notifications/{id}/read
  *   POST /user/notifications/read-all
  */
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Bell, BellOff, Check, Settings } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -46,8 +46,6 @@ function triggerDotClass(trigger: TriggerType | string): string {
 }
 
 export function NotificationBell() {
-  const params = useParams({ strict: false });
-  const routeSlug = (params as { slug?: string }).slug;
   const navigate = useNavigate();
 
   const { data: unreadData } = useUnreadCount();
@@ -60,7 +58,6 @@ export function NotificationBell() {
   const hasNotifications = notifications && notifications.length > 0;
 
   const resolveProjectSlug = (n: UserNotification): string | null => {
-    if (routeSlug) return routeSlug;
     return projects?.find((p) => p.id === n.project_id)?.slug ?? null;
   };
 

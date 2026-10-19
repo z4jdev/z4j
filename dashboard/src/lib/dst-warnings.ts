@@ -1,25 +1,9 @@
 /**
- * DST fall-back / spring-forward warnings for cron schedules.
+ * Conditional DST guidance for cron schedule editors.
  *
- * Implements docs/SCHEDULER.md §5.5: the dashboard schedule-create
- * form should warn the operator when their cron + timezone
- * combination would produce a fall-back duplicate fire (the day
- * has 25 hours, and a wall-clock time inside the ambiguous window
- * fires for both the DST and the standard-time interpretation) or
- * a spring-forward gap (a wall-clock time that does not exist on
- * spring-forward day).
- *
- * The check runs entirely in the browser using ``Intl.DateTimeFormat``
- * to detect timezone offset transitions over the next year. No
- * server round-trip; no croniter dep in JS.
- *
- * The cron parser here understands the 5-field syntax
- * (``minute hour dom month dow``) and only matches against the
- * HOUR field - which is what determines whether a fire lands
- * inside the ambiguous window. We intentionally don't ship a
- * full cron evaluator; the goal is to catch the 99% case (operator
- * picks ``0 2 * * *`` in a DST-observing timezone) without
- * dragging in a heavy parser.
+ * The browser scans timezone offsets over the next year and checks a limited
+ * numeric hour-field grammar. It does not evaluate minutes, calendar fields,
+ * seconds, or a scheduler's DST policy, so it cannot predict a particular fire.
  */
 
 export interface DstWarning {
@@ -28,13 +12,9 @@ export interface DstWarning {
 }
 
 /**
- * Compute DST warnings for the (cron, timezone) pair, if any.
- *
- * Returns ``null`` when there's nothing to warn about - a non-cron
- * kind, a UTC timezone, a cron that fires only outside the
- * ambiguous DST windows, or an unparseable expression (we don't
- * second-guess the croniter parser - syntactic errors get caught
- * at server validation time).
+ * Return a conditional warning when selected hours are near a detected DST
+ * transition. Null means no warning from this limited check, not proof that
+ * the expression is valid or unaffected by DST. Full validation is server-side.
  */
 export function computeDstWarning(
   kind: string,
@@ -44,72 +24,43 @@ export function computeDstWarning(
   if (kind !== "cron") return null;
   if (!timezone || timezone === "UTC" || timezone === "Etc/UTC") return null;
 
-  // Accept both 5-field (``m h dom month dow``) and 6-field
-  // (``m h dom month dow s``) cron expressions. The hour field is
-  // index 1 either way; the trailing seconds field on a 6-field
-  // expression doesn't affect DST analysis (DST transitions
-  // happen on hour boundaries).
+  // Five fields, or croniter's trailing-seconds sixth field. Only the
+  // numeric hour field is interpreted here; calendar fields remain unchecked.
   const fields = expression.trim().split(/\s+/);
   if (fields.length !== 5 && fields.length !== 6) return null;
-  const hourField = fields[1];
-  if (!hourField) return null;
-
-  const transitions = findDstTransitions(timezone, 12);
-  if (transitions.length === 0) {
-    // Timezone doesn't observe DST in the next 12 months
-    // (e.g. Asia/Tokyo, America/Phoenix) - no risk.
-    return null;
+  const hours = expandHourField(fields[1]);
+  if (hours.length === 0) return null;
+  let transitions: DstTransition[];
+  try {
+    transitions = findDstTransitions(timezone, 12);
+  } catch (error) {
+    if (error instanceof RangeError) return null; // unknown timezone
+    throw error;
   }
+  if (transitions.length === 0) return null;
 
   const fallBack = transitions.find((t) => t.kind === "fall_back");
   const springForward = transitions.find((t) => t.kind === "spring_forward");
 
-  // Hours that the cron would fire in (in the timezone's local clock).
-  const hours = expandHourField(hourField);
-  if (hours.length === 0) return null;
-
-  // Fall-back: clocks repeat 02:00 -> 01:00 on most US zones, or
-  // 03:00 -> 02:00 on most EU zones. The ambiguous hour is the
-  // one BEFORE the transition. Any cron firing inside that hour
-  // will fire twice.
-  if (fallBack) {
-    const ambig = fallBack.ambiguousHour;
-    if (hours.includes(ambig)) {
-      const dateStr = fallBack.transitionAt.toISOString().slice(0, 10);
-      return {
-        level: "warning",
-        message:
-          `On ${dateStr}, ${timezone} ends DST and clocks repeat from ` +
-          `${pad2(ambig + 1)}:00 back to ${pad2(ambig)}:00. ` +
-          `This schedule fires at ${pad2(ambig)}:00, so it will fire ` +
-          `TWICE on that day. To pick a non-ambiguous time, use any ` +
-          `hour outside ${pad2(ambig)}:00-${pad2(ambig + 1)}:00 ` +
-          `(e.g. ${pad2((ambig + 2) % 24)}:00).`,
-      };
-    }
+  if (fallBack && hours.includes(fallBack.ambiguousHour)) {
+    return {
+      level: "warning",
+      message:
+        `The selected hours overlap repeated local times near a DST change in ${timezone}. ` +
+        `If the calendar fields match a transition day, a scheduled time may occur twice. ` +
+        `This hour-only check does not predict a firing date or minute; actual execution ` +
+        `depends on the scheduler's DST policy. Review upcoming runs or choose another hour.`,
+    };
   }
-
-  // Spring-forward: clocks skip 02:00 -> 03:00 on most US zones,
-  // 02:00 -> 03:00 on most EU zones. A cron firing inside that
-  // gap (e.g. ``30 2 * * *``) will not fire on the transition
-  // day. We surface this as ``info`` because the next-on-time
-  // semantics from §5.5 mean the fire just shifts forward to
-  // the first valid wall-clock time - it isn't lost.
-  if (springForward) {
-    const skipped = springForward.skippedHour;
-    if (hours.includes(skipped)) {
-      const dateStr = springForward.transitionAt.toISOString().slice(0, 10);
-      return {
-        level: "info",
-        message:
-          `On ${dateStr}, ${timezone} starts DST and the wall clock ` +
-          `skips from ${pad2(skipped)}:00 directly to ${pad2(skipped + 1)}:00. ` +
-          `This schedule fires at ${pad2(skipped)}:00. The fire is not ` +
-          `lost - z4j-scheduler shifts it to the next valid wall-clock ` +
-          `time. Pick an hour outside ${pad2(skipped)}:00-${pad2(skipped + 1)}:00 ` +
-          `if you want to avoid the shift.`,
-      };
-    }
+  if (springForward && hours.includes(springForward.skippedHour)) {
+    return {
+      level: "info",
+      message:
+        `The selected hours overlap a local-time gap near a DST change in ${timezone}. ` +
+        `If the calendar fields match a transition day, a scheduled time may not exist. ` +
+        `This hour-only check does not predict a firing date or minute; whether a fire ` +
+        `is skipped or shifted depends on the scheduler. Review upcoming runs.`,
+    };
   }
 
   return null;
@@ -269,47 +220,21 @@ function partsToUtc(p: FormattedParts): number {
  * appear only in the day-of-week field, not hour.
  */
 function expandHourField(field: string): number[] {
-  const set = new Set<number>();
+  const values = new Set<number>();
   for (const term of field.split(",")) {
-    expandOneTerm(term, set);
-  }
-  return Array.from(set).sort((a, b) => a - b);
-}
-
-function expandOneTerm(term: string, into: Set<number>): void {
-  let stepDivisor = 1;
-  let base = term;
-  if (term.includes("/")) {
-    const [b, s] = term.split("/", 2);
-    base = b;
-    const parsed = parseInt(s, 10);
-    if (!isNaN(parsed) && parsed >= 1 && parsed <= 23) {
-      stepDivisor = parsed;
+    if (!/^(?:\*|\d{1,2}(?:-\d{1,2})?)(?:\/[1-9]\d*)?$/.test(term)) return [];
+    const [base, stepText] = term.split("/");
+    const step = stepText === undefined ? 1 : Number(stepText);
+    if (!Number.isSafeInteger(step) || step < 1) return [];
+    let start = 0;
+    let end = 23;
+    if (base !== "*") {
+      const parts = base.split("-").map(Number);
+      start = parts[0];
+      end = parts[1] ?? (stepText === undefined ? start : 23);
     }
+    if (start < 0 || start > 23 || end < start || end > 23) return [];
+    for (let hour = start; hour <= end; hour += step) values.add(hour);
   }
-  let start = 0;
-  let end = 23;
-  if (base === "*") {
-    // start/end stay at full range
-  } else if (base.includes("-")) {
-    const [a, b] = base.split("-", 2);
-    const ai = parseInt(a, 10);
-    const bi = parseInt(b, 10);
-    if (isNaN(ai) || isNaN(bi)) return;
-    start = ai;
-    end = bi;
-  } else {
-    const v = parseInt(base, 10);
-    if (isNaN(v)) return;
-    start = end = v;
-  }
-  for (let i = start; i <= end; i++) {
-    if ((i - start) % stepDivisor === 0) {
-      into.add(i);
-    }
-  }
-}
-
-function pad2(n: number): string {
-  return String(n).padStart(2, "0");
+  return [...values].sort((a, b) => a - b);
 }

@@ -50,7 +50,11 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from typing import Any
+from urllib.parse import unquote, urlsplit
+
+from z4j_brain.observability.sentry import _is_token_path
 
 logger = logging.getLogger("z4j.brain.observability.otel")
 
@@ -144,6 +148,100 @@ def _is_sensitive_outbound_host(host: str) -> bool:
     if lower in _DYNAMIC_SENSITIVE_HOSTS:
         return True
     return any(lower.endswith(suffix) for suffix in SENSITIVE_OUTBOUND_HOST_SUFFIXES)
+
+
+def _outbound_hostnames(request: Any) -> list[str]:
+    """Every hostname an outbound httpx request is known by, the one
+    it was addressed to first.
+
+    The notification dispatchers and the audit forwarder connect to
+    the IP they resolved and validated (DNS-rebinding defence), so
+    ``request.url.host`` is an IP literal for them. ``channels._post``
+    keeps the original hostname in the ``Host`` header and the
+    ``sni_hostname`` request extension.
+    """
+    names: list[str] = []
+    headers = getattr(request, "headers", None)
+    host_header = headers.get("host") if headers is not None else None
+    if isinstance(host_header, bytes):
+        host_header = host_header.decode("ascii", "replace")
+    if isinstance(host_header, str) and host_header:
+        names.append(urlsplit(f"//{host_header}").hostname or "")
+    extensions = getattr(request, "extensions", None)
+    sni = extensions.get("sni_hostname") if extensions is not None else None
+    if isinstance(sni, bytes):
+        sni = sni.decode("ascii", "replace")
+    if isinstance(sni, str):
+        names.append(sni)
+    url_host = getattr(getattr(request, "url", None), "host", None)
+    if url_host:
+        names.append(url_host if isinstance(url_host, str) else str(url_host))
+    return [name for name in names if name]
+
+
+def _is_sensitive_outbound_request(request: Any) -> bool:
+    """True iff the span of this outbound request must have its URL
+    redacted: any of its hostnames is credential-bearing, or its path
+    has a known credential-bearing shape (Slack, Discord, Teams,
+    Telegram, PagerDuty) whatever the host."""
+    if any(_is_sensitive_outbound_host(name) for name in _outbound_hostnames(request)):
+        return True
+    path = getattr(getattr(request, "url", None), "path", None)
+    return isinstance(path, str) and _is_token_path(path)
+
+
+#: An HTTP header name (RFC 9110 token).
+_HEADER_NAME_RE: re.Pattern[str] = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
+def parse_otlp_headers(raw: str) -> dict[str, str]:
+    """Parse ``Z4J_OTEL_EXPORTER_OTLP_HEADERS`` into a header mapping.
+
+    The format is OpenTelemetry's ``OTEL_EXPORTER_OTLP_HEADERS``:
+    comma-separated ``key=value`` pairs, each key and value URL-decoded
+    and trimmed. Keys are lowercased (gRPC metadata keys must be;
+    HTTP header names are case-insensitive). Empty entries are
+    skipped. Both OTLP exporters take a mapping; the HTTP one cannot
+    take the raw string at all.
+
+    Raises ``ValueError`` for an entry without ``=``, an empty or
+    invalid key, or a value that decodes to a control character. The
+    message names the entry by position only, never by content: the
+    value is a collector credential.
+    """
+    headers: dict[str, str] = {}
+    for index, entry in enumerate(raw.split(","), start=1):
+        if not entry.strip():
+            continue
+        name, sep, value = entry.partition("=")
+        if not sep:
+            raise ValueError(f"entry {index} is not a key=value pair")
+        name = unquote(name).strip().lower()
+        value = unquote(value).strip()
+        if not _HEADER_NAME_RE.fullmatch(name):
+            raise ValueError(f"entry {index} has an empty or invalid header name")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value.replace("\t", "")):
+            raise ValueError(f"entry {index} has a control character in its value")
+        headers[name] = value
+    return headers
+
+
+def _endpoint_for_log(endpoint: str) -> str:
+    """Scheme, host and port of the OTLP endpoint, for the startup
+    log line. A collector that takes its API key in the path, the
+    query or the userinfo must not have it printed."""
+    try:
+        parts = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}")
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return "[unparseable]"
+    if not host:
+        return "[unparseable]"
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    return f"{parts.scheme}://{netloc}" if parts.scheme else netloc
 
 
 def _detect_service_version() -> str:
@@ -329,13 +427,25 @@ def init_otel(  # noqa: PLR0911, PLR0912, PLR0915  otel init dispatch
     resource = Resource.create(build_resource_attributes(settings))
 
     headers_raw = getattr(settings, "otel_exporter_otlp_headers", None)
-    headers_value: str | None = None
+    headers_value: dict[str, str] = {}
     if headers_raw is not None:
-        headers_value = (
-            headers_raw.get_secret_value()
-            if hasattr(headers_raw, "get_secret_value")
-            else str(headers_raw)
-        ) or None
+        try:
+            headers_value = parse_otlp_headers(
+                headers_raw.get_secret_value()
+                if hasattr(headers_raw, "get_secret_value")
+                else str(headers_raw),
+            )
+        except ValueError as exc:
+            # Settings refuses this at startup; reached only when a
+            # caller builds the settings object some other way.
+            logger.warning(
+                "z4j observability.otel: Z4J_OTEL_EXPORTER_OTLP_HEADERS %s; "
+                "brain continues without OpenTelemetry.",
+                exc,
+            )
+            _initialised = True
+            _init_succeeded = False
+            return False
 
     try:
         exporter_kwargs: dict[str, Any] = {"endpoint": endpoint}
@@ -405,8 +515,8 @@ def init_otel(  # noqa: PLR0911, PLR0912, PLR0915  otel init dispatch
     try:
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
-        # Outbound URL scrubber. Slack / Discord / Teams / PagerDuty
-        # webhook URLs embed credentials in the path. The audit
+        # Outbound URL scrubber. Slack / Discord / Teams webhook URLs
+        # and the Telegram bot API embed credentials in the path. The audit
         # forwarder is similar. Without this hook the OTLP exporter
         # ships the full URL (including token) to the collector, a
         # third-party SaaS in most deployments. (Audit C7.)
@@ -438,11 +548,13 @@ def init_otel(  # noqa: PLR0911, PLR0912, PLR0915  otel init dispatch
                 url = getattr(request, "url", None)
                 if url is None:
                     return
-                host = getattr(url, "host", None) or ""
-                if not isinstance(host, str):
-                    host = str(host)
-                if not _is_sensitive_outbound_host(host):
+                # Decided on the dialled hostname and the path shape,
+                # not ``url.host`` alone: a dispatcher URL is pinned to
+                # its resolved IP.
+                if not _is_sensitive_outbound_request(request):
                     return
+                names = _outbound_hostnames(request)
+                host = names[0] if names else "[unknown]"
                 scheme = getattr(url, "scheme", "https") or "https"
                 if not isinstance(scheme, str):
                     scheme = str(scheme)
@@ -465,9 +577,20 @@ def init_otel(  # noqa: PLR0911, PLR0912, PLR0915  otel init dispatch
         def _httpx_response_hook(span: Any, request: Any, response: Any) -> None:
             _httpx_request_hook(span, request)
 
+        # ``httpx.AsyncClient`` runs only the async pair; the sync pair
+        # covers ``httpx.Client``. Every notification dispatcher and the
+        # audit forwarder use the async client.
+        async def _httpx_async_request_hook(span: Any, request: Any) -> None:
+            _httpx_request_hook(span, request)
+
+        async def _httpx_async_response_hook(span: Any, request: Any, response: Any) -> None:
+            _httpx_request_hook(span, request)
+
         HTTPXClientInstrumentor().instrument(
             request_hook=_httpx_request_hook,
             response_hook=_httpx_response_hook,
+            async_request_hook=_httpx_async_request_hook,
+            async_response_hook=_httpx_async_response_hook,
         )
     except ImportError:
         logger.info(
@@ -486,7 +609,7 @@ def init_otel(  # noqa: PLR0911, PLR0912, PLR0915  otel init dispatch
         "z4j observability.otel: OpenTelemetry initialised "
         "(endpoint=%s, protocol=%s, sampler_arg=%.3f, "
         "include_health=%s)",
-        endpoint,
+        _endpoint_for_log(endpoint),
         protocol,
         sampler_arg,
         getattr(settings, "otel_include_health", False),
@@ -513,4 +636,5 @@ __all__ = [
     "_reset_for_tests",
     "build_resource_attributes",
     "init_otel",
+    "parse_otlp_headers",
 ]

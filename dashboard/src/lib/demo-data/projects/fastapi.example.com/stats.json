@@ -3,8 +3,8 @@
     "pending": 4,
     "received": 0,
     "started": 5,
-    "success": 9842,
-    "failure": 14,
+    "success": 363229,
+    "failure": 20,
     "retry": 6,
     "revoked": 0,
     "rejected": 0,
@@ -13,19 +13,37 @@
   "tasks_total": 363264,
   "tasks_failed_24h": 20,
   "tasks_succeeded_24h": 9842,
-  "failure_rate_24h": 0.002,
+  "failure_rate_24h": 0.002027986209693774,
   "agents_online": 4,
   "agents_offline": 0,
   "workers_online": 2,
   "workers_offline": 0,
-  "commands_pending": 0,
-  "commands_completed_24h": 12,
-  "commands_failed_24h": 0,
+  "commands_pending": 3,
+  "commands_completed_24h": 5,
+  "commands_failed_24h": 2,
   "commands_timeout_24h": 0,
   "queue_depths": [
-    {"name": "default", "engine": "arq", "pending_count": 2, "broker_type": "redis", "last_seen_at_offset_s": -3},
-    {"name": "webhooks", "engine": "arq", "pending_count": 8, "broker_type": "redis", "last_seen_at_offset_s": -10},
-    {"name": "indexing", "engine": "arq", "pending_count": 0, "broker_type": "redis", "last_seen_at_offset_s": -45}
+    {
+      "name": "default",
+      "engine": "arq",
+      "pending_count": 2,
+      "broker_type": "redis",
+      "last_seen_at_offset_s": -3
+    },
+    {
+      "name": "webhooks",
+      "engine": "arq",
+      "pending_count": 8,
+      "broker_type": "redis",
+      "last_seen_at_offset_s": -10
+    },
+    {
+      "name": "indexing",
+      "engine": "arq",
+      "pending_count": 0,
+      "broker_type": "redis",
+      "last_seen_at_offset_s": -45
+    }
   ],
   "system_health": {
     "status": "healthy",

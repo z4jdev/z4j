@@ -28,8 +28,8 @@ export interface TimeRangeSelectProps<T extends string> {
  * Every page that lets the operator pick "Last 1 hour / 6 hours /
  * 24 hours / 3 days / 7 days" (Overview, Trends, anything future)
  * renders this component so they're visually identical: same clock
- * icon, same width, same chevron, same compact h-8 chip shape
- * (height enforced by PageHeader.actions, see page-header.tsx).
+ * icon, same width, same chevron and the same control sizing. The
+ * SelectTrigger below owns its size; PageHeader.actions only lays it out.
  *
  * Value vocabularies are generic on T so consumers stay typed --
  * Overview uses ``"1" | "24" | "168" | ...`` (hour-count strings)

@@ -335,7 +335,7 @@ function ExportJobsPanel({
           </CardTitle>
           <CardDescription>
             {sinkConfigured
-              ? `Background exports of any size, written to ${data?.sink} sink ${data?.sink_location ?? ""}. Queued with the current filters.`
+              ? `Background exports written to ${data?.sink} sink ${data?.sink_location ?? ""}, queued with the current filters. CSV and JSON have no row cap; XLSX stops at 1,048,575 rows.`
               : "Background exports need an export sink (Z4J_EXPORT_SINK). The download menu above stays available within its row caps."}
           </CardDescription>
         </div>

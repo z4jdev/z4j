@@ -40,8 +40,10 @@ The architecture is straightforward:
   queue / schedule events.
 - **Operator worker actions flow back through the agent transport.** Retry,
   cancel, bulk retry, purge, and restart use the agent command channel.
-  Schedule changes are stored and audited by the brain; the scheduler
-  consumes them through its separate gRPC protocol.
+  Schedule changes are stored and audited by the brain. The z4j scheduler
+  consumes its schedules through a separate gRPC protocol; changes to
+  managed native schedule sources reach the owning agent as signed commands
+  on the agent channel.
 
 The `z4j` server distribution is AGPL v3 and runs as its own process. The
 agent packages imported by applications are Apache-2.0 and can be installed
@@ -87,11 +89,11 @@ with a current incident scenario (failing schedule, alert firing,
 worker offline), and a mixed-engine z4j-scheduler showcase
 driving Celery + RQ + Dramatiq workers from one place.
 
-It is a navigable preview, not a sandbox: every Create / Update /
-Delete button toast-blocks (`This is a demo. Refresh to reset;
-install z4j to make changes for real.`), no real backend is
-connected, refresh resets to a clean state. Useful before you
-commit to `pip install`.
+It is a navigable preview, not a sandbox: Create / Update / Delete
+actions are blocked with a toast titled `This is a demo` (`Mutations
+are disabled. Refresh to reset; install z4j to make changes for
+real.`), no real backend is connected, refresh resets to a clean
+state. Useful before you commit to `pip install`.
 
 ## Install
 
@@ -172,7 +174,7 @@ covers all three paths (pip-SQLite, Docker-SQLite, Docker-Postgres).
 
 ## License
 
-AGPL-3.0-or-later, see [LICENSE](LICENSE). The `z4j` server distribution and
+AGPL-3.0-or-later, see [LICENSE](https://github.com/z4jdev/z4j/blob/main/LICENSE). The `z4j` server distribution and
 frozen `z4j-brain` compatibility shim are AGPL. The independently installable
 shared core, agent packages, and scheduler are Apache-2.0; consult the license
 terms for the obligations that apply to your deployment.
@@ -184,5 +186,5 @@ Commercial licenses available; contact licensing@z4j.com.
 - Documentation: https://docs.z4j.com
 - PyPI: https://pypi.org/project/z4j/
 - Issues: https://github.com/z4jdev/z4j/issues
-- Changelog: [CHANGELOG.md](CHANGELOG.md)
-- Security: security@z4j.com (see [SECURITY.md](SECURITY.md))
+- Changelog: [CHANGELOG.md](https://github.com/z4jdev/z4j/blob/main/CHANGELOG.md)
+- Security: security@z4j.com (see [SECURITY.md](https://github.com/z4jdev/z4j/blob/main/SECURITY.md))

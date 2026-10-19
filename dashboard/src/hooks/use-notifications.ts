@@ -49,7 +49,6 @@ export type TriggerType =
   | "task.succeeded"
   | "task.retried"
   | "agent.offline"
-  | "agent.online"
   // Synthetic trigger written by /channels/test (1.0.14+) so the
   // deliveries page can show "test" badge and operators have an
   // audit trail of test fires. Not a real subscription trigger.
@@ -334,9 +333,8 @@ export interface ChannelTestResult {
  *
  * Used by the "Test" button inside the create dialog so admins can
  * verify SMTP / webhook / Slack / Telegram credentials before
- * persisting. Backend does not log the delivery to
- * ``notification_deliveries`` - this is a preflight, not a real
- * send.
+ * persisting. This sends a real notification; the backend also
+ * attempts to record the test result in ``notification_deliveries``.
  */
 export function useTestChannelConfig(slug: string) {
   return useMutation({

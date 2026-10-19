@@ -4003,6 +4003,13 @@ async def test_gateway_issues_activation_only_to_the_exact_stable_session(
             assert activation_command.status.value == "dispatched"
             assert activation_command.delivery_registry_owner_id == handle.registry_owner_id
             assert activation_command.delivery_session_generation == str(handle.generation)
+            agent = await session.get(Agent, agent_id)
+            assert agent.agent_metadata["_z4j_external_capabilities"]["arqcron"] == {
+                "epoch_uuid": str(stream.current_epoch_uuid),
+                "registry_owner_id": str(handle.registry_owner_id),
+                "session_generation": str(handle.generation),
+                "capabilities": [],
+            }
     finally:
         await async_engine.dispose()
 
@@ -4550,7 +4557,7 @@ async def test_external_control_planning_rejects_revoked_stream_executor(
 
 
 @pytest.mark.parametrize("first_claimed", [False, True])
-async def test_gateway_replaces_only_a_never_claimed_activation(
+async def test_gateway_fences_disconnected_activation_before_replacement(
     boundary_d_install: tuple[Config, str, str],
     first_claimed: bool,
 ) -> None:
@@ -4674,7 +4681,7 @@ async def test_gateway_replaces_only_a_never_claimed_activation(
             session_handle=second,
             **common,
         )
-        assert second_delivery == (0 if first_claimed else 1)
+        assert second_delivery == 1
 
         async with database.session() as session:
             stream = (
@@ -4705,11 +4712,29 @@ async def test_gateway_replaces_only_a_never_claimed_activation(
             if first_claimed:
                 assert [row.status for row in commands] == [
                     CommandStatus.DISPATCHED,
+                    CommandStatus.DISPATCHED,
                 ]
-                assert [row.phase for row in epochs] == ["ACTIVATING"]
-                assert stream.current_epoch_uuid == epochs[0].epoch_uuid
-                assert stream.executor_session_generation == str(first.generation)
+                assert [row.phase for row in epochs] == [
+                    "RESTORE_REACTIVATION_REQUIRED",
+                    "ACTIVATING",
+                ]
+                assert stream.current_epoch_uuid == epochs[1].epoch_uuid
+                assert stream.current_epoch_number > epochs[0].epoch_number
+                assert stream.executor_session_generation == str(second.generation)
                 assert commands[0].delivery_session_generation == str(first.generation)
+                # Old transport authority is fenced even if its activation
+                # command was delivered before the connection disappeared.
+                current, claimed = await CommandRepository(session).claim_current_schedule_delivery(
+                    commands[0].id,
+                    project_id=project_id,
+                    agent_id=agent_id,
+                    transport_kind="websocket",
+                    registry_owner_id=first.registry_owner_id,
+                    session_generation=str(first.generation),
+                    timeout_seconds=60,
+                    occurred_at=datetime.now(UTC),
+                )
+                assert current and claimed is None  # marked action, delivery refused
             else:
                 assert [row.status for row in commands] == [
                     CommandStatus.CANCELLED,

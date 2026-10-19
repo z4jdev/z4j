@@ -12,6 +12,7 @@ import secrets
 import shutil
 import sqlite3
 from collections.abc import AsyncIterator, Iterator
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -267,7 +268,7 @@ def migrated_sqlite_template(tmp_path_factory) -> Path:
 
     # A template without live guards would silently restore the old blind
     # spot, so refuse to hand one out.
-    with sqlite3.connect(template) as probe:
+    with closing(sqlite3.connect(template)) as probe:
         guard_version = probe.execute(
             "SELECT guard_version FROM schedule_revision_state",
         ).fetchone()

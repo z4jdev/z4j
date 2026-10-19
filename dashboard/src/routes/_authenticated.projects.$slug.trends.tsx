@@ -33,7 +33,7 @@ const WINDOWS: { value: TrendWindow; label: string }[] = [
   { value: "7d", label: "Last 7 days" },
 ];
 
-// Default bucket size per window - keeps bucket count <= 48.
+// Default bucket sizes produce 60, 72, 96, 72, and 168 buckets respectively.
 const DEFAULT_BUCKET: Record<TrendWindow, TrendBucketSize> = {
   "1h": "1m",
   "6h": "5m",

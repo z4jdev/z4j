@@ -1,12 +1,9 @@
 /**
  * Schedules reconciliation diff view (docs/SCHEDULER.md §13.1).
  *
- * Operator pastes the JSON output of their declarative
- * reconciler (Z4J["schedules"] from Django/FastAPI/Flask, or the
- * JSONL from `z4j-scheduler import --dry-run`) into the textarea
- * and gets a 4-bucket preview of what `:import` would do, without
- * any side effects on brain state. Mirrors the CLI's
- * `import --verify` flag.
+ * Operator pastes a JSON array of schedule definitions into the textarea
+ * and gets a four-bucket comparison for valid import rows, without changing
+ * stored schedules. The editor accepts an array, not line-delimited JSON.
  *
  * Backend contract: POST /api/v1/projects/{slug}/schedules:diff
  * (see brain api/schedules.py). The endpoint requires ADMIN to
@@ -318,7 +315,7 @@ function ReconcileAdminPage({ slug }: { slug: string }) {
       <PageHeader
         title="Reconciliation diff"
         icon={GitCompare}
-        description="Preview what `import` would do, without applying anything"
+        description="Preview what import would change. Nothing is applied until you choose Apply this diff."
       />
 
       <Card>

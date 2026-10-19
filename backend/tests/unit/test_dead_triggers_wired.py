@@ -999,13 +999,16 @@ class TestTrimmedTriggersRejected:
         from z4j_brain.api.notifications import DefaultSubscriptionCreate
         from z4j_brain.api.user_notifications import UserSubscriptionCreate
 
-        with pytest.raises(pydantic.ValidationError):
-            DefaultSubscriptionCreate(trigger="task.slow")
-        with pytest.raises(pydantic.ValidationError):
-            UserSubscriptionCreate(
-                project_id=uuid.uuid4(),
-                trigger="task.slow",
-            )
+        # ``agent.online`` was accepted and offered in the dashboard but no
+        # code path ever emitted it, so those subscriptions never fired.
+        for trigger in ("task.slow", "agent.online"):
+            with pytest.raises(pydantic.ValidationError):
+                DefaultSubscriptionCreate(trigger=trigger)
+            with pytest.raises(pydantic.ValidationError):
+                UserSubscriptionCreate(
+                    project_id=uuid.uuid4(),
+                    trigger=trigger,
+                )
         # The still-real triggers stay accepted.
         DefaultSubscriptionCreate(trigger="agent.offline")
         UserSubscriptionCreate(project_id=uuid.uuid4(), trigger="agent.offline")

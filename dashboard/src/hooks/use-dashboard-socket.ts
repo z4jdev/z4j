@@ -39,11 +39,9 @@ export function useDashboardSocket(slug: string): UseDashboardSocketResult {
   const [status, setStatus] = useState<DashboardSocketStatus>("connecting");
   const socketRef = useRef<DashboardSocket | null>(null);
 
-  // Resolve slug → project_id from cached memberships. Admins
-  // without an explicit membership for the slug fall back to
-  // matching by slug across the membership list (V1: a project
-  // they don't belong to as a user simply doesn't appear; the
-  // backend will close 4403 anyway).
+  // Resolve the cached /me projection, including synthesized admin
+  // memberships (bounded to 500 projects by the backend). If the
+  // project is absent from that projection, no socket is opened.
   const projectId = me?.memberships.find((m) => m.project_slug === slug)
     ?.project_id;
 

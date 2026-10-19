@@ -9,6 +9,7 @@ import { Suspense } from "react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { bulkRetryStorageKey } from "@/lib/bulk-retry-storage";
+import { cancelEffect } from "@/lib/task-commands";
 
 const apiMocks = vi.hoisted(() => ({
   get: vi.fn(),
@@ -900,5 +901,62 @@ describe("explicit-selection command targets", () => {
     );
     expect(apiMocks.post).not.toHaveBeenCalled();
   });
-});
 
+  it("offers no Retry for a selection with an engine the brain will not retry", async () => {
+    tableMocks.selectedRows = [
+      { id: "row-1", task_id: "task-1", engine: "celery" },
+      { id: "row-2", task_id: "task-2", engine: "huey" },
+    ];
+
+    await renderPage();
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute(
+      "title",
+      expect.stringContaining("A huey retry re-submits the task"),
+    );
+    fireEvent.click(retry);
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(apiMocks.get).not.toHaveBeenCalled();
+    expect(apiMocks.post).not.toHaveBeenCalled();
+  });
+
+  it("states what cancel does on each selected engine before sending", async () => {
+    tableMocks.selectedRows = [
+      { id: "row-1", task_id: "task-1", engine: "huey" },
+      { id: "row-2", task_id: "task-2", engine: "celery" },
+      { id: "row-3", task_id: "task-3", engine: "celery" },
+    ];
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    await renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(
+      `Revoke 3 tasks?\n\n${cancelEffect("celery")}\n${cancelEffect("huey")}`,
+    );
+    expect(apiMocks.get).not.toHaveBeenCalled();
+    expect(apiMocks.post).not.toHaveBeenCalled();
+  });
+
+  it("says how far a selected-row retry got when a command fails", async () => {
+    tableMocks.selectedRows = [
+      { id: "row-1", task_id: "task-1", engine: "celery" },
+      { id: "row-2", task_id: "task-2", engine: "celery" },
+    ];
+    apiMocks.get.mockResolvedValue([
+      helloAgent("celery", { celery: CONTRACT }),
+    ]);
+    apiMocks.post
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("request failed (409)"));
+
+    await retrySelection();
+
+    await waitFor(() =>
+      expect(window.alert).toHaveBeenCalledWith(
+        "Retry stopped after 1 of 2 tasks: request failed (409). Check Commands before retrying again.",
+      ),
+    );
+  });
+});

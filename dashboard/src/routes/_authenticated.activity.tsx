@@ -16,10 +16,8 @@ import { useDebouncedValue } from "@/hooks/use-debounced-value";
  *
  *   1. Filter bar (project, action prefix)
  *   2. Live timeline -- newest first, polls every 5 seconds via
- *      :func:`useActivityInfinite`. The list is grouped visually
- *      by "minutes ago" buckets so the eye picks out activity
- *      spikes without having to read every timestamp.
- *   3. Load older button (walks ``next_before_id`` backwards).
+ *      :func:`useActivityInfinite`, rendered as individual timestamped cards.
+ *   3. Load older button (walks ``next_before_cursor`` backwards).
  */
 import { DateCell } from "@/components/domain/date-cell";
 import { PageHeader } from "@/components/domain/page-header";

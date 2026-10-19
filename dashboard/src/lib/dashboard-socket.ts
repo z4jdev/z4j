@@ -8,7 +8,8 @@
  * handler's job is to invalidate the matching TanStack Query keys
  * and let the existing REST hooks refetch.
  *
- * Reconnect strategy: exponential backoff capped at 30 s. The
+ * Reconnect strategy: exponential backoff with a 30 s base cap and
+ * ±20% jitter (up to 36 s). The
  * socket re-subscribes automatically on every reconnect. Pings are
  * sent every 25 s as a keepalive (browsers tend to kill idle
  * sockets backgrounded for a long time, and intermediaries time
@@ -64,12 +65,9 @@ export class DashboardSocket {
     // Demo build (VITE_Z4J_DEMO_MODE=true): there is no real backend
     // to connect to, so do NOT open a WebSocket. The dashboard's
     // useDashboardSocket consumers degrade gracefully when the
-    // socket never reaches "open" -- they just rely on REST refetch
-    // intervals instead of push updates. Returning early also
-    // ensures the demo build cannot accidentally make any outbound
-    // server-side connection: the static-asset GETs to Cloudflare
-    // Pages and the in-browser mock-fetch interceptor are the ONLY
-    // network egress paths.
+    // socket never reaches "open"; they can refetch on focus, mount
+    // or explicit refresh. Returning here prevents this socket client
+    // from opening a live backend connection.
     if (import.meta.env.VITE_Z4J_DEMO_MODE === "true") {
       this.closed = true;
       this.setStatus("closed");
@@ -157,8 +155,8 @@ export class DashboardSocket {
       if (frame.type === "event" && isDashboardTopic(frame.topic)) {
         this.opts.onEvent({ topic: frame.topic });
       }
-      // ready / pong are treated as no-ops - they exist for the
-      // server's benefit (it knows we're alive when we PONG back).
+      // Ignore ready / pong frames. The client sends periodic pings;
+      // the server answers with pong.
     });
 
     ws.addEventListener("close", () => {

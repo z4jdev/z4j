@@ -1520,7 +1520,9 @@ def _read_exact_inventory(root: Path) -> dict[str, bytes]:
         | getattr(os, "O_DIRECTORY", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
-    member_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    member_flags = (
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK
+    )
     try:
         root_descriptor = os.open(root, root_flags)
     except OSError as exc:
@@ -1579,7 +1581,7 @@ def _read_exact_inventory(root: Path) -> dict[str, bytes]:
 def _default_binary_reader(path: Path) -> bytes:
     if not hasattr(os, "O_NOFOLLOW"):
         raise ProductionContainerAuthorityRefused("no-follow Cosign reads are unavailable")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:

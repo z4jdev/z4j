@@ -8,8 +8,7 @@
  * - Filter the ``kind`` dropdown to the kinds this map lists for
  *   that engine (no ``solar`` for RQ, no ``clocked`` for Huey, etc.).
  * - Show inline notes when a field doesn't apply to the chosen
- *   (engine, kind) pair (e.g. queue field disabled for arq, which
- *   addresses tasks by function name with no broker-side queue).
+ *   (engine, kind) pair and explain queue-routing behavior.
  * - Surface a per-engine hint on the queue placeholder so operators
  *   coming from celery don't paste a routing key into a Redis
  *   broker that ignores it.
@@ -32,9 +31,7 @@ export interface EngineCaps {
   kinds: ScheduleKind[];
   /**
    * Whether the engine's broker concept maps to a "queue routing
-   * key." False for engines that enqueue by task name only
-   * (arq is the canonical example - all jobs go to the same
-   * Redis stream and are dispatched to whichever worker is free).
+   * key." Named-queue support depends on the adapter and broker.
    */
   hasQueues: boolean;
   /**
@@ -90,11 +87,11 @@ const _ENGINE_CAPS: Record<string, EngineCaps> = {
   arq: {
     // arq has cron jobs (defined statically, not dynamic) + delayed
     // jobs (one_shot equivalent via enqueue_job(_defer_until=...)).
-    // No queue concept - all jobs go to one Redis stream.
+    // Named Redis queues route jobs to workers configured for that queue.
     kinds: ["cron", "interval", "clocked"],
-    hasQueues: false,
+    hasQueues: true,
     queueHint:
-      "arq has no queue routing - all jobs share one Redis stream.",
+      "arq queue name. Use a queue consumed by a worker with the task registered.",
   },
   huey: {
     // Huey supports periodic tasks (cron + interval) but not

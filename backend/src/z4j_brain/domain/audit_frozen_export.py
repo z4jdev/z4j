@@ -3,7 +3,8 @@
 Frozen rows are deliberately outside the active Boundary-F chain.  This
 module implements the only non-reset path allowed to delete them:
 
-* a deterministic, owner-private local spool is finalized first;
+* a deterministic, owner-private local spool is verified before atomic,
+  no-replace publication;
 * a distinct local destination is populated and read back from that spool;
 * the database transition reauthenticates state and rechecks every frozen
   row under the audit writer/table exclusion;
@@ -11,6 +12,9 @@ module implements the only non-reset path allowed to delete them:
   atomically; and
 * the spool remains the crash authority until the operator explicitly
   acknowledges the destination digest and requests cleanup.
+
+Interrupted acknowledged cleanup can prove the prior commit from the retained
+destination and its signed database marker, without deleting database rows again.
 
 Security-critical file opens, reads, writes, and spool deletion use POSIX
 directory-relative no-follow operations or the native Windows handle/ACL
@@ -58,7 +62,9 @@ _MANIFEST_DOMAIN = b"z4j/audit-frozen-export-manifest/v1\x00"
 _MAX_JOURNAL_BYTES = 4 * 1024 * 1024
 _IO_CHUNK_BYTES = 1024 * 1024
 _PHASE_FILE = "phase.json"
+_PHASE_STAGE = ".phase-writing.tmp"
 _SPOOL_FILE = "frozen-audit-export.json"
+_SPOOL_STAGE = ".frozen-audit-export-writing.tmp"
 _PHASES = {
     "INITIAL",
     "SPOOLED",
@@ -249,7 +255,7 @@ def _read_relative(
         _recheck_directory(directory_path, directory_identity)
         return raw, identity, len(raw)
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(name, flags, dir_fd=directory_fd)
     except FileNotFoundError:
@@ -307,6 +313,69 @@ def _write_all(fd: int, payload: bytes) -> None:
         if written <= 0:
             raise OSError("short file write")
         offset += written
+
+
+def _discard_matching_stage(  # noqa: PLR0912  validate both native file-I/O implementations
+    directory_fd: int,
+    directory_path: Path,
+    directory_identity: tuple[int, int],
+    name: str,
+    expected_chunks: Iterator[bytes],
+) -> None:
+    """Remove only a private staging file that is an exact intended-byte prefix.
+
+    Callers supply a reserved name bound to this operation or export digest.
+    Unknown contents, symlinks, aliases, changed identities, and foreign owners
+    are refused; interrupted publication never authorizes replacing a final file.
+    """
+    if os.name == "nt":
+        from z4j_brain._windows_secure_io import open_relative_file
+
+        opened = open_relative_file(_windows_handle(directory_fd), name, require_private=True)
+        if opened is None:
+            return
+        handle, expected_identity, _ = opened
+        fd = _windows_fd(handle, os.O_RDONLY)
+    else:
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(name, flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return
+        expected_identity = _fd_identity(fd)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise AuditChainIntegrityError("staging file is not an unaliased regular file")
+        if os.name != "nt":
+            _validate_private_mode(before, directory=False, label=str(directory_path / name))
+        for expected in expected_chunks:
+            observed = _read_exact(fd, len(expected))
+            if not expected.startswith(observed):
+                raise AuditChainIntegrityError(
+                    "staging bytes do not belong to this export operation"
+                )
+            if len(observed) < len(expected):
+                break
+        if os.read(fd, 1):
+            raise AuditChainIntegrityError("staging file exceeds this export operation's bytes")
+        after = os.fstat(fd)
+        if _fd_identity(fd) != expected_identity or after.st_size != before.st_size:
+            raise AuditChainIntegrityError("staging identity or size changed during recovery")
+        _recheck_directory(directory_path, directory_identity, require_private=False)
+    finally:
+        os.close(fd)
+    if os.name == "nt":
+        from z4j_brain._windows_secure_io import delete_relative
+
+        delete_relative(_windows_handle(directory_fd), name, expected_identity=expected_identity)
+    else:
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if _identity(current) != expected_identity:
+            raise AuditChainIntegrityError("staging pathname changed before recovery removal")
+        os.unlink(name, dir_fd=directory_fd)
+    _flush_directory(directory_fd)
+    _recheck_directory(directory_path, directory_identity, require_private=False)
 
 
 def _write_exclusive_relative(
@@ -381,7 +450,14 @@ def _replace_phase(
     phase: Mapping[str, Any],
 ) -> None:
     payload = canonical_json(phase) + b"\n"
-    temp_name = f".phase-{uuid.uuid4()}.tmp"
+    temp_name = _PHASE_STAGE
+    _discard_matching_stage(
+        directory_fd,
+        directory_path,
+        directory_identity,
+        temp_name,
+        iter((payload,)),
+    )
     if os.name == "nt":
         from z4j_brain._windows_secure_io import (
             close_handle,
@@ -638,28 +714,59 @@ def _write_export_spool(
     manifest: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
 ) -> tuple[int, int]:
+    _discard_matching_stage(
+        directory_fd,
+        directory_path,
+        directory_identity,
+        _SPOOL_STAGE,
+        _iter_export_document(manifest=manifest, rows=rows),
+    )
     if os.name == "nt":
         from z4j_brain._windows_secure_io import (
             close_handle,
             create_relative_stream_file,
+            replace_open_handle,
         )
 
         handle, identity, _ = create_relative_stream_file(
             _windows_handle(directory_fd),
-            _SPOOL_FILE,
+            _SPOOL_STAGE,
             _iter_export_document(manifest=manifest, rows=rows),
         )
-        close_handle(handle)
+        try:
+            transferred_handle = handle
+            handle = 0
+            fd = _windows_fd(transferred_handle, os.O_RDONLY)
+            try:
+                _verify_export_fd(fd, manifest=manifest, rows=rows)
+                replace_open_handle(
+                    _windows_handle(fd),
+                    _windows_handle(directory_fd),
+                    _SPOOL_FILE,
+                    replace_existing=False,
+                )
+            finally:
+                os.close(fd)
+        finally:
+            if handle:
+                close_handle(handle)
         _recheck_directory(directory_path, directory_identity)
         return identity
 
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(_SPOOL_FILE, flags, 0o600, dir_fd=directory_fd)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(_SPOOL_STAGE, flags, 0o600, dir_fd=directory_fd)
     try:
         for chunk in _iter_export_document(manifest=manifest, rows=rows):
             _write_all(fd, chunk)
         os.fsync(fd)
+        _verify_export_fd(fd, manifest=manifest, rows=rows)
         final_state = os.fstat(fd)
+        current = os.stat(_SPOOL_STAGE, dir_fd=directory_fd, follow_symlinks=False)
+        if _identity(current) != _identity(final_state):
+            raise AuditChainIntegrityError("spool staging identity changed before publication")
+        from z4j_brain.management_retirement import _rename_no_replace
+
+        _rename_no_replace(directory_fd, _SPOOL_STAGE, directory_fd, _SPOOL_FILE)
     finally:
         os.close(fd)
     _flush_directory(directory_fd)
@@ -699,7 +806,7 @@ def _open_export_spool(
         handle, before_identity, before_size = opened
         fd = _windows_fd(handle, os.O_RDONLY)
     else:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
             fd = os.open(_SPOOL_FILE, flags, dir_fd=directory_fd)
         except FileNotFoundError:
@@ -909,7 +1016,7 @@ def _open_and_hash_destination(
         handle, before_identity, before_size = opened
         fd = _windows_fd(handle, os.O_RDONLY)
     else:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(destination.name, flags, dir_fd=parent_fd)
         before = os.fstat(fd)
         before_identity = _identity(before)
@@ -1018,14 +1125,25 @@ def _create_destination_windows(
     parent_fd: int,
     spool_fd: int,
     expected_size: int,
+    expected_digest: str,
     spool_identity: tuple[int, int],
 ) -> None:
     from z4j_brain._windows_secure_io import (
         close_handle,
         create_relative_stream_file,
         relative_file_identity,
+        replace_open_handle,
     )
 
+    stage_name = f".z4j-frozen-{expected_digest}.tmp"
+    os.lseek(spool_fd, 0, os.SEEK_SET)
+    _discard_matching_stage(
+        parent_fd,
+        destination.parent,
+        _fd_identity(parent_fd),
+        stage_name,
+        _spool_chunks(spool_fd),
+    )
     if (
         relative_file_identity(
             _windows_handle(parent_fd),
@@ -1043,17 +1161,44 @@ def _create_destination_windows(
     os.lseek(spool_fd, 0, os.SEEK_SET)
     destination_handle, _, copied = create_relative_stream_file(
         _windows_handle(parent_fd),
-        destination.name,
+        stage_name,
         _spool_chunks(spool_fd),
     )
-    close_handle(destination_handle)
-    _validate_completed_spool_copy(
-        spool_fd=spool_fd,
-        before=spool_before,
-        copied=copied,
-        expected_size=expected_size,
-        spool_identity=spool_identity,
-    )
+    try:
+        _validate_completed_spool_copy(
+            spool_fd=spool_fd,
+            before=spool_before,
+            copied=copied,
+            expected_size=expected_size,
+            spool_identity=spool_identity,
+        )
+        transferred_handle = destination_handle
+        destination_handle = 0
+        destination_fd = _windows_fd(transferred_handle, os.O_RDONLY)
+        try:
+            _verify_staged_destination(destination_fd, expected_size, expected_digest)
+            replace_open_handle(
+                _windows_handle(destination_fd),
+                _windows_handle(parent_fd),
+                destination.name,
+                replace_existing=False,
+            )
+        finally:
+            os.close(destination_fd)
+    finally:
+        if destination_handle:
+            close_handle(destination_handle)
+
+
+def _verify_staged_destination(fd: int, expected_size: int, expected_digest: str) -> None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    observed = hashlib.sha256()
+    size = 0
+    for chunk in _spool_chunks(fd):
+        observed.update(chunk)
+        size += len(chunk)
+    if size != expected_size or observed.hexdigest() != expected_digest:
+        raise AuditChainIntegrityError("destination staging did not read back identically")
 
 
 def _create_destination_posix(
@@ -1062,12 +1207,28 @@ def _create_destination_posix(
     parent_fd: int,
     spool_fd: int,
     expected_size: int,
+    expected_digest: str,
     spool_identity: tuple[int, int],
 ) -> None:
+    stage_name = f".z4j-frozen-{expected_digest}.tmp"
+    os.lseek(spool_fd, 0, os.SEEK_SET)
+    _discard_matching_stage(
+        parent_fd,
+        destination.parent,
+        _fd_identity(parent_fd),
+        stage_name,
+        _spool_chunks(spool_fd),
+    )
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        return
+    try:
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         destination_fd = os.open(
-            destination.name,
+            stage_name,
             flags,
             0o600,
             dir_fd=parent_fd,
@@ -1093,6 +1254,15 @@ def _create_destination_posix(
             spool_identity=spool_identity,
         )
         os.fsync(destination_fd)
+        _verify_staged_destination(destination_fd, expected_size, expected_digest)
+        current = os.stat(stage_name, dir_fd=parent_fd, follow_symlinks=False)
+        if _identity(current) != _fd_identity(destination_fd):
+            raise AuditChainIntegrityError(
+                "destination staging identity changed before publication"
+            )
+        from z4j_brain.management_retirement import _rename_no_replace
+
+        _rename_no_replace(parent_fd, stage_name, parent_fd, destination.name)
     finally:
         os.close(destination_fd)
     _flush_directory(parent_fd)
@@ -1114,6 +1284,7 @@ def _populate_destination(
             parent_fd=parent_fd,
             spool_fd=spool_fd,
             expected_size=expected_size,
+            expected_digest=expected_digest,
             spool_identity=spool_identity,
         )
         fd, identity, size, digest = _open_and_hash_destination(
@@ -1185,8 +1356,9 @@ async def _commit_frozen_delete(  # noqa: PLR0912, PLR0915
     rows: Sequence[Mapping[str, Any]],
     export_digest: str,
     export_size: int,
-    spool_identity: tuple[int, int],
+    spool_identity: tuple[int, int] | None,
     destination_identity: tuple[int, int],
+    allow_delete: bool = True,
 ) -> bool:
     """Commit the exact frozen deletion, or prove its prior signed commit."""
 
@@ -1252,6 +1424,13 @@ async def _commit_frozen_delete(  # noqa: PLR0912, PLR0915
             )
             current_rows = [canonical_frozen_row_snapshot(row) for row in persisted]
             if not current_rows:
+                if (
+                    state_payload["frozen_row_count"] != 0
+                    or state_payload["frozen_snapshot_digest"] is not None
+                ):
+                    raise AuditChainIntegrityError(  # noqa: TRY301
+                        "empty frozen rows do not match authenticated state"
+                    )
                 markers = list(
                     (
                         await session.execute(
@@ -1271,10 +1450,31 @@ async def _commit_frozen_delete(  # noqa: PLR0912, PLR0915
                 )
                 for marker in markers:
                     metadata = marker.audit_metadata
+                    expected_metadata = {
+                        "operation_id": operation_id,
+                        "destination": manifest["destination"],
+                        "manifest_digest": manifest["manifest_digest"],
+                        "export_sha256": export_digest,
+                        "export_size": export_size,
+                        "frozen_row_count": manifest["frozen_row_count"],
+                        "frozen_snapshot_digest": manifest["frozen_snapshot_digest"],
+                        "classification_counts": manifest["classification_counts"],
+                        "destination_identity": list(destination_identity),
+                    }
+                    signed_spool = metadata.get("spool_identity")
+                    valid_spool = (
+                        isinstance(signed_spool, list)
+                        and len(signed_spool) == 2
+                        and all(type(value) is int and value >= 0 for value in signed_spool)
+                        and signed_spool != list(destination_identity)
+                        and (spool_identity is None or signed_spool == list(spool_identity))
+                    )
                     if (
-                        metadata.get("operation_id") == operation_id
-                        and metadata.get("manifest_digest") == manifest["manifest_digest"]
-                        and metadata.get("export_sha256") == export_digest
+                        all(metadata.get(key) == value for key, value in expected_metadata.items())
+                        and valid_spool
+                        and marker.target_id == operation_id
+                        and marker.target_type == "audit_chain"
+                        and str(marker.chain_generation) == manifest["generation"]
                         and service.verify_row(marker)
                     ):
                         await connection.rollback()
@@ -1283,6 +1483,10 @@ async def _commit_frozen_delete(  # noqa: PLR0912, PLR0915
                     "frozen rows vanished without this operation's signed marker",
                 )
 
+            if not allow_delete or spool_identity is None:
+                raise AuditChainIntegrityError(  # noqa: TRY301
+                    "cleanup recovery requires an already committed frozen deletion"
+                )
             if (
                 current_rows != list(rows)
                 or state_payload["frozen_row_count"] != manifest["frozen_row_count"]
@@ -1349,6 +1553,149 @@ async def _commit_frozen_delete(  # noqa: PLR0912, PLR0915
             await session.close()
 
 
+async def _recover_acknowledged_cleanup(  # noqa: PLR0912, PLR0915  file and signed-DB verification before cleanup
+    *,
+    engine: AsyncEngine,
+    settings: Settings,
+    operation_id: uuid.UUID,
+    destination: Path,
+    operation_fd: int,
+    operation_path: Path,
+    operation_identity: tuple[int, int],
+    phase: Mapping[str, Any] | None,
+    acknowledge_destination_digest: str | None,
+) -> dict[str, Any]:
+    """Prove committed export from its destination and signed marker, never delete DB rows."""
+    if phase is not None and phase.get("phase") != "DESTINATION_ACKNOWLEDGED":
+        raise AuditChainIntegrityError("missing-spool cleanup requires an acknowledged phase")
+    acknowledgement = acknowledge_destination_digest
+    if acknowledgement is None and phase is not None:
+        acknowledgement = phase.get("acknowledged_destination_digest")
+    if not acknowledgement:
+        raise AuditChainIntegrityError(
+            "cleanup without a journal requires the explicit destination digest"
+        )
+    _recheck_directory(operation_path, operation_identity)
+    entries = (
+        sorted(entry.name for entry in operation_path.iterdir())  # noqa: ASYNC240  bounded offline ceremony
+        if os.name == "nt"
+        else sorted(os.listdir(operation_fd))
+    )
+    if entries != ([_PHASE_FILE] if phase is not None else []):
+        raise AuditChainIntegrityError("unexpected private phase entries prevent cleanup recovery")
+    _recheck_directory(operation_path, operation_identity)
+    parent_fd, parent_identity = _open_destination_parent(destination)
+    destination_fd = -1
+    try:
+        destination_fd, destination_identity, size, digest = _open_and_hash_destination(
+            destination, parent_fd, parent_identity
+        )
+        if digest != acknowledgement:
+            raise AuditChainIntegrityError(
+                "cleanup acknowledgement does not match retained destination"
+            )
+        manifest, rows = _parse_export_fd(destination_fd)
+        canonical_size, canonical_digest = _verify_export_fd(
+            destination_fd, manifest=manifest, rows=rows
+        )
+        if (canonical_size, canonical_digest) != (size, digest):
+            raise AuditChainIntegrityError("retained destination changed during cleanup recovery")
+        _validate_manifest_for_operation(
+            manifest, operation_id=operation_id, destination=destination
+        )
+        spool_identity = None
+        if phase is not None:
+            supplied_spool = phase.get("spool_identity")
+            if not isinstance(supplied_spool, list) or len(supplied_spool) != 2:
+                raise AuditChainIntegrityError("acknowledged journal has no valid spool identity")
+            spool_identity = tuple(supplied_spool)
+            _validate_phase_export(
+                phase,
+                manifest=manifest,
+                export_digest=digest,
+                export_size=size,
+                spool_identity=spool_identity,
+            )
+            if (
+                phase.get("destination_identity") != list(destination_identity)
+                or phase.get("acknowledged_destination_digest") != digest
+            ):
+                raise AuditChainIntegrityError(
+                    "retained destination no longer matches its acknowledgement"
+                )
+        await _commit_frozen_delete(
+            engine,
+            settings,
+            manifest=manifest,
+            rows=rows,
+            export_digest=digest,
+            export_size=size,
+            spool_identity=spool_identity,
+            destination_identity=destination_identity,
+            allow_delete=False,
+        )
+        _recheck_directory(operation_path, operation_identity)
+        # Reopen the destination by its held parent to prove its pathname still
+        # names the exact verified file before discarding the last phase record.
+        checked_fd, checked_identity, checked_size, checked_digest = _open_and_hash_destination(
+            destination, parent_fd, parent_identity
+        )
+        os.close(checked_fd)
+        if (checked_identity, checked_size, checked_digest) != (destination_identity, size, digest):
+            raise AuditChainIntegrityError("destination changed before cleanup recovery removal")
+        if phase is not None:
+            current = _read_relative(
+                operation_fd, operation_path, operation_identity, _PHASE_FILE, required=True
+            )
+            assert current is not None
+            if _strict_json(current[0], label="cleanup phase") != dict(phase):
+                raise AuditChainIntegrityError("cleanup phase changed during recovery")
+            if os.name == "nt":
+                from z4j_brain._windows_secure_io import delete_relative
+
+                delete_relative(
+                    _windows_handle(operation_fd), _PHASE_FILE, expected_identity=current[1]
+                )
+            else:
+                os.unlink(_PHASE_FILE, dir_fd=operation_fd)
+            _flush_directory(operation_fd)
+        return {
+            "operation_id": str(operation_id),
+            "phase": "CLEANED",
+            "manifest_digest": manifest["manifest_digest"],
+            "export_sha256": digest,
+            "destination": str(destination),
+        }
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        os.close(parent_fd)
+        _recheck_directory(destination.parent, parent_identity, require_private=False)
+
+
+def _remove_empty_operation_directory(
+    private_root: Path,
+    operation_id: uuid.UUID,
+    operation_path: Path,
+    operation_identity: tuple[int, int],
+) -> None:
+    root_fd, root_identity = _open_private_directory(private_root, create=False)
+    try:
+        _recheck_directory(operation_path, operation_identity)
+        if os.name == "nt":
+            from z4j_brain._windows_secure_io import delete_relative_directory
+
+            delete_relative_directory(
+                _windows_handle(root_fd), str(operation_id), expected_identity=operation_identity
+            )
+        else:
+            operation_path.rmdir()
+        _flush_directory(root_fd)
+        _recheck_directory(private_root, root_identity)
+    finally:
+        os.close(root_fd)
+
+
 async def export_and_delete_frozen(  # noqa: PLR0912, PLR0915
     *,
     engine: AsyncEngine,
@@ -1391,6 +1738,24 @@ async def export_and_delete_frozen(  # noqa: PLR0912, PLR0915
             operation_path,
             operation_identity,
         )
+        if phase is None and cleanup:
+            result = await _recover_acknowledged_cleanup(
+                engine=engine,
+                settings=settings,
+                operation_id=operation_id,
+                destination=destination,
+                operation_fd=operation_fd,
+                operation_path=operation_path,
+                operation_identity=operation_identity,
+                phase=None,
+                acknowledge_destination_digest=acknowledge_destination_digest,
+            )
+            os.close(operation_fd)
+            operation_fd = -1
+            _remove_empty_operation_directory(
+                private_root, operation_id, operation_path, operation_identity
+            )
+            return result
         if phase is None:
             _replace_phase(
                 operation_fd,
@@ -1412,6 +1777,24 @@ async def export_and_delete_frozen(  # noqa: PLR0912, PLR0915
             required=False,
         )
         if spool_result is None:
+            if cleanup and phase["phase"] == "DESTINATION_ACKNOWLEDGED":
+                result = await _recover_acknowledged_cleanup(
+                    engine=engine,
+                    settings=settings,
+                    operation_id=operation_id,
+                    destination=destination,
+                    operation_fd=operation_fd,
+                    operation_path=operation_path,
+                    operation_identity=operation_identity,
+                    phase=phase,
+                    acknowledge_destination_digest=acknowledge_destination_digest,
+                )
+                os.close(operation_fd)
+                operation_fd = -1
+                _remove_empty_operation_directory(
+                    private_root, operation_id, operation_path, operation_identity
+                )
+                return result
             if phase["phase"] != "INITIAL":
                 raise AuditChainIntegrityError(
                     "retained export spool is missing before acknowledgement",

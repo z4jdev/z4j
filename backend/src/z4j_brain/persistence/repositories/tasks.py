@@ -241,6 +241,31 @@ class TaskRepository(BaseRepository[Task]):
             "state": incoming_state,
             "updated_at": guard_now,
         }
+        missing_name = or_(
+            Task.name.in_(("unknown", "<unknown>", "")),
+            and_(Task.name.startswith("<unknown:", autoescape=True), Task.name.endswith(">")),
+        )
+        incoming_name = str(defaults.get("name") or "")
+        has_real_name = (
+            bool(incoming_name)
+            and incoming_name not in {"unknown", "<unknown>"}
+            and not incoming_name.startswith("<unknown:")
+        )
+        if "name" in update_values and not has_real_name:
+            # A later observer without a name cannot erase an earlier name.
+            update_values["name"] = case((missing_name, incoming_name), else_=Task.name)
+
+        async def _enrich_missing_name() -> None:
+            if has_real_name:
+                # Broker and signal streams can arrive in different orders.
+                # A late received event may fill routing metadata, but must
+                # never regress terminal state or replace result/arguments.
+                await self.session.execute(
+                    update(Task)
+                    .where(*identity, missing_name)
+                    .values(name=incoming_name)
+                    .execution_options(synchronize_session="fetch")
+                )
 
         async def _apply_update() -> bool:
             result = await self.session.execute(
@@ -262,6 +287,7 @@ class TaskRepository(BaseRepository[Task]):
         if await _apply_update():
             return True
         if await _row_exists():
+            await _enrich_missing_name()
             return False
 
         merged: dict[str, Any] = {
@@ -287,6 +313,7 @@ class TaskRepository(BaseRepository[Task]):
             if await _apply_update():
                 return True
             if await _row_exists():
+                await _enrich_missing_name()
                 return False
             raise
         return True

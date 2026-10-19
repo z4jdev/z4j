@@ -50,12 +50,11 @@ export function applyDemoTimestamps<T>(payload: T): T {
 }
 
 /**
- * Test helper: re-anchor for snapshot tests. Not used at runtime.
+ * Legacy test entry point that always rejects re-anchoring.
  */
 export function _setAnchorForTests(ms: number): void {
-  // Module-level const can't be mutated; tests should not depend on
-  // re-anchoring. Provided as a no-op so tests fail loudly if they
-  // try, instead of silently working in dev and breaking in CI.
+  // The module-level anchor is immutable. Fail explicitly so tests
+  // mock the clock before importing the module instead.
   void ms;
   throw new Error(
     "Demo timestamp anchor is set once per module load and cannot be mutated. " +

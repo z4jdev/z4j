@@ -412,6 +412,52 @@ class TestTasksRouter:
         finally:
             brain_app.state.settings = base
 
+    @pytest.mark.parametrize("export_format", ["csv", "json", "xlsx"])
+    async def test_export_ignores_cursor_and_preserves_whole_filter_cap(
+        self,
+        brain_app,
+        client,
+        counted_history,
+        export_format,
+    ) -> None:
+        import csv
+        import io
+        import xml.etree.ElementTree as ET
+        import zipfile
+
+        url = "/api/v1/projects/default/tasks"
+        page = (await client.get(url, params={"limit": 2})).json()
+        cursor = page["next_cursor"]
+        assert cursor
+        tail = await client.get(url, params={"cursor": cursor})
+        assert len(tail.json()["items"]) == 2
+        for ignored_cursor in (cursor, "not-a-valid-cursor"):
+            result = await client.get(
+                url,
+                params={
+                    "format": export_format,
+                    "cursor": ignored_cursor,
+                    "limit": 1,
+                },
+            )
+            assert result.status_code == 200, result.text
+            if export_format == "json":
+                assert len(result.json()) == 4
+            elif export_format == "csv":
+                assert len(list(csv.DictReader(io.StringIO(result.text)))) == 4
+            else:
+                with zipfile.ZipFile(io.BytesIO(result.content)) as archive:
+                    sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+                assert len(sheet.findall(".//{*}row")) == 5  # header plus every task
+        base = brain_app.state.settings
+        try:
+            brain_app.state.settings = base.model_copy(update={"tasks_export_max_rows": 3})
+            refused = await client.get(url, params={"format": export_format, "cursor": cursor})
+            assert refused.status_code == 422, refused.text
+            assert refused.json()["details"]["cap"] == 3
+        finally:
+            brain_app.state.settings = base
+
     async def test_total_requires_project_access(self, client, seeded, brain_app) -> None:
         async with brain_app.state.db.session() as s:
             user = await s.get(User, seeded["user_id"])

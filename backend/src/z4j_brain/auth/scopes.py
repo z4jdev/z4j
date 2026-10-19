@@ -80,6 +80,9 @@ PUBLIC_TAGS: Final[frozenset[str]] = frozenset(
         "health",
         "setup",
         "metrics",
+        # Docs have no extra API-key scope. Private visibility still requires
+        # get_current_user, and project-bound keys retain their route fence.
+        "openapi",
     }
 )
 

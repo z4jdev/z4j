@@ -190,8 +190,10 @@ class TestUpgradeCheck:
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = main(["upgrade", "--json"])
-        # Not on PyPI is not "behind"; should not flip the exit code.
-        assert rc == 0
+        # Not on PyPI is not "behind", but leaves the installed version
+        # unverified and therefore makes the scan incomplete.
+        assert rc == 2
         payload = json.loads(buf.getvalue())
+        assert payload["ok"] is False
         assert payload["rows"][0]["latest"] == "(not on PyPI)"
         assert payload["rows"][0]["behind"] is False

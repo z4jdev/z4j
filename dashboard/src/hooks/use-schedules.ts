@@ -11,6 +11,7 @@ import type {
   ScheduleDiffResponse,
   ScheduleFirePublic,
   SchedulePublic,
+  ProjectPublic,
 } from "@/lib/api-types";
 
 interface SchedulesEnvelope {
@@ -60,6 +61,40 @@ export function useSchedules(slug: string) {
     ...schedulesQuery(slug),
     select: (envelope: SchedulesEnvelope) => envelope.items,
   });
+}
+
+/** Only the currently authorized native producer can advertise controls. */
+export function useNativeScheduleCapabilities(slug: string) {
+  return useQuery({
+    queryKey: ["native-schedule-capabilities", slug],
+    queryFn: () =>
+      api.get<Record<string, string[]>>(
+        `/projects/${slug}/schedules/native-capabilities`,
+      ),
+    enabled: !!slug,
+    refetchInterval: 15_000,
+  });
+}
+
+/** Why the enable switch is locked when {@link canManageNativeSchedule} refuses "toggle". */
+export const NATIVE_TOGGLE_UNAVAILABLE =
+  "This schedule cannot be enabled or disabled here: its definition is static, or no connected scheduler offers enable and disable for it.";
+
+export function canManageNativeSchedule(
+  row: Pick<SchedulePublic, "scheduler" | "source">,
+  operation: "create" | "update" | "delete" | "toggle" | "trigger_now",
+  capabilities: Record<string, string[]> | undefined,
+): boolean {
+  if (row.scheduler === "z4j-scheduler") return true;
+  const caps = capabilities?.[row.scheduler] ?? [];
+  if (operation === "trigger_now") return caps.includes("trigger_now");
+  if (row.source === "celery-beat:static") return false;
+  return (
+    caps.includes("external_schedule_mutation_v1") &&
+    (operation === "toggle"
+      ? caps.includes("enable") && caps.includes("disable")
+      : caps.includes(operation))
+  );
 }
 
 /**
@@ -208,6 +243,8 @@ export interface ScheduleMisfirePublic {
 
 /** Rolling window for the "recent misfires" banner (M16). */
 export const RECENT_MISFIRE_WINDOW_HOURS = 24;
+/** Newest misfires the banner reads. A full page means there may be more. */
+export const PROJECT_MISFIRE_LIMIT = 50;
 const RECENT_MISFIRE_WINDOW_MS = RECENT_MISFIRE_WINDOW_HOURS * 60 * 60 * 1000;
 
 /** Project-wide misfires (GET /projects/{slug}/schedules/misfires, VIEWER):
@@ -218,7 +255,7 @@ export function useProjectMisfires(slug: string) {
     queryKey: ["project-misfires", slug],
     queryFn: () =>
       api.get<ScheduleMisfirePublic[]>(
-        `/projects/${slug}/schedules/misfires?limit=50`,
+        `/projects/${slug}/schedules/misfires?limit=${PROJECT_MISFIRE_LIMIT}`,
       ),
     // M16: the endpoint has no time window, so once ANY misfire was recorded
     // the destructive-styled banner stayed forever -- until audit retention
@@ -241,27 +278,75 @@ export function useProjectMisfires(slug: string) {
 export function useToggleSchedule(slug: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       scheduleId,
       enabled,
     }: {
       scheduleId: string;
       enabled: boolean;
-    }) =>
-      api.post<SchedulePublic>(
+    }) => {
+      const row = await api.get<SchedulePublic>(
+        `/projects/${slug}/schedules/${scheduleId}`,
+      );
+      if (row.scheduler !== "z4j-scheduler") {
+        await nativeScheduleMutation(
+          slug,
+          "update",
+          row.scheduler,
+          { is_enabled: enabled },
+          row,
+        );
+        return api.get<SchedulePublic>(
+          `/projects/${slug}/schedules/${scheduleId}`,
+        );
+      }
+      const { data, location } = await api.postResource<SchedulePublic>(
         `/projects/${slug}/schedules/${scheduleId}/${enabled ? "enable" : "disable"}`,
-      ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules", slug] }),
+      );
+      if (!location) return data;
+      await waitForScheduleControl(location);
+      return api.get<SchedulePublic>(
+        `/projects/${slug}/schedules/${scheduleId}`,
+      );
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ["schedules", slug] }),
   });
+}
+
+/** An accepted request is still pending until the native source confirms it. */
+export async function waitForScheduleControl(location: string): Promise<void> {
+  if (
+    !location.startsWith("/api/v1/projects/") ||
+    !location.includes("/schedules/external-control-operations/")
+  ) {
+    throw new Error("Schedule operation returned an invalid status address");
+  }
+  const path = location.slice("/api/v1".length);
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const operation = await api.get<{ id: string; status: string }>(path);
+    if (operation.status === "APPLIED") return;
+    if (!["PENDING", "CLAIMED"].includes(operation.status)) {
+      throw new Error(
+        `Schedule change is ${operation.status.toLowerCase()}. Refresh and check the native schedule before retrying. Operation: ${operation.id}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(
+    "Schedule change is still awaiting source confirmation. Refresh its status before issuing another change.",
+  );
 }
 
 export function useTriggerSchedule(slug: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (scheduleId: string) =>
-      api.post<SchedulePublic>(
+    mutationFn: async (scheduleId: string) => {
+      const { data, location } = await api.postResource<SchedulePublic>(
         `/projects/${slug}/schedules/${scheduleId}/trigger`,
-      ),
+      );
+      if (location) await waitForNativeScheduleOperation(location);
+      return data;
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules", slug] }),
   });
 }
@@ -302,10 +387,7 @@ export function useResumeSchedule(slug: string) {
 export function useScheduleDiff(slug: string) {
   return useMutation<ScheduleDiffResponse, Error, ScheduleDiffRequest>({
     mutationFn: (body) =>
-      api.post<ScheduleDiffResponse>(
-        `/projects/${slug}/schedules:diff`,
-        body,
-      ),
+      api.post<ScheduleDiffResponse>(`/projects/${slug}/schedules:diff`, body),
   });
 }
 
@@ -373,9 +455,8 @@ export function useScheduleResync(slug: string) {
 }
 
 // CRUD mutations - the dashboard's "manage schedules from a real
-// UI" promise (docs/SCHEDULER.md §3.2 wish #3). Each one invalidates
-// the schedule list + any open detail page so the dashboard reflects
-// the new state without a manual refresh.
+// UI" promise (docs/SCHEDULER.md §3.2 wish #3). All invalidate the
+// schedule list; update also invalidates the edited detail query.
 //
 // Body shapes mirror brain's ScheduleCreateIn / ScheduleUpdateIn so
 // the dashboard form can pass through whatever the operator filled in
@@ -414,8 +495,28 @@ export interface ScheduleUpdateBody {
 export function useCreateSchedule(slug: string) {
   const qc = useQueryClient();
   return useMutation<SchedulePublic, Error, ScheduleCreateBody>({
-    mutationFn: (body) =>
-      api.post<SchedulePublic>(`/projects/${slug}/schedules`, body),
+    mutationFn: async (body) => {
+      const scheduler =
+        body.scheduler ??
+        (await api.get<ProjectPublic>(`/projects/${slug}`))
+          .default_scheduler_owner;
+      if (scheduler !== "z4j-scheduler") {
+        const operation = await nativeScheduleMutation(
+          slug,
+          "create",
+          scheduler,
+          body,
+        );
+        if (!operation.schedule_id)
+          throw new Error(
+            "Native creation was confirmed but the schedule is no longer present. Refresh the list.",
+          );
+        return api.get<SchedulePublic>(
+          `/projects/${slug}/schedules/${operation.schedule_id}`,
+        );
+      }
+      return api.post<SchedulePublic>(`/projects/${slug}/schedules`, body);
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules", slug] }),
   });
 }
@@ -425,13 +526,29 @@ export function useUpdateSchedule(slug: string) {
   return useMutation<
     SchedulePublic,
     Error,
-    { scheduleId: string; body: ScheduleUpdateBody }
+    {
+      scheduleId: string;
+      body: ScheduleUpdateBody;
+      observedSchedule?: SchedulePublic;
+    }
   >({
-    mutationFn: ({ scheduleId, body }) =>
-      api.patch<SchedulePublic>(
+    mutationFn: async ({ scheduleId, body, observedSchedule }) => {
+      const row =
+        observedSchedule ??
+        (await api.get<SchedulePublic>(
+          `/projects/${slug}/schedules/${scheduleId}`,
+        ));
+      if (row.scheduler !== "z4j-scheduler") {
+        await nativeScheduleMutation(slug, "update", row.scheduler, body, row);
+        return api.get<SchedulePublic>(
+          `/projects/${slug}/schedules/${scheduleId}`,
+        );
+      }
+      return api.patch<SchedulePublic>(
         `/projects/${slug}/schedules/${scheduleId}`,
         body,
-      ),
+      );
+    },
     onSuccess: (_, { scheduleId }) => {
       qc.invalidateQueries({ queryKey: ["schedules", slug] });
       qc.invalidateQueries({ queryKey: ["schedule", slug, scheduleId] });
@@ -441,9 +558,98 @@ export function useUpdateSchedule(slug: string) {
 
 export function useDeleteSchedule(slug: string) {
   const qc = useQueryClient();
-  return useMutation<void, Error, string>({
-    mutationFn: (scheduleId) =>
-      api.delete<void>(`/projects/${slug}/schedules/${scheduleId}`),
+  return useMutation<void, Error, string | SchedulePublic>({
+    mutationFn: async (selected) => {
+      const scheduleId = typeof selected === "string" ? selected : selected.id;
+      const row =
+        typeof selected === "string"
+          ? await api.get<SchedulePublic>(
+              `/projects/${slug}/schedules/${scheduleId}`,
+            )
+          : selected;
+      if (row.scheduler !== "z4j-scheduler") {
+        await nativeScheduleMutation(slug, "delete", row.scheduler, {}, row);
+        return;
+      }
+      return api.delete<void>(`/projects/${slug}/schedules/${scheduleId}`);
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules", slug] }),
   });
+}
+
+interface NativeScheduleOperation {
+  id: string;
+  status: string;
+  schedule_id: string | null;
+  error: string | null;
+}
+
+async function waitForNativeScheduleOperation(
+  location: string,
+): Promise<NativeScheduleOperation> {
+  if (
+    !location.startsWith("/api/v1/projects/") ||
+    !location.includes("/schedules/native-operations/")
+  ) {
+    throw new Error("Schedule operation returned an invalid status address");
+  }
+  const path = location.slice("/api/v1".length);
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const state = await api.get<NativeScheduleOperation>(path);
+    if (state.status === "APPLIED") return state;
+    if (state.status !== "PENDING")
+      throw new Error(
+        state.error ??
+          `Native change is unconfirmed. Refresh and inspect the source before retrying. Operation: ${state.id}`,
+      );
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(
+    "Native change is awaiting source confirmation. Refresh its status before issuing another change.",
+  );
+}
+
+async function nativeScheduleMutation(
+  slug: string,
+  operation: "create" | "update" | "delete",
+  scheduler: string,
+  body: ScheduleCreateBody | ScheduleUpdateBody,
+  row?: SchedulePublic,
+): Promise<NativeScheduleOperation> {
+  if (row?.source === "celery-beat:static")
+    throw new Error(
+      "Static Beat schedules are read-only. Edit your application configuration.",
+    );
+  if (body.catch_up && body.catch_up !== "skip")
+    throw new Error("Catch-up policies require a z4j-owned schedule.");
+  if (scheduler === "celery-beat" && body.engine && body.engine !== "celery")
+    throw new Error("Celery Beat schedules must use the Celery engine.");
+  const fields = new Set([
+    "name",
+    "task_name",
+    "kind",
+    "expression",
+    "timezone",
+    "queue",
+    "args",
+    "kwargs",
+    "is_enabled",
+  ]);
+  const definition = Object.fromEntries(
+    Object.entries(body).filter(([key]) => fields.has(key)),
+  );
+  const state = await api.post<NativeScheduleOperation>(
+    `/projects/${slug}/schedules/native-operations`,
+    {
+      request_id: crypto.randomUUID(),
+      scheduler,
+      operation,
+      schedule_id: row?.id ?? null,
+      observed_control_token: row?.control_token ?? null,
+      definition,
+    },
+  );
+  return waitForNativeScheduleOperation(
+    `/api/v1/projects/${slug}/schedules/native-operations/${state.id}`,
+  );
 }

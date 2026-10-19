@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/activity", tags=["activity"])
 
 
-#: Hard cap on how many distinct callers can poll the activity feed
+#: Hard cap on how many calls each user can make to the activity feed
 #: per minute. PER WORKER PROCESS: with ``Z4J_WORKERS=N`` and M
 #: brain replicas, the effective cluster-wide ceiling is N*M*60/min
 #: per user. This is documented in operations/activity-feed.md;
@@ -222,7 +222,10 @@ async def list_activity(
     project_slug: str | None = Query(
         None,
         max_length=80,
-        description="Constrain to a single project slug (must be in caller's accessible set).",
+        description=(
+            "Filter project rows to this accessible slug, while retaining the caller's "
+            "own audit rows that have no project."
+        ),
     ),
 ) -> ActivityListResponse:
     """List audit rows across every project the caller can see.

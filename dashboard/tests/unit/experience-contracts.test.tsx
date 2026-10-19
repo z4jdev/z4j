@@ -233,8 +233,10 @@ describe("accessible field wiring", () => {
   });
 });
 it("describes presets without pretending to calculate custom cron execution", () => {
-  expect(scheduleSummary("cron", "0 9 * * *", "Europe/London")).toBe(
-    "Daily at 09:00 · Europe/London",
+  expect(
+    scheduleSummary("cron", "0 9 * * *", "Europe/London", "z4j-scheduler"),
+  ).toBe("Daily at 09:00 · Europe/London");
+  expect(scheduleSummary("cron", "invalid", "UTC", "z4j-scheduler")).toBe(
+    "Custom cron · UTC",
   );
-  expect(scheduleSummary("cron", "invalid", "UTC")).toBe("Custom cron · UTC");
 });

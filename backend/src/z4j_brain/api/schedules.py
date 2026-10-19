@@ -22,7 +22,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -65,6 +65,148 @@ if TYPE_CHECKING:
 
 
 router = APIRouter(prefix="/projects/{slug}/schedules", tags=["schedules"])
+
+
+class NativeScheduleMutationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: uuid.UUID
+    scheduler: str = Field(min_length=1, max_length=40)
+    operation: Literal["create", "update", "delete", "trigger"]
+    schedule_id: uuid.UUID | None = None
+    observed_control_token: uuid.UUID | None = None
+    definition: dict[str, Any] = Field(default_factory=dict)
+
+
+class NativeScheduleMutationPublic(BaseModel):
+    id: uuid.UUID
+    status: str
+    schedule_id: uuid.UUID | None = None
+    error: str | None = None
+
+
+@router.get("/native-capabilities", response_model=dict[str, list[str]])
+async def native_scheduler_capabilities(
+    slug: str,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+) -> dict[str, list[str]]:
+    """Expose live native operations without exposing connection authority."""
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.domain.schedule_native_mutations import capabilities
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships, user=user, project=project, min_role=ProjectRole.VIEWER
+    )
+    return await capabilities(db_session, project_id=project.id)
+
+
+@router.post(
+    "/native-operations",
+    response_model=NativeScheduleMutationPublic,
+    status_code=202,
+    dependencies=[Depends(require_csrf)],
+)
+async def mutate_native_schedule(
+    slug: str,
+    body: NativeScheduleMutationIn,
+    request: Request,
+    response: Response,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    audit_log: AuditLogRepository = Depends(get_audit_log_repo),
+    audit: AuditService = Depends(get_audit_service),
+    dispatcher: CommandDispatcher = Depends(get_command_dispatcher),
+    db_session: AsyncSession = Depends(get_session),
+    ip: str = Depends(get_client_ip),
+) -> dict[str, Any]:
+    """Request a native transaction; completion requires observed source truth."""
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.domain.schedule_native_mutations import plan, status
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    state_only = (
+        body.operation == "update"
+        and set(body.definition) == {"is_enabled"}
+        and isinstance(body.definition["is_enabled"], bool)
+    )
+    await policy.require_member(
+        memberships,
+        user=user,
+        project=project,
+        min_role=ProjectRole.OPERATOR
+        if state_only or body.operation == "trigger"
+        else ProjectRole.ADMIN,
+    )
+    try:
+        _validate_scheduler_in_allowlist(project, body.scheduler)
+    except ValueError as exc:
+        raise ValidationError(
+            f"invalid schedule: {exc}",
+            details={"reason": str(exc)},
+        ) from exc
+    command, stream = await plan(
+        db_session,
+        project_id=project.id,
+        user_id=user.id,
+        scheduler=body.scheduler,
+        operation=body.operation,
+        schedule_id=body.schedule_id,
+        definition=body.definition,
+        request_id=body.request_id,
+        observed_control_token=body.observed_control_token,
+        source_ip=ip,
+        timeout_seconds=dispatcher.command_timeout_seconds,
+    )
+    await audit.record(
+        audit_log,
+        action=f"schedule.native.{body.operation}",
+        target_type="command",
+        target_id=str(command.id),
+        result="accepted",
+        outcome="allow",
+        user_id=user.id,
+        project_id=project.id,
+        api_key_id=resolve_api_key_id(request),
+        source_ip=ip,
+        metadata={"scheduler": body.scheduler, "request_id": str(body.request_id)},
+    )
+    await db_session.commit()
+    await dispatcher.deliver_frozen(
+        command_id=command.id,
+        agent_id=stream.executor_agent_id,
+        registry_owner_id=stream.executor_registry_owner_id,
+        session_generation=stream.executor_session_generation,
+    )
+    response.headers["Location"] = (
+        f"/api/v1/projects/{slug}/schedules/native-operations/{command.id}"
+    )
+    return await status(db_session, project_id=project.id, command_id=command.id)
+
+
+@router.get("/native-operations/{operation_id}", response_model=NativeScheduleMutationPublic)
+async def native_schedule_operation_status(
+    slug: str,
+    operation_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    memberships: MembershipRepository = Depends(get_membership_repo),
+    projects: ProjectRepository = Depends(get_project_repo),
+    db_session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    from z4j_brain.domain.policy_engine import PolicyEngine
+    from z4j_brain.domain.schedule_native_mutations import status
+
+    policy = PolicyEngine()
+    project = await policy.get_project_or_404(projects, slug)
+    await policy.require_member(
+        memberships, user=user, project=project, min_role=ProjectRole.VIEWER
+    )
+    return await status(db_session, project_id=project.id, command_id=operation_id)
 
 
 # ---------------------------------------------------------------------------
@@ -774,7 +916,7 @@ async def list_schedule_misfires(
 
     Authorization: VIEWER. A misfire is a system-detected "this enabled
     schedule missed its slot" event (no who-did-what), so unlike the
-    general audit log (ADMIN) it is safe for any project member to see --
+    general audit log (AUDITOR or ADMIN) it is safe for any project member to see --
     it is operational data about a schedule they can already read. The
     most recent row is the schedule detail page's "last misfire".
 
@@ -1101,7 +1243,7 @@ def _validate_args_kwargs_size(value: Any, field_name: str) -> Any:
 def _refuse_unenforced_overlap_policy(value: object) -> object:
     """Refuse a policy the release cannot honour, at the REST boundary.
 
-    Every request schema here inherits pydantic's default ``extra="ignore"``,
+    The create, update, and import schemas use pydantic's default ``extra="ignore"``,
     so a POST, PATCH or bulk-import body carrying ``overlap_policy: "skip"``
     was accepted, silently dropped before the write, and answered 200 with
     ``"allow"``. The caller asked for collision prevention, was told it was
@@ -1188,9 +1330,9 @@ class ScheduleCreateIn(BaseModel):
     is_enabled: bool = True
     # 1.2.2: when None, the create handler falls back to the
     # project's ``default_scheduler_owner`` (default
-    # ``"z4j-scheduler"``). Operators in celery-beat-first shops
-    # can flip the project default so dashboard-created schedules
-    # land under celery-beat ownership instead of z4j-scheduler.
+    # ``"z4j-scheduler"``). An activated database only permits this
+    # endpoint to create z4j-owned schedules; an external project default
+    # requires an explicit z4j-scheduler choice here or creation at its owner.
     # Pre-1.2.2 this field defaulted to ``"z4j-scheduler"``
     # unconditionally; the new None default is backward-compatible
     # because callers that explicitly pass ``"z4j-scheduler"``
@@ -1421,8 +1563,8 @@ async def create_schedule(
 
     # 1.2.2: when scheduler is None (operator didn't pick), fall
     # back to the project's default_scheduler_owner. Defaults to
-    # ``"z4j-scheduler"`` for fresh projects; celery-beat-first
-    # shops flip it via PATCH /projects/{slug}.
+    # ``"z4j-scheduler"`` for fresh projects. Activated databases reject
+    # external ownership below because those definitions belong at their source.
     create_data = body.model_dump()
     if create_data.get("scheduler") is None:
         create_data["scheduler"] = getattr(
@@ -1430,12 +1572,11 @@ async def create_schedule(
             "default_scheduler_owner",
             "z4j-scheduler",
         )
-    # Enforce per-project allow-list when
-    # set. ``None`` means unrestricted (the default).
-    _validate_scheduler_in_allowlist(project, create_data["scheduler"])
-
     repo = ScheduleRepository(db_session)
     try:
+        # Enforce the per-project allow-list inside the semantic-validation
+        # boundary. ``None`` means unrestricted (the default).
+        _validate_scheduler_in_allowlist(project, create_data["scheduler"])
         control = ScheduleControlRepository(db_session)
         control_active = await control.control_is_active()
         owner = create_data["scheduler"]
@@ -2253,7 +2394,8 @@ def _manual_fire_command(schedule: Schedule) -> _ManualFire:
         return _ManualFire(
             action="schedule.trigger_now",
             payload={
-                "schedule_id": schedule.name,
+                "schedule_id": schedule.external_id or schedule.name,
+                "scheduler": schedule.scheduler,
                 "schedule_name": schedule.name,
                 "external_id": schedule.external_id,
             },
@@ -2352,6 +2494,11 @@ async def _enable_or_disable(  # noqa: PLR0915 - reserved/external/legacy author
             ScheduleExternalRepository,
         )
 
+        if schedule.source == "celery-beat:static":
+            raise ConflictError(
+                "static Beat schedules are read-only; edit application configuration"
+            )
+
         action = "schedule.enable" if enabled else "schedule.disable"
         if schedule.external_stream_id is None:
             await audit.record(
@@ -2377,6 +2524,51 @@ async def _enable_or_disable(  # noqa: PLR0915 - reserved/external/legacy author
                     "reason": "external_stream_not_activated",
                 },
             )
+        from z4j_core.schedule_external import EXTERNAL_SCHEDULE_MUTATION_CAPABILITY
+
+        from z4j_brain.domain.schedule_native_mutations import capabilities
+        from z4j_brain.domain.schedule_native_mutations import plan as native_plan
+
+        native_caps = await capabilities(db_session, project_id=project.id)
+        if EXTERNAL_SCHEDULE_MUTATION_CAPABILITY in native_caps.get(schedule.scheduler, []):
+            command, stream = await native_plan(
+                db_session,
+                project_id=project.id,
+                user_id=user.id,
+                scheduler=schedule.scheduler,
+                operation="update",
+                schedule_id=schedule.id,
+                definition={"is_enabled": enabled},
+                request_id=uuid.uuid4(),
+                observed_control_token=schedule.control_token,
+                source_ip=ip,
+                timeout_seconds=dispatcher.command_timeout_seconds,
+            )
+            await audit.record(
+                audit_log,
+                action=action,
+                target_type="schedule",
+                target_id=str(schedule_id),
+                result="accepted",
+                outcome="allow",
+                user_id=user.id,
+                project_id=project.id,
+                source_ip=ip,
+                metadata={"command_id": str(command.id), "state_changes_on_projection_only": True},
+            )
+            await db_session.commit()
+            await dispatcher.deliver_frozen(
+                command_id=command.id,
+                agent_id=stream.executor_agent_id,
+                registry_owner_id=stream.executor_registry_owner_id,
+                session_generation=stream.executor_session_generation,
+            )
+            response.status_code = 202
+            response.headers["Location"] = (
+                f"/api/v1/projects/{slug}/schedules/native-operations/{command.id}"
+            )
+            return _payload(schedule)
+
         plan = await ScheduleExternalRepository(
             db_session,
         ).plan_control_operation(
@@ -2619,6 +2811,7 @@ async def trigger_schedule_now(
     slug: str,
     schedule_id: uuid.UUID,
     request: Request,
+    response: Response,
     user: User = Depends(get_current_user),
     memberships: MembershipRepository = Depends(get_membership_repo),
     projects: ProjectRepository = Depends(get_project_repo),
@@ -2741,6 +2934,47 @@ async def trigger_schedule_now(
             message,
             details={"schedule_id": str(schedule_id), "reason": reason},
         )
+
+    if schedule.external_stream_id is not None:
+        from z4j_brain.domain.schedule_native_mutations import plan
+
+        command, stream = await plan(
+            db_session,
+            project_id=project.id,
+            user_id=user.id,
+            scheduler=schedule.scheduler,
+            operation="trigger",
+            schedule_id=schedule.id,
+            definition={},
+            request_id=uuid.uuid4(),
+            observed_control_token=schedule.control_token,
+            source_ip=ip,
+            timeout_seconds=dispatcher.command_timeout_seconds,
+        )
+        await audit.record(
+            audit_log,
+            action="schedule.trigger_now",
+            target_type="schedule",
+            target_id=str(schedule_id),
+            result="accepted",
+            outcome="allow",
+            user_id=user.id,
+            project_id=project.id,
+            api_key_id=resolve_api_key_id(request),
+            source_ip=ip,
+            metadata={"command_id": str(command.id)},
+        )
+        await db_session.commit()
+        await dispatcher.deliver_frozen(
+            command_id=command.id,
+            agent_id=stream.executor_agent_id,
+            registry_owner_id=stream.executor_registry_owner_id,
+            session_generation=stream.executor_session_generation,
+        )
+        response.headers["Location"] = (
+            f"/api/v1/projects/{slug}/schedules/native-operations/{command.id}"
+        )
+        return _payload(schedule)
 
     fire = _manual_fire_command(schedule)
     target_agent = (
@@ -2972,7 +3206,7 @@ def _validate_scheduler_in_allowlist(
     flipping the setting never strands existing schedules.
 
     Audit fix MED-13 (1.2.2 deep audit). Raises ``ValueError`` so
-    both the schedule-create handler (which re-raises as
+    the create and native-operation handlers (which re-raise as
     ``ValidationError`` for a 422) and the per-row import loop
     (which catches ``ValueError`` to report row-scoped errors)
     handle it uniformly.
@@ -3039,13 +3273,10 @@ class ImportSchedulesRequest(BaseModel):
     Defaults to the source of the first row in the batch (the
     framework adapters always tag everything with one label).
 
-    Audit fix HIGH-8: ``schedules`` is capped at 2000 entries to
-    bound the worst-case blast radius of
-    ``mode=replace_for_source`` (a misconfigured CI pipeline with
-    an empty list could otherwise wipe thousands of schedules in
-    one POST). Operators with legitimately larger schedule sets
-    should batch their reconciles by source label or contact us
-    so we can raise the cap with safer semantics.
+    ``schedules`` is capped at 2000 incoming entries to bound input size
+    and per-row validation work. This does not cap replacement deletions:
+    ``replace_for_source`` can remove every stored row in the selected source
+    scope that is absent from the batch, including when the batch is empty.
     """
 
     schedules: list[ImportedScheduleIn] = Field(..., max_length=2000)
@@ -3196,21 +3427,8 @@ async def import_schedules(  # noqa: PLR0912, PLR0915  import diff + apply branc
     # lock is released on commit/rollback - no manual cleanup. Only
     # applies on Postgres; SQLite has a single writer so the race
     # cannot happen there.
-    # Acquire the project-wide
-    # advisory lock FOR EVERY import mode so a concurrent project
-    # PATCH that rewrites stored ``Schedule.scheduler`` values
-    # cannot race this import. ``update_project`` takes the SAME
-    # ``(proj_int, 0)`` lock; both paths serialize on it.
-    #
-    # The lock used to be inside the
-    # ``replace_for_source`` branch (because the source-specific
-    # lock only matters for replace), but the PATCH-vs-import race
-    # affects EVERY import that touches declarative-source rows
-    # under the OLD scheduler, including ``upsert_only``. Hoist
-    # the project-wide lock outside the mode check; keep the
-    # source-specific lock inside (it's finer-grained
-    # reconcile-vs-reconcile serialization, only meaningful for
-    # ``replace_for_source``).
+    # This source-scoped lock is taken only for replace_for_source. It does
+    # not provide project-wide serialization with project PATCH or upserts.
     if body.mode == "replace_for_source":
         scope_key = body.source_filter or (body.schedules[0].source if body.schedules else "") or ""
         await _acquire_replace_for_source_lock(
@@ -3449,7 +3667,7 @@ class DiffSchedulesResponse(BaseModel):
     status_code=200,
     dependencies=[Depends(require_csrf)],
 )
-async def diff_schedules(  # noqa: PLR0912  import diff branches
+async def diff_schedules(  # noqa: PLR0912, PLR0915  preview validation and diff buckets
     slug: str,
     body: ImportSchedulesRequest,
     user: User = Depends(get_current_user),
@@ -3469,6 +3687,9 @@ async def diff_schedules(  # noqa: PLR0912  import diff branches
     - ``deleted`` - only populated when ``mode="replace_for_source"``;
       rows brain has under the resolved ``source_filter`` that the
       batch dropped.
+
+    Rows outside the project's scheduler allowlist return 422 with
+    row-indexed errors instead of predicting changes import would refuse.
 
     Authorization: project ADMIN. The diff itself is read-only but
     surfaces the same data ``:import`` would mutate, so it inherits
@@ -3539,6 +3760,15 @@ async def diff_schedules(  # noqa: PLR0912  import diff branches
         "default_scheduler_owner",
         "z4j-scheduler",
     )
+    errors: dict[int, str] = {}
+    for idx, row in enumerate(body.schedules):
+        try:
+            _validate_scheduler_in_allowlist(project, row.scheduler or diff_project_default)
+        except ValueError as exc:
+            errors[idx] = str(exc)
+    if errors:
+        raise ValidationError("invalid schedules for preview", details={"errors": errors})
+
     diff_batch_keys = [(row.scheduler or diff_project_default, row.name) for row in body.schedules]
     existing_rows: dict[tuple[str, str], Schedule] = {}
     if diff_batch_keys:

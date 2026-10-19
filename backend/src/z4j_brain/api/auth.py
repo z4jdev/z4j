@@ -189,8 +189,10 @@ class LoginResponse(BaseModel):
     mfa_required: bool = Field(
         default=False,
         description=(
-            "True when the user has MFA enrolled AND a valid trust "
-            "cookie was NOT presented. The dashboard should route "
+            "True when the new session needs second-factor verification. "
+            "At login, an enrolled user can satisfy this with a valid trust "
+            "cookie. Password changes revoke that trust and require fresh "
+            "verification for enrolled users. The dashboard should route "
             "to the MFA-verify page. Until verification succeeds, this "
             "cookie session may call only POST /api/v1/auth/mfa/verify, "
             "POST /api/v1/auth/logout, GET /api/v1/auth/me, and "
@@ -821,8 +823,8 @@ async def change_password(
        prior session (audit H3 - the timestamp check alone leaves
        stale ``revoked_at IS NULL`` rows that still show in the
        Account → Security tab until each is next touched).
-    3. A fresh session is minted + cookies reset so the caller
-       keeps working without an extra login round-trip.
+    3. A fresh session is minted and cookies reset. Enrolled users
+       must verify MFA again; the response sets ``mfa_required``.
     """
     from z4j_brain.auth.passwords import PasswordHasher
     from z4j_brain.auth.sessions import generate_csrf_token
@@ -889,10 +891,9 @@ async def change_password(
 
     _clear_trust_cookie(response, environment=settings.environment)
 
-    # Mint a fresh session for the caller. ``issued_at`` is after
-    # ``password_changed_at`` so the new session passes the live
-    # check immediately; the old cookie's session id is already in
-    # the revoked set.
+    # Mint a replacement after rotation. Validation allows SQLite
+    # timestamp precision when comparing issue and password-change times;
+    # prior session IDs are explicitly revoked above.
     from datetime import UTC, datetime, timedelta
 
     expires_at = datetime.now(UTC) + timedelta(
@@ -930,7 +931,8 @@ async def change_password(
     )
     await db_session.commit()
 
-    return LoginResponse(user=_user_payload(user))
+    has_mfa = user.mfa_secret_encrypted is not None and user.mfa_enrolled_at is not None
+    return LoginResponse(user=_user_payload(user), mfa_required=has_mfa)
 
 
 # ---------------------------------------------------------------------------

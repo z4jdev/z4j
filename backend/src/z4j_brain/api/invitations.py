@@ -333,6 +333,12 @@ async def mint_invitation(
         source_ip=ip,
         metadata={"email": body.email, "role": body.role},
     )
+    # The email helper rolls back its channel-read transaction, expiring all
+    # ORM instances in this session even with expire_on_commit=False. Capture
+    # the response and audit identities before crossing that boundary.
+    invitation = _invitation_public(row)
+    user_id = user.id
+    project_name = project.name
     await db_session.commit()
 
     # Best-effort auto-email the invitee. If the project has an
@@ -343,8 +349,8 @@ async def mint_invitation(
     email_sent = await _try_send_invitation_email(
         db_session=db_session,
         settings=settings,
-        project_id=project.id,
-        project_name=project.name,
+        project_id=invitation.project_id,
+        project_name=project_name,
         invitee_email=body.email,
         role=body.role,
         token=plaintext,
@@ -352,10 +358,10 @@ async def mint_invitation(
     await audit.record(
         audit_log,
         action="invitation.email_delivery_result",
-        user_id=user.id,
-        project_id=project.id,
+        user_id=user_id,
+        project_id=invitation.project_id,
         target_type="invitation",
-        target_id=str(row.id),
+        target_id=str(invitation.id),
         result="success" if email_sent else "failed",
         outcome="allow" if email_sent else "error",
         source_ip=ip,
@@ -368,7 +374,7 @@ async def mint_invitation(
     await db_session.commit()
 
     return InvitationMintPublic(
-        invitation=_invitation_public(row),
+        invitation=invitation,
         token=plaintext,
         # URL fragment
         # not query string. See auth.py password-reset accept_url

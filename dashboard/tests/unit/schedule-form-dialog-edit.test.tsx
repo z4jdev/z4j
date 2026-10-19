@@ -32,7 +32,9 @@ vi.mock("sonner", () => ({
   },
 }));
 
-vi.mock("@/hooks/use-schedules", () => ({
+vi.mock("@/hooks/use-schedules", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/use-schedules")>()),
+  useNativeScheduleCapabilities: () => ({ data: {} }),
   useCreateSchedule: () => ({
     isPending: false,
     mutateAsync: formMocks.create,
@@ -210,12 +212,11 @@ describe("ScheduleFormDialog editing a saved schedule", () => {
     { engine: "huey", kind: "solar", expression: SOLAR, field: "queue" },
     { engine: "dramatiq", kind: "solar", expression: SOLAR, field: "queue" },
     { engine: "rq", kind: "solar", expression: SOLAR, field: "queue" },
-    // arq has no queue routing, so the form disables its queue input.
     {
       engine: "arq",
       kind: "solar",
       expression: "sunrise:40.7128:-74.006",
-      field: "task_name",
+      field: "queue",
     },
     {
       engine: "taskiq",
@@ -235,6 +236,7 @@ describe("ScheduleFormDialog editing a saved schedule", () => {
       ).toHaveAccessibleDescription(/kept as saved/i);
 
       const edited = field === "queue" ? "reports" : "jobs.renamed";
+      expect(screen.getByRole("textbox", { name: FIELD_LABELS[field] })).toBeEnabled();
       fireEvent.change(
         screen.getByRole("textbox", { name: FIELD_LABELS[field] }),
         { target: { value: edited } },

@@ -37,6 +37,7 @@ export function InviteDialog({ slug }: { slug: string }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("viewer");
   const [acceptUrl, setAcceptUrl] = useState<string | null>(null);
+  const [emailSent, setEmailSent] = useState(false);
   const dialogEpoch = useRef(0);
 
   const mutation = useMintInvitation(slug);
@@ -44,6 +45,7 @@ export function InviteDialog({ slug }: { slug: string }) {
   const clearDialogState = useCallback(() => {
     dialogEpoch.current += 1;
     setAcceptUrl(null);
+    setEmailSent(false);
     setEmail("");
     setRole("viewer");
   }, []);
@@ -78,6 +80,7 @@ export function InviteDialog({ slug }: { slug: string }) {
       // supplied relative path if window isn't available (SSR).
       const origin =
         typeof window !== "undefined" ? window.location.origin : "";
+      setEmailSent(res.email_sent === true);
       setAcceptUrl(`${origin}${res.accept_url_path}`);
     } catch (err) {
       if (epoch !== dialogEpoch.current) return;
@@ -115,7 +118,18 @@ export function InviteDialog({ slug }: { slug: string }) {
             <DialogHeader>
               <DialogTitle>Invitation link ready</DialogTitle>
               <DialogDescription>
-                Send this link to <code className="font-mono">{email}</code>.
+                {emailSent ? (
+                  <>
+                    z4j emailed this link to{" "}
+                    <code className="font-mono">{email}</code>.
+                  </>
+                ) : (
+                  <>
+                    z4j did not email it (no project email channel, or the send
+                    failed). Send this link to{" "}
+                    <code className="font-mono">{email}</code>.
+                  </>
+                )}{" "}
                 The link is shown <strong>once</strong> - copy it now; the
                 server does not expose it again.
               </DialogDescription>

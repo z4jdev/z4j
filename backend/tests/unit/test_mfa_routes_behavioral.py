@@ -654,6 +654,74 @@ class TestEnrollmentFlow:
 
 @pytest.mark.asyncio
 class TestLoginChallengeFlow:
+    @pytest.mark.parametrize(
+        "enrolled,remember_device", [(False, False), (True, False), (True, True)]
+    )
+    async def test_password_rotation_reports_the_new_sessions_mfa_gate(
+        self, enrolled: bool, remember_device: bool
+    ) -> None:
+        settings = make_settings()
+        async with make_brain(settings) as (app, client):
+            uid, secret = await seed_user(
+                app, settings, email="rotation@example.com", enrolled=enrolled
+            )
+            await login(client, "rotation@example.com")
+            if enrolled:
+                # Use the accepted previous window first so the next check
+                # presents a new code, respecting the per-user replay fence.
+                verified = await client.post(
+                    "/api/v1/auth/mfa/verify",
+                    json={
+                        "code": current_totp_code(secret, at_time=time.time() - 30),
+                        "remember_device": remember_device,
+                    },
+                    headers=csrf_header(client, settings),
+                )
+                assert verified.status_code == 200, verified.text
+
+            changed = await client.post(
+                "/api/v1/auth/change-password",
+                json={
+                    "current_password": PASSWORD,
+                    "new_password": "new correct battery staple 42",
+                },
+                headers=csrf_header(client, settings),
+            )
+            assert changed.status_code == 200, changed.text
+            assert changed.json()["mfa_required"] is enrolled
+            assert TRUST_COOKIE not in client.cookies
+
+            async with app.state.db.session() as session:
+                rows = list(
+                    (
+                        await session.scalars(select(SessionRow).where(SessionRow.user_id == uid))
+                    ).all()
+                )
+                live = [row for row in rows if row.revoked_at is None]
+                assert len(rows) == 2
+                assert len(live) == 1
+                assert live[0].mfa_verified_at is None
+                assert not list(
+                    (
+                        await session.scalars(
+                            select(TrustedDevice).where(TrustedDevice.user_id == uid)
+                        )
+                    ).all()
+                )
+
+            protected = await client.get("/api/v1/projects")
+            if enrolled:
+                assert protected.status_code == 403, protected.text
+                assert protected.json()["error"] == "mfa_reverify_required"
+                verified = await client.post(
+                    "/api/v1/auth/mfa/verify",
+                    json={"code": current_totp_code(secret)},
+                    headers=csrf_header(client, settings),
+                )
+                assert verified.status_code == 200, verified.text
+                protected = await client.get("/api/v1/projects")
+            assert protected.status_code == 200, protected.text
+
     async def test_full_challenge_round_trip(self) -> None:
         """login -> mfa_required -> wrong code 401 (audited) ->
         correct TOTP -> session is MFA-fresh."""

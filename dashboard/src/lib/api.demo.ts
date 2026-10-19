@@ -29,9 +29,9 @@
  *   3. Run `pnpm build:demo && pnpm preview:demo` to verify
  *
  * Adding seed data shapes:
- *   The JSON shapes must match the OpenAPI types under
- *   src/lib/openapi-types.gen.ts. If the dashboard's TypeScript
- *   complains at build time, the seed data is wrong; fix the JSON.
+ *   Keep JSON shapes aligned with src/lib/openapi-types.gen.ts.
+ *   Runtime seed JSON is not automatically checked by TypeScript;
+ *   exercise affected demo routes and fixture tests when changing it.
  */
 
 import { applyDemoTimestamps } from "./demo-timestamps";
@@ -434,9 +434,8 @@ const ROUTES: RouteHandler[] = [
   },
 
   // Per-project lists. Each maps to a single JSON file per project.
-  // Tasks endpoint accepts query params (status, page, etc.) but the
-  // demo serves the same canned page regardless; the dashboard's
-  // filter UI still renders, just not predictively.
+  // The tasks route applies its supported filters and pagination to
+  // the finite seeded collection.
   {
     // Canvas tree, built from tasks.json by root_task_id. Declared ahead of
     // the task detail route: that route's pattern is anchored, so it would
@@ -509,7 +508,9 @@ const ROUTES: RouteHandler[] = [
     handler: (_req, match) =>
       serveItemFromList(
         `projects/${match[1]}/tasks.json`,
-        (item) => item.task_id === match[3] || item.id === match[3],
+        (item) =>
+          item.engine === match[2] &&
+          (item.task_id === match[3] || item.id === match[3]),
       ),
   },
   {
@@ -951,7 +952,6 @@ export async function demoFetch(
         ? input.toString()
         : input.url;
   const path = url.replace(/^https?:\/\/[^/]+/, "");
-  const method = (init?.method ?? "GET").toUpperCase();
 
   // /api/v1/* and /setup* go through the interceptor. /metrics, /ws,
   // and any /demo-data/* fetches go through real fetch (the dashboard
@@ -961,18 +961,21 @@ export async function demoFetch(
     return fetch(input, init);
   }
 
+  // Retain Request method, headers and body, then apply explicit init
+  // overrides through the platform's normal Request constructor.
+  const request = new Request(
+    input instanceof Request
+      ? input
+      : url.startsWith("http") ? url : `http://demo.z4j.com${url}`,
+    init,
+  );
+  const method = request.method.toUpperCase();
+
   for (const route of ROUTES) {
     if (route.method !== method) continue;
     const m = path.match(route.pattern);
     if (m) {
-      // Construct a Request-like object so handlers that need to
-      // read the body have one. URL might be a relative path; that
-      // is fine for body-reading purposes.
-      const req = new Request(
-        url.startsWith("http") ? url : `http://demo.z4j.com${url}`,
-        init,
-      );
-      return route.handler(req, m);
+      return route.handler(request, m);
     }
   }
 

@@ -133,6 +133,10 @@ def clear_trust_cookie(response: Response, *, environment: str) -> None:
     response.delete_cookie(
         cookie_name(environment=environment),
         path="/",
+        # Browsers enforce __Host- prefix rules even on an expiry header.
+        secure=not is_dev_environment(environment),
+        httponly=True,
+        samesite="strict",
     )
 
 

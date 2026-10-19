@@ -1,5 +1,5 @@
 /**
- * Static structural-equivalence assertions between the
+ * Static assignability assertions between selected
  * hand-maintained ``api-types.ts`` shapes and the generated
  * ``openapi-types.gen.ts`` (which is ``pnpm openapi:gen``'d from
  * the brain's live OpenAPI snapshot).
@@ -10,19 +10,18 @@
  * consumer wants the simple flat ``WorkerPublic`` / ``TaskPublic``
  * / ``UserPublic`` shape rather than the
  * ``components["schemas"]["WorkerPublic"]`` syntax that
- * openapi-typescript emits. Replacing it across 22 files would be
- * pure churn with no user-facing benefit.
+ * openapi-typescript emits. Consumers can keep these flat names while the assertions below
+ * check selected models against generated types.
  *
  * BUT - we also want the brain Pydantic models to be the source
  * of truth, and the dashboard's hand-typed mirror to fail loudly
  * the moment they drift.
  *
- * This file does the loudly-failing part. For every interface in
- * ``api-types.ts``, a ``StructurallyEquivalent`` type assertion
- * proves the hand-typed shape has the same fields with the same
- * types as the schema component the brain advertises in its
- * OpenAPI document. ``tsc --noEmit`` (run by ``pnpm typecheck``,
- * which CI gates on) fails on any mismatch.
+ * For the models explicitly listed below, ``StructurallyEquivalent``
+ * checks one-way assignability from the hand-written shape to the
+ * generated component. ``pnpm typecheck`` fails when that assignment
+ * is invalid. Extra fields, narrower types and omitted optional fields
+ * can pass; this is not exhaustive schema equality or runtime validation.
  *
  * How to update it
  * ----------------
@@ -30,7 +29,7 @@
  * 2. Restart the brain (or it auto-reloads in dev).
  * 3. Run ``pnpm openapi:fetch && pnpm openapi:gen`` to refresh
  *    the snapshot + generated types.
- * 4. ``pnpm typecheck`` will now fail in this file with
+ * 4. An incompatible change to a checked model makes ``pnpm typecheck`` fail with
  *    ``DRIFTED_FROM_THE_BRAIN_SCHEMA: "X"``, naming the fields the
  *    hand-typed mirror is missing (or saying every field is present
  *    and one of them has the wrong type).
@@ -104,14 +103,10 @@ type MissingFields<Hand, Generated> = Exclude<
 >;
 
 /**
- * Asserts ``Hand`` is structurally a superset of ``Generated``.
+ * Checks whether ``Hand`` is assignable to ``Generated``.
  *
- * The check is one-way on purpose: the hand-typed shape MAY add
- * doc-only fields the brain doesn't advertise (e.g. UI-only
- * computed flags) but it MUST cover every field the brain
- * actually returns. Drift in the other direction (a Pydantic
- * field missing from the dashboard) is the actual bug class we're
- * preventing.
+ * Required generated fields must be present with assignable types.
+ * Additional fields, narrower types and missing optional fields may pass.
  *
  * On failure this resolves to an object type rather than to
  * ``never``, for two reasons. It cannot be silently swallowed by

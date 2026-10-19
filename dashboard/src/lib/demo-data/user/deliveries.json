@@ -100,7 +100,7 @@
       "task_id": "task-django-2",
       "task_name": "billing.run_daily_invoices",
       "status": "failed",
-      "response_code": 503,
+      "response_code": 429,
       "error": "channel rate-limited (Slack 429 retry-after: 30)",
       "sent_at_offset_s": -1268,
       "channel_name": "engineering-slack",

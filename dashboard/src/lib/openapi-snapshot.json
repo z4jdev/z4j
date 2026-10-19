@@ -904,7 +904,7 @@
                 "type": "null"
               }
             ],
-            "description": "id of the newest audit row the receiver acknowledged.",
+            "description": "id of the initial audit-head baseline or, after delivery, the newest row the receiver acknowledged.",
             "title": "Cursor Id"
           },
           "cursor_initialised": {
@@ -922,7 +922,7 @@
                 "type": "null"
               }
             ],
-            "description": "occurred_at of the newest audit row the receiver acknowledged.",
+            "description": "occurred_at of the initial audit-head baseline or, after delivery, the newest row the receiver acknowledged.",
             "title": "Cursor Occurred At"
           },
           "enabled": {
@@ -1585,7 +1585,7 @@
         "type": "object"
       },
       "ChannelTestRequest": {
-        "description": "Body for the unsaved-config test endpoint.\n\nAdmin is composing a channel in the dialog and wants to verify\ncredentials BEFORE persisting. We accept a full ``{type, config}``\nshape, validate it through the same SSRF / format guards that\ncreate_channel / update_channel use, and dispatch a single test\npayload. Nothing is written to the DB.",
+        "description": "Body for the unsaved-config test endpoint.\n\nAdmin is composing a channel in the dialog and wants to verify\ncredentials BEFORE persisting. We accept a full ``{type, config}``\nshape, validate it through the same SSRF / format guards that\ncreate_channel / update_channel use, and dispatch a single test\npayload. The channel is not saved; the test records delivery/audit\nhistory when persistence succeeds.",
         "properties": {
           "config": {
             "additionalProperties": true,
@@ -1967,6 +1967,19 @@
             "format": "uuid",
             "title": "Agent Id",
             "type": "string"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
           },
           "idempotency_key": {
             "anyOf": [
@@ -2527,7 +2540,7 @@
             "type": "array"
           },
           "trigger": {
-            "pattern": "^(task\\.failed|task\\.succeeded|task\\.retried|agent\\.offline|agent\\.online|schedule\\.fire\\.failed|schedule\\.fire\\.succeeded|schedule\\.task_failed|schedule\\.misfired|schedule\\.circuit_breaker\\.tripped)$",
+            "pattern": "^(task\\.failed|task\\.succeeded|task\\.retried|agent\\.offline|schedule\\.fire\\.failed|schedule\\.fire\\.succeeded|schedule\\.task_failed|schedule\\.misfired|schedule\\.circuit_breaker\\.tripped)$",
             "title": "Trigger",
             "type": "string"
           }
@@ -2650,7 +2663,7 @@
           "trigger": {
             "anyOf": [
               {
-                "pattern": "^(task\\.failed|task\\.succeeded|task\\.retried|agent\\.offline|agent\\.online|schedule\\.fire\\.failed|schedule\\.fire\\.succeeded|schedule\\.task_failed|schedule\\.misfired|schedule\\.circuit_breaker\\.tripped)$",
+                "pattern": "^(task\\.failed|task\\.succeeded|task\\.retried|agent\\.offline|schedule\\.fire\\.failed|schedule\\.fire\\.succeeded|schedule\\.task_failed|schedule\\.misfired|schedule\\.circuit_breaker\\.tripped)$",
                 "type": "string"
               },
               {
@@ -3664,7 +3677,7 @@
         "type": "object"
       },
       "ImportSchedulesRequest": {
-        "description": "POST body for ``/api/v1/projects/{slug}/schedules:import``.\n\n``mode`` controls the delete behaviour:\n\n- ``\"upsert\"`` (default): per-row upsert. Schedules already in\n  brain that are NOT in the batch stay untouched. Right for the\n  one-shot importers (celery-beat, rq, apscheduler, cron).\n- ``\"replace_for_source\"``: same upsert semantics for present\n  rows, plus delete every schedule with the same ``source``\n  label that is NOT in this batch. Right for the declarative\n  reconciler - the framework adapter sends the COMPLETE set of\n  schedules from one source label and absence means removal.\n\n``source_filter`` is required when ``mode=\"replace_for_source\"``\nand must come from the audited replace-source allow-list.\nDefaults to the source of the first row in the batch (the\nframework adapters always tag everything with one label).\n\nAudit fix HIGH-8: ``schedules`` is capped at 2000 entries to\nbound the worst-case blast radius of\n``mode=replace_for_source`` (a misconfigured CI pipeline with\nan empty list could otherwise wipe thousands of schedules in\none POST). Operators with legitimately larger schedule sets\nshould batch their reconciles by source label or contact us\nso we can raise the cap with safer semantics.",
+        "description": "POST body for ``/api/v1/projects/{slug}/schedules:import``.\n\n``mode`` controls the delete behaviour:\n\n- ``\"upsert\"`` (default): per-row upsert. Schedules already in\n  brain that are NOT in the batch stay untouched. Right for the\n  one-shot importers (celery-beat, rq, apscheduler, cron).\n- ``\"replace_for_source\"``: same upsert semantics for present\n  rows, plus delete every schedule with the same ``source``\n  label that is NOT in this batch. Right for the declarative\n  reconciler - the framework adapter sends the COMPLETE set of\n  schedules from one source label and absence means removal.\n\n``source_filter`` is required when ``mode=\"replace_for_source\"``\nand must come from the audited replace-source allow-list.\nDefaults to the source of the first row in the batch (the\nframework adapters always tag everything with one label).\n\n``schedules`` is capped at 2000 incoming entries to bound input size\nand per-row validation work. This does not cap replacement deletions:\n``replace_for_source`` can remove every stored row in the selected source\nscope that is absent from the batch, including when the batch is empty.",
         "properties": {
           "mode": {
             "default": "upsert",
@@ -4356,7 +4369,7 @@
           },
           "mfa_required": {
             "default": false,
-            "description": "True when the user has MFA enrolled AND a valid trust cookie was NOT presented. The dashboard should route to the MFA-verify page. Until verification succeeds, this cookie session may call only POST /api/v1/auth/mfa/verify, POST /api/v1/auth/logout, GET /api/v1/auth/me, and GET /api/v1/auth/mfa/status.",
+            "description": "True when the new session needs second-factor verification. At login, an enrolled user can satisfy this with a valid trust cookie. Password changes revoke that trust and require fresh verification for enrolled users. The dashboard should route to the MFA-verify page. Until verification succeeds, this cookie session may call only POST /api/v1/auth/mfa/verify, POST /api/v1/auth/logout, GET /api/v1/auth/me, and GET /api/v1/auth/mfa/status.",
             "title": "Mfa Required",
             "type": "boolean"
           },
@@ -4474,6 +4487,110 @@
         "title": "MfaStatusResponse",
         "type": "object"
       },
+      "NativeScheduleMutationIn": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "additionalProperties": true,
+            "title": "Definition",
+            "type": "object"
+          },
+          "observed_control_token": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Control Token"
+          },
+          "operation": {
+            "enum": [
+              "create",
+              "update",
+              "delete",
+              "trigger"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "schedule_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Id"
+          },
+          "scheduler": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Scheduler",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "scheduler",
+          "operation"
+        ],
+        "title": "NativeScheduleMutationIn",
+        "type": "object"
+      },
+      "NativeScheduleMutationPublic": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "schedule_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "NativeScheduleMutationPublic",
+        "type": "object"
+      },
       "PasswordPolicyPublic": {
         "description": "Public-readable view of the brain's password policy.\n\nAdded in 1.6.5 (advisory F4). The dashboard fetches this at\npage load so password input fields enforce the correct\n``minLength`` instead of hardcoding a value that drifts from\nthe backend. Intentionally exposes ONLY the rules a user\nneeds to compose a valid password; never returns Argon2\nparameters, secret-related settings, or anything else\nsensitive.",
         "properties": {
@@ -4587,6 +4704,19 @@
             "minimum": -100.0,
             "title": "Delta",
             "type": "integer"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
           },
           "idempotency_key": {
             "anyOf": [
@@ -5467,6 +5597,19 @@
             "format": "uuid",
             "title": "Agent Id",
             "type": "string"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
           },
           "idempotency_key": {
             "anyOf": [
@@ -8707,7 +8850,7 @@
             "type": "string"
           },
           "trigger": {
-            "pattern": "^(task\\.failed|task\\.succeeded|task\\.retried|agent\\.offline|agent\\.online)$",
+            "pattern": "^(task\\.failed|task\\.succeeded|task\\.retried|agent\\.offline)$",
             "title": "Trigger",
             "type": "string"
           },
@@ -8915,7 +9058,7 @@
           "trigger": {
             "anyOf": [
               {
-                "pattern": "^(task\\.failed|task\\.succeeded|task\\.retried|agent\\.offline|agent\\.online)$",
+                "pattern": "^(task\\.failed|task\\.succeeded|task\\.retried|agent\\.offline)$",
                 "type": "string"
               },
               {
@@ -9146,6 +9289,19 @@
           "active_tasks": {
             "title": "Active Tasks",
             "type": "integer"
+          },
+          "agent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sole agent reporting this engine/name in retained worker lifecycle events; null when missing or ambiguous.",
+            "title": "Agent Id"
           },
           "concurrency": {
             "anyOf": [
@@ -9601,7 +9757,7 @@
   },
   "info": {
     "title": "z4j",
-    "version": "1.12.1"
+    "version": "1.13.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -9680,7 +9836,7 @@
             }
           },
           {
-            "description": "Constrain to a single project slug (must be in caller's accessible set).",
+            "description": "Filter project rows to this accessible slug, while retaining the caller's own audit rows that have no project.",
             "in": "query",
             "name": "project_slug",
             "required": false,
@@ -9694,7 +9850,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Constrain to a single project slug (must be in caller's accessible set).",
+              "description": "Filter project rows to this accessible slug, while retaining the caller's own audit rows that have no project.",
               "title": "Project Slug"
             }
           }
@@ -10192,7 +10348,7 @@
     },
     "/api/v1/auth/change-password": {
       "post": {
-        "description": "Self-service password change for the current user.\n\nVerifies the current password, validates the new password\nagainst the policy, hashes it, and rotates the session atomic-\nally:\n\n1. ``update_password_hash`` writes the new hash and bumps\n   ``password_changed_at``.\n2. ``sessions.revoke_all_for_user`` explicitly revokes every\n   prior session (audit H3 - the timestamp check alone leaves\n   stale ``revoked_at IS NULL`` rows that still show in the\n   Account \u2192 Security tab until each is next touched).\n3. A fresh session is minted + cookies reset so the caller\n   keeps working without an extra login round-trip.",
+        "description": "Self-service password change for the current user.\n\nVerifies the current password, validates the new password\nagainst the policy, hashes it, and rotates the session atomic-\nally:\n\n1. ``update_password_hash`` writes the new hash and bumps\n   ``password_changed_at``.\n2. ``sessions.revoke_all_for_user`` explicitly revokes every\n   prior session (audit H3 - the timestamp check alone leaves\n   stale ``revoked_at IS NULL`` rows that still show in the\n   Account \u2192 Security tab until each is next touched).\n3. A fresh session is minted and cookies reset. Enrolled users\n   must verify MFA again; the response sets ``mfa_required``.",
         "operationId": "change_password_api_v1_auth_change_password_post",
         "requestBody": {
           "content": {
@@ -15148,6 +15304,161 @@
         ]
       }
     },
+    "/api/v1/projects/{slug}/schedules/native-capabilities": {
+      "get": {
+        "description": "Expose live native operations without exposing connection authority.",
+        "operationId": "native_scheduler_capabilities_api_v1_projects__slug__schedules_native_capabilities_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response Native Scheduler Capabilities Api V1 Projects  Slug  Schedules Native Capabilities Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Native Scheduler Capabilities",
+        "tags": [
+          "schedules"
+        ]
+      }
+    },
+    "/api/v1/projects/{slug}/schedules/native-operations": {
+      "post": {
+        "description": "Request a native transaction; completion requires observed source truth.",
+        "operationId": "mutate_native_schedule_api_v1_projects__slug__schedules_native_operations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeScheduleMutationIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeScheduleMutationPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mutate Native Schedule",
+        "tags": [
+          "schedules"
+        ]
+      }
+    },
+    "/api/v1/projects/{slug}/schedules/native-operations/{operation_id}": {
+      "get": {
+        "operationId": "native_schedule_operation_status_api_v1_projects__slug__schedules_native_operations__operation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeScheduleMutationPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Native Schedule Operation Status",
+        "tags": [
+          "schedules"
+        ]
+      }
+    },
     "/api/v1/projects/{slug}/schedules/runs": {
       "get": {
         "description": "Last ``limit`` fires for each requested schedule, newest first.\n\nDeclared before the ``/{schedule_id}`` routes on purpose: FastAPI matches\nin declaration order, and after them the literal ``runs`` would be parsed\nas a schedule id and refused with a 422.\n\n``id`` repeats (``?id=...&id=...``) and is capped at one list page. Ids\nfrom another project are dropped silently rather than refused: this is a\nread of history the caller can already list, and a 403 on a stale id from\na cached page would turn a routine refresh into an error.",
@@ -15610,7 +15921,7 @@
     },
     "/api/v1/projects/{slug}/schedules/{schedule_id}/misfires": {
       "get": {
-        "description": "Return the schedule's detected misfires, newest first.\n\nAuthorization: VIEWER. A misfire is a system-detected \"this enabled\nschedule missed its slot\" event (no who-did-what), so unlike the\ngeneral audit log (ADMIN) it is safe for any project member to see --\nit is operational data about a schedule they can already read. The\nmost recent row is the schedule detail page's \"last misfire\".\n\nLimit capped at 1000; the dashboard defaults to a short window.",
+        "description": "Return the schedule's detected misfires, newest first.\n\nAuthorization: VIEWER. A misfire is a system-detected \"this enabled\nschedule missed its slot\" event (no who-did-what), so unlike the\ngeneral audit log (AUDITOR or ADMIN) it is safe for any project member to see --\nit is operational data about a schedule they can already read. The\nmost recent row is the schedule detail page's \"last misfire\".\n\nLimit capped at 1000; the dashboard defaults to a short window.",
         "operationId": "list_schedule_misfires_api_v1_projects__slug__schedules__schedule_id__misfires_get",
         "parameters": [
           {
@@ -15962,7 +16273,7 @@
     },
     "/api/v1/projects/{slug}/schedules:diff": {
       "post": {
-        "description": "Preview what ``:import`` would do without applying it.\n\nSame body as ``:import``. Returns four buckets:\n\n- ``inserted`` - rows in the batch with no matching brain row.\n- ``updated`` - rows with a matching brain row and a different\n  ``source_hash``. The ``current`` field carries the brain's\n  pre-update shape.\n- ``unchanged`` - rows whose ``source_hash`` matches brain.\n- ``deleted`` - only populated when ``mode=\"replace_for_source\"``;\n  rows brain has under the resolved ``source_filter`` that the\n  batch dropped.\n\nAuthorization: project ADMIN. The diff itself is read-only but\nsurfaces the same data ``:import`` would mutate, so it inherits\nthe same role gate. (A separate \"view diff as VIEWER\" path could\nbe added later if operator UX demands it.)",
+        "description": "Preview what ``:import`` would do without applying it.\n\nSame body as ``:import``. Returns four buckets:\n\n- ``inserted`` - rows in the batch with no matching brain row.\n- ``updated`` - rows with a matching brain row and a different\n  ``source_hash``. The ``current`` field carries the brain's\n  pre-update shape.\n- ``unchanged`` - rows whose ``source_hash`` matches brain.\n- ``deleted`` - only populated when ``mode=\"replace_for_source\"``;\n  rows brain has under the resolved ``source_filter`` that the\n  batch dropped.\n\nRows outside the project's scheduler allowlist return 422 with\nrow-indexed errors instead of predicting changes import would refuse.\n\nAuthorization: project ADMIN. The diff itself is read-only but\nsurfaces the same data ``:import`` would mutate, so it inherits\nthe same role gate. (A separate \"view diff as VIEWER\" path could\nbe added later if operator UX demands it.)",
         "operationId": "diff_schedules_api_v1_projects__slug__schedules_diff_post",
         "parameters": [
           {
@@ -16812,7 +17123,7 @@
     },
     "/api/v1/schedulers": {
       "get": {
-        "description": "Return one entry per configured scheduler URL.\n\nAuthorization is global ADMIN (not project-scoped). The fleet\nis operator-level concern - any project admin sees the same\nfleet, but only global admins (``user.is_admin``) can view it.",
+        "description": "Return one entry per configured scheduler URL.\n\nAuthorization is global ADMIN (not project-scoped). The fleet\nis an operator-level concern: only global admins\n(``user.is_admin``) can view it.",
         "operationId": "list_fleet_api_v1_schedulers_get",
         "responses": {
           "200": {

@@ -20,15 +20,19 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
 from z4j_brain.persistence.models import (
+    AuditLog,
     NotificationChannel,
     Project,
+    ProjectDefaultSubscription,
     Session,
     User,
 )
+from z4j_brain.persistence.repositories import ProjectDefaultSubscriptionRepository
 from z4j_brain.settings import Settings
 
 
@@ -172,3 +176,92 @@ class TestProductionRepro:
         if r.status_code != 201:
             print(f"\n!!! status={r.status_code}\nbody={r.text}")  # noqa: T201  diagnostic on assertion failure
         assert r.status_code == 201, r.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update"])
+async def test_default_trigger_race_returns_conflict(
+    operation: str,
+    integration_settings: Settings,
+    brain_app,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed arrival after the precheck loses cleanly at the real flush."""
+    seed = await _seed(brain_app, integration_settings)
+    original_id, competitor_id = uuid.uuid4(), uuid.uuid4()
+    async with brain_app.state.db.session() as session:
+        session.add(
+            ProjectDefaultSubscription(
+                id=original_id,
+                project_id=seed["project_id"],
+                trigger="task.failed",
+                filters={},
+                in_app=True,
+                project_channel_ids=[],
+                cooldown_seconds=300,
+            ),
+        )
+        await session.commit()
+
+    original_check = ProjectDefaultSubscriptionRepository.exists_for_project_trigger
+
+    async def concurrent_arrival(repo, project_id, trigger):
+        exists = await original_check(repo, project_id, trigger)
+        assert not exists
+        # PostgreSQL lets this independent writer commit while the request's
+        # READ COMMITTED transaction still retains its earlier precheck result.
+        async with brain_app.state.db.session() as session:
+            session.add(
+                ProjectDefaultSubscription(
+                    id=competitor_id,
+                    project_id=project_id,
+                    trigger=trigger,
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[],
+                    cooldown_seconds=10,
+                ),
+            )
+            await session.commit()
+        return exists
+
+    monkeypatch.setattr(
+        ProjectDefaultSubscriptionRepository,
+        "exists_for_project_trigger",
+        concurrent_arrival,
+    )
+    async with _client(brain_app, integration_settings, seed) as client:
+        url = "/api/v1/projects/fragai/notifications/defaults"
+        body = {"trigger": "task.succeeded", "cooldown_seconds": 90}
+        if operation == "create":
+            response = await client.post(url, json=body)
+        else:
+            response = await client.patch(f"{url}/{original_id}", json=body)
+
+    assert response.status_code == 409, response.text
+    assert response.json()["details"] == {"trigger": "task.succeeded"}
+    async with brain_app.state.db.session() as session:
+        defaults = list(
+            await session.scalars(
+                select(ProjectDefaultSubscription).where(
+                    ProjectDefaultSubscription.project_id == seed["project_id"],
+                ),
+            ),
+        )
+        assert {row.id for row in defaults} == {original_id, competitor_id}
+        original = next(row for row in defaults if row.id == original_id)
+        assert original.trigger == "task.failed"
+        assert original.cooldown_seconds == 300
+        competitor = next(row for row in defaults if row.id == competitor_id)
+        assert competitor.trigger == "task.succeeded"
+        assert competitor.cooldown_seconds == 10
+        audit_rows = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action.in_(
+                        ["notifications.default.create", "notifications.default.update"],
+                    ),
+                ),
+            ),
+        )
+        assert audit_rows == []

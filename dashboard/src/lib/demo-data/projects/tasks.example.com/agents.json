@@ -90,7 +90,7 @@
     "engine_adapters": ["dramatiq"],
     "scheduler_adapters": [],
     "capabilities": {
-      "dramatiq": ["cancel_task", "retry_task", "retry_by_reference_v1"]
+      "dramatiq": ["submit_task", "retry_task", "purge_queue", "retry_by_reference_v1"]
     },
     "last_seen_at_offset_s": -3,
     "last_connect_at_offset_s": -86400,

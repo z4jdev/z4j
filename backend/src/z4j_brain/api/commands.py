@@ -257,7 +257,7 @@ class RetryTaskRequest(BaseModel):
         """RH1 defense in depth: override_args and override_kwargs must
         be supplied TOGETHER or not at all.
 
-        Native engines (celery/rq/dramatiq) retry BY REFERENCE and normally need
+        Native engines (celery/rq) retry BY REFERENCE and normally need
         no overrides, so a PARTIAL override -- exactly one half present -- is
         ambiguous: the operator changed one half but left the other to be
         reconstructed from a source the brain has redacted. An older (N-1) agent
@@ -366,6 +366,7 @@ class PurgeQueueRequest(BaseModel):
 
 class RestartWorkerRequest(BaseModel):
     agent_id: uuid.UUID
+    engine: str | None = Field(default=None, min_length=1, max_length=40)
     worker_name: str = Field(min_length=1, max_length=200)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
@@ -374,6 +375,7 @@ class PoolResizeRequest(BaseModel):
     """Grow or shrink a worker's process pool."""
 
     agent_id: uuid.UUID
+    engine: str | None = Field(default=None, min_length=1, max_length=40)
     worker_name: str = Field(min_length=1, max_length=200)
     delta: int = Field(ge=-100, le=100)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
@@ -390,6 +392,7 @@ class ConsumerRequest(BaseModel):
     """Add or cancel a queue consumer on a worker."""
 
     agent_id: uuid.UUID
+    engine: str | None = Field(default=None, min_length=1, max_length=40)
     worker_name: str = Field(min_length=1, max_length=200)
     queue: str = Field(min_length=1, max_length=200)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
@@ -629,7 +632,7 @@ async def issue_retry_task(
     # path -- routing metadata, never redacted) so adapters without a
     # native ``retry_task`` (huey/arq/taskiq) can lower the call to
     # ``submit_task`` agent-side. Adapters that DO implement retry_task
-    # natively (celery/rq/dramatiq) ignore the extra fields.
+    # natively (celery/rq) ignore the extra fields.
     #
     # 1.7.1 (H3/M7, correctness/security): the brain stores args/kwargs
     # ALREADY REDACTED (Task model: "defence in depth before storing"),
@@ -884,21 +887,17 @@ async def issue_bulk_retry(
         )
         await db_session.commit()
 
-    # H2: distinguish "task_ids omitted" (a legitimate retry-all-matching
-    # request) from "task_ids present but not a non-empty list" (an explicit
-    # selection that is empty [] or malformed, e.g. a bare string). The latter
-    # must NOT fall through to the all-matching path below -- that would silently
-    # mass-retry the WHOLE project's failed backlog when the operator/UI actually
-    # selected zero (or sent a malformed value). Reject it (fail closed: a
-    # malformed explicit selection must never widen a destructive action).
+    # Explicit selections must be nonempty lists. Missing task_ids is
+    # handled separately below with a 410 directing all-matching callers
+    # to the durable bulk-retry-requests resource.
     if "task_ids" in raw_filter and not (isinstance(raw_ids, list) and raw_ids):
         raise HTTPException(
             status_code=400,
             detail={
                 "error": (
                     "task_ids was supplied but is not a non-empty list of ids. "
-                    "Omit task_ids to retry all matching, or supply at least one "
-                    "id to retry a specific selection."
+                    "Supply at least one id to retry a specific selection. "
+                    f"For all matching tasks, use /api/v1/projects/{slug}/bulk-retry-requests."
                 ),
             },
         )
@@ -912,12 +911,8 @@ async def issue_bulk_retry(
         # len(task_names), a deduped dict, against len(capped_ids)) into a
         # false 400 with zero ids actually missing.
         capped_ids = list(dict.fromkeys(str(t) for t in raw_ids))[: body.max]
-        # The filter MUST carry an explicit engine now - silently
-        # defaulting to "celery" would misroute a bulk retry of RQ
-        # or Dramatiq tasks (LATENT-1). We still accept the filter
-        # without an engine, but then we skip the priority lookup
-        # (which needs an engine for its WHERE clause) rather than
-        # guessing.
+        # An explicit, supported engine is required for ownership checks
+        # and dispatch. Missing or unknown engines are rejected below.
         filter_engine = raw_filter.get("engine")
         # H4: a bulk retry that targets explicit task_ids MUST name a
         # well-formed engine, and EVERY id must resolve to a Task row in THIS
@@ -1076,8 +1071,8 @@ async def issue_bulk_retry(
 
 def _parse_filter_datetime(value: Any) -> datetime | None:
     """Parse a bulk-filter ``since``/``until`` value (ISO-8601 string or epoch
-    seconds) into an aware datetime; None if absent or unparseable (an
-    unparseable bound is simply not applied rather than silently widening)."""
+    seconds) into an aware datetime; None if absent or unparseable.
+    Callers must reject a supplied bound that produces None."""
     import contextlib
 
     dt: datetime | None = None
@@ -1549,7 +1544,7 @@ async def issue_restart_worker(
         action="restart_worker",
         target_type="worker",
         target_id=body.worker_name,
-        payload={"worker_name": body.worker_name},
+        payload={"worker_name": body.worker_name, "engine": body.engine},
         idempotency_key=body.idempotency_key,
         agent_id=body.agent_id,
         user=user,
@@ -1588,6 +1583,7 @@ async def issue_pool_resize(
         target_id=body.worker_name,
         payload={
             "worker_name": body.worker_name,
+            "engine": body.engine,
             "delta": abs(body.delta),
         },
         idempotency_key=body.idempotency_key,
@@ -1627,6 +1623,7 @@ async def issue_add_consumer(
         target_id=body.worker_name,
         payload={
             "worker_name": body.worker_name,
+            "engine": body.engine,
             "queue": body.queue,
         },
         idempotency_key=body.idempotency_key,
@@ -1666,6 +1663,7 @@ async def issue_cancel_consumer(
         target_id=body.worker_name,
         payload={
             "worker_name": body.worker_name,
+            "engine": body.engine,
             "queue": body.queue,
         },
         idempotency_key=body.idempotency_key,
@@ -1829,6 +1827,25 @@ async def _issue_generic_command(
     if dispatch_requirement is not None:
         required_engine, required_action = dispatch_requirement
         _require_dispatchable(agent, engine=required_engine, action=required_action)
+
+    if target_type == "worker" and action in {
+        "restart_worker",
+        "pool_grow",
+        "pool_shrink",
+        "add_consumer",
+        "cancel_consumer",
+    }:
+        from z4j_brain.domain.worker_targets import require_native_worker_target
+
+        engine = await require_native_worker_target(
+            db_session,
+            project_id=project.id,
+            agent=agent,
+            worker_name=payload["worker_name"],
+            engine=payload.get("engine"),
+            action=action,
+        )
+        payload = {**payload, "engine": engine}
 
     commands = CommandRepository(db_session)
     command = await dispatcher.issue(

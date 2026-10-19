@@ -761,11 +761,13 @@ def test_an_externally_owned_schedule_is_addressed_to_its_own_adapter() -> None:
     """
     row = _row(control_token=_TOKEN)
     row.scheduler = "celery-beat"
-    row.external_id = "beat-42"
+    row.external_id = "dcb:42"
 
     fire = _manual_fire_command(row)
 
     assert fire.by_engine is False, "an agent's own scheduler adapter is the target"
     assert fire.action == "schedule.trigger_now"
-    assert fire.payload["schedule_id"] == "nightly"
-    assert fire.payload["external_id"] == "beat-42"
+    # Display names can collide across static and database sources. The
+    # qualified native identity must survive all the way to the adapter.
+    assert fire.payload["schedule_id"] == "dcb:42"
+    assert fire.payload["external_id"] == "dcb:42"

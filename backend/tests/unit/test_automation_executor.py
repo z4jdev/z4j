@@ -51,6 +51,9 @@ def _rule(**kw) -> SimpleNamespace:
     kw.setdefault("project_id", uuid.uuid4())
     kw.setdefault("name", "rule")
     kw.setdefault("trigger", "task.failed")
+    # Persisted rules have an explicit JSON conditions object; absent/NULL
+    # conditions are malformed and must not silently become match-all.
+    kw.setdefault("conditions", {})
     kw.setdefault("dry_run", False)
     kw.setdefault("actions", [])
     kw.setdefault("config_revision", 1)
@@ -130,16 +133,17 @@ class TestExecutorGovernance:
         assert all(r["metadata"]["outcome"] == "failed" for r in fired)
         assert all(r["result"] == "failed" for r in fired)
 
-    async def test_unknown_action_type(self) -> None:
+    @pytest.mark.parametrize("action_type", ["launch_missiles", [], {}, 0, None])
+    async def test_unknown_action_type(self, action_type) -> None:
         runner = _FakeRunner()
         audit = _FakeAudit()
         ex = AutomationExecutor(audit=audit, runner=runner)
-        rule = _rule(actions=[{"type": "launch_missiles"}])
+        rule = _rule(actions=[{"type": action_type}, {"type": "notify"}])
 
         await ex._run_one(None, None, rule, {}, CircuitDecision.EXECUTE)
 
-        assert runner.calls == []
-        assert _actions(audit)[0]["metadata"]["outcome"] == "unknown_action"
+        assert [c["action"]["type"] for c in runner.calls] == ["notify"]
+        assert [a["metadata"]["outcome"] for a in _actions(audit)] == ["unknown_action", "ran"]
 
 
 class _FakeSession:

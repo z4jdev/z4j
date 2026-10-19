@@ -62,7 +62,7 @@
     "trigger": "task.succeeded",
     "reason": "subscribed",
     "title": "Daily ETL completed: etl.warehouse_load",
-    "body": "Loaded 4.2M rows to Snowflake in 64m 12s",
+    "body": "Loaded 4.2M rows to Snowflake in 64m",
     "data": {
       "project_slug": "tasks.example.com"
     },
@@ -96,19 +96,5 @@
     },
     "read_at_offset_s": -3509,
     "created_at_offset_s": -3569
-  },
-  {
-    "id": "d0000000-0000-4000-1000-000000000008",
-    "project_id": "00000000-0000-4000-9000-000000000001",
-    "subscription_id": "e0000000-0000-4000-2000-000000000004",
-    "trigger": "agent.online",
-    "reason": "subscribed",
-    "title": "Agent online: beat-1",
-    "body": "Reconnected after restart",
-    "data": {
-      "project_slug": "example.com"
-    },
-    "read_at_offset_s": -86280,
-    "created_at_offset_s": -86340
   }
 ]

@@ -84,3 +84,13 @@ class TestDefaults:
         assert s.session_idle_timeout_seconds == 1800
         assert s.login_lockout_threshold == 10
         assert s.cors_allow_credentials is True
+
+
+@pytest.mark.parametrize("value", [0, 3601, 86400])
+def test_command_timeout_rejects_values_outside_wire_range(value: int) -> None:
+    with pytest.raises(ValidationError, match="command_timeout_seconds"):
+        Settings(**_base_kwargs(), command_timeout_seconds=value)  # type: ignore[arg-type]
+
+
+def test_command_timeout_accepts_wire_maximum() -> None:
+    assert Settings(**_base_kwargs(), command_timeout_seconds=3600).command_timeout_seconds == 3600  # type: ignore[arg-type]

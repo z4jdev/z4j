@@ -58,7 +58,7 @@ the connection and validates the PostgreSQL server certificate and hostname.
 Use an immutable digest from the published multi-architecture manifest for
 `Z4J_IMAGE` so a later tag move cannot change a production rollout.
 
-PostgreSQL unlocks horizontal scale-out (`LISTEN/NOTIFY`-based registry fan-out), range-partitioned events, and `tsvector` full-text search.
+PostgreSQL unlocks horizontal scale-out (`LISTEN/NOTIFY`-based registry fan-out) and range-partitioned events.
 
 ## Docker Compose (recommended)
 
@@ -71,10 +71,15 @@ cd z4j
 # SQLite (evaluation / homelab):
 docker compose up -d
 
-# PostgreSQL (production):
+# PostgreSQL (production). Create .env from the template, then set
+# POSTGRES_PASSWORD, Z4J_SECRET, Z4J_SESSION_SECRET, Z4J_AUDIT_CHAIN_SECRET,
+# Z4J_PUBLIC_URL and Z4J_ALLOWED_HOSTS in it; compose refuses to start
+# without them:
+cp .env.example .env
 docker compose -f docker-compose.postgres.yml up -d
 
-# Add Caddy auto-HTTPS on top of either:
+# Add Caddy auto-HTTPS on top of either (also set Z4J_DOMAIN and
+# Z4J_ACME_EMAIL in .env):
 docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
 ```
 
@@ -83,13 +88,13 @@ docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
 | Var | Default | Purpose |
 |---|---|---|
 | `Z4J_DATABASE_URL` | (unset = bundled SQLite) | `postgresql+asyncpg://...` for Postgres mode |
-| `Z4J_SECRET` | auto-generated | HMAC signing key (>= 32 bytes) |
-| `Z4J_SESSION_SECRET` | auto-generated | Session cookie signing key (>= 32 bytes) |
-| `Z4J_AUDIT_CHAIN_SECRET` | required in production | Independent audit-chain signing key (>= 32 bytes) |
+| `Z4J_SECRET` | auto-generated in SQLite mode; required with PostgreSQL | HMAC signing key (>= 32 bytes) |
+| `Z4J_SESSION_SECRET` | auto-generated in SQLite mode; required with PostgreSQL | Session cookie signing key (>= 32 bytes) |
+| `Z4J_AUDIT_CHAIN_SECRET` | auto-generated in SQLite mode; required with PostgreSQL outside dev | Independent audit-chain signing key (>= 32 bytes) |
 | `Z4J_BIND_PORT` | `7700` | ASGI port |
 | `Z4J_PUBLIC_URL` | `http://localhost:7700` | Used to build setup + password-reset links |
 | `Z4J_ENVIRONMENT` | `production` | Set to `dev` to relax host-header + HTTPS checks |
-| `Z4J_ALLOWED_HOSTS` | (required in prod) | JSON array of allowed Host headers |
+| `Z4J_ALLOWED_HOSTS` | `["localhost","127.0.0.1"]` | JSON array of allowed Host headers; set your public hostname for any non-loopback access |
 | `Z4J_BOOTSTRAP_ADMIN_EMAIL` + `_PASSWORD` | (unset) | If both set on empty DB, skip the setup-URL step and provision the admin directly |
 | `Z4J_EVENT_RETENTION_DAYS` | `30` | How long raw events live |
 | `Z4J_AUDIT_RETENTION_DAYS` | `90` | Audit-log row lifetime |
@@ -106,7 +111,7 @@ Full reference (30+ additional tunables for rate limits, Argon2 cost, CORS, sess
 ## What's inside
 
 - **Backend**: FastAPI + SQLAlchemy 2.0 async (Python 3.14-slim-trixie base image)
-- **Dashboard**: React 19 + TanStack Start + Tailwind CSS 4, served from the same process at `/`
+- **Dashboard**: React 19 + TanStack Router + Tailwind CSS 4 (Vite single-page app), served from the same process at `/`
 - **Migrations**: Alembic, auto-applied on first boot, bundled inside the image
 - **Database**: SQLite (via `aiosqlite`) bundled by default; PostgreSQL 18 supported via `Z4J_DATABASE_URL`
 
@@ -129,4 +134,4 @@ The **z4j** image (this control plane) is AGPL. All **agent packages** (`z4j-cor
 ## Related
 
 - [`pip install z4j`](https://pypi.org/project/z4j/) - PyPI distribution (same content, for Python-native installs; AGPL)
-- [github.com/z4jdev](https://github.com/z4jdev) - all public repos (z4j + agent packages + sites)
+- [github.com/z4jdev](https://github.com/z4jdev) - public repos for z4j and its packages

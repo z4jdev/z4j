@@ -218,7 +218,9 @@ async def list_tasks(
                     },
                 ) from exc
 
-    cursor_pair = decode_cursor(cursor)
+    # Exports cover the whole filter. A listing cursor must neither truncate
+    # the download nor hide rows from the export-cap check.
+    cursor_pair = decode_cursor(cursor) if format is None else None
 
     # Parse field selection: ?fields=task_id,name,state,priority
     selected_fields: list[str] | None = None
@@ -837,11 +839,9 @@ def _export_xlsx(
         for r, row in enumerate(rows, start=1):
             for col, (_, fn) in enumerate(field_defs):
                 value = _neutralise_formula(fn(row))
-                # xlsxwriter refuses ``None`` and a few other
-                # types it can't serialise (dict, list). Coerce
-                # everything to a string when we can't write it
-                # directly - type stability per column matters
-                # for Excel filtering.
+                # Write empty values as blank cells. Preserve supported
+                # scalar types and stringify structured values such as
+                # dicts/lists that xlsxwriter cannot write directly.
                 if value is None or value == "":
                     ws.write_blank(r, col, None)
                 elif isinstance(value, (str, int, float, bool)):

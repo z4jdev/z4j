@@ -1,12 +1,14 @@
 # Default values for the z4j chart.
 #
-# Every key has a comment explaining what it does and why the default is
-# what it is. Operators read this file as the canonical reference for the
-# chart's behavior; keep the comments honest.
+# Keys are commented where their behavior or default needs explaining.
+# Operators read this file as the canonical reference for the chart's
+# behavior; keep the comments honest.
 #
-# The defaults mirror the packaged docker-compose.yml evaluation posture:
-# one brain replica, bundled SQLite on a PersistentVolumeClaim, no
-# scheduler, no PostgreSQL, reachable through ``kubectl port-forward``.
+# The defaults follow the packaged docker-compose.yml evaluation posture
+# (one brain replica, bundled SQLite on a PersistentVolumeClaim, no
+# PostgreSQL, reachable through ``kubectl port-forward``) except that no
+# scheduler runs; set scheduler.enabled or brain.embeddedScheduler for
+# schedules to fire.
 # Production installs set brain.publicUrl, brain.allowedHosts,
 # brain.secrets and a PostgreSQL database; see README.md.
 
@@ -192,6 +194,9 @@ brain:
   # /metrics bearer token. The packaged SQLite mode auto-mints one into
   # /data/secret.env; set a Secret here to pin it. Required when
   # brain.serviceMonitor.enabled is true so Prometheus can present it.
+  # While a token gates /metrics (and Z4J_METRICS_PUBLIC is not enabled),
+  # the brain exempts that path from brain.allowedHosts, so a scrape that
+  # sends the pod IP as Host is accepted.
   metrics:
     authExistingSecret: ""
     authExistingSecretKey: token
@@ -283,7 +288,9 @@ brain:
     enabled: false
     interval: 30s
     scrapeTimeout: 10s
-    # Same Secret and key as brain.metrics.authExistingSecret.
+    # Same Secret and key as brain.metrics.authExistingSecret. The scrape
+    # targets each pod by address; the token-gated /metrics is exempt from
+    # brain.allowedHosts, so that Host is accepted.
     bearerTokenSecret:
       name: ""
       key: token
@@ -303,7 +310,7 @@ postgresql:
     tag: "18.6"
     # Pinned to the same image digest the compose file runs. Clear it to
     # follow the tag.
-    digest: "sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941"
+    digest: "sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336"
     pullPolicy: IfNotPresent
   auth:
     username: z4j
@@ -514,8 +521,8 @@ scheduler:
     metricsAuthExistingSecretKey: token
 
   resources:
-    # Measured idle RSS is about 50-95 MiB; workload, Python allocator
-    # behavior and cache size can raise it.
+    # Budget at least 128 MiB per scheduler; RSS depends on topology,
+    # schedule count, Python allocator behavior and cache size.
     requests:
       cpu: 100m
       memory: 128Mi

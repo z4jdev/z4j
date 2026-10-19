@@ -61,7 +61,6 @@ const TRIGGERS: { value: TriggerType; label: string }[] = [
   { value: "task.succeeded", label: "Task succeeded" },
   { value: "task.retried", label: "Task retried" },
   { value: "agent.offline", label: "Agent offline" },
-  { value: "agent.online", label: "Agent online" },
 ];
 
 const PRIORITIES = ["critical", "high", "normal", "low"] as const;
@@ -355,7 +354,7 @@ function filterSummary(filters: Record<string, unknown>): string {
 /**
  * Unified create / edit dialog for personal subscriptions.
  *
- * - ``existing=null`` => CREATE mode, all fields blank, project
+ * - ``existing=null`` => CREATE mode with initial defaults, project
  *   picker enabled, POST to /user/subscriptions on save.
  * - ``existing=row``  => EDIT mode, fields prefilled, project
  *   picker DISABLED (you can't move a sub between projects -
@@ -708,8 +707,9 @@ function SubscriptionDialog({
             onChange={(e) => setCooldown(e.target.value)}
           />
           <p className="text-xs text-muted-foreground">
-            Minimum interval between firings for the same task name. 0 = no
-            cooldown.
+            Minimum time between notifications from this subscription, across
+            every task it matches. Alerts inside the window are dropped, not
+            queued. 0 = no cooldown.
           </p>
         </div>
       </div>

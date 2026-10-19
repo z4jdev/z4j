@@ -3,11 +3,10 @@
  *
  * These mirror the Pydantic response models in
  * `packages/z4j/backend/src/z4j_brain/api/*.py`. We keep
- * them hand-written for v1 - `openapi-typescript` codegen lands
- * in Phase 1.1 once the schema settles. Hand-writing is fine
- * because the surface is small (~25 endpoints) and ANY drift
- * between brain + dashboard is caught immediately by TypeScript
- * at the call site.
+ * these flat names for consumers. `openapi-types.gen.ts` is generated
+ * from the committed OpenAPI snapshot; `api-types-check.ts` checks
+ * selected hand-written models for one-way assignability. Those
+ * checks do not validate every response or decode JSON at runtime.
  *
  * Naming convention: `*Public` matches the brain's response model
  * class name. Request payloads are `*Request`.
@@ -241,6 +240,8 @@ export type WorkerState = "online" | "offline" | "draining" | "unknown";
 export interface WorkerPublic {
   id: string;
   project_id: string;
+  /** Detail response only: sole retained lifecycle reporter; absent/null is unproven. */
+  agent_id?: string | null;
   engine: string;
   name: string;
   hostname: string | null;
@@ -286,6 +287,9 @@ export type ScheduleCatchUp = "skip" | "fire_one_missed" | "fire_all_missed";
 export type ScheduleOverlapPolicy = "allow" | "skip" | "queue";
 
 export interface SchedulePublic {
+  /** Observed generation required for native edits and deletion. */
+  control_token?: string | null;
+  schedule_revision?: number | null;
   id: string;
   project_id: string;
   engine: string;

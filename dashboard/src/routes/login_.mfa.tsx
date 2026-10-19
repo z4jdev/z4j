@@ -17,6 +17,7 @@ import { Label } from "@/components/ui/label";
 import { Z4jMark } from "@/components/z4j-mark";
 import { useMfaVerify } from "@/hooks/use-mfa";
 import { api, ApiError } from "@/lib/api";
+import { isSafeNextPath } from "@/lib/safe-next-path";
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { AlertCircle, Loader2 } from "lucide-react";
 import { useState } from "react";
@@ -53,22 +54,6 @@ export const Route = createFileRoute("/login_/mfa")({
   },
   component: MfaPage,
 });
-
-/** Whether ``raw`` is safe to navigate to after MFA verify.
- *
- * Same-origin only: must start with a single ``/`` (not ``//`` or
- * ``/\\`` which the browser interprets as a protocol-relative URL
- * pointing somewhere else). Anything that looks like an absolute
- * URL is rejected. The brain trusts the dashboard origin; an
- * attacker who could plant a phishing path in the ``next`` param
- * would otherwise turn the MFA gate into an open redirect.
- */
-function isSafeNextPath(raw: string | undefined): raw is string {
-  if (!raw) return false;
-  if (!raw.startsWith("/")) return false;
-  if (raw.startsWith("//") || raw.startsWith("/\\")) return false;
-  return true;
-}
 
 function MfaPage() {
   const navigate = useNavigate();
@@ -124,11 +109,21 @@ function MfaPage() {
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 429) {
-          setError({
-            title: "Too many attempts",
-            description:
-              "MFA verify is rate-limited per IP. Wait a minute and try again.",
-          });
+          // Two limits answer 429 here: the per-account lockout after
+          // repeated wrong codes, and the per-IP verify throttle.
+          setError(
+            err.details.reason === "mfa_locked"
+              ? {
+                  title: "Account temporarily locked",
+                  description:
+                    "Too many wrong codes. Two-factor verification for this account is locked for a while (15 minutes by default), from any network.",
+                }
+              : {
+                  title: "Too many attempts",
+                  description:
+                    "Too many code attempts from this network address. Wait a minute and try again.",
+                },
+          );
           return;
         }
         if (err.status === 401) {
@@ -223,10 +218,11 @@ function MfaPage() {
                 htmlFor="mfa-remember"
                 className="text-sm font-normal leading-snug text-muted-foreground"
               >
-                Skip the code at sign-in on this browser for 30 days.
+                Skip the code at sign-in on this browser (30 days by default).
                 <span className="block text-xs">
-                  Sensitive actions (change password, mint API key) will still
-                  ask for a fresh code.
+                  A sign-in that skips the code counts as verified: sensitive
+                  actions (change password, create API key) ask for a fresh
+                  code only once it is more than an hour old (by default).
                 </span>
               </Label>
             </div>

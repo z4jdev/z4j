@@ -343,7 +343,7 @@ class PrunePreview:
         return self.active_rows - self.expired_rows
 
 
-async def preview_authenticated_prune(
+async def preview_authenticated_prune(  # noqa: PLR0912, PLR0915  explicit integrity refusals
     session: AsyncSession,
     settings: Settings,
     *,
@@ -352,13 +352,13 @@ async def preview_authenticated_prune(
 ) -> PrunePreview:
     """Count the expired prefix of the active generation without touching it.
 
-    Authenticates the chain state first and refuses (raises
-    :class:`AuditChainIntegrityError`) when the state is missing, does not
-    authenticate under the configured keys, or disagrees with the physical
-    row count, so a dry run never reports a number from a chain the prune
-    itself would refuse. The walk also checks every link of the prefix it
-    counts; a broken link is the same refusal.
+    Checks current-key agreement, signed state/head, physical row count,
+    prefix row HMACs/links/key counts, and the retained successor before
+    reporting a count. These are read-only checks of the observed rows, not
+    a reservation: apply repeats its checks under the chain lock because
+    the database can change after the preview.
     """
+    from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.persistence.repositories import AuditLogRepository
 
     if not 1 <= page_size <= 5000:
@@ -382,6 +382,10 @@ async def preview_authenticated_prune(
         )
     state = states[0]
     authenticate_state(state, keyring)
+    if state.state_key_id != canonical_audit_key_id(secrets[0]):
+        raise AuditChainIntegrityError(
+            "configured current audit key differs from authenticated state",
+        )
     repo = AuditLogRepository(session)
     active_count = await repo.count_active_generation(generation=state.generation)
     if active_count != state.active_row_count:
@@ -390,9 +394,28 @@ async def preview_authenticated_prune(
             f"state {state.active_row_count}",
         )
     frozen_count = await repo.count_frozen_rows()
+    verifier = AuditService(settings)
+    head = (
+        await session.execute(
+            select(AuditLog)
+            .where(AuditLog.legacy_frozen.is_(False), AuditLog.chain_generation == state.generation)
+            .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
+            .limit(1),
+        )
+    ).scalar_one_or_none()
+    if active_count and (
+        head is None
+        or head.row_hmac != state.head_row_hmac
+        or head.hmac_key_id != state.head_hmac_key_id
+        or normalize_timestamp(head.occurred_at) != normalize_timestamp(state.head_occurred_at)
+        or head.id != state.head_id
+        or not verifier.verify_row(head)
+    ):
+        raise AuditChainIntegrityError("live audit head does not authenticate against state")
 
     expired = 0
     by_class: dict[str, int] = {}
+    key_counts = dict(state.active_key_counts)
     boundary: AuditLog | None = None
     blocker: AuditLog | None = None
     previous = state.prune_row_hmac
@@ -427,6 +450,22 @@ async def preview_authenticated_prune(
                 raise AuditChainIntegrityError(
                     f"expired audit prefix contains a broken link at row {row.id}",
                 )
+            if not verifier.verify_row(row):
+                raise AuditChainIntegrityError("selected audit prefix contains an invalid row HMAC")
+            if (
+                expired == 0
+                and state.prune_id is not None
+                and (normalize_timestamp(row.occurred_at), row.id.int)
+                <= (normalize_timestamp(state.prune_occurred_at), state.prune_id.int)
+            ):
+                raise AuditChainIntegrityError(
+                    "selected prefix does not sort after the prune boundary"
+                )
+            if row.hmac_key_id is None or key_counts.get(row.hmac_key_id, 0) <= 0:
+                raise AuditChainIntegrityError(
+                    "selected row key is absent from authenticated key counts",
+                )
+            key_counts[row.hmac_key_id] -= 1
             previous = row.row_hmac
             expired += 1
             by_class[action_class(row.action)] = by_class.get(action_class(row.action), 0) + 1
@@ -435,6 +474,27 @@ async def preview_authenticated_prune(
         cursor_id = rows[-1].id
         if len(rows) < page_size:
             break
+    if boundary is not None:
+        successor = (
+            await session.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.legacy_frozen.is_(False),
+                    AuditLog.chain_generation == state.generation,
+                    or_(
+                        AuditLog.occurred_at > boundary.occurred_at,
+                        (AuditLog.occurred_at == boundary.occurred_at)
+                        & (AuditLog.id > boundary.id),
+                    ),
+                )
+                .order_by(AuditLog.occurred_at, AuditLog.id)
+                .limit(1),
+            )
+        ).scalar_one_or_none()
+        if successor is not None and (
+            successor.prev_row_hmac != previous or not verifier.verify_row(successor)
+        ):
+            raise AuditChainIntegrityError("audit prefix successor does not authenticate")
     return PrunePreview(
         generation=state.generation,
         active_rows=active_count,
@@ -690,10 +750,7 @@ class AuditRetentionSweeper:
             100,
             self._settings.audit_retention_sweep_batch_size,
         )
-        max_per_pass = max(
-            batch_size,
-            self._settings.audit_retention_sweep_max_per_pass,
-        )
+        max_per_pass = self._settings.audit_retention_sweep_max_per_pass
         dialect_name = self._db.engine.dialect.name
         is_postgres = dialect_name == "postgresql"
 
@@ -717,9 +774,8 @@ class AuditRetentionSweeper:
         # ``SET LOCAL`` per batch is transaction-scoped (Postgres
         # docs); we re-set it every batch as belt-and-suspenders
         # so a future refactor that drops the SAVEPOINT still
-        # works. The ``begin_nested()`` SAVEPOINTs isolate
-        # batch-level errors so a single bad row doesn't abort
-        # the whole pass.
+        # works. A batch error propagates out of the SAVEPOINT and
+        # the outer transaction, rolling back the whole capped pass.
         if is_postgres:
             async with self._db.session() as session, session.begin():
                 lock_row = await session.execute(
@@ -743,7 +799,7 @@ class AuditRetentionSweeper:
                     rows = await self._sweep_one_batch_postgres(
                         session,
                         cutoffs=cutoffs,
-                        batch_size=batch_size,
+                        batch_size=min(batch_size, max_per_pass - total),
                     )
                     total += rows
                     if rows < batch_size:
@@ -757,7 +813,7 @@ class AuditRetentionSweeper:
             while not self._stop_event.is_set() and total < max_per_pass:
                 rows = await self._sweep_one_batch_sqlite(
                     cutoffs=cutoffs,
-                    batch_size=batch_size,
+                    batch_size=min(batch_size, max_per_pass - total),
                 )
                 total += rows
                 if rows < batch_size:
@@ -795,8 +851,7 @@ class AuditRetentionSweeper:
         skipping when the periodic sweeper holds the lease.
         """
         assert self._settings is not None
-        batch_size = max(100, self._settings.audit_retention_sweep_batch_size)
-        max_per_pass = max(batch_size, self._settings.audit_retention_sweep_max_per_pass)
+        max_per_pass = self._settings.audit_retention_sweep_max_per_pass
         total = 0
         while True:
             pruned = await self._do_sweep_v2(cutoffs=cutoffs, raise_when_busy=True)
@@ -828,10 +883,7 @@ class AuditRetentionSweeper:
                 return 0
             cutoffs = RetentionCutoffs.from_settings(self._settings, datetime.now(UTC))
         batch_size = max(100, self._settings.audit_retention_sweep_batch_size)
-        max_per_pass = max(
-            batch_size,
-            self._settings.audit_retention_sweep_max_per_pass,
-        )
+        max_per_pass = self._settings.audit_retention_sweep_max_per_pass
         secrets = self._settings.all_audit_chain_secrets_for_verification()
         if not secrets:
             raise AuditChainIntegrityError(
@@ -1130,9 +1182,9 @@ class AuditRetentionSweeper:
         out of the explicit outer begin) still has the GUC set
         for every DELETE.
 
-        The SAVEPOINT itself isolates errors: a row-level failure
-        in one batch rolls back to the SAVEPOINT without aborting
-        the entire pass + losing the advisory lock.
+        A failure rolls back this SAVEPOINT and propagates to the caller's
+        outer transaction, which rolls back all batches in the pass and
+        releases the advisory lock. The caller does not continue past errors.
         """
         async with session.begin_nested():
             await session.execute(
@@ -1269,10 +1321,7 @@ class AuditRetentionSweeper:
             100,
             self._settings.audit_retention_sweep_batch_size,
         )
-        max_per_pass = max(
-            batch_size,
-            self._settings.audit_retention_sweep_max_per_pass,
-        )
+        max_per_pass = self._settings.audit_retention_sweep_max_per_pass
 
         from z4j_brain.persistence.repositories.agent_status_history import (
             AgentStatusHistoryRepository,
@@ -1288,7 +1337,7 @@ class AuditRetentionSweeper:
                 repo = AgentStatusHistoryRepository(session)
                 rows = await repo.delete_older_than(
                     cutoff=cutoff,
-                    batch_size=batch_size,
+                    batch_size=min(batch_size, max_per_pass - total),
                 )
                 await session.commit()
             total += rows

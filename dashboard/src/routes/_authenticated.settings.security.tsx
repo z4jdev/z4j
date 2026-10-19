@@ -47,6 +47,7 @@ import {
   useTrustedDevices,
 } from "@/hooks/use-mfa";
 import { api } from "@/lib/api";
+import { formatAbsolute } from "@/lib/format";
 import { revokeOtherSessions } from "@/lib/session-actions";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
@@ -181,9 +182,13 @@ function MfaEnrollPanel() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => {
-                    navigator.clipboard.writeText(secret);
-                    toast.success("Secret copied to clipboard");
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(secret);
+                      toast.success("Secret copied to clipboard");
+                    } catch {
+                      toast.error("Could not copy the secret. Copy it manually from the text shown.");
+                    }
                   }}
                   aria-label="Copy secret to clipboard"
                 >
@@ -274,9 +279,13 @@ function RecoveryCodesPanel({ codes }: { codes: string[] }) {
       <div className="flex flex-wrap items-center gap-2">
         <Button
           variant="outline"
-          onClick={() => {
-            navigator.clipboard.writeText(codes.join("\n"));
-            toast.success("Copied to clipboard");
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(codes.join("\n"));
+              toast.success("Copied to clipboard");
+            } catch {
+              toast.error("Could not copy recovery codes. Download them or copy the text manually.");
+            }
           }}
         >
           <Copy className="size-4" />
@@ -501,15 +510,17 @@ function TrustedDevicesList() {
       disabled={trustCurrent.isPending}
       onClick={async () => {
         try {
-          await trustCurrent.mutateAsync();
-          toast.success("This browser is now trusted for 30 days");
+          const device = await trustCurrent.mutateAsync();
+          toast.success(
+            `This browser is now trusted until ${formatAbsolute(device.expires_at)}`,
+          );
         } catch (err) {
           toast.error(err instanceof Error ? err.message : String(err));
         }
       }}
     >
       {trustCurrent.isPending && <Loader2 className="size-4 animate-spin" />}
-      Trust this device for 30 days
+      Trust this device
     </Button>
   );
 
@@ -518,11 +529,11 @@ function TrustedDevicesList() {
       <div className="mt-2 space-y-3">
         <h4 className="text-sm font-semibold">Trusted devices</h4>
         <p className="text-xs text-muted-foreground">
-          Trusting a browser lets it skip the two-factor step{" "}
-          <em>at sign-in</em> for 30 days. It does NOT skip the re-verify prompt
-          that appears before sensitive actions like changing your password or
-          minting an API key -- those still ask for a fresh code on every
-          device.
+          Trusting a browser lets it skip the two-factor code{" "}
+          <em>at sign-in</em> (30 days by default). A sign-in that skips the
+          code still counts as verified: sensitive actions such as changing
+          your password or creating an API key ask for a fresh code only once
+          that sign-in is more than an hour old (by default).
         </p>
         {trustCurrentButton}
       </div>

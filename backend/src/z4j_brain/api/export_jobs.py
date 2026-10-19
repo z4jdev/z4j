@@ -3,8 +3,8 @@
 Background exports of the audit log. The synchronous download on
 ``GET /projects/{slug}/audit?format=`` refuses result sets above its
 in-memory caps; a job here takes the same filters, is written to the
-configured sink by the export-jobs worker page by page, and can be any
-size. The router creates rows and reports on them. It never writes to a
+configured sink by the export-jobs worker page by page. Format limits
+still apply, including the XLSX cap of 1,048,575 data rows. The router creates rows and reports on them. It never writes to a
 sink itself, and the only bytes it serves are a finished local-sink file
 to a member holding the audit tier (auditor or admin).
 

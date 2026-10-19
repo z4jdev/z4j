@@ -139,16 +139,13 @@ def normalize_ip(value: str | None) -> str | None:
 def normalize_hmac(value: str | None, *, field: str) -> str | None:
     if value is None:
         return None
-    normalized = value.lower()
-    if len(normalized) != 64:
+    if len(value) != 64:
         raise AuditChainIntegrityError(f"{field} must be a 64-character HMAC")
-    try:
-        bytes.fromhex(normalized)
-    except ValueError as exc:
-        raise AuditChainIntegrityError(f"{field} must be lowercase hexadecimal") from exc
-    if normalized != value:
+    # bytes.fromhex ignores whitespace, so length plus decoding does not
+    # establish that this is exactly 32 bytes of canonical lowercase hex.
+    if any(char not in "0123456789abcdef" for char in value):
         raise AuditChainIntegrityError(f"{field} must be lowercase hexadecimal")
-    return normalized
+    return value
 
 
 def normalize_uuid(value: uuid.UUID | str | None, *, field: str) -> str | None:

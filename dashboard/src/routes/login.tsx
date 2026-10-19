@@ -35,36 +35,33 @@ export const Route = createFileRoute("/login")({
 
 /**
  * Map an ApiError from the login endpoint to an operator-facing
- * message pair (title + description). z4j's auth service
- * returns distinct error codes for the three login-failure modes
- * (bad creds, locked out, inactive user); generic networking /
- * server errors fall through to a safe default.
- *
- * Kept verbose so the user can tell "wrong password" (try again)
- * from "locked out" (wait) from "account disabled" (contact admin)
- * without having to decode status codes.
+ * message pair (title + description). Wrong credentials, a locked
+ * account and an inactive account all answer the same 401, so the
+ * page cannot tell them apart; 429 is the per-IP throttle and 403 the
+ * dashboard IP allowlist. Generic networking / server errors fall
+ * through to a safe default.
  */
 function describeLoginError(err: unknown): {
   title: string;
   description: string;
 } {
   if (err instanceof ApiError) {
-    // Rate-limit / lockout - 429 on z4j when login attempts
-    // exceed the configured per-identity / per-IP ceiling.
+    // 429 comes only from the per-IP login throttle. A locked or
+    // inactive account gets the same 401 as a wrong password, by design.
     if (err.status === 429) {
       return {
-        title: "Too many login attempts",
+        title: "Too many sign-in attempts",
         description:
-          "The account is temporarily locked. Wait a few minutes and try again.",
+          "Too many sign-in attempts from this network address. Wait a minute and try again.",
       };
     }
-    // 403 on this endpoint means the user row exists but is_active
-    // is false - "account disabled", not "wrong password".
+    // 403 on this endpoint is the dashboard source-address allowlist
+    // (Z4J_DASHBOARD_IP_ALLOWLIST), checked before the credentials.
     if (err.status === 403) {
       return {
-        title: "Account disabled",
+        title: "Sign-in not allowed from this network",
         description:
-          "Your account has been disabled. Ask a z4j admin to re-enable it.",
+          "This network address is not on the dashboard IP allowlist. Ask a z4j admin to check it.",
       };
     }
     if (err.status === 401) {

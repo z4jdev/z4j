@@ -4,7 +4,7 @@ import { sortTimestamp } from "@/lib/table-sorting";
 /**
  * Project settings - Delivery Log section.
  *
- * Audit log of every notification sent, failed, or skipped by cooldown.
+ * Audit log of every external notification attempt that was sent or failed.
  * Cursor-paginated (50/page) so a project with thousands of deliveries
  * doesn't crash the dashboard. Admins can wipe the log via the Clear
  * button (destructive; confirms first).
@@ -90,7 +90,7 @@ export function ProjectDeliveriesTab({ slug }: { slug: string }) {
     confirm({
       title: "Clear delivery history?",
       description:
-        "This permanently deletes every delivery row for this project (sent + failed + skipped). The notifications themselves were already delivered to their destinations - this only wipes the audit table. Cannot be undone.",
+        "This permanently deletes delivery history for this project, including sent and failed entries. It does not resend notifications or cancel delivery attempts. Cannot be undone.",
       confirmLabel: "Clear all",
       variant: "destructive",
       onConfirm: () =>
@@ -135,7 +135,8 @@ export function ProjectDeliveriesTab({ slug }: { slug: string }) {
         }
         description={
           <>
-            Every notification attempt - sent, failed, or skipped by cooldown.
+            External notification attempts that were sent or failed. Cooldown
+            skips and in-app notifications are not listed.
           </>
         }
         actions={

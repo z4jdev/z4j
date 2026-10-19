@@ -54,12 +54,17 @@ describe("outcomeOf", () => {
     expect(statusLabel("something_new")).toBe("something_new");
   });
 
-  it("draws in-flight and timed-out fires as anything but success", () => {
+  it("draws a hand-off as dispatched, never as a task success", () => {
     expect(outcomeOf("accepted")).toBe("pending");
-    expect(outcomeOf("delivered")).toBe("pending");
+    // The scheduler's receipt and the agent's submit report a hand-off; the
+    // task's own result is under Tasks and the scheduler never learns it.
+    expect(outcomeOf("delivered")).toBe("dispatched");
+    expect(outcomeOf("acked_success")).toBe("dispatched");
+    expect(outcomeOf("terminal_completed")).toBe("dispatched");
+    expect(statusLabel("acked_success")).toBe("dispatched");
+    expect(statusLabel("delivered")).toBe("handed to the brain");
+    expect(statusLabel("terminal_completed")).toBe("submitted by the agent");
     expect(outcomeOf("terminal_timeout")).toBe("failed");
-    expect(outcomeOf("acked_success")).toBe("ok");
-    expect(outcomeOf("terminal_completed")).toBe("ok");
     expect(outcomeOf("operator_skipped")).toBe("skipped");
   });
 
@@ -73,7 +78,9 @@ describe("stripSummary", () => {
   it("does not claim no fires while the history is unknown", () => {
     expect(stripSummary(undefined, false)).toBe("run history not loaded yet");
     expect(stripSummary(undefined, true)).toBe("run history unavailable");
-    expect(stripSummary([], false)).toBe("no fires in the retention window");
+    expect(stripSummary([], false)).toBe(
+      "no recorded fires (only z4j-scheduler schedules record fires)",
+    );
   });
 
   it("counts every failed outcome", () => {
@@ -90,7 +97,9 @@ describe("ScheduleRunStrip", () => {
     const cells = Array.from(strip.querySelectorAll("span[title]"));
     expect(cells).toHaveLength(3);
     expect(cells[cells.length - 1].getAttribute("title")).toContain("failed");
-    expect(cells[0].getAttribute("title")).toContain("succeeded");
+    expect(cells[0].getAttribute("title")).toContain("dispatched");
+    // No cell is drawn in the success colour.
+    for (const c of cells) expect(c.className).not.toContain("bg-success");
     // Two empty slots pad the left.
     expect(strip.querySelectorAll("span[aria-hidden]")).toHaveLength(2);
   });

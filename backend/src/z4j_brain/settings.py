@@ -320,7 +320,7 @@ class Settings(BaseSettings):
         ge=60,
         le=86_400,
     )
-    command_timeout_seconds: int = Field(default=60, ge=1, le=86_400)
+    command_timeout_seconds: int = Field(default=60, ge=1, le=3600)
     #: How long a DISPATCHED command is still considered a
     #: possibly-lost delivery. The long-poll transport re-selects a
     #: DISPATCHED command within this window (a reconnecting agent whose
@@ -667,10 +667,12 @@ class Settings(BaseSettings):
     #: to ``grpc`` if your collector exposes only gRPC and you have
     #: installed ``opentelemetry-exporter-otlp-proto-grpc``.
     otel_protocol: Literal["http/protobuf", "http", "grpc"] = "http/protobuf"
-    #: Comma-separated ``key=value`` pairs forwarded to the OTLP
-    #: exporter as ``OTEL_EXPORTER_OTLP_HEADERS``. The standard place
-    #: to put an x-honeycomb-team / authorization header. SecretStr
-    #: for the same reason as the endpoint.
+    #: Comma-separated ``key=value`` pairs in the
+    #: ``OTEL_EXPORTER_OTLP_HEADERS`` format (URL-encoded values),
+    #: parsed into the OTLP exporter's header mapping. The standard
+    #: place to put an x-honeycomb-team / authorization header.
+    #: SecretStr for the same reason as the endpoint; a malformed value
+    #: is refused at startup by :meth:`_enforce_otel_invariants`.
     otel_exporter_otlp_headers: SecretStr | None = None
     #: Override the OTel ``service.name`` resource attribute. Default
     #: ``z4j-brain`` for the brain process. Multi-brain deployments
@@ -689,8 +691,10 @@ class Settings(BaseSettings):
     #: trace (errors-only effectively, since the brain still exports
     #: span structure but the sampler keeps none). Set to a small
     #: positive value to capture a fraction of requests. The sampler
-    #: is ParentBased(TraceIdRatioBased(arg)) so an inbound trace
-    #: context from an upstream service is always honoured.
+    #: is ParentBased(TraceIdRatioBased(arg)) with both remote-parent
+    #: branches ALWAYS_OFF, so a request that arrives with an upstream
+    #: trace context is never recorded; only parentless requests are
+    #: sampled at this ratio.
     otel_traces_sampler_arg: float = Field(default=0.0, ge=0.0, le=1.0)
     #: When False (default), tracing for ``/health*`` and ``/metrics``
     #: is suppressed via the FastAPI instrumentation's ``excluded_urls``
@@ -702,6 +706,29 @@ class Settings(BaseSettings):
     #: Comma-separated additional URL substrings to exclude from
     #: tracing. Layered on top of :attr:`otel_include_health`.
     otel_excluded_url_patterns: str = Field(default="", max_length=512)
+
+    def _enforce_otel_invariants(self) -> None:
+        """Refuse a malformed :attr:`otel_exporter_otlp_headers`.
+
+        Called from ``__init__`` after validation, like
+        :meth:`_enforce_security_invariants`, so the refusal is a
+        :class:`ConfigError` that never prints the value, which is a
+        collector credential. Refusing here surfaces the mistake at
+        startup and in ``z4j config validate``, rather than as
+        OpenTelemetry staying off after one warning line.
+        """
+        if self.otel_exporter_otlp_headers is None:
+            return
+        from z4j_brain.observability.otel import parse_otlp_headers
+
+        try:
+            parse_otlp_headers(self.otel_exporter_otlp_headers.get_secret_value())
+        except ValueError as exc:
+            raise ConfigError(
+                f"Z4J_OTEL_EXPORTER_OTLP_HEADERS {exc}: use comma-separated "
+                "key=value pairs with URL-encoded values, for example "
+                "x-honeycomb-team=<api-key>",
+            ) from None
 
     # ------------------------------------------------------------------
     # Audit webhook forwarding (optional out-of-band SIEM mirror)
@@ -1743,6 +1770,7 @@ class Settings(BaseSettings):
         super().__init__(**values)
         self._enforce_security_invariants()
         self._enforce_export_sink_invariants()
+        self._enforce_otel_invariants()
 
     @property
     def is_dev(self) -> bool:

@@ -41,12 +41,14 @@ def test_domain_package_disclaims_a_strict_dependency_boundary() -> None:
     assert "brain persistence, authentication, settings" in contract
 
 
-def test_forwarder_docs_state_at_least_once_and_the_cursor_limit() -> None:
+def test_forwarder_docs_state_retry_and_retention_limits() -> None:
     contract = _normalized(audit_forwarder.__doc__)
 
-    assert "Delivery is at least once" in contract
+    assert "Retries can deliver a retained row more than once" in contract
     assert "the receiver de-duplicates on the row id" in contract
-    assert "Nothing is dropped" in contract
+    assert "Retention pruning is independent of this cursor" in contract
+    assert "outage longer than source retention can lose rows" in contract
+    assert "Nothing is dropped" not in contract
     # The cursor lives beside the log, so the forwarder still is not the
     # out-of-band anchor; the docstring has to keep saying so.
     assert "a role that can delete audit rows can also move the cursor past them" in contract

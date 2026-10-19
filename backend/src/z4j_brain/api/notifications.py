@@ -48,6 +48,9 @@ from z4j_brain.domain.notifications.channels import (
     validate_webhook_headers,
     validate_webhook_url,
 )
+from z4j_brain.domain.notifications.config import MASK as _MASK
+from z4j_brain.domain.notifications.config import mask_config as _mask_config
+from z4j_brain.domain.notifications.config import merge_config as _safe_merge_config
 
 # Audit-log sanitization helper lives in domain so service.py and
 # api.notifications.py share one implementation (audit H-1/H-2/H-3).
@@ -80,12 +83,13 @@ router = APIRouter(
 # ---------------------------------------------------------------------------
 
 
-# ``task.slow`` was removed in 1.7: it never had an emit site, so a
-# subscription on it could never fire. Stored rows that still carry the
-# string keep listing / muting fine; only create + rename reject it.
+# ``task.slow`` (1.7) and ``agent.online`` (1.13) were removed: neither
+# ever had an emit site, so a subscription on them could never fire.
+# Stored rows that still carry the string keep listing / muting fine;
+# only create + rename reject it.
 _TRIGGER_PATTERN = (
     r"^(task\.failed|task\.succeeded|task\.retried|"
-    r"agent\.offline|agent\.online|"
+    r"agent\.offline|"
     r"schedule\.fire\.failed|schedule\.fire\.succeeded|"
     r"schedule\.task_failed|schedule\.misfired|"
     r"schedule\.circuit_breaker\.tripped)$"
@@ -189,7 +193,8 @@ class ChannelTestRequest(BaseModel):
     credentials BEFORE persisting. We accept a full ``{type, config}``
     shape, validate it through the same SSRF / format guards that
     create_channel / update_channel use, and dispatch a single test
-    payload. Nothing is written to the DB.
+    payload. The channel is not saved; the test records delivery/audit
+    history when persistence succeeds.
     """
 
     type: str = Field(pattern=_CHANNEL_TYPE_PATTERN)
@@ -325,11 +330,9 @@ class DeliveryPublic(BaseModel):
     response_code: int | None
     error: str | None
     sent_at: datetime
-    # Denormalized at read time (1.0.14+) so the dashboard doesn't
-    # have to issue a separate per-channel fetch to label the row.
-    # NULL when the underlying channel was deleted, or when the row
-    # was an unsaved-config test (no channel exists). The list
-    # endpoint resolves these via a single batch query per page.
+    # Prefer the delivery's name/type snapshot so history survives channel
+    # deletion. Legacy rows without snapshots fall back to a batched channel
+    # lookup and may have no label after that channel is deleted.
     channel_name: str | None = None
     channel_type: str | None = None
     # v1.1.0: who manually triggered this row. NULL for
@@ -361,83 +364,6 @@ class DeliveryListPublic(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-_SENSITIVE_CONFIG_KEYS = (
-    "smtp_pass",
-    "hmac_secret",
-    "bot_token",
-    "password",
-    # PagerDuty Events API v2 routing key. Anyone with this key can
-    # open incidents on the linked PD service, so treat it like a
-    # password: masked on read, preserved on PATCH-with-blank.
-    "integration_key",
-)
-
-# Telegram bot-token and chat-id regexes now live in the domain
-# module (``z4j_brain.domain.notifications.channels``) so the
-# project-channel and user-channel validators share one source of
-# truth - see external-audit High #2.
-_MASK = "••••••••"
-
-
-def _mask_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Mask credential-like fields when returning channel configs."""
-    safe = dict(config)
-    for key in _SENSITIVE_CONFIG_KEYS:
-        if safe.get(key):
-            safe[key] = _MASK
-    return safe
-
-
-def _safe_merge_config(
-    existing: dict[str, Any],
-    incoming: dict[str, Any],
-    *,
-    mask: str,
-) -> tuple[dict[str, Any], bool]:
-    """Merge a PATCH config payload onto an existing channel config.
-
-    HIGH-01 fix. Two related credential bugs are solved here:
-
-    1. Clients that render a channel and POST it back unchanged send
-       the MASK placeholder ("••••••••") in place of the real secret.
-       Naive ``dict.update`` would overwrite the real password with
-       bullets. We DROP any incoming value equal to the mask so the
-       existing secret is preserved.
-
-    2. If the caller changes the URL (e.g. from a legitimate webhook
-       to ``http://attacker.com``) without also re-supplying the
-       credentials, the attacker would inherit the signed payloads
-       or SMTP password ("URL-pivot credential harvest"). When the
-       url/webhook_url changes we forcibly clear every sensitive
-       key from the merged config so the user must re-enter them.
-
-    Returns ``(merged, url_changed)``.
-    """
-    merged = dict(existing or {})
-    scrubbed: dict[str, Any] = {}
-    for k, v in (incoming or {}).items():
-        if k in _SENSITIVE_CONFIG_KEYS and v == mask:
-            # Preserve existing secret - client just echoed the mask.
-            continue
-        scrubbed[k] = v
-
-    # Detect URL change BEFORE applying the merge so we know whether
-    # to wipe sensitive keys below.
-    url_changed = False
-    for url_key in ("url", "webhook_url"):
-        if url_key in scrubbed and scrubbed[url_key] != merged.get(url_key):
-            url_changed = True
-            break
-
-    merged.update(scrubbed)
-
-    if url_changed:
-        for sk in _SENSITIVE_CONFIG_KEYS:
-            merged.pop(sk, None)
-
-    return merged, url_changed
 
 
 async def _validate_channel_config(  # noqa: PLR0912, PLR0915  per-channel-type validation
@@ -900,9 +826,6 @@ async def update_channel(
         fields_changed.append("name")
     url_changed = False
     if body.config is not None:
-        # Validate any incoming URL/headers BEFORE the merge so
-        # unsafe patches never touch the DB.
-        await _validate_channel_config(channel.type, body.config)
         # Merge instead of replace so admins don't have to re-enter
         # masked credentials. See _safe_merge_config for HIGH-01
         # details (mask-echo preservation + URL-pivot scrub).
@@ -911,6 +834,9 @@ async def update_channel(
             body.config,
             mask=_MASK,
         )
+        # Validate the effective values after resolving read-time masks,
+        # before persisting any changes or sending a notification.
+        await _validate_channel_config(channel.type, merged)
         channel.config = merged
         fields_changed.append("config")
     if body.is_active is not None:
@@ -1427,6 +1353,25 @@ async def test_saved_channel(
 # ---------------------------------------------------------------------------
 
 
+def _is_default_trigger_conflict(exc: IntegrityError) -> bool:
+    """Identify only the project's trigger uniqueness constraint."""
+    original = exc.orig
+    if getattr(original, "sqlite_errorname", None) == "SQLITE_CONSTRAINT_UNIQUE":
+        return str(original) == (
+            "UNIQUE constraint failed: project_default_subscriptions.project_id, "
+            "project_default_subscriptions.trigger"
+        )
+    if getattr(original, "sqlstate", None) == "23505":
+        # SQLAlchemy's asyncpg adapter chains the driver exception, which
+        # retains the server's constraint name, as its original cause.
+        driver_error = original.__cause__ or original
+        return (
+            getattr(driver_error, "constraint_name", None)
+            == "uq_project_default_subscription_trigger"
+        )
+    return False
+
+
 @router.get(
     "/defaults",
     response_model=list[DefaultSubscriptionPublic],
@@ -1523,33 +1468,35 @@ async def create_default(
         cooldown_seconds=body.cooldown_seconds,
     )
     db_session.add(default)
-    await db_session.flush()
-    # Audit-Phase4-1: defaults auto-materialise into UserSubscriptions
-    # for every new project member. Defining one is a privileged
-    # operation that propagates across the whole org → must audit.
-    await audit.record(
-        audit_log,
-        action="notifications.default.create",
-        target_type="project_default_subscription",
-        target_id=str(default.id),
-        result="success",
-        outcome="allow",
-        user_id=user.id,
-        project_id=project_id,
-        source_ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        metadata={
-            "trigger": default.trigger,
-            "in_app": default.in_app,
-            "channel_count": len(default.project_channel_ids or []),
-            "cooldown_seconds": default.cooldown_seconds,
-        },
-    )
     try:
+        await db_session.flush()
+        # Audit-Phase4-1: defaults auto-materialise into UserSubscriptions
+        # for every new project member. Defining one is a privileged
+        # operation that propagates across the whole org → must audit.
+        await audit.record(
+            audit_log,
+            action="notifications.default.create",
+            target_type="project_default_subscription",
+            target_id=str(default.id),
+            result="success",
+            outcome="allow",
+            user_id=user.id,
+            project_id=project_id,
+            source_ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            metadata={
+                "trigger": default.trigger,
+                "in_app": default.in_app,
+                "channel_count": len(default.project_channel_ids or []),
+                "cooldown_seconds": default.cooldown_seconds,
+            },
+        )
         await db_session.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         # HIGH-02: concurrent insert lost the check-then-insert race.
         await db_session.rollback()
+        if not _is_default_trigger_conflict(exc):
+            raise
         raise ConflictError(
             "default subscription for this trigger already exists",
             details={"trigger": body.trigger},
@@ -1685,34 +1632,37 @@ async def update_default(
         }
         default.cooldown_seconds = body.cooldown_seconds
 
-    await db_session.flush()
-    # z4j 1.6.5: defaults auto-materialise into every
-    # project member's UserSubscriptions, so mutating one is just as
-    # privileged as create/delete and needs the same forensic trail.
-    # Pre-1.6.5 only the create/delete neighbors recorded; this PATCH
-    # was fresh-MFA gated but silent in the audit log.
-    await audit.record(
-        audit_log,
-        action="notifications.default.update",
-        target_type="project_default_subscription",
-        target_id=str(default.id),
-        result="success",
-        outcome="allow",
-        user_id=user.id,
-        project_id=project_id,
-        source_ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        metadata={"changed": changed},
-    )
+    trigger = default.trigger
     try:
+        await db_session.flush()
+        # z4j 1.6.5: defaults auto-materialise into every
+        # project member's UserSubscriptions, so mutating one is just as
+        # privileged as create/delete and needs the same forensic trail.
+        # Pre-1.6.5 only the create/delete neighbors recorded; this PATCH
+        # was fresh-MFA gated but silent in the audit log.
+        await audit.record(
+            audit_log,
+            action="notifications.default.update",
+            target_type="project_default_subscription",
+            target_id=str(default.id),
+            result="success",
+            outcome="allow",
+            user_id=user.id,
+            project_id=project_id,
+            source_ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            metadata={"changed": changed},
+        )
         await db_session.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         # Concurrent insert / update lost the check-then-write
         # race for a trigger rename. Re-raise as a clean 409.
         await db_session.rollback()
+        if not _is_default_trigger_conflict(exc):
+            raise
         raise ConflictError(
             "default subscription for this trigger already exists",
-            details={"trigger": body.trigger or default.trigger},
+            details={"trigger": trigger},
         ) from None
     await db_session.refresh(default)
     return _default_payload(default)
@@ -1782,7 +1732,7 @@ async def delete_default(
 
 
 # ---------------------------------------------------------------------------
-# Delivery audit log (admin-only, read-only)
+# Delivery history (admin-only; supports listing and explicit clearing)
 # ---------------------------------------------------------------------------
 
 

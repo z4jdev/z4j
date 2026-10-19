@@ -87,24 +87,28 @@ export function useRequeueDeadLetter(slug: string) {
 
 export interface PoolResizeRequest {
   agent_id: string;
+  engine: string;
   worker_name: string;
   delta: number;
 }
 
 export interface AddConsumerRequest {
   agent_id: string;
+  engine: string;
   worker_name: string;
   queue: string;
 }
 
 export interface CancelConsumerRequest {
   agent_id: string;
+  engine: string;
   worker_name: string;
   queue: string;
 }
 
 export interface RestartWorkerRequest {
   agent_id: string;
+  engine: string;
   worker_name: string;
 }
 
@@ -188,8 +192,8 @@ export function useRateLimit(slug: string) {
       api.post<CommandPublic>(`/projects/${slug}/commands/rate-limit`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["commands", slug] });
-      // Rate-limit changes are immediate broker-side but we
-      // refresh tasks as the throttle starts to bite.
+      // The command sends worker control without confirming application.
+      // Refresh the task view later; this is not an applied-rate receipt.
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ["tasks", slug] });
       }, 2000);

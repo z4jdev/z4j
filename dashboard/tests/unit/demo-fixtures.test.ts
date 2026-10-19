@@ -50,6 +50,52 @@ const lintDocs = import.meta.glob<{ default: LintDoc }>(
 
 const projectOf = (path: string) => path.split("/").at(-2) ?? path;
 
+const statsDocs = import.meta.glob<{ default: {
+  tasks_total: number;
+  tasks_by_state: Record<string, number>;
+  tasks_failed_24h: number;
+  tasks_succeeded_24h: number;
+  failure_rate_24h: number;
+  commands_pending: number;
+  commands_completed_24h: number;
+  commands_failed_24h: number;
+  commands_timeout_24h: number;
+} }>("../../src/lib/demo-data/projects/*/stats.json", { eager: true });
+const trendDocs = import.meta.glob<{ default: {
+  window: string;
+  series: { success: number; failure: number; retry: number; revoked: number; total: number }[];
+} }>("../../src/lib/demo-data/projects/*/trends.json", { eager: true });
+const commandDocs = import.meta.glob<{ default: { items: {
+  status: string; completed_at_offset_s: number | null;
+}[] } }>("../../src/lib/demo-data/projects/*/commands.json", { eager: true });
+
+describe("demo statistics agree across overview and trends", () => {
+  for (const [path, mod] of Object.entries(statsDocs)) {
+    it(projectOf(path), () => {
+      const stats = mod.default;
+      const trend = trendDocs[path.replace("stats.json", "trends.json")].default;
+      expect(trend.window).toBe("24h");
+      expect(stats.tasks_total).toBe(Object.values(stats.tasks_by_state).reduce((a, b) => a + b, 0));
+      expect(stats.tasks_failed_24h).toBe(trend.series.reduce((n, row) => n + row.failure, 0));
+      expect(stats.tasks_succeeded_24h).toBe(trend.series.reduce((n, row) => n + row.success, 0));
+      expect(stats.tasks_by_state.failure).toBeGreaterThanOrEqual(stats.tasks_failed_24h);
+      expect(stats.tasks_by_state.success).toBeGreaterThanOrEqual(stats.tasks_succeeded_24h);
+      const completed = stats.tasks_failed_24h + stats.tasks_succeeded_24h;
+      expect(stats.failure_rate_24h).toBeCloseTo(completed ? stats.tasks_failed_24h / completed : 0);
+      for (const row of trend.series) {
+        expect(row.total).toBe(row.success + row.failure + row.retry + row.revoked);
+      }
+      const commands = commandDocs[path.replace("stats.json", "commands.json")].default.items;
+      expect(stats.commands_pending).toBe(commands.filter(c => ["pending", "dispatched"].includes(c.status)).length);
+      for (const status of ["completed", "failed", "timeout"] as const) {
+        expect(stats[`commands_${status}_24h`]).toBe(commands.filter(c =>
+          c.status === status && c.completed_at_offset_s !== null && c.completed_at_offset_s >= -86400,
+        ).length);
+      }
+    });
+  }
+});
+
 describe("demo schedule-runs fixtures", () => {
   const known = new Set(Object.keys(OUTCOME_BY_STATUS));
 

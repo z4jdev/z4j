@@ -147,3 +147,23 @@ describe("InviteDialog one-time secret lifetime", () => {
     expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
   });
 });
+
+describe("InviteDialog email delivery copy", () => {
+  it.each([
+    [true, /z4j emailed this link to/],
+    [false, /z4j did not email it/],
+    [undefined, /z4j did not email it/],
+  ])("reports email_sent=%s from the mint response", async (sent, copy) => {
+    const user = userEvent.setup();
+    postSpy.mockResolvedValue({
+      ...mintedResponse("E".repeat(43)),
+      ...(sent === undefined ? {} : { email_sent: sent }),
+    });
+    renderDialog();
+
+    await submitMint(user);
+
+    expect(await screen.findByText("Invitation link ready")).toBeInTheDocument();
+    expect(document.body).toHaveTextContent(copy);
+  });
+});

@@ -12,7 +12,7 @@ import { FilterToolbar } from "@/components/domain/filter-toolbar";
  * "let me copy current as a .env" UX itch. Edits happen by editing
  * `~/.z4j/config.env` (or the environment) and restarting the brain.
  *
- * Backend: GET /api/v1/admin/settings, requires admin (Settings.is_admin).
+ * Backend: GET /api/v1/admin/settings, requires admin (User.is_admin).
  */
 import { PageHeader } from "@/components/domain/page-header";
 import { QueryError } from "@/components/domain/query-error";

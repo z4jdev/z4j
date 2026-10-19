@@ -28,7 +28,7 @@ default OFF) plus the per-user grace anchor
 
 Bearer (API-key) callers are deliberately NOT evaluated. API keys are
 a separate credential class with explicit scopes and no second-factor
-ceremony; docs/MFA-DESIGN.md (open question 5) records the decision
+ceremony; docs/MFA-DESIGN.md records the decision
 that programmatic accounts are exempt. Blocked users still cannot
 mint NEW keys: the API-key endpoints are session-gated and therefore
 behind this gate.

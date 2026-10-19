@@ -6,7 +6,7 @@
  *
  * - **Navigate** - jump to any page (Overview, Tasks, Agents, ...)
  * - **Search tasks** - type a task name or ID, select to open detail
- * - **Quick actions** - refresh, toggle theme, switch project
+ * - **Quick actions** - toggle theme, switch project
  * - **Keyboard shortcuts help** - shows the shortcut sheet
  *
  * Mounted once at the app root level. Opens on ⌘K (Mac) or Ctrl+K
@@ -290,8 +290,8 @@ function PaletteItem({
  * Trailing-edge debounce for fast-typed search inputs.
  *
  * Returns ``value`` after it has been stable for ``delay`` ms.
- * The effect clears its timer on every re-render so the latest
- * keystroke always wins.
+ * The effect clears its timer when value or delay changes and on unmount,
+ * so the latest keystroke wins.
  */
 function useDebouncedValue<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -308,7 +308,9 @@ function useDebouncedValue<T>(value: T, delay: number): T {
  * Usage:
  * ```tsx
  * const { open, setOpen } = useCommandPalette();
- * <CommandPalette open={open} onOpenChange={setOpen} />
+ * const [shortcutsOpen, setShortcutsOpen] = useState(false);
+ * <CommandPalette open={open} onOpenChange={setOpen}
+ *   onOpenShortcuts={() => setShortcutsOpen(true)} />
  * ```
  */
 export function useCommandPalette() {

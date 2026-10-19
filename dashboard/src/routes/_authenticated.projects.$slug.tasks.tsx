@@ -69,6 +69,7 @@ import {
   type DurableBulkRetryBody,
 } from "@/lib/bulk-retry-storage";
 import { formatDuration, truncate } from "@/lib/format";
+import { cancelEffect, retryUnavailableReason } from "@/lib/task-commands";
 import {
   parseTaskListSearch,
   type TaskListSearch as TasksSearch,
@@ -272,6 +273,10 @@ function TasksPage() {
       if (!window.confirm(`Retry ${count} tasks?`)) return;
 
       setBulkLoading(true);
+      // Selected rows are retried one command at a time, so a failure can
+      // land after earlier rows were already sent.
+      let sent = 0;
+      let total = 0;
       try {
         // For individual tasks, issue retry commands one by one.
         // For all-pages, use the durable request resource.
@@ -418,6 +423,13 @@ function TasksPage() {
             clearStoredBulkRetry(slug);
           }
         } else {
+          const refusal = retryUnavailableReason(
+            selectedRows.map((row) => row.engine),
+          );
+          if (refusal) {
+            window.alert(`${refusal} Nothing was sent.`);
+            return;
+          }
           const agents = await api.get<AgentPublic[]>(
             `/projects/${slug}/agents`,
           );
@@ -434,6 +446,7 @@ function TasksPage() {
             );
             return;
           }
+          total = targets.length;
           for (const { row, agent } of targets) {
             await api.post(`/projects/${slug}/commands/retry-task`, {
               agent_id: agent.id,
@@ -441,13 +454,23 @@ function TasksPage() {
               task_id: row.task_id,
               idempotency_key: crypto.randomUUID(),
             });
+            sent += 1;
           }
         }
         clearSelection();
         queryClient.invalidateQueries({ queryKey: ["tasks", slug] });
         queryClient.invalidateQueries({ queryKey: ["commands", slug] });
-      } catch {
-        window.alert("Failed to retry tasks. Check permissions.");
+      } catch (error) {
+        const reason =
+          error instanceof Error ? error.message : String(error);
+        if (sent > 0) {
+          queryClient.invalidateQueries({ queryKey: ["commands", slug] });
+        }
+        window.alert(
+          total > 0
+            ? `Retry stopped after ${sent} of ${total} tasks: ${reason}. Check Commands before retrying again.`
+            : `Retry failed: ${reason}`,
+        );
       } finally {
         setBulkLoading(false);
       }
@@ -461,14 +484,19 @@ function TasksPage() {
       _allPages: boolean,
       clearSelection: () => void,
     ) => {
+      const effects = [...new Set(selectedRows.map((row) => row.engine))]
+        .sort()
+        .map(cancelEffect);
       if (
         !window.confirm(
-          `Cancel/revoke ${selectedRows.length} tasks? Running tasks will be terminated.`,
+          `Revoke ${selectedRows.length} tasks?\n\n${effects.join("\n")}`,
         )
       )
         return;
 
       setBulkLoading(true);
+      let sent = 0;
+      let total = 0;
       try {
         const agents = await api.get<AgentPublic[]>(
           `/projects/${slug}/agents`,
@@ -487,18 +515,29 @@ function TasksPage() {
           );
           return;
         }
+        total = targets.length;
         for (const { row, agent } of targets) {
           await api.post(`/projects/${slug}/commands/cancel-task`, {
             agent_id: agent.id,
             engine: row.engine,
             task_id: row.task_id,
           });
+          sent += 1;
         }
         clearSelection();
         queryClient.invalidateQueries({ queryKey: ["tasks", slug] });
         queryClient.invalidateQueries({ queryKey: ["commands", slug] });
-      } catch {
-        window.alert("Failed to cancel tasks. Check permissions.");
+      } catch (error) {
+        const reason =
+          error instanceof Error ? error.message : String(error);
+        if (sent > 0) {
+          queryClient.invalidateQueries({ queryKey: ["commands", slug] });
+        }
+        window.alert(
+          total > 0
+            ? `Revoke stopped after ${sent} of ${total} tasks: ${reason}. Check Commands for what was sent.`
+            : `Revoke failed: ${reason}`,
+        );
       } finally {
         setBulkLoading(false);
       }
@@ -634,7 +673,7 @@ function TasksPage() {
             description={
               activeFilterCount > 0 || searchQuery
                 ? "try adjusting your filters or search query"
-                : "connect a z4j agent in your worker (Celery, RQ, or Dramatiq) to see tasks here"
+                : "connect a z4j agent in your worker (Celery, RQ, Dramatiq, Huey, arq or TaskIQ) to see tasks here"
             }
           />
         }
@@ -659,8 +698,15 @@ function TasksPage() {
             ? `Showing ${pageCount.toLocaleString()} of ${totalText} matching task${totalCount === 1 ? "" : "s"}`
             : `${pageCount.toLocaleString()} on this page · Total unavailable`
         }
-        toolbar={(ctx) =>
-          ctx.selectedCount > 0 ? (
+        toolbar={(ctx) => {
+          // Selected rows are retried one retry-task command each, which the
+          // brain refuses for engines outside NATIVE_RETRY_ENGINES. The
+          // all-matching path goes through bulk retry, which the brain
+          // scopes to engines whose agents advertise it.
+          const retryRefusal = ctx.allPagesSelected
+            ? undefined
+            : retryUnavailableReason(ctx.selectedRows.map((row) => row.engine));
+          return ctx.selectedCount > 0 ? (
             // Bulk action bar - replaces filter bar in-place, same height
             <div className="flex min-h-9 flex-wrap items-center gap-3 rounded-md bg-accent px-3 py-2">
               <span className="text-sm font-medium">
@@ -695,7 +741,8 @@ function TasksPage() {
                     variant="outline"
                     size="sm"
                     className="gap-1"
-                    disabled={bulkLoading}
+                    disabled={bulkLoading || retryRefusal !== undefined}
+                    title={retryRefusal}
                     onClick={() =>
                       handleBulkRetry(
                         ctx.selectedRows,
@@ -752,8 +799,8 @@ function TasksPage() {
           ) : (
             // Filter bar - default state
             filterToolbar
-          )
-        }
+          );
+        }}
       />
     </PageShell>
   );

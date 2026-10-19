@@ -46,6 +46,11 @@ class TestTokensMatch:
     def test_empty_supplied(self) -> None:
         assert not tokens_match("abc", "")
 
+    def test_non_ascii_tokens_are_rejected(self) -> None:
+        assert not tokens_match("abc", "ééé")
+        assert not tokens_match("ééé", "abc")
+        assert not tokens_match("ééé", "ééé")
+
 
 class TestCookieNames:
     def test_prod_uses_host_prefix(self) -> None:

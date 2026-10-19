@@ -263,8 +263,11 @@ def _scrub_url(url: str) -> str:
     except Exception:
         return url
     host = (parts.hostname or "").lower().rstrip(".")
-    # Drop tokens-in-path for known credential-bearing hosts.
-    if host and _is_token_path_host(host):
+    # Drop tokens-in-path for known credential-bearing hosts, and for
+    # known credential-bearing path shapes on any host: the
+    # notification dispatchers connect to the resolved IP, so an
+    # outbound breadcrumb or span URL names an IP, not the webhook host.
+    if (host and _is_token_path_host(host)) or (parts.netloc and _is_token_path(parts.path)):
         return urlunsplit(
             (
                 parts.scheme,
@@ -319,6 +322,28 @@ def _is_token_path_host(host: str) -> bool:
     return any(lower.endswith(s) for s in _TOKEN_PATH_HOST_SUFFIXES)
 
 
+#: URL path shapes that carry a credential whatever host serves them.
+#: The host lists above cannot see a request the dispatchers pinned to
+#: its resolved IP, so these are matched on the path alone. Shared
+#: with the OpenTelemetry httpx hook.
+_TOKEN_PATH_RE: re.Pattern[str] = re.compile(
+    r"^/(?:"
+    r"services/[^/]+/[^/]+/"  # Slack incoming webhook: /services/T../B../<secret>
+    r"|(?:workflows|triggers)/[^/]+/"  # Slack workflow triggers, Azure Logic Apps
+    r"|api(?:/v\d+)?/webhooks/"  # Discord: /api/webhooks/<id>/<token>
+    r"|webhook(?:b2)?/"  # Teams connectors: /webhookb2/... and /webhook/...
+    r"|(?:file/)?bot\d+:"  # Telegram Bot API: /bot<id>:<token>/<method>
+    r"|integration/[^/]+/enqueue"  # PagerDuty: /integration/<key>/enqueue
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_token_path(path: str) -> bool:
+    """True iff this URL path has a known credential-bearing shape."""
+    return bool(path) and _TOKEN_PATH_RE.match(path) is not None
+
+
 #: Token-in-path hosts. The breadcrumb / log scrubber spots URLs
 #: that have no ``?`` but DO embed credentials in the path (Slack,
 #: Discord, Teams workflow webhooks). Catch them with a regex on
@@ -330,6 +355,11 @@ _PATH_TOKEN_HOST_RE: re.Pattern[str] = re.compile(
     r"[^\s]*",
     re.IGNORECASE,
 )
+
+#: Any absolute http(s) URL inside free-form text. Each one is run
+#: through :func:`_scrub_url`, which also catches the credential path
+#: shapes on an IP-pinned URL that ``_PATH_TOKEN_HOST_RE`` cannot see.
+_INLINE_URL_RE: re.Pattern[str] = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 
 
 def _scrub_inline_urls(text: str) -> str:
@@ -345,7 +375,24 @@ def _scrub_inline_urls(text: str) -> str:
         scheme = m.group(0).split(":", 1)[0]
         return f"{scheme}://{host}/[REDACTED by z4j]"
 
-    return _PATH_TOKEN_HOST_RE.sub(_sub, text)
+    def _sub_any(m: re.Match[str]) -> str:
+        url = m.group(0)
+        # Already replaced by the host pass above.
+        if "/[REDACTED" in url:
+            return url
+        return _scrub_url(url)
+
+    return _INLINE_URL_RE.sub(_sub_any, _PATH_TOKEN_HOST_RE.sub(_sub, text))
+
+
+def _scrub_text(text: str) -> str:
+    """Scrub a free-form message: the whole-string pass, then every URL in it.
+
+    An unhandled request error reaches Sentry as a log event whose message is
+    the rendered traceback, so a webhook URL sits inside a longer string that
+    the whole-string pass alone does not take apart.
+    """
+    return _scrub_inline_urls(_scrub_url(text))
 
 
 def _scrub_env_mapping(env: Any) -> Any:
@@ -377,6 +424,25 @@ def _scrub_env_mapping(env: Any) -> Any:
             continue
         out[key] = value
     return out
+
+
+#: Breadcrumb and span ``data`` keys that hold a URL, and keys that
+#: hold a bare query string. The SDK's own HTTP client integrations
+#: record ``url`` plus ``http.query``; OTel-style names cover the rest.
+_URL_DATA_KEYS: tuple[str, ...] = ("url", "http.url", "url.full")
+_QUERY_DATA_KEYS: tuple[str, ...] = ("http.query", "url.query")
+
+
+def _scrub_url_data(data: dict[str, Any]) -> None:
+    """URL-scrub the URL attributes of a breadcrumb or span ``data``
+    dict in place. Runs before the key-pattern walk because the URL is
+    a single string under a key whose name matches no pattern."""
+    for key in _URL_DATA_KEYS:
+        if isinstance(data.get(key), str):
+            data[key] = _scrub_url(data[key])
+    for key in _QUERY_DATA_KEYS:
+        if isinstance(data.get(key), str):
+            data[key] = _scrub_query_string(data[key])
 
 
 def _scrub_stacktrace_frames(frames: list[Any]) -> list[Any]:
@@ -420,10 +486,13 @@ def scrub_event(  # noqa: PLR0912, PLR0915  event redaction dispatch
     event: Any,
     hint: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Sentry ``before_send`` hook.
+    """Sentry ``before_send`` and ``before_send_transaction`` hook.
 
-    Returns the event after redacting sensitive surfaces. The hint
-    argument is ignored; it is part of the SDK contract and may carry
+    Returns the event after redacting sensitive surfaces. The SDK
+    calls ``before_send`` for error and log events only, so the same
+    function is registered for transactions, whose request block,
+    span descriptions and span data carry the same URLs and headers.
+    The hint argument is ignored; it is part of the SDK contract and may carry
     the original exception object, which we do not need to inspect to
     decide what to redact.
 
@@ -497,7 +566,7 @@ def scrub_event(  # noqa: PLR0912, PLR0915  event redaction dispatch
         for str_key in ("message", "formatted"):
             val = logentry.get(str_key)
             if isinstance(val, str):
-                logentry[str_key] = _scrub_url(val)
+                logentry[str_key] = _scrub_text(val)
         params = logentry.get("params")
         if isinstance(params, dict):
             logentry["params"] = _redact_mapping(params)
@@ -507,7 +576,7 @@ def scrub_event(  # noqa: PLR0912, PLR0915  event redaction dispatch
             logentry["params"] = [_REDACTED for _ in params]
     top_message = event.get("message")
     if isinstance(top_message, str):
-        event["message"] = _scrub_url(top_message)
+        event["message"] = _scrub_text(top_message)
 
     # Breadcrumbs commonly include logged outbound HTTP URLs. Walk
     # each breadcrumb's ``data`` for a URL and scrub it.
@@ -520,12 +589,11 @@ def scrub_event(  # noqa: PLR0912, PLR0915  event redaction dispatch
                     continue
                 data = bc.get("data")
                 if isinstance(data, dict):
-                    if isinstance(data.get("url"), str):
-                        data["url"] = _scrub_url(data["url"])
+                    _scrub_url_data(data)
                     bc["data"] = _redact_mapping(data)
                 if isinstance(bc.get("message"), str):
                     # Best-effort URL scrub inside free-form messages.
-                    bc["message"] = _scrub_url(bc["message"])
+                    bc["message"] = _scrub_text(bc["message"])
 
     # ``extra``, ``tags``, ``contexts`` all carry operator-supplied
     # values. The value-key scrubber catches keys named password /
@@ -536,33 +604,31 @@ def scrub_event(  # noqa: PLR0912, PLR0915  event redaction dispatch
         block = event.get(top_key)
         if isinstance(block, dict):
             event[top_key] = _redact_mapping(block)
-    # Spans (Sentry tracing) carry per-span data attributes that
-    # mirror the trace-context block. Same scrub applies.
+    # Spans (transaction events) carry per-span data attributes that
+    # mirror the trace-context block. Same scrub applies. An outbound
+    # HTTP span is also described as ``<METHOD> <url>``.
     spans = event.get("spans")
     if isinstance(spans, list):
         for span in spans:
             if not isinstance(span, dict):
                 continue
+            if isinstance(span.get("description"), str):
+                span["description"] = _scrub_inline_urls(span["description"])
             sdata = span.get("data")
             if isinstance(sdata, dict):
-                # URL attributes leak query tokens; scrub before the
-                # key-pattern walk because the URL is a single string,
-                # not a key whose name matches a pattern.
-                for url_key in ("http.url", "url.full", "url.query"):
-                    if isinstance(sdata.get(url_key), str):
-                        sdata[url_key] = _scrub_url(sdata[url_key])
+                _scrub_url_data(sdata)
                 span["data"] = _redact_mapping(sdata)
-    # Same URL-key scrub on contexts.trace.data (already key-walked
-    # above; this is a defence-in-depth pass for the URL specifically).
+    # Same URL-key scrub on contexts.trace (already key-walked above;
+    # this is a defence-in-depth pass for the URL specifically).
     contexts = event.get("contexts")
     if isinstance(contexts, dict):
         trace = contexts.get("trace")
         if isinstance(trace, dict):
+            if isinstance(trace.get("description"), str):
+                trace["description"] = _scrub_inline_urls(trace["description"])
             tdata = trace.get("data")
             if isinstance(tdata, dict):
-                for url_key in ("http.url", "url.full", "url.query"):
-                    if isinstance(tdata.get(url_key), str):
-                        tdata[url_key] = _scrub_url(tdata[url_key])
+                _scrub_url_data(tdata)
 
     # Exception value + stacktrace frames + mechanism block.
     # ``str(exc)`` routinely includes the offending URL. aiohttp /
@@ -676,6 +742,10 @@ def init_sentry(settings: Any) -> bool:
                 getattr(settings, "sentry_send_default_pii", False),
             ),
             before_send=scrub_event,
+            # ``before_send`` never sees transactions; without this
+            # hook a traced request ships its headers and outbound
+            # span URLs unredacted.
+            before_send_transaction=scrub_event,
             # The SDK's FastAPI integration picks itself up via the
             # ``starlette`` auto-discovery, so we do not enumerate
             # integrations here -- letting Sentry handle the version

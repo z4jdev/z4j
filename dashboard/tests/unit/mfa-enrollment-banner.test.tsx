@@ -2,10 +2,9 @@
  * The banner is the only thing that tells a user why the dashboard closed.
  *
  * When enforcement targets a user who has not enrolled, the brain answers every
- * non-exempt route with 403 mfa_enrollment_required and the client renders the
- * generic "your role doesn't have access" toast. That tells the user they lack
- * permission, which is wrong and offers no way out. The status endpoint stays
- * reachable past the deadline precisely so this can be shown instead.
+ * non-exempt route with 403 mfa_enrollment_required and the client can only
+ * raise a toast per failed request, which offers no way to enroll. The status
+ * endpoint stays reachable past the deadline precisely so this can be shown.
  */
 
 import { render, screen } from "@testing-library/react";

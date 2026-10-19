@@ -3,8 +3,7 @@
 # Use this compose file when you need:
 #   - more than one concurrent admin (SQLite is single-writer)
 #   - throughput or retention that exceeds your measured SQLite capacity
-#   - audit-grade Postgres (range-partitioned events, LISTEN/NOTIFY,
-#     tsvector full-text search)
+#   - audit-grade Postgres (range-partitioned events, LISTEN/NOTIFY)
 #   - horizontal brain replicas behind a load balancer
 #   - compliance regimes (SOC 2, HIPAA, ISO 27001) that mandate Postgres
 #
@@ -64,7 +63,7 @@ services:
   # PostgreSQL 18 - brain database
   # ====================================================================
   z4j-postgres:
-    image: postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
+    image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     container_name: z4j-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-z4j}
@@ -131,7 +130,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        Z4J_VERSION: ${Z4J_VERSION:-1.12.1}
+        Z4J_VERSION: ${Z4J_VERSION:-1.13.0}
     image: ${Z4J_BRAIN_IMAGE:-z4jdev/z4j:latest}
     container_name: z4j
     depends_on:
@@ -181,10 +180,21 @@ services:
       # you're 100% sure your DB lives on a trusted private network.
       Z4J_REQUIRE_DB_SSL: ${Z4J_REQUIRE_DB_SSL:-false}
 
+      # ----- reverse proxy -----
+      # JSON array of proxy CIDRs whose X-Forwarded-For the brain honors.
+      # The default [] trusts no proxy. docker-compose.caddy.yml supplies
+      # its own bridge subnet; set this in .env for any other proxy.
+      Z4J_TRUSTED_PROXIES: ${Z4J_TRUSTED_PROXIES:-[]}
+
       # ----- operational -----
       Z4J_LOG_LEVEL: ${Z4J_LOG_LEVEL:-INFO}
       Z4J_LOG_JSON: ${Z4J_LOG_JSON:-true}
       Z4J_ENVIRONMENT: ${Z4J_ENVIRONMENT:-production}
+      # The image default is true, which lets production start on an http://
+      # Z4J_PUBLIC_URL. Set false in .env once TLS fronts the brain.
+      Z4J_ALLOW_HTTP_PUBLIC_URL: ${Z4J_ALLOW_HTTP_PUBLIC_URL:-true}
+      Z4J_COMMAND_TIMEOUT_SECONDS: ${Z4J_COMMAND_TIMEOUT_SECONDS:-60}
+      Z4J_AGENT_OFFLINE_TIMEOUT_SECONDS: ${Z4J_AGENT_OFFLINE_TIMEOUT_SECONDS:-30}
 
       # --- optional: skip interactive first-boot by seeding an admin ---
       # When both are set and the users table is empty, the brain

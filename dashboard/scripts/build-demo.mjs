@@ -51,15 +51,10 @@ const dashboardRoot = resolve(__dirname, "..");
 const distDemoPath = resolve(dashboardRoot, "dist-demo");
 
 console.log("[build:demo] running vite build with VITE_Z4J_DEMO_MODE=true");
-// R7-L6: explicitly pin NODE_ENV=production so vite.config.ts's
-// production-only ``sourcemap: false`` branch fires. Without this,
-// build-demo inherits whatever NODE_ENV the operator's shell has
-// (often unset, which means vite's mode-detection falls back to
-// ``development`` for the implicit-mode case and emits .map files
-// alongside every chunk). The 1.6.3 advisory's "no source maps in
-// production" posture covers demo.z4j.com too -- it's a publicly
-// reachable build and source maps reproduce the unminified React
-// source for any attacker who guesses ``<chunk>.js.map``.
+// Pin NODE_ENV for production dependency behavior. Vite's build mode,
+// separately, selects the production sourcemap policy in vite.config.ts;
+// NODE_ENV alone does not control that branch. The demo also verifies
+// its output contains no source maps before deployment.
 const env = {
   ...process.env,
   VITE_Z4J_DEMO_MODE: "true",

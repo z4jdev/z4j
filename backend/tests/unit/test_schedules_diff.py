@@ -201,6 +201,47 @@ def _row(name: str, **overrides) -> dict:
 
 @pytest.mark.asyncio
 class TestDiffBuckets:
+    @pytest.mark.parametrize("mode", ["upsert", "replace_for_source"])
+    async def test_diff_refuses_disallowed_row_with_importer_reason(
+        self,
+        mode: str,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _make_admin_seed(settings=settings, brain_app=brain_app)
+        await _seed_schedule(brain_app, seed["project_id"], "stable")
+        async with brain_app.state.db.session() as session:
+            project = await session.get(Project, seed["project_id"])
+            project.allowed_schedulers = ["z4j-scheduler"]
+            await session.commit()
+
+        body = {
+            "mode": mode,
+            "source_filter": "declarative:django",
+            "schedules": [_row("stable"), _row("forbidden", scheduler="celery-beat")],
+        }
+        async with _client(brain_app, settings, seed) as client:
+            preview = await client.post("/api/v1/projects/default/schedules:diff", json=body)
+            assert preview.status_code == 422, preview.text
+            assert preview.json()["error"] == "validation_error"
+            errors = preview.json()["details"]["errors"]
+            assert set(errors) == {"1"}
+            assert "allowed_schedulers" in errors["1"]
+            async with brain_app.state.db.session() as session:
+                rows = list(await session.scalars(select(Schedule)))
+                assert [row.name for row in rows] == ["stable"]
+                assert rows[0].source_hash == "hash-stable"
+
+            imported = await client.post("/api/v1/projects/default/schedules:import", json=body)
+            assert imported.status_code == 200, imported.text
+            result = imported.json()
+            assert result["failed"] == 1
+            assert result["errors"] == errors
+            assert result["inserted"] == 0
+            assert result["updated"] == 0
+            assert result["unchanged"] == 1
+            assert result["deleted"] == 0
+
     async def test_new_row_lands_in_insert_bucket(
         self,
         settings: Settings,

@@ -20,8 +20,9 @@ Defense-in-depth layers applied regardless of mode:
 1. Per-IP rate limit (``require_openapi_throttle``: 10 req/min/IP)
 2. ``Cache-Control`` headers per mode
 3. ``ETag`` based on schema hash; respond 304 on ``If-None-Match``
-4. Best-effort ``openapi.schema_accessed`` audit attempt before each
-   successful 200 (an audit-store outage is logged but does not deny docs)
+4. Best-effort ``openapi.schema_accessed`` audit for successful 200s.
+   Authenticated requests defer the write until their read session closes;
+   an audit-store outage is logged but does not deny docs.
 5. Version watermark (``info.x-z4j-build``) in the schema metadata
 6. No-leak responses: ``private`` returns 401 with a generic
    ``WWW-Authenticate`` header; ``disabled`` paths simply do not
@@ -50,6 +51,8 @@ from z4j_brain import __version__
 from z4j_brain.domain.ip_rate_limit import require_openapi_throttle
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from z4j_brain.persistence.models import User
     from z4j_brain.settings import Settings
 
@@ -105,13 +108,13 @@ def _hash_schema(schema: dict[str, Any]) -> str:
 async def _audit_schema_access(
     request: Request,
     *,
-    user: User | None,
+    user_id: UUID | None,
     path: str,
 ) -> None:
     """Write an ``openapi.schema_accessed`` audit row.
 
-    Fire-and-forget at the call site -- audit failures must not
-    break a successful schema fetch. The audit row distinguishes
+    Awaited by the route or its request-session teardown; failures
+    must not break a successful schema fetch. The audit row distinguishes
     authenticated from anonymous accesses so security teams can spot
     a public-mode operator getting unusual recon traffic.
     """
@@ -130,7 +133,7 @@ async def _audit_schema_access(
                 target_id=path,
                 result="success",
                 outcome="allow",
-                user_id=user.id if user is not None else None,
+                user_id=user_id,
                 source_ip=_safe_client_ip(request),
                 metadata={
                     "path": path,
@@ -152,6 +155,26 @@ async def _audit_schema_access(
         )
 
 
+async def _record_schema_access(request: Request, *, user: User | None, path: str) -> None:
+    """Defer private-route writes until authentication releases its connection."""
+    user_id = user.id if user is not None else None
+    if getattr(request.state, "z4j_request_session_active", False):
+        # Retain only immutable identity, not ORM objects that expire on close.
+        request.state.z4j_openapi_access = (user_id, path)
+        return
+    await _audit_schema_access(request, user_id=user_id, path=path)
+
+
+async def drain_schema_access_audit(request: Request) -> None:
+    """Called after the request session closes, so even a pool of one works."""
+    pending = getattr(request.state, "z4j_openapi_access", None)
+    if pending is None:
+        return
+    request.state.z4j_openapi_access = None
+    user_id, path = pending
+    await _audit_schema_access(request, user_id=user_id, path=path)
+
+
 def _safe_client_ip(request: Request) -> str:
     """Best-effort client IP for the audit row.
 
@@ -171,7 +194,7 @@ def _safe_client_ip(request: Request) -> str:
 def register_openapi_routes(app: FastAPI, settings: Settings) -> None:
     """Mount the schema + Swagger UI routes per the visibility mode.
 
-    Idempotent: skips registration when ``visibility == "disabled"``
+    Call once per app. Skips registration when ``visibility == "disabled"``
     so the SPA catch-all returns 404 for both paths. The FastAPI app
     MUST be constructed with ``openapi_url=None, docs_url=None,
     redoc_url=None`` so this helper is the sole source of those
@@ -234,7 +257,7 @@ def register_openapi_routes(app: FastAPI, settings: Settings) -> None:
                     "Cache-Control": cache_control,
                 },
             )
-        await _audit_schema_access(
+        await _record_schema_access(
             request,
             user=user if visibility == "private" else None,
             path=OPENAPI_SCHEMA_PATH,
@@ -265,7 +288,7 @@ def register_openapi_routes(app: FastAPI, settings: Settings) -> None:
             openapi_url=OPENAPI_SCHEMA_PATH,
             title="z4j API docs",
         )
-        await _audit_schema_access(
+        await _record_schema_access(
             request,
             user=user if visibility == "private" else None,
             path=OPENAPI_DOCS_PATH,

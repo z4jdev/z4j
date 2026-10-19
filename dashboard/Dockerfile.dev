@@ -4,7 +4,7 @@
 #
 # Used only by docker-compose.dev.yml. Production builds the
 # dashboard inside the unified brain image (see
-# packages/z4j-brain/backend/Dockerfile stage 1).
+# packages/z4j/backend/Dockerfile stage 1).
 #
 # Build context: monorepo root.
 

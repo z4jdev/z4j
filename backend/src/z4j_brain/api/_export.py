@@ -199,10 +199,10 @@ def export_xlsx(
 # The helpers above take a list, which is what the synchronous export
 # path has after its capped query. A background job never has the whole
 # result in memory: it pages the query and hands each page to one of the
-# encoders below, which return bytes for that page only. The byte layout
-# is the one the synchronous path produces (same header, same quoting,
-# same two-space JSON indentation), so a file written by a job and a file
-# downloaded synchronously for the same filter are the same bytes.
+# encoders below. CSV/JSON use the synchronous path's byte layout (same
+# header, quoting and JSON indentation) for the same ordered rows. XLSX
+# uses a separate constant-memory workbook writer; its archive bytes need
+# not match the synchronous in-memory workbook.
 # ---------------------------------------------------------------------------
 
 #: Rows per worksheet an xlsx job may write. Excel's sheet holds 1 048 576

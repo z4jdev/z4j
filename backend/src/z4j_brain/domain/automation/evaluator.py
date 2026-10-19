@@ -269,7 +269,7 @@ def validate_actions(actions: Any) -> list[str]:
             errors.append(f"actions[{i}] must be an object")
             continue
         atype = action.get("type")
-        if atype not in KNOWN_ACTIONS:
+        if not isinstance(atype, str) or atype not in KNOWN_ACTIONS:
             errors.append(f"actions[{i}]: unknown action type {atype!r}")
         elif atype not in SUPPORTED_ACTIONS:
             errors.append(
@@ -286,7 +286,7 @@ def actions_are_destructive(actions: Any) -> bool:
     Fail-safe: a malformed ``actions`` value is treated as destructive so
     the STRICTER gate applies (the write is rejected downstream anyway).
     """
-    if not isinstance(actions, list):
+    if validate_actions(actions):
         return True
     for action in actions:
         if not isinstance(action, dict):
@@ -366,7 +366,7 @@ def evaluate_conditions(conditions: Any, fields: dict[str, Any]) -> bool:
     Never raises. Any malformed shape returns ``False``.
     """
     try:
-        if not isinstance(conditions, dict):
+        if validate_conditions(conditions):
             return False
         for op, combine in (("all", all), ("any", any)):
             if op in conditions:
@@ -401,7 +401,7 @@ def matching_rules(
             continue
         if getattr(rule, "trigger", None) != trigger:
             continue
-        if evaluate_conditions(getattr(rule, "conditions", None) or {}, fields):
+        if evaluate_conditions(getattr(rule, "conditions", None), fields):
             out.append(rule)
     return out
 

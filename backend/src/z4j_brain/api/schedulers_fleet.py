@@ -136,8 +136,8 @@ async def list_fleet(
     """Return one entry per configured scheduler URL.
 
     Authorization is global ADMIN (not project-scoped). The fleet
-    is operator-level concern - any project admin sees the same
-    fleet, but only global admins (``user.is_admin``) can view it.
+    is an operator-level concern: only global admins
+    (``user.is_admin``) can view it.
     """
     if not user.is_admin:
         # Raise an explicit 403 so the dashboard knows to render
@@ -166,10 +166,8 @@ async def list_fleet(
         return FleetResponse(schedulers=[], total=0, healthy=0)
 
     # Explicit ``follow_redirects=False``.
-    # httpx defaults to following redirects; a compromised scheduler
-    # could redirect the brain's probe to internal-metadata services
-    # (cloud-instance metadata at 169.254.169.254 etc). Pin to false
-    # so a "redirect to a sensitive URL" attack is impossible.
+    # Keep HTTPX's no-redirect behavior explicit so a scheduler response
+    # cannot send the next probe hop to an unintended metadata service.
     # Fan out in parallel with a short timeout - dashboard polls
     # this on a refresh interval, can't hold up rendering on a
     # dead scheduler.
@@ -230,6 +228,12 @@ async def _probe_scheduler(  # noqa: PLR0911  probe result status mapping
     info_url = url.rstrip("/") + "/info"
     try:
         response = await client.get(info_url)
+    except httpx.InvalidURL as exc:
+        return FleetEntry(
+            url=url,
+            ok=False,
+            error=f"refused to probe invalid URL: {exc}",
+        )
     except httpx.TimeoutException:
         return FleetEntry(
             url=url,

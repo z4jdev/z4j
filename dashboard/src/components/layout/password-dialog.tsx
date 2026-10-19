@@ -3,7 +3,7 @@
  *
  * Opened from the user dropdown in the topbar. Requires current
  * password + new password + confirmation. All existing sessions
- * are revoked on success (the user is re-logged in).
+ * are revoked on success, and the user must log in again.
  */
 import { useState } from "react";
 import { KeyRound } from "lucide-react";

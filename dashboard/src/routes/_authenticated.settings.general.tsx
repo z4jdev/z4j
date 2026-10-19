@@ -142,7 +142,7 @@ export function GeneralSettingsPage() {
           {/* Retention */}
           <SectionCard
             title="Retention"
-            description="How long z4j keeps event and audit data before automatic cleanup."
+            description="How long z4j keeps event and audit data before automatic cleanup. Event cleanup runs on PostgreSQL only; on SQLite, events are never removed automatically."
             readOnly
           >
             <SettingsTable

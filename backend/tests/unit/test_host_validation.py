@@ -6,6 +6,7 @@ import secrets
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from z4j_brain.main import create_app
@@ -183,6 +184,70 @@ async def prod_client(prod_settings: Settings):
     async with AsyncClient(transport=transport, base_url="https://z4j.example.com") as ac:
         yield ac
     await engine.dispose()
+
+
+async def _metrics_client(settings: Settings):
+    engine = create_async_engine(
+        settings.database_url,
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return engine, create_app(settings, engine=engine)
+
+
+@pytest.mark.asyncio
+class TestMetricsScrapeByAddress:
+    """Prometheus scrapes a target by its address, so the Host it sends is the
+    pod IP and port (Kubernetes ServiceMonitor) or the host IP, which a pinned
+    allow-list never carries. Every scrape used to be a 400 ``invalid_host``.
+    """
+
+    async def _get(self, settings: Settings, host: str, token: str | None):
+        from httpx import ASGITransport, AsyncClient
+
+        engine, app = await _metrics_client(settings)
+        try:
+            headers = {"Host": host}
+            if token is not None:
+                headers["Authorization"] = f"Bearer {token}"
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="https://z4j.example.com"
+            ) as ac:
+                return await ac.get("/metrics", headers=headers)
+        finally:
+            await engine.dispose()
+
+    async def test_token_gated_scrape_by_pod_address_is_served(self, prod_settings) -> None:
+        settings = prod_settings.model_copy(
+            update={"metrics_auth_token": SecretStr("scrape-token-0123456789")}
+        )
+        r = await self._get(settings, "10.42.3.17:7700", "scrape-token-0123456789")
+        assert r.status_code == 200, r.text
+        assert "z4j_" in r.text
+
+    async def test_token_gate_still_applies_to_the_exempt_scrape(self, prod_settings) -> None:
+        settings = prod_settings.model_copy(
+            update={"metrics_auth_token": SecretStr("scrape-token-0123456789")}
+        )
+        r = await self._get(settings, "10.42.3.17:7700", "wrong-token")
+        assert r.status_code == 401
+
+    async def test_public_metrics_keep_the_allow_list(self, prod_settings) -> None:
+        # Unauthenticated /metrics stays behind Host validation, so a
+        # DNS-rebinding page cannot read it through a foreign Host.
+        settings = prod_settings.model_copy(update={"metrics_public": True})
+        r = await self._get(settings, "10.42.3.17:7700", None)
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_host"
+
+    async def test_malformed_host_is_still_rejected_on_metrics(self, prod_settings) -> None:
+        settings = prod_settings.model_copy(
+            update={"metrics_auth_token": SecretStr("scrape-token-0123456789")}
+        )
+        r = await self._get(settings, "evil.com/admin", "scrape-token-0123456789")
+        assert r.status_code == 400
 
 
 @pytest.mark.asyncio

@@ -10,8 +10,8 @@ under `deploy/systemd/` and in the source repository.
 # 1. A system user and a virtualenv the units expect.
 sudo useradd --system --home-dir /var/lib/z4j --shell /usr/sbin/nologin z4j
 sudo python3 -m venv /opt/z4j/venv
-sudo /opt/z4j/venv/bin/pip install z4j            # brain
-sudo /opt/z4j/venv/bin/pip install z4j-scheduler  # only for the standalone scheduler
+sudo /opt/z4j/venv/bin/pip install z4j            # brain; install 'z4j[postgres]' instead for PostgreSQL
+sudo /opt/z4j/venv/bin/pip install z4j-scheduler  # for either scheduler option below; also supplies the brain's gRPC runtime
 
 # 2. Configuration, readable by root only (systemd passes it to the process).
 sudo install -d -m 0750 -o root -g z4j /etc/z4j
@@ -55,9 +55,12 @@ sudo systemctl enable --now z4j-scheduler
 curl http://127.0.0.1:7800/ready
 ```
 
-Alternatively set `Z4J_EMBEDDED_SCHEDULER=true` in `brain.env` and skip
-the second unit: the brain supervises the scheduler as a subprocess with
-auto-minted loopback PKI.
+Alternatively install `z4j-scheduler` into the same venv, set
+`Z4J_EMBEDDED_SCHEDULER=true` in `brain.env` and skip the second unit: the
+brain supervises the scheduler as a subprocess with auto-minted loopback
+PKI. Without `z4j-scheduler` in the venv the subprocess cannot start and
+the brain's gRPC listener is skipped with a warning, so schedules never
+fire.
 
 ## Rotation and upgrades
 

@@ -44,10 +44,12 @@ the cursor, in chain order, and POSTs them one row per request in that
 order. The cursor moves to a row only after the receiver answered with
 a 2xx, by a compare-and-set UPDATE, so a brain restart, a receiver
 outage, or a leadership change resumes from the last acknowledged row.
-Nothing is dropped: a row the receiver has not acknowledged is sent
-again on a later pass, for as long as it takes.
+A row the receiver has not acknowledged is retried while it remains in the
+source audit table. Retention pruning is independent of this cursor, so an
+outage longer than source retention can lose rows before forwarding. Monitor
+the backlog and retain source rows long enough for recovery.
 
-Delivery is at least once. A crash between the receiver's 2xx and the
+Retries can deliver a retained row more than once. A crash between the receiver's 2xx and the
 cursor write re-sends that one row, and a receiver that answered 2xx
 after the brain gave up waiting sees it twice. The audit-row ``id`` is
 mint-once per row, so the receiver de-duplicates on the row id; the
@@ -163,7 +165,7 @@ def row_to_payload(row: Any) -> dict[str, Any]:
     def _iso(v: datetime | None) -> str | None:
         if v is None:
             return None
-        return v.astimezone(UTC).isoformat(timespec="microseconds")
+        return _aware(v).astimezone(UTC).isoformat(timespec="microseconds")
 
     def _str_uuid(v: uuid.UUID | None) -> str | None:
         return str(v) if v is not None else None

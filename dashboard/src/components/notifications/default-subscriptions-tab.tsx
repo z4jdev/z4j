@@ -56,7 +56,6 @@ const TRIGGERS: { value: TriggerType; label: string }[] = [
   { value: "task.succeeded", label: "Task succeeded" },
   { value: "task.retried", label: "Task retried" },
   { value: "agent.offline", label: "Agent offline" },
-  { value: "agent.online", label: "Agent online" },
 ];
 
 const PRIORITIES = ["critical", "high", "normal", "low"] as const;

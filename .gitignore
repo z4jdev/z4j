@@ -25,6 +25,11 @@ __pycache__/
 .venv/
 venv/
 
+# Env files hold secrets. Ignore every .env* except the shipped template.
+.env
+.env.*
+!.env.example
+
 # IDE / editor
 .vscode/
 .idea/

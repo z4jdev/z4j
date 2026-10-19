@@ -20,6 +20,7 @@ import type { AgentPublic, TaskPublic } from "@/lib/api-types";
 const detailState = vi.hoisted(() => ({
   agents: [] as AgentPublic[],
   task: null as TaskPublic | null,
+  engine: "celery",
 }));
 
 const commands = vi.hoisted(() => ({
@@ -40,7 +41,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
       fullPath: path,
       useParams: () => ({
         slug: "project",
-        engine: "celery",
+        engine: detailState.engine,
         taskId: "task-1",
       }),
       useSearch: () => ({}),
@@ -210,6 +211,7 @@ vi.mock("@/components/ui/select", async () => {
 });
 
 import { Route } from "@/routes/_authenticated.projects.$slug.tasks_.$engine.$taskId";
+import { cancelEffect } from "@/lib/task-commands";
 
 type PreloadableRouteComponent = ComponentType & {
   preload?: () => Promise<void>;
@@ -332,13 +334,30 @@ async function renderDetail() {
 
 const button = (name: string) => screen.getByRole("button", { name });
 
+/** Cancel asks first; the command goes out only from the dialog. */
+function cancelThroughDialog() {
+  fireEvent.click(button("Cancel"));
+  fireEvent.click(button("Cancel task"));
+}
+
 describe("task detail command target", () => {
   beforeEach(() => {
+    detailState.engine = "celery";
     detailState.task = taskFixture();
     for (const command of Object.values(commands)) {
       command.mockReset();
       command.mockResolvedValue(undefined);
     }
+  });
+
+  it.each([true, false])("gates rate limits on the selected agent capability: %s", async (supportsRateLimit) => {
+    detailState.agents = [helloAgent("celery", {
+      celery: supportsRateLimit ? [...CONTRACT, "rate_limit"] : CONTRACT,
+    })];
+    await renderDetail();
+    const control = button("Set rate limit for reports.build");
+    if (supportsRateLimit) expect(control).toBeEnabled();
+    else expect(control).toBeDisabled();
   });
 
   it("targets a long-poll agent whose transport never reported engines", async () => {
@@ -359,7 +378,7 @@ describe("task detail command target", () => {
         ...TASK_COMMAND,
       }),
     );
-    fireEvent.click(button("Cancel"));
+    cancelThroughDialog();
     await waitFor(() =>
       expect(commands.cancel).toHaveBeenCalledWith({
         agent_id: "agent-long-poll",
@@ -410,7 +429,7 @@ describe("task detail command target", () => {
     );
 
     fireEvent.click(screen.getByRole("option", { name: /^celery-worker/ }));
-    fireEvent.click(button("Cancel"));
+    cancelThroughDialog();
     await waitFor(() =>
       expect(commands.cancel).toHaveBeenCalledWith({
         agent_id: "agent-celery-worker",
@@ -487,12 +506,55 @@ describe("task detail command target", () => {
 
     // The long-poll agent is still one choice away.
     fireEvent.click(screen.getByRole("option", { name: /^long-poll/ }));
-    fireEvent.click(button("Cancel"));
+    cancelThroughDialog();
     await waitFor(() =>
       expect(commands.cancel).toHaveBeenCalledWith({
         agent_id: "agent-long-poll",
         ...TASK_COMMAND,
       }),
     );
+  });
+
+  it("asks before cancelling and states what cancel does on the engine", async () => {
+    detailState.agents = [helloAgent("celery-worker", { celery: CONTRACT })];
+    await renderDetail();
+
+    fireEvent.click(button("Cancel"));
+    // The dialog primitives are fragments here, so match on page text.
+    expect(document.body).toHaveTextContent("Cancel this task?");
+    expect(document.body).toHaveTextContent(cancelEffect("celery"));
+    expect(cancelEffect("celery")).toContain("terminated (SIGTERM)");
+    expect(commands.cancel).not.toHaveBeenCalled();
+
+    // Backing out sends nothing.
+    fireEvent.click(button("Keep task"));
+    expect(document.body).not.toHaveTextContent("Cancel this task?");
+    expect(commands.cancel).not.toHaveBeenCalled();
+
+    cancelThroughDialog();
+    await waitFor(() =>
+      expect(commands.cancel).toHaveBeenCalledWith({
+        agent_id: "agent-celery-worker",
+        ...TASK_COMMAND,
+      }),
+    );
+  });
+
+  it("offers no Retry for an engine the brain retries only with explicit arguments", async () => {
+    detailState.engine = "huey";
+    detailState.task = { ...taskFixture(), engine: "huey" };
+    detailState.agents = [helloAgent("huey-worker", { huey: CONTRACT })];
+    await renderDetail();
+
+    const retry = button("Retry");
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute(
+      "title",
+      expect.stringContaining("Celery and RQ tasks only"),
+    );
+    fireEvent.click(retry);
+    expect(commands.retry).not.toHaveBeenCalled();
+    // Cancel stays available: the agent advertises it for huey.
+    expect(button("Cancel")).toBeEnabled();
   });
 });

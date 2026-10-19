@@ -32,7 +32,7 @@ import pytest
 
 # Two paths into this suite:
 #  1. testcontainers available + Docker reachable → spin a fresh
-#     ``postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941`` per session.
+#     ``postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336`` per session.
 #  2. ``Z4J_TEST_POSTGRES_URL`` set → reuse an existing Postgres
 #     (the dev-container loop sets this to the shared
 #     ``z4j-dev-postgres`` service). Every test still gets its own
@@ -154,7 +154,7 @@ from z4j_brain.settings import Settings  # noqa: E402  must follow importorskip 
 
 @pytest.fixture(scope="session")
 def _postgres_container() -> Iterator[object | None]:
-    """Start one ``postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941`` container for the whole test run.
+    """Start one ``postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336`` container for the whole test run.
 
     When :envvar:`Z4J_TEST_POSTGRES_URL` is set this fixture is a
     no-op - the suite reuses that Postgres instead. Otherwise we
@@ -165,7 +165,7 @@ def _postgres_container() -> Iterator[object | None]:
         return
     try:
         container = PostgresContainer(
-            image="postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941",
+            image="postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
             username="z4j",
             password="z4j",
             dbname="z4j",

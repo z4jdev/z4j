@@ -63,11 +63,17 @@ class AuditForwarderStatus(BaseModel):
     )
     cursor_occurred_at: datetime | None = Field(
         default=None,
-        description="occurred_at of the newest audit row the receiver acknowledged.",
+        description=(
+            "occurred_at of the initial audit-head baseline or, after delivery, "
+            "the newest row the receiver acknowledged."
+        ),
     )
     cursor_id: str | None = Field(
         default=None,
-        description="id of the newest audit row the receiver acknowledged.",
+        description=(
+            "id of the initial audit-head baseline or, after delivery, "
+            "the newest row the receiver acknowledged."
+        ),
     )
     lag_rows: int | None = Field(
         default=None,

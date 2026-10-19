@@ -38,9 +38,11 @@ value to set.
 
 ### Evaluation (defaults)
 
-The defaults mirror the packaged `docker-compose.yml`: one brain replica,
-bundled SQLite on a 1 GiB PersistentVolumeClaim, secrets auto-minted on
-first boot, no scheduler, reachable through `kubectl port-forward`.
+The defaults follow the packaged `docker-compose.yml` evaluation posture
+except that no scheduler runs: one brain replica, bundled SQLite on a 1 GiB
+PersistentVolumeClaim, secrets auto-minted on first boot, reachable through
+`kubectl port-forward`. Schedules fire only once `scheduler.enabled` or
+`brain.embeddedScheduler` is set.
 
 ```sh
 helm install z4j oci://ghcr.io/z4jdev/charts/z4j --namespace z4j --create-namespace
@@ -51,6 +53,7 @@ kubectl --namespace z4j port-forward svc/z4j 7700:7700
 ### Production (PostgreSQL, explicit secrets, ingress)
 
 ```sh
+kubectl create namespace z4j
 kubectl --namespace z4j create secret generic z4j-secrets \
   --from-literal=app-secret="$(openssl rand -hex 48)" \
   --from-literal=session-secret="$(openssl rand -hex 48)" \
@@ -165,7 +168,15 @@ affinity helper.
 `/metrics` requires a bearer token. Point `brain.metrics.authExistingSecret`
 at a Secret holding it and, for the Prometheus Operator, enable
 `brain.serviceMonitor` with `bearerTokenSecret` naming the same Secret and
-key.
+key; the chart refuses to render the ServiceMonitor without both.
+
+The ServiceMonitor scrapes each brain pod by its address, so Prometheus
+sends the pod IP as `Host`, which `brain.allowedHosts` does not list. While
+a bearer token gates `/metrics` (`Z4J_METRICS_AUTH_TOKEN` set and
+`Z4J_METRICS_PUBLIC` not enabled), the brain exempts that path from the Host
+allow-list, so the scrape is accepted. If you make metrics public through
+`brain.extraEnv`, the allow-list applies to `/metrics` again and a scrape by
+pod address is rejected with 400.
 
 ## Bundled PostgreSQL
 
@@ -208,8 +219,10 @@ Scheduler side (`scheduler.tls`), in order of production-readiness:
    `tls.crt`, `tls.key` and `ca.crt` (the CA that signed the brain's
    server certificate). The chart never sees the material. Mint the leaf
    with `z4j mint-scheduler-cert --name scheduler-1 --ca-cert ca.crt
-   --ca-key ca.key --out-dir .` against your own CA, then
-   `kubectl create secret generic z4j-scheduler-tls --from-file=tls.crt=scheduler-1.crt --from-file=tls.key=scheduler-1.key --from-file=ca.crt=ca.crt`.
+   --ca-key ca.key --out-dir scheduler-tls` against your own CA (the
+   command sets `--out-dir` to mode 0700, so give it a directory of its
+   own), then
+   `kubectl --namespace z4j create secret generic z4j-scheduler-tls --type=kubernetes.io/tls --from-file=tls.crt=scheduler-tls/scheduler-1.crt --from-file=tls.key=scheduler-tls/scheduler-1.key --from-file=ca.crt=ca.crt`.
 2. `scheduler.tls.certManager.enabled=true`: the chart renders a
    `cert-manager.io/v1` `Certificate` against the Issuer or ClusterIssuer
    you name. `scheduler.tls.certManager.commonName` must be in
@@ -229,7 +242,8 @@ Scheduler side (`scheduler.tls`), in order of production-readiness:
    Its ServiceAccount can only `get` and `update` those two Secret names
    and `create` Secrets in the release namespace; the RBAC is removed once
    the Job succeeds and the completed Job stays until the next hook run so
-   `kubectl logs job/<release>-pki-mint` shows what it did. A renewal
+   `kubectl --namespace z4j logs job/<fullname>-pki-mint` shows what it did
+   (`job/z4j-pki-mint` for the installs on this page). A renewal
    replaces the Secrets but not the files already loaded by running pods,
    so pass a new `rolloutRevision` on any upgrade near expiry (the log
    says `RENEWED`). The Secrets are not Helm-managed: `helm uninstall`
@@ -321,9 +335,12 @@ The brain uses `Recreate` (see above). The scheduler uses the default
 RollingUpdate strategy; PostgreSQL leader coordination prevents
 simultaneous leaders for the same lock, but the chart does not promise
 zero-delay firing during a rollout. Both Deployments checksum their
-ConfigMaps and chart-rendered inline Secrets, so a values change rolls the
-pods. External Secret contents are outside the rendered release: rotate
-them first, then restart or bump `rolloutRevision` as above.
+ConfigMaps and their inline application or TLS Secrets, so a values change
+to those rolls the pods. The Secrets composed from
+`postgresql.auth.password` (the bundled PostgreSQL password and the
+scheduler's leader DSN) are not checksummed. External Secret contents are
+outside the rendered release: rotate them first, then restart or bump
+`rolloutRevision` as above.
 
 Upgrade the release with the same `--version` discipline as install:
 

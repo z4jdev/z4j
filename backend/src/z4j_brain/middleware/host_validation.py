@@ -63,6 +63,10 @@ _HOST_VALIDATION_EXEMPT_PATHS: frozenset[str] = frozenset(
     }
 )
 
+#: Exempt from the allow-list only while a bearer token gates it; see
+#: ``HostValidationMiddleware.__init__``.
+_METRICS_PATH = "/metrics"
+
 
 class HostValidationMiddleware(BaseHTTPMiddleware):
     """Reject requests with an unrecognised Host header.
@@ -82,6 +86,16 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
             configured |= _DEV_DEFAULTS
         self._allowed: frozenset[str] = frozenset(configured)
         self._dev = is_dev
+        # A Prometheus scrape sends the target address as Host (in Kubernetes
+        # the pod IP), which no pinned allow-list can carry, so every scrape
+        # was a 400. ``/metrics`` is exempt from the allow-list only while a
+        # bearer token gates it: the scraper's credential is the gate, and
+        # the response builds no URL from Host. With Z4J_METRICS_PUBLIC the
+        # allow-list stays in force, so a DNS-rebinding page cannot read an
+        # unauthenticated /metrics through a foreign Host.
+        self._metrics_exempt = (
+            settings.metrics_auth_token is not None and not settings.metrics_public
+        )
         # Frozen public list (preserve original case + order from settings)
         # used in the rejection payload so operators see exactly what's
         # whitelisted, not a lowercased+reordered version.
@@ -125,7 +139,10 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
         # The exempt-path test never needed the host: the raw scope path is
         # the authority for which route was requested, and it cannot be
         # poisoned by a header.
-        is_health = request.scope.get("path", "").rstrip("/") in _HOST_VALIDATION_EXEMPT_PATHS
+        scope_path = request.scope.get("path", "").rstrip("/")
+        is_health = scope_path in _HOST_VALIDATION_EXEMPT_PATHS or (
+            self._metrics_exempt and scope_path == _METRICS_PATH
+        )
         # 1.6.5: a present-but-malformed Host header
         # used to fall through the allow-list. added the
         # _strip_port hardening that collapses malformed values to

@@ -12,8 +12,8 @@ gates that make destructive automation safe to hand an operator:
   needs ADMIN.
 - **Fresh MFA step-up**: creating / updating / enabling a destructive
   rule from a browser session additionally requires a recent MFA verify
-  (bearer API keys are their own factor and are exempt, matching
-  ``require_fresh_mfa``).
+  (scoped bearer API keys are exempt under this router's
+  optional-session policy).
 - **Every mutation is audited** through the one HMAC-chained audit log.
 
 The project-level ``/automation/settings`` endpoint exposes a kill switch
@@ -257,8 +257,8 @@ async def _authorize_write(
 
     A destructive rule needs ADMIN; anything else needs OPERATOR. For a
     destructive mutation from a browser session we additionally require a
-    recent MFA verify; bearer callers (``resolved is None``) are exempt,
-    matching ``require_fresh_mfa``.
+    recent MFA verify; this router exempts bearer callers
+    (``resolved is None``) from that additional session gate.
     """
     min_role = ProjectRole.ADMIN if destructive else ProjectRole.OPERATOR
     await policy.require_member(

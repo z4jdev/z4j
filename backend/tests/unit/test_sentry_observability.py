@@ -14,6 +14,9 @@ Pin the load-bearing pieces of the v1.6 optional Sentry surface:
   ``sentry-sdk`` installed because the scrubber is a pure function.
 - Settings validation rejects out-of-range sample rates so a typo
   in ``Z4J_SENTRY_TRACES_SAMPLE_RATE`` is caught at startup.
+- Transaction events are scrubbed too, and an outbound webhook URL the
+  dispatcher pinned to its resolved IP is still recognised by its
+  path. The real-SDK variant skips when ``sentry-sdk`` is not installed.
 """
 
 from __future__ import annotations
@@ -22,9 +25,12 @@ import secrets
 import sys
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
+from z4j_brain.domain.notifications import channels
 from z4j_brain.observability import sentry as sentry_mod
 from z4j_brain.observability.sentry import (
     _REDACTED,
@@ -186,6 +192,28 @@ class TestInitSentry:
         assert kwargs["profiles_sample_rate"] == 0.05
         assert kwargs["send_default_pii"] is False
         # The scrubber must be wired or the brain leaks credentials.
+        assert kwargs["before_send"] is scrub_event
+
+    def test_scrubber_also_registered_for_transactions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The SDK never calls ``before_send`` for a transaction, so a
+        traced request would ship its headers and span URLs unscrubbed
+        unless the scrubber is registered for transactions too."""
+        fake = _FakeSentrySDK()
+        monkeypatch.setitem(sys.modules, "sentry_sdk", fake)  # type: ignore[arg-type]
+        s = SimpleNamespace(
+            sentry_dsn=SecretStr("https://abc@sentry.example.com/42"),
+            sentry_environment=None,
+            sentry_traces_sample_rate=0.1,
+            sentry_profiles_sample_rate=0.0,
+            sentry_send_default_pii=True,
+            environment="production",
+        )
+        assert init_sentry(s) is True
+        kwargs = fake.init_calls[0]
+        assert kwargs.get("before_send_transaction") is scrub_event
         assert kwargs["before_send"] is scrub_event
 
     def test_environment_falls_back_to_settings_environment(
@@ -711,3 +739,288 @@ def test_module_exposes_idempotency_reset_hook() -> None:
     """The reset hook is used by the test rig. Pin it so a refactor
     that renames or drops it breaks the test suite loudly here."""
     assert callable(sentry_mod._reset_for_tests)
+
+
+# ---------------------------------------------------------------------------
+# Transactions and IP-pinned outbound URLs
+# ---------------------------------------------------------------------------
+
+#: The IP a notification dispatcher pins its request to. The SDK's
+#: outbound breadcrumbs and spans name it instead of the webhook host.
+_PINNED_IP = "93.184.216.34"
+
+#: (pinned URL path, the credential in it), one per dispatcher whose
+#: URL path carries the credential.
+_PINNED_WEBHOOK_PATHS = [
+    pytest.param("/services/T0ABC/B0DEF/SECRETSLACKPATH", "SECRETSLACKPATH", id="slack"),
+    pytest.param(
+        "/api/webhooks/123456/SECRETDISCORDTOKEN/slack",
+        "SECRETDISCORDTOKEN",
+        id="discord",
+    ),
+    pytest.param(
+        "/webhookb2/a1b2@c3d4/IncomingWebhook/SECRETTEAMSID/e5f6",
+        "SECRETTEAMSID",
+        id="teams",
+    ),
+    pytest.param(
+        "/bot123456:SECRETTELEGRAMTOKEN/sendMessage",
+        "SECRETTELEGRAMTOKEN",
+        id="telegram",
+    ),
+]
+
+_REDACTED_PINNED_URL = f"https://{_PINNED_IP}/[REDACTED by z4j]"
+
+
+class TestScrubTransactionEvent:
+    """Transactions reach :func:`scrub_event` through
+    ``before_send_transaction``. An outbound HTTP span is described as
+    ``<METHOD> <url>`` and carries the URL under ``data.url``."""
+
+    @pytest.mark.parametrize(("path", "secret"), _PINNED_WEBHOOK_PATHS)
+    def test_pinned_webhook_span_redacted(self, path: str, secret: str) -> None:
+        url = f"https://{_PINNED_IP}{path}"
+        plain = f"https://{_PINNED_IP}/v1/receive"
+        event = {
+            "type": "transaction",
+            "transaction": "/api/v1/projects/{slug}/notifications/channels/{channel_id}/test",
+            "contexts": {"trace": {"op": "http.server", "data": {"thread.name": "MainThread"}}},
+            "spans": [
+                {
+                    "op": "http.client",
+                    "description": f"POST {url}",
+                    "data": {"url": url, "http.method": "POST", "http.query": ""},
+                },
+                {
+                    "op": "http.client",
+                    "description": f"POST {plain}",
+                    "data": {"url": plain, "http.method": "POST"},
+                },
+            ],
+        }
+        out = scrub_event(event)
+        assert secret not in repr(out)
+        webhook_span, plain_span = out["spans"]
+        assert webhook_span["description"] == f"POST {_REDACTED_PINNED_URL}"
+        assert webhook_span["data"]["url"] == _REDACTED_PINNED_URL
+        # Control: an ordinary outbound path stays readable.
+        assert plain_span["description"] == f"POST {plain}"
+        assert plain_span["data"]["url"] == plain
+
+    def test_span_query_string_keys_scrubbed(self) -> None:
+        """Teams Workflows URLs carry the credential in ``sig``; the SDK
+        records the query apart from the URL, under ``http.query``."""
+        event = {
+            "type": "transaction",
+            "spans": [
+                {
+                    "op": "http.client",
+                    "description": f"POST https://{_PINNED_IP}/v1/receive",
+                    "data": {
+                        "url": f"https://{_PINNED_IP}/v1/receive",
+                        "http.query": "api-version=2016-06-01&sv=1.0&sig=SECRETSIG",
+                    },
+                },
+            ],
+        }
+        out = scrub_event(event)
+        query = out["spans"][0]["data"]["http.query"]
+        assert "SECRETSIG" not in query
+        assert "api-version=2016-06-01" in query
+
+
+class TestScrubPinnedBreadcrumbs:
+    @pytest.mark.parametrize(("path", "secret"), _PINNED_WEBHOOK_PATHS)
+    def test_pinned_webhook_breadcrumb_url_redacted(self, path: str, secret: str) -> None:
+        event = {
+            "breadcrumbs": {
+                "values": [
+                    {
+                        "type": "http",
+                        "category": "httplib",
+                        "data": {"url": f"https://{_PINNED_IP}{path}", "http.method": "POST"},
+                    },
+                    {
+                        "type": "http",
+                        "category": "httplib",
+                        "data": {"url": f"https://{_PINNED_IP}/v1/receive", "http.method": "POST"},
+                    },
+                ],
+            },
+        }
+        out = scrub_event(event)
+        webhook, plain = (bc["data"] for bc in out["breadcrumbs"]["values"])
+        assert secret not in repr(out)
+        assert webhook["url"] == _REDACTED_PINNED_URL
+        # Control: an ordinary outbound path stays readable.
+        assert plain["url"] == f"https://{_PINNED_IP}/v1/receive"
+
+    def test_breadcrumb_query_string_keys_scrubbed(self) -> None:
+        event = {
+            "breadcrumbs": {
+                "values": [
+                    {
+                        "type": "http",
+                        "data": {
+                            "url": f"https://{_PINNED_IP}/v1/receive",
+                            "http.query": "api-version=2016-06-01&sig=SECRETSIG",
+                        },
+                    },
+                ],
+            },
+        }
+        out = scrub_event(event)
+        query = out["breadcrumbs"]["values"][0]["data"]["http.query"]
+        assert "SECRETSIG" not in query
+        assert "api-version=2016-06-01" in query
+
+    def test_pinned_webhook_url_in_exception_value_redacted(self) -> None:
+        url = f"https://{_PINNED_IP}/api/webhooks/123456/SECRETDISCORDTOKEN/slack"
+        event = {
+            "exception": {
+                "values": [
+                    {
+                        "type": "HTTPStatusError",
+                        "value": f"Client error '404 Not Found' for url '{url}'",
+                    },
+                ],
+            },
+        }
+        out = scrub_event(event)
+        value = out["exception"]["values"][0]["value"]
+        assert "SECRETDISCORDTOKEN" not in value
+        assert value == f"Client error '404 Not Found' for url '{_REDACTED_PINNED_URL}'"
+
+    def test_webhook_url_inside_a_logged_traceback_redacted(self) -> None:
+        """An unhandled request error reaches Sentry as a log event whose
+        message is the rendered traceback: the URL sits inside a longer
+        string, so the whole-string pass alone left its secret path."""
+        url = "https://hooks.slack.com/services/T0ABC/B0DEF/SECRETSLACKPATH"
+        traceback_text = (
+            "Traceback (most recent call last):\n"
+            '  File "channels.py", line 160, in _post\n'
+            f"httpx.HTTPStatusError: Client error '404 Not Found' for url '{url}'\n"
+        )
+        event = {
+            "logentry": {"message": traceback_text, "formatted": traceback_text},
+            "message": traceback_text,
+            "breadcrumbs": {"values": [{"message": f"POST {url} failed"}]},
+        }
+        out = scrub_event(event)
+        assert "SECRETSLACKPATH" not in out["logentry"]["message"]
+        assert "SECRETSLACKPATH" not in out["logentry"]["formatted"]
+        assert "SECRETSLACKPATH" not in out["message"]
+        assert "SECRETSLACKPATH" not in out["breadcrumbs"]["values"][0]["message"]
+        # The rest of the traceback stays readable.
+        assert 'File "channels.py", line 160' in out["logentry"]["formatted"]
+
+
+class TestSentryRealSdk:
+    """Drive a real ``sentry_sdk`` client configured by :func:`init_sentry`
+    and keep what its transport would send. The Slack dispatcher runs
+    inside a transaction, the way a channel test-fire does, and an error
+    event follows in the same scope to carry the breadcrumbs."""
+
+    async def test_transaction_and_breadcrumbs_scrubbed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sentry_sdk = pytest.importorskip("sentry_sdk")
+        from sentry_sdk.integrations.httpx import HttpxIntegration
+        from sentry_sdk.transport import Transport
+
+        class _CapturingTransport(Transport):
+            def __init__(self) -> None:
+                super().__init__(None)
+                self.envelopes: list[Any] = []
+
+            def capture_envelope(self, envelope: Any) -> None:
+                self.envelopes.append(envelope)
+
+        transport = _CapturingTransport()
+        real_init = sentry_sdk.init
+
+        def _init(**kwargs: Any) -> Any:
+            # init_sentry's options as given; capture instead of sending,
+            # and patch only httpx rather than every installed library.
+            return real_init(
+                **kwargs,
+                transport=transport,
+                integrations=[HttpxIntegration()],
+                default_integrations=False,
+                auto_enabling_integrations=False,
+            )
+
+        def _attach_request(event: dict[str, Any], hint: Any) -> dict[str, Any]:
+            event["request"] = {
+                "method": "POST",
+                "url": "https://brain.example.com/api/v1/notifications/test",
+                "headers": {
+                    "X-Z4J-Signature": "sha256=SECRETSIGNATURE",
+                    "X-Forwarded-For": "198.51.100.7",
+                },
+                "cookies": {"z4j_session": "SECRETCOOKIE"},
+            }
+            return event
+
+        class _OkBody(httpx.AsyncByteStream):
+            async def __aiter__(self) -> Any:
+                yield b"ok"
+
+        sent: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent.append(request)
+            return httpx.Response(200, stream=_OkBody())
+
+        monkeypatch.setattr(sentry_sdk, "init", _init)
+        monkeypatch.setattr(channels, "_resolve_cached", AsyncMock(return_value=[_PINNED_IP]))
+        settings = SimpleNamespace(
+            sentry_dsn=SecretStr("https://public@sentry.example.invalid/1"),
+            sentry_environment=None,
+            sentry_traces_sample_rate=1.0,
+            sentry_profiles_sample_rate=0.0,
+            sentry_send_default_pii=True,
+            environment="production",
+        )
+        try:
+            assert init_sentry(settings) is True
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                monkeypatch.setattr(channels, "_shared_client", client)
+                with sentry_sdk.isolation_scope() as scope:
+                    scope.add_event_processor(_attach_request)
+                    with sentry_sdk.start_transaction(op="http.server", name="/api/v1/test"):
+                        result = await channels.deliver_slack(
+                            {
+                                "webhook_url": (
+                                    "https://hooks.slack.com/services/T0ABC/B0DEF/SECRETSLACKPATH"
+                                ),
+                            },
+                            {"trigger": "test"},
+                        )
+                    sentry_sdk.capture_message("dispatch check")
+            sentry_sdk.flush()
+        finally:
+            sentry_sdk.get_client().close()
+            sentry_sdk.get_global_scope().set_client(None)
+
+        assert result.success
+        assert sent[0].url.host == _PINNED_IP
+        transactions = [
+            e.get_transaction_event() for e in transport.envelopes if e.get_transaction_event()
+        ]
+        errors = [e.get_event() for e in transport.envelopes if e.get_event()]
+        assert len(transactions) == 1
+        assert len(errors) == 1
+        transaction, error = transactions[0], errors[0]
+
+        assert "SECRET" not in repr(transaction)
+        assert transaction["request"]["headers"]["X-Z4J-Signature"] == _REDACTED
+        assert transaction["request"]["cookies"] == _REDACTED
+        (http_span,) = [s for s in transaction["spans"] if s.get("op") == "http.client"]
+        assert http_span["description"] == f"POST {_REDACTED_PINNED_URL}"
+
+        assert "SECRET" not in repr(error)
+        (crumb,) = [b for b in error["breadcrumbs"]["values"] if b.get("type") == "http"]
+        assert crumb["data"]["url"] == _REDACTED_PINNED_URL

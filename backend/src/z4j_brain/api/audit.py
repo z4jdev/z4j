@@ -4,7 +4,8 @@ Read-only access to the audit log. Filterable by action prefix,
 outcome, user, and time range. Keyset-paginated by ``occurred_at``
 so query work does not grow with page depth.
 
-This router exposes no write path at all. Within the application trust
+This router does not expose direct editing of audit rows; exporting appends
+an audit.export event through AuditService. Within the application trust
 boundary, the database mutation trigger and per-row HMAC chain detect a
 write outside :class:`AuditService`: an allowed mutation that does not
 also reproduce the authenticated chain leaves retained rows disagreeing

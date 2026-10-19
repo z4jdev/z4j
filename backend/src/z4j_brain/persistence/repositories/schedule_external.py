@@ -744,6 +744,96 @@ class ScheduleExternalRepository:
         await self.session.flush()
         await assert_external_lifecycle_consumed(self.session)
 
+    async def hold_disconnected_streams(
+        self,
+        *,
+        agent_id: uuid.UUID,
+        registry_owner_id: uuid.UUID | None,
+        session_generation: str | None,
+        worker_id: str | None = None,
+        owner: str | None = None,
+    ) -> int:
+        """Fence a lost executor before a fresh generation observes the source.
+
+        Reuse the durable reactivation hold used by restore: it preserves the
+        inventory and requires a new allocated epoch plus a complete snapshot.
+        Never clear an uncertain control or transfer a live worker's authority.
+        A reconnect may identify the displaced worker slot instead of the old
+        registry ID (which changes on a Brain restart).
+        """
+        query = select(ScheduleExternalStream).where(
+            ScheduleExternalStream.executor_agent_id == agent_id,
+            ScheduleExternalStream.phase.in_(("ACTIVATING", "ACTIVE")),
+            ScheduleExternalStream.activation_requirement.is_(None),
+        )
+        if owner is not None:
+            query = query.where(ScheduleExternalStream.owner == owner)
+        if session_generation is not None:
+            query = query.where(
+                ScheduleExternalStream.executor_registry_owner_id == registry_owner_id,
+                ScheduleExternalStream.executor_session_generation == session_generation,
+            )
+        else:
+            query = query.where(ScheduleExternalStream.executor_worker_id == worker_id)
+        streams = (await self.session.execute(query.with_for_update())).scalars().all()
+        changed = 0
+        for stream in streams:
+            if stream.phase == "ACTIVATING":
+                unclaimed_activation = (
+                    await self.session.execute(
+                        select(Command.id)
+                        .where(
+                            Command.project_id == stream.project_id,
+                            Command.action == "schedule.external.activate",
+                            Command.target_id == stream.owner,
+                            Command.status == CommandStatus.PENDING,
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if unclaimed_activation is not None:
+                    # The existing abandonment path cancels an undelivered
+                    # activation before replacing it; retain that cleanup.
+                    continue
+            unresolved = (
+                await self.session.execute(
+                    select(ScheduleExternalControlOperation.id)
+                    .where(
+                        ScheduleExternalControlOperation.stream_id == stream.id,
+                        ScheduleExternalControlOperation.status.in_(
+                            ("PENDING", "CLAIMED", "AMBIGUOUS")
+                        ),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if unresolved is not None:
+                continue
+            native_in_flight = (
+                await self.session.execute(
+                    select(Command.id)
+                    .where(
+                        Command.project_id == stream.project_id,
+                        Command.action == "schedule.external.mutate",
+                        Command.target_id == stream.owner,
+                        Command.status.in_((CommandStatus.PENDING, CommandStatus.DISPATCHED)),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if native_in_flight is not None:
+                continue
+            epoch = await self._lock_current_epoch(stream)
+            await self._transition_stream_lifecycle(
+                stream=stream,
+                epoch=epoch,
+                transition="restore_hold",
+                to_phase="RESTORE_REACTIVATION_REQUIRED",
+                occurred_at=datetime.now(UTC),
+            )
+            changed += 1
+        return changed
+
     async def begin_stream_drain(
         self,
         *,
@@ -2716,6 +2806,20 @@ class ScheduleExternalRepository:
                 schedule,
             )
 
+        native_in_flight = (
+            await self.session.execute(
+                select(Command.id)
+                .where(
+                    Command.project_id == project_id,
+                    Command.action == "schedule.external.mutate",
+                    Command.target_id == stream.owner,
+                    Command.status.in_((CommandStatus.PENDING, CommandStatus.DISPATCHED)),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if native_in_flight is not None:
+            return ExternalControlPlan("stream_not_executable", stream, schedule)
         prior_projection = _business_projection(schedule)
         desired_projection = dict(prior_projection)
         desired_projection["is_enabled"] = enabled

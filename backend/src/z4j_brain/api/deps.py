@@ -383,12 +383,17 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     write = not is_safe_method(request.method)
     try:
         async with db.session(write=write) as session:
+            request.state.z4j_request_session_active = True
             yield session
     finally:
+        request.state.z4j_request_session_active = False
         await _drain_ip_denial(request)
         await _drain_session_revoke(request)
         await _drain_session_touch(request)
         await _drain_api_key_touch(request)
+        from z4j_brain.api.openapi_route import drain_schema_access_audit
+
+        await drain_schema_access_audit(request)
 
 
 async def begin_sqlite_immediate_write_unit(
@@ -1033,7 +1038,7 @@ def enforce_mfa_enrollment(
 
     Bearer-only (API-key) requests never reach this gate by design:
     programmatic accounts are exempt from MFA enforcement
-    (docs/MFA-DESIGN.md, open question 5).
+    (docs/MFA-DESIGN.md).
 
     Cheap: pure computation over the already-loaded user row; no
     additional queries. Not audited per-request (that would flood the
@@ -1097,11 +1102,10 @@ def enforce_mfa_verified(
     prompt gains nothing beyond whoami/logout.
 
     Reuses the ``mfa_reverify_required`` code (the same one the per-action
-    step-up gate raises) so the dashboard's existing "prompt for a TOTP
-    code and retry" handler resolves it: the user submits the code to
-    ``/auth/mfa/verify`` (allowlisted), which stamps ``mfa_verified_at``,
-    and the retried request passes. Any non-allowlisted route that trips
-    this therefore self-heals through the same prompt.
+    step-up gate raises) so the dashboard redirects to its MFA page.
+    The user submits the code to ``/auth/mfa/verify`` (allowlisted),
+    which stamps ``mfa_verified_at``, then returns to the prior URL.
+    The original mutation is not automatically replayed.
 
     No-op for a user with no ACTIVE MFA (never enrolled, or mid-first-
     enrollment with ``mfa_enrolled_at`` NULL) -- those are the enrollment
@@ -1279,7 +1283,7 @@ async def require_fresh_mfa(
       within the last ``Z4J_MFA_VERIFICATION_TTL_SECONDS``. Pass.
     * User has MFA but no recent verify. Raise ``403`` with
       ``error="mfa_reverify_required"``. The dashboard catches this
-      response and prompts for a fresh TOTP code, then retries.
+      response and redirects to MFA verification; it does not replay the action.
 
     Bearer / API-key callers: this dependency resolves the current
     session via ``get_current_session``, which raises 401 when there is

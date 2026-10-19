@@ -148,7 +148,7 @@ export const SHORTCUT_GROUPS = [
       { keys: "⌘K", description: "Open command palette" },
       { keys: "r", description: "Refresh data" },
       { keys: "/", description: "Focus search" },
-      { keys: "?", description: "Toggle this help" },
+      { keys: "?", description: "Open shortcut help" },
     ],
   },
 ] as const;

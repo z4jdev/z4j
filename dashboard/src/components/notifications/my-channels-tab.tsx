@@ -324,8 +324,8 @@ export function MyChannelsTab() {
                           title: "Delete channel",
                           description: (
                             <>
-                              This removes <code>{ch.name}</code> and any
-                              subscriptions pointing to it.
+                              This deletes <code>{ch.name}</code> and removes it
+                              from subscriptions. The subscriptions remain.
                             </>
                           ),
                           confirmLabel: "Delete",
@@ -683,7 +683,7 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
 
     switch (type) {
       case "webhook":
-        return { url };
+        return editing && !url ? {} : { url };
       case "email": {
         const cfg: Record<string, unknown> = {
           smtp_host: smtpHost,
@@ -701,7 +701,7 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
         return cfg;
       }
       case "slack":
-        return { webhook_url: slackUrl };
+        return editing && !slackUrl ? {} : { webhook_url: slackUrl };
       case "telegram": {
         const cfg: Record<string, unknown> = { chat_id: chatId };
         const tok = keepIfBlank(botToken);
@@ -717,9 +717,9 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
         return cfg;
       }
       case "discord":
-        return { webhook_url: discordUrl };
+        return editing && !discordUrl ? {} : { webhook_url: discordUrl };
       case "teams":
-        return { webhook_url: teamsUrl };
+        return editing && !teamsUrl ? {} : { webhook_url: teamsUrl };
       default:
         return {};
     }
@@ -846,11 +846,11 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
               id="user-channel-webhook-url"
               type="url"
               pattern="https://.*"
-              placeholder="https://..."
+              placeholder={mode === "edit" ? "Leave blank to keep current" : "https://..."}
               title="Must start with https://"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              required
+              required={mode === "create"}
             />
           </div>
         )}
@@ -1013,11 +1013,11 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
               id="user-channel-slack-url"
               type="url"
               pattern="https://hooks\.slack\.com/.*"
-              placeholder="https://hooks.slack.com/services/..."
+              placeholder={mode === "edit" ? "Leave blank to keep current" : "https://hooks.slack.com/services/..."}
               title="Must be a Slack webhook URL starting with https://hooks.slack.com/"
               value={slackUrl}
               onChange={(e) => setSlackUrl(e.target.value)}
-              required
+              required={mode === "create"}
             />
           </div>
         )}
@@ -1109,11 +1109,11 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
               id="user-channel-discord-url"
               type="url"
               pattern="https://discord(app)?\.com/api/webhooks/.*"
-              placeholder="https://discord.com/api/webhooks/.../..."
+              placeholder={mode === "edit" ? "Leave blank to keep current" : "https://discord.com/api/webhooks/.../..."}
               title="Must be a Discord webhook URL"
               value={discordUrl}
               onChange={(e) => setDiscordUrl(e.target.value)}
-              required
+              required={mode === "create"}
             />
             <p className="text-xs text-muted-foreground">
               In Discord: Server Settings → Integrations → Webhooks → New
@@ -1132,11 +1132,11 @@ function UserChannelDialog({ mode, channel, onClose }: UserChannelDialogProps) {
               id="user-channel-teams-url"
               type="url"
               pattern="https://([a-z0-9-]+\.)*(webhook\.office\.com|logic\.azure\.com|outlook\.office\.com).*"
-              placeholder="https://contoso.webhook.office.com/webhookb2/..."
+              placeholder={mode === "edit" ? "Leave blank to keep current" : "https://contoso.webhook.office.com/webhookb2/..."}
               title="Must be an official Microsoft Teams webhook URL"
               value={teamsUrl}
               onChange={(e) => setTeamsUrl(e.target.value)}
-              required
+              required={mode === "create"}
             />
             <p className="text-xs text-muted-foreground">
               In Teams: open a channel, click ··· → Workflows → Post to a
@@ -1283,7 +1283,7 @@ function extractFormFields(ch: UserChannel | undefined): FormFields {
   const isTeams = ch.type === "teams";
   return {
     name: ch.name,
-    url: str(cfg.url),
+    url: unmask(cfg.url),
     smtpHost: str(cfg.smtp_host),
     smtpPort:
       typeof cfg.smtp_port === "number"
@@ -1293,12 +1293,12 @@ function extractFormFields(ch: UserChannel | undefined): FormFields {
     smtpPass: unmask(cfg.smtp_pass),
     fromAddr: str(cfg.from_addr),
     toAddrs: toAddrsVal(cfg.to_addrs),
-    slackUrl: isSlack ? str(cfg.webhook_url) : "",
+    slackUrl: isSlack ? unmask(cfg.webhook_url) : "",
     botToken: unmask(cfg.bot_token),
     chatId: str(cfg.chat_id),
     pdKey: unmask(cfg.integration_key),
     pdSeverity: str(cfg.severity_default) || "warning",
-    discordUrl: isDiscord ? str(cfg.webhook_url) : "",
-    teamsUrl: isTeams ? str(cfg.webhook_url) : "",
+    discordUrl: isDiscord ? unmask(cfg.webhook_url) : "",
+    teamsUrl: isTeams ? unmask(cfg.webhook_url) : "",
   };
 }

@@ -1,3 +1,4 @@
+import { useConfirm } from "@/components/domain/confirm-dialog";
 import { PageHeader } from "@/components/domain/page-header";
 import { PageShell } from "@/components/domain/page-shell";
 import { QueryError } from "@/components/domain/query-error";
@@ -46,6 +47,7 @@ import {
 } from "@/lib/agent-capabilities";
 import { ApiError } from "@/lib/api";
 import { formatAbsolute, formatDuration, formatRelative } from "@/lib/format";
+import { cancelEffect, retryUnavailableReason } from "@/lib/task-commands";
 import {
   parseTaskListSearch,
   type TaskListSearch,
@@ -80,6 +82,8 @@ export const Route = createFileRoute(
   }),
 });
 
+const NO_AGENT_SELECTED = "Select the agent that runs this task first";
+
 function TaskDetailPage() {
   const { slug, engine, taskId } = Route.useParams();
   const { list } = Route.useSearch();
@@ -103,6 +107,7 @@ function TaskDetailPage() {
   const retry = useRetryTask(slug);
   const cancel = useCancelTask(slug);
   const rateLimit = useRateLimit(slug);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   // RBAC UI gates - mirrored from the server policy (api/deps.py).
   // Backend is the source of truth; this hides buttons so users
@@ -137,11 +142,15 @@ function TaskDetailPage() {
       : "Select the agent that owns this task before issuing a command."
     : agent.state === "online"
       ? undefined
-      : `Agent is ${agent.state}; commands wait for it to reconnect.`;
+      : `Agent is ${agent.state}; a command times out if the agent does not reconnect within the command timeout (60s by default).`;
+  // The brain refuses a retry without argument overrides for every engine
+  // outside NATIVE_RETRY_ENGINES, and this page sends none.
+  const retryRefusal = retryUnavailableReason([engine]);
 
   async function onRetry() {
+    if (retryRefusal) return;
     if (!agentId) {
-      toast.error("no agent registered for this project");
+      toast.error(NO_AGENT_SELECTED);
       return;
     }
     try {
@@ -158,14 +167,10 @@ function TaskDetailPage() {
     }
   }
 
-  async function onCancel() {
-    if (!agentId) {
-      toast.error("no agent registered for this project");
-      return;
-    }
+  async function cancelTask(targetAgentId: string) {
     try {
       await cancel.mutateAsync({
-        agent_id: agentId,
+        agent_id: targetAgentId,
         engine,
         task_id: taskId,
       });
@@ -177,9 +182,25 @@ function TaskDetailPage() {
     }
   }
 
+  function onCancel() {
+    if (!agentId) {
+      toast.error(NO_AGENT_SELECTED);
+      return;
+    }
+    const targetAgentId = agentId;
+    confirm({
+      title: "Cancel this task?",
+      description: cancelEffect(engine),
+      confirmLabel: "Cancel task",
+      cancelLabel: "Keep task",
+      onConfirm: () => cancelTask(targetAgentId),
+    });
+  }
+
   async function onRateLimit() {
+    if (!canRateLimit || !supportsAgentAction(agent, engine, "rate_limit")) return;
     if (!agentId || !task) {
-      toast.error("no agent registered for this project");
+      toast.error(NO_AGENT_SELECTED);
       return;
     }
     try {
@@ -190,8 +211,8 @@ function TaskDetailPage() {
       });
       toast.success(
         rateValue.trim() === "0"
-          ? `rate limit cleared for "${task.name}"`
-          : `rate limit set to ${rateValue} for "${task.name}"`,
+          ? `rate limit clear requested for "${task.name}"`
+          : `rate limit ${rateValue} requested for "${task.name}"`,
       );
       setRateOpen(false);
       setRateValue("");
@@ -289,7 +310,7 @@ function TaskDetailPage() {
                       variant="outline"
                       size="sm"
                       onClick={() => setRateOpen(true)}
-                      disabled={rateLimit.isPending || !agentId}
+                      disabled={rateLimit.isPending || !agentId || !supportsAgentAction(agent, engine, "rate_limit")}
                       title={agentTooltip}
                       aria-label={`Set rate limit for ${task.name}`}
                     >
@@ -319,10 +340,11 @@ function TaskDetailPage() {
                       onClick={onRetry}
                       disabled={
                         retry.isPending ||
+                        retryRefusal !== undefined ||
                         !agentId ||
                         !supportsAgentAction(agent, engine, "retry_task")
                       }
-                      title={agentTooltip}
+                      title={retryRefusal ?? agentTooltip}
                     >
                       <RefreshCw
                         className={
@@ -481,16 +503,20 @@ function TaskDetailPage() {
         </>
       )}
 
+      {confirmDialog}
+
       <Dialog open={rateOpen} onOpenChange={setRateOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Set rate limit</DialogTitle>
             <DialogDescription>
               Throttle <span className="font-mono">{task?.name}</span> across
-              every worker on this project. The rate grammar is Celery's -{" "}
-              <code>0</code> clears the limit, <code>5/s</code> caps the task to
-              5 executions per second. (Rate-limiting is only exposed for
-              engines that advertise the <code>rate_limit</code> capability.)
+              workers reached through the selected agent's Celery broker.
+              The limit applies per worker, not as a project-wide quota. {" "}
+              <code>0</code> requests clearing the limit; <code>5/s</code> requests
+              five executions per second per worker. A completed command means
+              the broadcast was sent; z4j cannot confirm that any worker applied
+              the limit.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">

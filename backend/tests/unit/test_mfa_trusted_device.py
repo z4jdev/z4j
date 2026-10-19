@@ -1,3 +1,26 @@
+import pytest
+
+
+@pytest.mark.parametrize("environment", ["production", "staging", "development", "dev"])
+def test_trust_cookie_deletion_keeps_prefix_required_attributes(environment):
+    from http.cookies import SimpleCookie
+
+    from starlette.responses import Response
+    from z4j_brain.auth import trusted_device as td
+
+    response = Response()
+    td.clear_trust_cookie(response, environment=environment)
+    cookies = SimpleCookie()
+    cookies.load(response.headers["set-cookie"])
+    cookie = cookies[td.cookie_name(environment=environment)]
+    assert cookie["max-age"] == "0"
+    assert cookie["path"] == "/"
+    assert not cookie["domain"]
+    assert bool(cookie["secure"]) is (environment != "dev")
+    assert cookie["httponly"]
+    assert cookie["samesite"] == "strict"
+
+
 def test_only_the_exact_string_dev_relaxes_the_trust_cookie() -> None:
     """A near miss on the environment name must not drop a security flag.
 

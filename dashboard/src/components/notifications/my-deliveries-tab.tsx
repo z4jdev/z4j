@@ -8,8 +8,8 @@ import { sortTimestamp } from "@/lib/table-sorting";
  * the user's personal subscriptions. Mirrors the per-project
  * Delivery Log tab but unscoped to the user, with an extra Project
  * column. Deliveries from projects the user is no longer a member
- * of still surface (audit data outlives membership) and get a
- * "you left this project" badge so the row reads honestly.
+ * of still surface (audit data outlives membership). Missing project
+ * details are labeled unavailable; loading and projectless tests are distinct.
  */
 import { DateCell } from "@/components/domain/date-cell";
 import { EmptyState } from "@/components/domain/empty-state";
@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/table";
 import { useUserDeliveries, type ChannelType } from "@/hooks/use-notifications";
 import { useProjects } from "@/hooks/use-projects";
-import { Globe, LogOut, Mail, RefreshCw, Send, Webhook } from "lucide-react";
+import { Globe, Mail, RefreshCw, Send, Webhook } from "lucide-react";
 import { useMemo, useState } from "react";
 
 // Same icon map the project deliveries tab uses.
@@ -63,11 +63,9 @@ export function MyDeliveriesTab() {
   const hasPrev = cursorStack.length > 1;
   const pageNumber = cursorStack.length;
 
-  // We need to label each row's project, AND mark rows whose
-  // project the user is no longer a member of. ``useProjects``
-  // returns the projects the caller currently belongs to; rows
-  // whose project_id is NOT in that set get the "you left" badge.
-  const { data: projects } = useProjects();
+  // A missing project can mean lost access or deletion. It cannot establish
+  // that the user left, and an unresolved query is not an empty project list.
+  const { data: projects, isLoading: projectsLoading } = useProjects();
   const projectMap = useMemo(
     () => new Map((projects ?? []).map((p) => [p.id, p])),
     [projects],
@@ -139,7 +137,11 @@ export function MyDeliveriesTab() {
         <TableBody>
           {(deliveries ?? []).map((d) => {
             const project = projectMap.get(d.project_id ?? "");
-            const isExMember = !project;
+            const projectLabel = !d.project_id
+              ? "No project"
+              : projectsLoading
+                ? "Loading project…"
+                : "Project unavailable";
             const isChannelTest = d.trigger === "test.dispatch";
             const ChannelIcon = d.channel_type
               ? (CHANNEL_ICONS[d.channel_type as ChannelType] ?? Globe)
@@ -156,7 +158,7 @@ export function MyDeliveriesTab() {
             return (
               <TableRow
                 sortValues={{
-                  c0: project?.name ?? "You left",
+                  c0: project?.name ?? projectLabel,
                   c1: isChannelTest ? "channel test" : d.trigger,
                   c2: channelLabel,
                   c3: d.task_name ?? d.task_id,
@@ -180,10 +182,13 @@ export function MyDeliveriesTab() {
                       <Badge
                         variant="muted"
                         className="text-[10px]"
-                        title="You're no longer a member of this project. The delivery still belongs to you historically."
+                        title={
+                          !d.project_id
+                            ? "This delivery has no associated project."
+                            : "Project details are not currently available."
+                        }
                       >
-                        <LogOut className="size-3" />
-                        you left
+                        {projectLabel}
                       </Badge>
                     </div>
                   )}
@@ -237,14 +242,6 @@ export function MyDeliveriesTab() {
                   >
                     {d.status}
                   </Badge>
-                  {isExMember && (
-                    <span
-                      className="ml-1 text-[10px] text-muted-foreground"
-                      title="You're no longer a member of this project"
-                    >
-                      ·
-                    </span>
-                  )}
                 </TableCell>
                 <TableCell className="text-right">
                   <DateCell value={d.sent_at} />

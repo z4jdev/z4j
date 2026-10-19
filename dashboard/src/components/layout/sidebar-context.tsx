@@ -3,7 +3,7 @@
  *
  * Holds two pieces of state:
  *
- *   collapsed   - desktop icon-rail mode (true) vs full 256px (false).
+ *   collapsed   - desktop icon-rail mode (true) vs full 15rem (false).
  *                 Persisted to localStorage so the user's choice
  *                 survives a reload.
  *   mobileOpen  - off-canvas drawer visibility on mobile. Not

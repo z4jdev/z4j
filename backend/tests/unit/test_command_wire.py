@@ -23,11 +23,9 @@ def test_engine_surfaced_regardless_of_filter_shape() -> None:
     assert target["engine"] == "rq"
 
 
-def test_single_task_command_has_no_engine_key() -> None:
-    # A single-task command carries engine in parameters, not a filter, and its
-    # target_id already encodes it; the target must not sprout an engine key.
+def test_single_task_command_surfaces_engine_for_multiple_engine_agents() -> None:
     target = wire_target("task", "celery:abc123", {"engine": "celery", "task_id": "abc123"})
-    assert target == {"type": "task", "id": "celery:abc123"}
+    assert target == {"type": "task", "id": "celery:abc123", "engine": "celery"}
 
 
 def test_empty_or_missing_engine_is_not_surfaced() -> None:

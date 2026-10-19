@@ -147,13 +147,13 @@ function SummaryCards({
     <div className="grid gap-3 md:grid-cols-3">
       <SummaryCard label="Total" value={total} icon={Server} tone="neutral" />
       <SummaryCard
-        label="Healthy"
+        label="Reachable"
         value={healthy}
         icon={CheckCircle2}
         tone={total > 0 && healthy === total ? "good" : "neutral"}
       />
       <SummaryCard
-        label="Unhealthy"
+        label="Unreachable or invalid"
         value={unhealthy}
         icon={WifiOff}
         tone={unhealthy > 0 ? "bad" : "neutral"}

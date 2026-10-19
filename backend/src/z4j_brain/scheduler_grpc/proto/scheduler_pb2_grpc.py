@@ -145,8 +145,9 @@ class SchedulerServiceServicer(object):
     def FireSchedule(self, request, context):
         """Scheduler tells brain to fire a schedule. Brain creates a
         Command row and dispatches via the existing CommandDispatcher
-        through the agent's WebSocket. Returns the command_id; the
-        agent's actual completion comes back via AcknowledgeFireResult.
+        through the agent's WebSocket. Returns the command_id after
+        acceptance. AcknowledgeFireResult reports the scheduler's handoff;
+        actual task completion arrives separately through agent events.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

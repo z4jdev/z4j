@@ -154,7 +154,7 @@
       "task_id": "task-tasks-9",
       "task_name": "etl.warehouse_load",
       "status": "failed",
-      "response_code": 503,
+      "response_code": 429,
       "error": "channel rate-limited (Slack 429 retry-after: 30)",
       "sent_at_offset_s": -5466,
       "channel_name": "ops-alerts",

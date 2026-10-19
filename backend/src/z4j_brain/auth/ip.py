@@ -131,10 +131,10 @@ class TrustedProxyResolver:
             parsed = ipaddress.ip_address(ip)
         except ValueError:
             return None
-        # Round-trip through the numeric address to remove any valid IPv6
-        # scope/zone identifier and canonicalize compressed spellings. The
-        # parser rejects zones on IPv4 and malformed/multiple zone suffixes.
-        return str(ipaddress.ip_address(int(parsed)))
+        # Remove an IPv6 scope while preserving the parsed address family.
+        # The generic integer factory would turn ::1 into IPv4 0.0.0.1 and
+        # let an IPv4 trusted-proxy CIDR match an unrelated IPv6 peer.
+        return str(type(parsed)(int(parsed)))
 
 
 __all__ = ["TrustedProxyResolver"]

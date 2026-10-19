@@ -148,6 +148,16 @@ async def test_dispatched_fire_recovered_when_lease_elapses_mid_wait(brain_app, 
 
 
 async def test_fresh_dispatched_fire_not_resent_within_lease(brain_app, ids, client):
+    # Newer FastAPI versions resolve route parameter types on the first request.
+    # Let the real connect probe build those schemas before freezegun replaces
+    # datetime globally; FakeDatetime is not a supported Pydantic field type.
+    # max_frames=0 does not claim work, matching the agent's connection probe.
+    probe = await client.get(
+        "/api/v1/agent/commands",
+        params={"wait": 0, "max_frames": 0},
+        headers={"Authorization": f"Bearer {AGENT_TOKEN}"},
+    )
+    assert probe.status_code == 200, probe.text
     # A fire DISPATCHED now, polled with wait=0: still inside the lease window, so
     # it must NOT be re-sent (guards against re-sending on every poll).
     # Freeze the wall clock shared by the insert and the production cutoff so

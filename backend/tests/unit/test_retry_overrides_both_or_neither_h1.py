@@ -1,6 +1,6 @@
 """RetryTaskRequest enforces override_args/override_kwargs both-or-neither.
 
-A native retry (celery/rq/dramatiq) runs by reference and needs no overrides,
+A native retry (celery/rq) runs by reference and needs no overrides,
 but a PARTIAL override -- exactly one half supplied -- is ambiguous: an older
 (N-1) agent could substitute an empty value for the missing half and re-run
 with dropped inputs. The request model refuses a partial override statically at

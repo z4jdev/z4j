@@ -84,6 +84,10 @@ def tokens_match(expected: str, supplied: str | None) -> bool:
         return False
     if len(supplied) != len(expected):
         return False
+    # HTTP headers may contain Latin-1 bytes. compare_digest(str, str)
+    # accepts ASCII only; malformed tokens must be refused rather than 500.
+    if not supplied.isascii() or not expected.isascii():
+        return False
     return hmac.compare_digest(supplied, expected)
 
 

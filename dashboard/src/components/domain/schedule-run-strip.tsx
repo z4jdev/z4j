@@ -19,9 +19,15 @@ import { cn } from "@/lib/utils";
 
 /**
  * Outcome classes for a fire status. Four buckets on purpose: an operator
- * scanning forty schedules needs "fine / broke / undecided / did not run",
- * not the fourteen-state machine the brain tracks. The full status is in
- * the tooltip.
+ * scanning forty schedules needs "handed off / broke / undecided / did not
+ * run", not the fourteen-state machine the brain tracks. The full status is
+ * in the tooltip.
+ *
+ * No bucket means the task succeeded. `delivered` and `acked_success` record
+ * that the scheduler handed the fire to the brain and a task command was
+ * issued; `terminal_completed` records that the agent submitted the task to
+ * its engine. The task's own result is reported under Tasks, and the
+ * scheduler never learns it, so a hand-off is never drawn as a success.
  *
  * "failed" colours every outcome that ended badly, including fires an
  * operator marked failed during recovery and fires that timed out. The
@@ -30,7 +36,7 @@ import { cn } from "@/lib/utils";
  * strip answers "what happened", the badge answers "what will the breaker
  * do".
  */
-export type Outcome = "ok" | "failed" | "pending" | "skipped";
+export type Outcome = "dispatched" | "failed" | "pending" | "skipped";
 
 /**
  * Exhaustive over the brain's vocabulary: adding a status to
@@ -39,11 +45,11 @@ export type Outcome = "ok" | "failed" | "pending" | "skipped";
 export const OUTCOME_BY_STATUS = {
   pending: "pending",
   accepted: "pending",
-  delivered: "pending",
+  delivered: "dispatched",
   buffered: "pending",
   buffer_stale: "pending",
-  acked_success: "ok",
-  terminal_completed: "ok",
+  acked_success: "dispatched",
+  terminal_completed: "dispatched",
   acked_failed: "failed",
   failed: "failed",
   terminal_failed: "failed",
@@ -53,13 +59,13 @@ export const OUTCOME_BY_STATUS = {
   terminal_cancelled: "skipped",
 } as const satisfies Record<ScheduleFireStatus, Outcome>;
 
-/** A status this build does not know is undecided, never a success. */
+/** A status this build does not know is undecided, never a hand-off. */
 export function outcomeOf(status: string): Outcome {
   return (OUTCOME_BY_STATUS as Record<string, Outcome>)[status] ?? "pending";
 }
 
 const CELL: Record<Outcome, string> = {
-  ok: "bg-success",
+  dispatched: "bg-blue-500/70",
   failed: "bg-destructive",
   pending: "bg-muted-foreground/40",
   skipped: "bg-muted-foreground/20 ring-1 ring-inset ring-muted-foreground/40",
@@ -68,11 +74,11 @@ const CELL: Record<Outcome, string> = {
 const STATUS_LABEL = {
   pending: "pending",
   accepted: "accepted, awaiting dispatch",
-  delivered: "delivered, awaiting result",
+  delivered: "handed to the brain",
   buffered: "buffered, no agent online",
   buffer_stale: "buffered, definition changed since",
-  acked_success: "succeeded",
-  terminal_completed: "completed by recovery",
+  acked_success: "dispatched",
+  terminal_completed: "submitted by the agent",
   acked_failed: "failed",
   failed: "failed to dispatch",
   terminal_failed: "failed, marked by recovery",
@@ -111,7 +117,8 @@ export function stripSummary(
   if (cells === undefined) {
     return error ? "run history unavailable" : "run history not loaded yet";
   }
-  if (cells.length === 0) return "no fires in the retention window";
+  if (cells.length === 0)
+    return "no recorded fires (only z4j-scheduler schedules record fires)";
   const failures = cells.filter((c) => outcomeOf(c.status) === "failed").length;
   return `${cells.length} recent fires, ${failures} failed`;
 }

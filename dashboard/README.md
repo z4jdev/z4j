@@ -153,16 +153,15 @@ dashboard/
 
 ## Theme
 
-The default theme is dark and tuned for an enterprise control plane -
-slate canvas, cool primary, OKLCH-based palette so accent additions
-stay perceptually uniform. Light mode is also fully supported via the
-toggle in the sidebar footer (the local theme provider persists the choice).
+The default theme follows the system preference. Light and dark modes use
+an OKLCH-based palette. The theme toggle in the top bar selects light, dark
+or system mode, and the local theme provider persists the choice.
 
 ## Adding a page
 
 1. Create `src/routes/_authenticated.projects.$slug.<page>.tsx`.
-2. Add a corresponding entry to `src/components/layout/app-sidebar.tsx`'s
-   `buildNav()` function.
+2. Add the corresponding entry to the project-navigation helpers used by
+   `src/components/layout/app-sidebar.tsx`.
 3. Add a hook in `src/hooks/use-<resource>.ts` if the page needs API data.
 4. Run `pnpm dev` - `routeTree.gen.ts` regenerates automatically.
 

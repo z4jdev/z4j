@@ -31,6 +31,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from z4j_brain.auth.passwords import PasswordError
 from z4j_brain.errors import (
     AuthenticationError,
     AuthorizationError,
@@ -78,6 +79,15 @@ class ErrorMiddleware(BaseHTTPMiddleware):
         except Z4JError as exc:
             await _record_denial_if_relevant(request, exc=exc)
             return _z4j_error_response(request, exc)
+        except PasswordError as exc:
+            # The policy check raises a plain ValueError subclass so the
+            # CLI can print it. At the HTTP boundary it is the caller's
+            # input that failed, so it answers 422 with the stable reason
+            # instead of falling through to the generic 500 below.
+            return _z4j_error_response(
+                request,
+                ValidationError(str(exc), details={"reason": exc.code}),
+            )
         except PydanticValidationError as exc:
             await _record_denial_if_relevant(request, exc=exc)
             return _pydantic_validation_response(request, exc)

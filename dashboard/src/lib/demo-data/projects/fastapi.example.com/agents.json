@@ -9,7 +9,7 @@
     "engine_adapters": ["arq"],
     "scheduler_adapters": ["arq-cron"],
     "capabilities": {
-      "arq": ["cancel_task", "retry_task", "retry_by_reference_v1"]
+      "arq": ["submit_task", "cancel_task"]
     },
     "last_seen_at_offset_s": -3,
     "last_connect_at_offset_s": -172800,
@@ -29,7 +29,7 @@
     "engine_adapters": ["arq"],
     "scheduler_adapters": [],
     "capabilities": {
-      "arq": ["cancel_task", "retry_task", "retry_by_reference_v1"]
+      "arq": ["submit_task", "cancel_task"]
     },
     "last_seen_at_offset_s": -7,
     "last_connect_at_offset_s": -172800,
@@ -49,12 +49,7 @@
     "engine_adapters": ["arq"],
     "scheduler_adapters": [],
     "capabilities": {
-      "arq": [
-        "cancel_task",
-        "retry_task",
-        "restart_worker",
-        "retry_by_reference_v1"
-      ]
+      "arq": ["submit_task", "cancel_task"]
     },
     "last_seen_at_offset_s": -4,
     "last_connect_at_offset_s": -172800,
@@ -74,12 +69,7 @@
     "engine_adapters": ["arq"],
     "scheduler_adapters": [],
     "capabilities": {
-      "arq": [
-        "cancel_task",
-        "retry_task",
-        "restart_worker",
-        "retry_by_reference_v1"
-      ]
+      "arq": ["submit_task", "cancel_task"]
     },
     "last_seen_at_offset_s": -11,
     "last_connect_at_offset_s": -172800,

@@ -40,6 +40,9 @@ export interface InvitationMintResponse {
    *  The server does not expose it again. */
   token: string;
   accept_url_path: string;
+  /** True when the brain emailed the link through the project's email
+   *  channel; false when no email channel exists or the send failed. */
+  email_sent?: boolean;
 }
 
 export interface InvitationPreview {

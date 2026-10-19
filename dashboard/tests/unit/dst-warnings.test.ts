@@ -1,25 +1,4 @@
-/**
- * Tests for the DST fall-back / spring-forward warning helper.
- *
- * docs/SCHEDULER.md §5.5 promises the dashboard create form will
- * warn the operator when their cron + timezone combination would
- * produce a fall-back duplicate. These tests pin the contract:
- *
- * - Non-cron kinds never warn (intervals + one_shot fire on
- *   absolute UTC instants and don't see DST).
- * - UTC and non-DST timezones never warn.
- * - A cron firing at 02:00 in America/New_York triggers a
- *   fall-back warning (US DST ends 02:00 -> 01:00 in November).
- * - A cron firing at 02:00 in Europe/Berlin triggers a fall-back
- *   warning (EU DST ends 03:00 -> 02:00 in October).
- * - The hour-field parser handles ``*``, lists, ranges, steps.
- *
- * The warning DATE in the message is computed from the actual
- * timezone's DST schedule at test time, so we assert on the
- * presence of "fires TWICE" / "skips" rather than on a specific
- * year that would go stale.
- */
-
+/** Conditional DST hour guidance; calendar matching and firing policy stay server-side. */
 import { describe, expect, it, vi } from "vitest";
 
 import { computeDstWarning } from "@/lib/dst-warnings";
@@ -84,21 +63,21 @@ describe("computeDstWarning", () => {
 
   it("warns on fall-back duplicate for US Eastern", () => {
     // US DST ends in November - clocks fall back from 02:00 to 01:00.
-    // A cron firing at 01:00 fires twice on that day.
+    // Warn conditionally about the repeated local hour.
     const w = computeDstWarning("cron", "0 1 * * *", "America/New_York");
     expect(w).not.toBeNull();
     expect(w!.level).toBe("warning");
-    expect(w!.message).toMatch(/fires? TWICE/i);
+    expect(w!.message).toMatch(/may occur twice/i);
     expect(w!.message).toContain("America/New_York");
   });
 
   it("warns on fall-back duplicate for Europe/Berlin", () => {
     // EU DST ends in October - clocks fall back from 03:00 to 02:00.
-    // A cron firing at 02:00 fires twice on that day.
+    // Warn conditionally about the repeated local hour.
     const w = computeDstWarning("cron", "0 2 * * *", "Europe/Berlin");
     expect(w).not.toBeNull();
     expect(w!.level).toBe("warning");
-    expect(w!.message).toMatch(/fires? TWICE/i);
+    expect(w!.message).toMatch(/may occur twice/i);
   });
 
   it("returns null when cron fires outside the ambiguous window", () => {
@@ -140,5 +119,27 @@ describe("computeDstWarning", () => {
 
   it("returns null on an empty timezone", () => {
     expect(computeDstWarning("cron", "0 2 * * *", "")).toBeNull();
+  });
+});
+
+
+describe("conditional DST risk, not a firing forecast", () => {
+  it.each(["0 1 * 1 *", "30 1 * * *"])("does not assert a firing date or minute for %s", (expression) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-15T12:00:00Z"));
+    try {
+      const warning = computeDstWarning("cron", expression, "Europe/London");
+      expect(warning).not.toBeNull();
+      expect(warning!.message).not.toMatch(/will fire|fires at|TWICE|2026-10-25/);
+      expect(warning!.message).toMatch(/if.*calendar/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it.each(["0 1/0 * * *", "0 1garbage * * *", "0 1,99 * * *", "0 1-99 * * *"])("refuses an invalid hour field: %s", (expression) => {
+    expect(computeDstWarning("cron", expression, "Europe/London")).toBeNull();
+  });
+  it("does not crash the editor for an unknown timezone", () => {
+    expect(computeDstWarning("cron", "0 1 * * *", "Invalid/Timezone")).toBeNull();
   });
 });

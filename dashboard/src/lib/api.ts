@@ -11,8 +11,8 @@
  * 3. **Typed JSON parse** - successful responses are parsed and
  *    returned typed; failures throw a typed `ApiError`.
  *
- * Every dashboard hook in `src/hooks/*` calls through this
- * module - there is no raw `fetch` anywhere else.
+ * REST hooks use this module. Demo fixtures and other non-API
+ * resources can use fetch separately.
  */
 import type { ErrorEnvelope } from "./api-types";
 

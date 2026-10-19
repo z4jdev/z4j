@@ -384,7 +384,7 @@ class AutomationExecutor:
         now: Any = None,
         notify_coalesce_seconds: int = 0,
     ) -> str:
-        if action_type not in KNOWN_ACTIONS:
+        if not isinstance(action_type, str) or action_type not in KNOWN_ACTIONS:
             return "unknown_action"
         if failsafe and action_type in DESTRUCTIVE_ACTIONS:
             return "skipped_failsafe"

@@ -7,9 +7,8 @@ import { sortTimestamp } from "@/lib/table-sorting";
  * recent 50 fires returned by ``GET /projects/{slug}/schedules/{id}/fires``,
  * with status, latency, and any error message visible inline.
  *
- * The page is intentionally read-mostly: enable/disable + trigger live
- * on the list page where they batch naturally; the detail page is
- * where operators come to investigate "why did this fire fail at 03:00?"
+ * The detail header offers permitted enable/disable and manual-run actions
+ * alongside timing and history for investigating failed fires.
  */
 import { DateCell } from "@/components/domain/date-cell";
 import { EmptyState } from "@/components/domain/empty-state";
@@ -33,6 +32,9 @@ import {
 import { useCan } from "@/hooks/use-memberships";
 import {
   useSchedule,
+  useNativeScheduleCapabilities,
+  canManageNativeSchedule,
+  NATIVE_TOGGLE_UNAVAILABLE,
   useScheduleFires,
   useToggleSchedule,
   useTriggerSchedule,
@@ -54,6 +56,7 @@ import {
   Inbox,
   Play,
   RefreshCw,
+  Send,
   XCircle,
   Zap,
 } from "lucide-react";
@@ -78,6 +81,7 @@ function ScheduleDetailPage() {
     refetch: refetchFires,
   } = useScheduleFires(slug, scheduleId);
 
+  const { data: nativeCapabilities } = useNativeScheduleCapabilities(slug);
   const canOperate = useCan(slug, "operate_schedules");
   const toggle = useToggleSchedule(slug);
   const trigger = useTriggerSchedule(slug);
@@ -154,21 +158,44 @@ function ScheduleDetailPage() {
                   aria-label={`Enable schedule ${schedule.name}`}
                   checked={schedule.is_enabled}
                   onCheckedChange={onToggle}
-                  disabled={!canOperate || toggle.isPending}
+                  disabled={
+                    !canOperate ||
+                    toggle.isPending ||
+                    !canManageNativeSchedule(
+                      schedule,
+                      "toggle",
+                      nativeCapabilities,
+                    )
+                  }
+                  title={
+                    !canManageNativeSchedule(
+                      schedule,
+                      "toggle",
+                      nativeCapabilities,
+                    )
+                      ? NATIVE_TOGGLE_UNAVAILABLE
+                      : undefined
+                  }
                 />
               </div>
             )}
-            {schedule && canOperate && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={onTrigger}
-                disabled={trigger.isPending}
-              >
-                <Play className="size-3" />
-                Trigger now
-              </Button>
-            )}
+            {schedule &&
+              canOperate &&
+              canManageNativeSchedule(
+                schedule,
+                "trigger_now",
+                nativeCapabilities,
+              ) && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onTrigger}
+                  disabled={trigger.isPending}
+                >
+                  <Play className="size-3" />
+                  Trigger now
+                </Button>
+              )}
           </div>
         }
       />
@@ -178,6 +205,7 @@ function ScheduleDetailPage() {
 
       <FireHistoryCard
         fires={fires}
+        scheduler={schedule?.scheduler}
         skippedSlots24h={schedule?.skipped_slots_24h ?? 0}
         loading={!fires}
         fetching={firesFetching}
@@ -279,15 +307,20 @@ function Field({
 
 function FireHistoryCard({
   fires,
+  scheduler,
   skippedSlots24h,
   loading,
   fetching,
   onRefresh,
 }: {
   fires: ScheduleFirePublic[] | undefined;
-  // Occurrences the scheduler discarded in the last day because they came
-  // due while it could not reach the brain. These never become fires, so
-  // the run strip cannot show them; this is the only place they appear.
+  // Only the z4j-scheduler path writes fire rows; a native scheduler's runs
+  // never appear here. Undefined while the schedule is loading.
+  scheduler: string | undefined;
+  // Gaps the scheduler discarded in the last day because they came due
+  // while it could not reach the brain. One gap can cover several
+  // occurrences. These never become fires, so the run strip cannot show
+  // them; this is the only place they appear.
   skippedSlots24h: number;
   loading: boolean;
   fetching: boolean;
@@ -297,9 +330,9 @@ function FireHistoryCard({
     <Badge
       variant="outline"
       className="text-foreground"
-      title="occurrences discarded because they came due while the scheduler could not reach the brain (catch-up policy: skip); they never fired"
+      title="gaps in which the scheduler discarded runs that came due while it could not reach the brain (catch-up policy: skip); one gap can cover several runs, and none of them fired"
     >
-      Skipped in last 24h: {skippedSlots24h}
+      Skipped gaps in last 24h: {skippedSlots24h}
     </Badge>
   );
   return (
@@ -333,7 +366,11 @@ function FireHistoryCard({
           <EmptyState
             icon={Inbox}
             title="no fires recorded"
-            description="this schedule has not fired yet, or its fires predate the schedule_fires history retention window"
+            description={
+              scheduler !== undefined && scheduler !== "z4j-scheduler"
+                ? `fire history is recorded for z4j-scheduler schedules only; look for runs started by ${scheduler} under Tasks`
+                : "this schedule has not fired yet, or its fires are older than the fire history retention window"
+            }
           />
         )}
         {fires && fires.length > 0 && (
@@ -409,14 +446,24 @@ function FireHistoryCard({
  * can land in, mirroring z4j's ``schedule_fires.status`` enum.
  *
  * Distinct icon + color for each so a row of 50 fires is scannable
- * at a glance: green for clean acks, red for failures, amber for
- * buffered (no agent online), blue for the in-flight states.
+ * at a glance: red for failures, amber for buffered (no agent online),
+ * blue for the in-flight states, neutral for hand-offs. Nothing is
+ * green: a fire records that the task was handed off, and the task's own
+ * result is under Tasks (the scheduler never learns it).
  */
+const HANDOFF_NOTE =
+  "The task's own result is under Tasks; the scheduler does not learn it.";
+
+interface FireStatusStyle {
+  label: string;
+  className: string;
+  icon: typeof CheckCircle2;
+  /** Hover text where the label alone could be misread. */
+  title?: string;
+}
+
 function FireStatusBadge({ status }: { status: ScheduleFireStatus }) {
-  const map: Record<
-    ScheduleFireStatus,
-    { label: string; className: string; icon: typeof CheckCircle2 }
-  > = {
+  const map: Record<ScheduleFireStatus, FireStatusStyle> = {
     pending: {
       label: "pending",
       className:
@@ -424,10 +471,10 @@ function FireStatusBadge({ status }: { status: ScheduleFireStatus }) {
       icon: Clock,
     },
     delivered: {
-      label: "delivered",
-      className:
-        "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-400",
+      label: "handed off",
+      className: "border-border bg-muted/40 text-foreground",
       icon: Zap,
+      title: `The brain received this fire and issued the task command. ${HANDOFF_NOTE}`,
     },
     buffered: {
       label: "buffered",
@@ -436,10 +483,10 @@ function FireStatusBadge({ status }: { status: ScheduleFireStatus }) {
       icon: Inbox,
     },
     acked_success: {
-      label: "success",
-      className:
-        "border-green-500/40 bg-green-500/10 text-green-700 dark:text-green-400",
-      icon: CheckCircle2,
+      label: "dispatched",
+      className: "border-border bg-muted/40 text-foreground",
+      icon: Send,
+      title: `The scheduler handed this fire to the brain, which issued the task command. ${HANDOFF_NOTE}`,
     },
     acked_failed: {
       label: "failed",
@@ -477,10 +524,10 @@ function FireStatusBadge({ status }: { status: ScheduleFireStatus }) {
       icon: Clock,
     },
     terminal_completed: {
-      label: "completed",
-      className:
-        "border-green-500/40 bg-green-500/10 text-green-700 dark:text-green-400",
-      icon: CheckCircle2,
+      label: "submitted",
+      className: "border-border bg-muted/40 text-foreground",
+      icon: Send,
+      title: `The agent submitted the task to its engine. ${HANDOFF_NOTE}`,
     },
     terminal_failed: {
       label: "failed",
@@ -500,7 +547,7 @@ function FireStatusBadge({ status }: { status: ScheduleFireStatus }) {
       icon: AlertTriangle,
     },
   };
-  const config = map[status] ?? {
+  const config: FireStatusStyle = map[status] ?? {
     label: status,
     className: "",
     icon: Clock,
@@ -510,6 +557,7 @@ function FireStatusBadge({ status }: { status: ScheduleFireStatus }) {
     <Badge
       variant="outline"
       className={cn("gap-1 text-[10px]", config.className)}
+      title={config.title}
     >
       <Icon className="size-3" />
       {config.label}

@@ -102,7 +102,7 @@ async def health_ready(
 
 @router.get("/health/system")
 async def health_system(
-    db: DatabaseManager = Depends(get_db),
+    session: AsyncSession = Depends(get_session),
     _user: object = Depends(get_current_user),
 ) -> dict[str, object]:
     """System information for the dashboard settings page.
@@ -123,9 +123,11 @@ async def health_system(
         "pid": os.getpid(),
     }
 
-    # Database info.
+    # Authentication already holds the request's connection. Reuse it so
+    # pool_size=1/max_overflow=0 can answer this probe. A savepoint keeps a
+    # failed metadata query from poisoning the surrounding transaction.
     try:
-        async with db.session() as session:
+        async with session.begin_nested():
             bind = session.get_bind()
             dialect = bind.dialect.name
             info["database_type"] = dialect

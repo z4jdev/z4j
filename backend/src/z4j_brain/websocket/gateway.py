@@ -1017,6 +1017,11 @@ async def _cleanup_registered_connection(
                 session_generation=session_generation,
                 occurred_at=datetime.now(UTC),
             )
+            await ScheduleExternalRepository(db_session).hold_disconnected_streams(
+                agent_id=agent_id,
+                registry_owner_id=registry_owner_id,
+                session_generation=session_generation,
+            )
             for operation_id in ambiguous_operations:
                 await audit.record(
                     AuditLogRepository(db_session),
@@ -1155,6 +1160,7 @@ async def _issue_external_schedule_activations(
 ) -> int:
     """Assign fresh stable sources to this exact WebSocket generation."""
     from z4j_core.schedule_external import (
+        EXTERNAL_SCHEDULE_MUTATION_CAPABILITY,
         EXTERNAL_SCHEDULE_RUNTIME_FEATURE,
         EXTERNAL_SCHEDULE_STABLE_SNAPSHOT_CAPABILITY,
         external_schedule_source_scope,
@@ -1181,6 +1187,15 @@ async def _issue_external_schedule_activations(
         try:
             async with db.session(write=True) as session:
                 external = ScheduleExternalRepository(session)
+                # Registration displaced this exact worker slot. Retain its
+                # rows, fence its old epoch, then require fresh source truth.
+                await external.hold_disconnected_streams(
+                    agent_id=agent_id,
+                    registry_owner_id=None,
+                    session_generation=None,
+                    worker_id=session_handle.worker_id,
+                    owner=owner,
+                )
                 stream = await external.ensure_activation_epoch(
                     project_id=project_id,
                     owner=owner,
@@ -1255,6 +1270,32 @@ async def _issue_external_schedule_activations(
                 if live_agent is None or live_agent.project_id != project_id:
                     await session.rollback()
                     continue
+                # Several worker processes may share one agent token. The
+                # agent's display capabilities are last-hello-wins, so bind
+                # native write authority to this exact scheduler generation.
+                metadata = dict(live_agent.agent_metadata or {})
+                native_caps = dict(metadata.get("_z4j_external_capabilities") or {})
+                native_caps[owner] = {
+                    "epoch_uuid": str(stream.current_epoch_uuid),
+                    "registry_owner_id": str(session_handle.registry_owner_id),
+                    "session_generation": str(session_handle.generation),
+                    "capabilities": sorted(
+                        set(capabilities.get(owner, ()))
+                        & {
+                            EXTERNAL_SCHEDULE_MUTATION_CAPABILITY,
+                            "trigger_now",
+                            "create",
+                            "update",
+                            "delete",
+                            "enable",
+                            "disable",
+                            "list",
+                            "read",
+                        }
+                    ),
+                }
+                metadata["_z4j_external_capabilities"] = native_caps
+                live_agent.agent_metadata = metadata
                 payload = {
                     "scheduler": owner,
                     "owner": owner,

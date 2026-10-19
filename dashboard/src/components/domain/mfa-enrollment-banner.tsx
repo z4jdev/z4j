@@ -6,12 +6,11 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 /**
  * Tells a user that enrollment is required of them, and where to do it.
  *
- * Without this the enforcement policy is invisible from the dashboard: the
- * brain answers every non-exempt route with 403 mfa_enrollment_required, the
- * client turns that into the generic "your role doesn't have access" toast, and
- * the user is told they lack permission rather than that they need to enroll.
- * The status endpoint stays reachable past the deadline precisely so this can
- * be rendered.
+ * Without this the enforcement policy is only a toast: the brain answers
+ * every non-exempt route with 403 mfa_enrollment_required, which the client
+ * reports as a failed request, not as the place to enroll. The status
+ * endpoint stays reachable past the deadline precisely so this can be
+ * rendered.
  */
 export function MfaEnrollmentBanner() {
   const { data: status } = useMfaStatus();

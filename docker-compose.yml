@@ -69,7 +69,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        Z4J_VERSION: ${Z4J_VERSION:-1.12.1}
+        Z4J_VERSION: ${Z4J_VERSION:-1.13.0}
     image: ${Z4J_IMAGE:-z4jdev/z4j:latest}
     container_name: z4j
     environment:
@@ -101,11 +101,19 @@ services:
       # (see docker-compose.caddy.yml or https://docs.z4j.com/guides/docker/).
       Z4J_PUBLIC_URL: ${Z4J_PUBLIC_URL:-http://localhost:7700}
 
+      # --- optional: reverse proxy ---
+      # JSON array of proxy CIDRs whose X-Forwarded-For the brain honors.
+      # The default [] trusts no proxy. docker-compose.caddy.yml supplies
+      # its own bridge subnet; set this in .env for any other proxy.
+      Z4J_TRUSTED_PROXIES: ${Z4J_TRUSTED_PROXIES:-[]}
+
       # --- optional: operational overrides ---
       Z4J_LOG_LEVEL: ${Z4J_LOG_LEVEL:-INFO}
       Z4J_LOG_JSON: ${Z4J_LOG_JSON:-true}
       Z4J_EVENT_RETENTION_DAYS: ${Z4J_EVENT_RETENTION_DAYS:-30}
       Z4J_AUDIT_RETENTION_DAYS: ${Z4J_AUDIT_RETENTION_DAYS:-90}
+      Z4J_COMMAND_TIMEOUT_SECONDS: ${Z4J_COMMAND_TIMEOUT_SECONDS:-60}
+      Z4J_AGENT_OFFLINE_TIMEOUT_SECONDS: ${Z4J_AGENT_OFFLINE_TIMEOUT_SECONDS:-30}
 
       # --- scheduler channel (mTLS gRPC on :7701, bridge network only) ---
       # The brain serves the z4j-scheduler gRPC service with the server

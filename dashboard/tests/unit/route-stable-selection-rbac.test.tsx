@@ -136,7 +136,9 @@ vi.mock("@/hooks/use-tasks", () => ({
   }),
 }));
 
-vi.mock("@/hooks/use-schedules", () => ({
+vi.mock("@/hooks/use-schedules", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/use-schedules")>()),
+  useNativeScheduleCapabilities: () => ({ data: {} }),
   useSchedules: () => ({
     data: routeState.scheduleRows,
     isLoading: false,

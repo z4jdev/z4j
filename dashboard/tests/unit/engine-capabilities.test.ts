@@ -42,13 +42,10 @@ describe("capsForEngine", () => {
     expect(d.kinds.sort()).toEqual(["cron", "interval"]);
   });
 
-  it("arq has no queues", () => {
-    // Distinguishing case - the queue field gates on this. arq
-    // addresses tasks by function name with no broker-side queue
-    // routing, so the form must disable the field.
+  it("arq supports named Redis queues", () => {
     const a = capsForEngine("arq");
-    expect(a.hasQueues).toBe(false);
-    expect(a.queueHint).toMatch(/no queue/i);
+    expect(a.hasQueues).toBe(true);
+    expect(a.queueHint).toMatch(/queue name/i);
   });
 
   it("huey supports cron + interval", () => {

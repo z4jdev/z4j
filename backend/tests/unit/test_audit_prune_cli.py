@@ -204,6 +204,52 @@ def _prune_rows(rows: list[AuditLog]) -> list[AuditLog]:
     return [row for row in rows if row.action == AUDIT_PRUNE_ACTION]
 
 
+@pytest.mark.parametrize("fault", ["prefix_hmac", "successor_hmac", "head_hmac", "current_key"])
+def test_dry_run_refuses_integrity_failures_that_apply_refuses(
+    chain: SimpleNamespace,
+    fault: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    if fault == "current_key":
+        monkeypatch.setenv(
+            "Z4J_AUDIT_CHAIN_SECRET", "new-current-audit-key-independent-000000000000"
+        )
+        monkeypatch.setenv("Z4J_AUDIT_CHAIN_PREVIOUS_SECRETS", AUDIT)
+    else:
+        row = {
+            "prefix_hmac": chain.old[0],
+            "successor_hmac": chain.fresh[0],
+            "head_hmac": chain.fresh[-1],
+        }[fault]
+
+        async def _tamper() -> None:
+            engine = create_async_engine(chain.database_url)
+            try:
+                async with AsyncSession(engine) as session:
+                    await session.execute(
+                        update(AuditLog)
+                        .where(AuditLog.id == row.id)
+                        .values(target_type="tampered"),
+                    )
+                    await session.commit()
+            finally:
+                await engine.dispose()
+
+        asyncio.run(_tamper())
+
+    before = asyncio.run(_state(chain.database_url))
+    ids_before = [row.id for row in asyncio.run(_rows(chain.database_url))]
+    assert _prune("--apply") == 1
+    assert "REFUSING" in capsys.readouterr().err
+    assert _prune() == 1
+    assert "REFUSING" in capsys.readouterr().err
+    after = asyncio.run(_state(chain.database_url))
+    assert after.state_mac == before.state_mac
+    assert after.prune_id == before.prune_id
+    assert [row.id for row in asyncio.run(_rows(chain.database_url))] == ids_before
+
+
 def test_soft_prune_records_the_boundary_and_verify_reports_clean(
     chain: SimpleNamespace,
     capsys: pytest.CaptureFixture[str],

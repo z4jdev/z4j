@@ -14,10 +14,14 @@ rather than the behaviour of one.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
+from fastapi import FastAPI
+from z4j_brain.api import schedulers_fleet
+from z4j_brain.api.deps import get_current_user, get_settings
 from z4j_brain.api.schedulers_fleet import _info_schema_error, _probe_scheduler
 
 # Malformed IPv6 authorities. urlparse raises on these from 3.14 onward.
@@ -32,6 +36,65 @@ _REFUSED_SCHEMES = [
     "file:///etc/passwd",
     "ftp://example.com",
 ]
+
+_HTTPX_INVALID_URLS = [
+    "http://scheduler.example:not-a-port",
+    "http://scheduler\x00.example",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", _HTTPX_INVALID_URLS)
+async def test_httpx_invalid_url_is_refused_before_transport(url: str) -> None:
+    def no_transport(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an invalid URL reached the transport")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(no_transport)) as client:
+        entry = await _probe_scheduler(client, url)
+
+    assert entry.url == url
+    assert entry.ok is False
+    assert entry.info is None
+    assert "refused" in entry.error
+
+
+@pytest.mark.asyncio
+async def test_fleet_route_keeps_healthy_entry_when_other_urls_are_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    brain_settings,
+) -> None:
+    urls = [*_HTTPX_INVALID_URLS, "http://healthy-scheduler.example"]
+    app = FastAPI()
+    app.include_router(schedulers_fleet.router, prefix="/api/v1")
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(is_admin=True)
+    app.dependency_overrides[get_settings] = lambda: brain_settings.model_copy(
+        update={"scheduler_info_urls": urls},
+    )
+    requested = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(200, json=_valid_info_payload())
+
+    real_client = httpx.AsyncClient
+
+    def probe_client(**kwargs):
+        return real_client(transport=httpx.MockTransport(transport), **kwargs)
+
+    monkeypatch.setattr(schedulers_fleet.httpx, "AsyncClient", probe_client)
+    async with real_client(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/v1/schedulers")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 3
+    assert body["healthy"] == 1
+    assert [entry["url"] for entry in body["schedulers"]] == urls
+    assert [entry["ok"] for entry in body["schedulers"]] == [False, False, True]
+    assert requested == ["http://healthy-scheduler.example/info"]
 
 
 @pytest.mark.asyncio

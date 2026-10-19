@@ -55,6 +55,10 @@ class WorkerDetailPublic(WorkerPublic):
     """Extended worker data from control.inspect()."""
 
     metadata: dict[str, Any] = Field(default_factory=dict)
+    agent_id: uuid.UUID | None = Field(
+        default=None,
+        description="Sole agent reporting this engine/name in retained worker lifecycle events; null when missing or ambiguous.",
+    )
 
 
 def _worker_payload(
@@ -98,11 +102,14 @@ def _worker_payload(
 def _worker_detail_payload(
     worker: Worker,
     counts: dict[str, int] | None = None,
+    *,
+    agent_id: uuid.UUID | None = None,
 ) -> WorkerDetailPublic:
     base = _worker_payload(worker, counts)
     return WorkerDetailPublic(
         **base.model_dump(),
         metadata=worker.worker_metadata or {},
+        agent_id=agent_id,
     )
 
 
@@ -207,8 +214,8 @@ async def lint_workers(
             )
         )
 
-    # Worst-affected workers first, then the unevaluated ones last: an
-    # operator opening this wants the problems, not the inventory.
+    # Sort findings by worst severity and count. Workers with no findings
+    # (including unevaluated workers) share the final name-sorted group.
     results.sort(
         key=lambda w: (
             min(
@@ -288,7 +295,15 @@ async def get_worker_detail(
             details={"worker_id": str(worker_id)},
         )
     counts = await repo.counts_for_project(project.id)
-    return _worker_detail_payload(worker, counts.get(worker.name))
+    from z4j_brain.domain.worker_targets import worker_reporting_agent
+
+    agent_id = await worker_reporting_agent(
+        db_session,
+        project_id=project.id,
+        engine=worker.engine,
+        worker_name=worker.name,
+    )
+    return _worker_detail_payload(worker, counts.get(worker.name), agent_id=agent_id)
 
 
 __all__ = ["WorkerDetailPublic", "WorkerPublic", "router"]

@@ -109,9 +109,9 @@ class Session(Base):
         nullable=True,
     )
     #: Most recent time MFA was successfully verified inside this
-    #: session. ``NULL`` for sessions issued before the user enrolled
-    #: in MFA or sessions that satisfied login via a trusted-device
-    #: cookie. The sensitive-action gate (see docs/MFA-DESIGN.md) uses
+    #: session. ``NULL`` until verification, including new sessions
+    #: after password rotation. A valid trusted-device cookie stamps
+    #: verification at login. The sensitive-action gate uses
     #: this to decide whether to prompt for a fresh TOTP code.
     mfa_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

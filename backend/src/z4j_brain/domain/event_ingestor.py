@@ -25,6 +25,7 @@ no FastAPI imports, no implicit globals.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
@@ -241,6 +242,25 @@ def _sqlstate_of(exc: BaseException) -> str | None:
     return None
 
 
+def _driver_error_message(exc: BaseException) -> str:
+    """Read the driver diagnostic without SQLAlchemy SQL/bound parameters.
+
+    A monitored task's payload may itself describe a database failure. The
+    wrapper's string includes that payload, which must never decide whether
+    the brain retries or acknowledges this unrelated persistence failure.
+    """
+    return str(getattr(exc, "orig", exc)).lower()
+
+
+def _sqlite_error_code(exc: BaseException) -> int | None:
+    """Return SQLite's primary result code, including for extended errors."""
+    for candidate in (getattr(exc, "orig", None), exc):
+        code = getattr(candidate, "sqlite_errorcode", None)
+        if isinstance(code, int):
+            return code & 0xFF
+    return None
+
+
 def _looks_like_stale_type_cache(exc: BaseException) -> bool:
     """True if a bare XX000 ``InternalServerError`` is the SELF-HEALING
     server-side stale-type-cache invalidation (``cache lookup failed for type
@@ -257,9 +277,7 @@ def _looks_like_stale_type_cache(exc: BaseException) -> bool:
     ``exc`` only when there is no ``.orig`` (an unwrapped raw error, whose str is
     likewise message-only).
     """
-    orig = getattr(exc, "orig", None)
-    candidate = orig if orig is not None else exc
-    return _STALE_TYPE_CACHE_SIGNATURE in str(candidate).lower()
+    return _STALE_TYPE_CACHE_SIGNATURE in _driver_error_message(exc)
 
 
 def _is_transient_db_error(exc: BaseException) -> bool:
@@ -391,18 +409,22 @@ def _is_transient_db_error(exc: BaseException) -> bool:
     # so this isinstance carve-out is the ONLY signal that keeps the follow-on
     # events after a real invalidation classified transient; narrowing/removing it
     # would drop-and-ack a recoverable event.
-    if isinstance(
-        exc,
-        (
-            OperationalError,
-            InterfaceError,
-            SATimeoutError,
-            ProgrammingError,
-            PendingRollbackError,
-            ConnectionError,
-            OSError,
-        ),
-    ) or getattr(exc, "connection_invalidated", False):
+    if (
+        _sqlite_error_code(exc) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+        or isinstance(
+            exc,
+            (
+                OperationalError,
+                InterfaceError,
+                SATimeoutError,
+                ProgrammingError,
+                PendingRollbackError,
+                ConnectionError,
+                OSError,
+            ),
+        )
+        or getattr(exc, "connection_invalidated", False)
+    ):
         return True
     return _looks_like_deadlock(exc)
 
@@ -412,13 +434,16 @@ def _looks_like_permanent_sqlite_error(exc: BaseException) -> bool:
     DETERMINISTIC (permanent) condition -- schema drift or a malformed
     statement -- rather than the transient ``database is locked``.
 
-    SQLite folds many unrelated failures into the single catch-all
-    ``OperationalError`` with no SQLSTATE, so the transient (lock) vs
-    permanent (schema/syntax) split can only be made by message here. Used
-    only on the no-SQLSTATE dev/SQLite path; production Postgres classifies
-    by SQLSTATE and never reaches this.
+    SQLite identifies locking errors by result code, while several schema
+    and syntax failures share ``SQLITE_ERROR``. Those need the raw driver's
+    message. Never inspect the SQLAlchemy wrapper: its SQL/parameters may
+    contain these words as ordinary event content. Production Postgres
+    classifies by SQLSTATE and never reaches this.
     """
-    msg = str(exc).lower()
+    code = _sqlite_error_code(exc)
+    if code is not None and code != sqlite3.SQLITE_ERROR:
+        return False
+    msg = _driver_error_message(exc)
     return any(
         token in msg
         for token in (
@@ -438,17 +463,21 @@ def _looks_like_deadlock(exc: BaseException) -> bool:
     per-event savepoint RETRY path (one fresh-savepoint retry on a
     deadlock) and as the no-SQLSTATE transient fallback.
 
-    Matches the deadlock/serialization SQLSTATEs, then falls back to a
-    substring check so the SQLite ``database is locked`` and cockroachdb /
-    yugabyte equivalents are also caught. Deliberately does NOT match
+    Matches the deadlock/serialization SQLSTATEs and SQLite locking result
+    codes, then falls back to the raw driver's message when neither code is
+    available. SQL text and bound event payloads never supply the diagnostic.
+    Deliberately does NOT match
     ``current transaction is aborted``: that is a CASCADE from a prior
     (possibly permanent) error, not itself transient, and treating it as
     transient could withhold the ack forever behind a poison event.
     """
     sqlstate = _sqlstate_of(exc)
-    if sqlstate in {"40P01", "40001"}:
-        return True
-    msg = str(exc).lower()
+    if sqlstate is not None:
+        return sqlstate in {"40P01", "40001"}
+    sqlite_code = _sqlite_error_code(exc)
+    if sqlite_code is not None:
+        return sqlite_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    msg = _driver_error_message(exc)
     return any(
         token in msg
         for token in (
@@ -667,6 +696,10 @@ class EventIngestor:
         session_obj = event_repo.session
         for raw_event in events:
             for _attempt in (1, 2):
+                # Task metrics can be staged before a later projection check
+                # or the savepoint release fails. Keep each attempt's callbacks
+                # private until its writes survive the entire savepoint.
+                event_metrics: list[Callable[[], None]] = []
                 try:
                     async with session_obj.begin_nested():
                         event_max = await self._ingest_one(
@@ -678,7 +711,7 @@ class EventIngestor:
                             queue_repo=queue_repo,
                             worker_seen=worker_seen,
                             queues_seen=queues_seen,
-                            pending_metrics=pending_metrics,
+                            pending_metrics=event_metrics,
                         )
                 except _ScheduleUpgradeRequiredError:
                     upgrade_required = True
@@ -743,6 +776,7 @@ class EventIngestor:
                     if event_max is None:
                         # Per-event ingest skipped (bad envelope, dup, etc.)
                         break
+                    pending_metrics.extend(event_metrics)
                     (
                         inserted,
                         occurred_at,

@@ -35,6 +35,7 @@ from z4j_brain.api.deps import (
     require_csrf,
 )
 from z4j_brain.api.notifications import ChannelTestRequest, ChannelTestResult
+from z4j_brain.auth.sessions import aware_utc
 from z4j_brain.domain.ip_rate_limit import (
     require_channel_import_throttle,
     require_channel_test_throttle,
@@ -45,6 +46,9 @@ from z4j_brain.domain.notifications.channels import (
     validate_webhook_headers,
     validate_webhook_url,
 )
+from z4j_brain.domain.notifications.config import MASK as _MASK
+from z4j_brain.domain.notifications.config import mask_config as _mask
+from z4j_brain.domain.notifications.config import merge_config as _safe_merge_config
 from z4j_brain.errors import ConflictError
 from z4j_brain.persistence.enums import ProjectRole
 
@@ -68,83 +72,15 @@ router = APIRouter(prefix="/user", tags=["user-notifications"])
 # ---------------------------------------------------------------------------
 
 
-# ``task.slow`` was removed in 1.7: it never had an emit site, so a
-# subscription on it could never fire. Stored rows that still carry the
-# string keep listing / muting fine; only create + rename reject it.
+# ``task.slow`` (1.7) and ``agent.online`` (1.13) were removed: neither
+# ever had an emit site, so a subscription on them could never fire.
+# Stored rows that still carry the string keep listing / muting fine;
+# only create + rename reject it.
 _TRIGGER_PATTERN = (
     r"^(task\.failed|task\.succeeded|task\.retried|"
-    r"agent\.offline|agent\.online)$"
+    r"agent\.offline)$"
 )
 _CHANNEL_TYPE_PATTERN = r"^(webhook|email|slack|telegram|pagerduty|discord|teams)$"
-
-_SENSITIVE_KEYS = (
-    "smtp_pass",
-    "hmac_secret",
-    "bot_token",
-    "password",
-    "integration_key",
-)
-_MASKED_CONFIG_KEYS = (*_SENSITIVE_KEYS, "url", "webhook_url")
-_MASK = "••••••••"
-
-
-def _mask(config: dict[str, Any]) -> dict[str, Any]:
-    safe = dict(config)
-    # Webhook URLs are bearer credentials: Slack, Discord, and Teams put
-    # the secret in the URL path. They must be redacted just like explicit
-    # password/token fields in every response payload.
-    for k in _MASKED_CONFIG_KEYS:
-        if safe.get(k):
-            safe[k] = _MASK
-    return safe
-
-
-def _safe_merge_config(
-    existing: dict[str, Any],
-    incoming: dict[str, Any],
-    *,
-    mask: str,
-) -> tuple[dict[str, Any], bool]:
-    """Merge a PATCH config payload onto an existing channel config.
-
-    HIGH-01 fix. Two related credential bugs are solved here:
-
-    1. Clients that render a channel and POST it back unchanged send
-       the MASK placeholder ("••••••••") in place of the real secret.
-       Naive ``dict.update`` would overwrite the real password with
-       bullets. We DROP any incoming value equal to the mask so the
-       existing secret is preserved.
-
-    2. If the caller changes the URL (e.g. from a legitimate webhook
-       to ``http://attacker.com``) without also re-supplying the
-       credentials, the attacker would inherit the signed payloads
-       or SMTP password ("URL-pivot credential harvest"). When the
-       url/webhook_url changes we forcibly clear every sensitive
-       key from the merged config so the user must re-enter them.
-
-    Returns ``(merged, url_changed)``.
-    """
-    merged = dict(existing or {})
-    scrubbed: dict[str, Any] = {}
-    for k, v in (incoming or {}).items():
-        if k in _MASKED_CONFIG_KEYS and v == mask:
-            # Preserve existing secret - client just echoed the mask.
-            continue
-        scrubbed[k] = v
-
-    url_changed = False
-    for url_key in ("url", "webhook_url"):
-        if url_key in scrubbed and scrubbed[url_key] != merged.get(url_key):
-            url_changed = True
-            break
-
-    merged.update(scrubbed)
-
-    if url_changed:
-        for sk in _SENSITIVE_KEYS:
-            merged.pop(sk, None)
-
-    return merged, url_changed
 
 
 async def _validate_channel_config(  # noqa: PLR0912  per-channel-type validation
@@ -206,6 +142,18 @@ async def _validate_channel_config(  # noqa: PLR0912  per-channel-type validatio
             err = await validate_webhook_url(url)
             if err:
                 raise ConflictError(f"unsafe discord webhook URL: {err}")
+
+    elif channel_type == "teams":
+        from z4j_brain.domain.notifications.channels import validate_teams_config
+
+        err = validate_teams_config(config)
+        if err:
+            raise ConflictError(f"invalid teams config: {err}")
+        url = config.get("webhook_url", "")
+        if url:
+            err = await validate_webhook_url(url)
+            if err:
+                raise ConflictError(f"unsafe teams webhook URL: {err}")
 
 
 class SubscriptionFilters(BaseModel):
@@ -357,6 +305,18 @@ class UserSubscriptionUpdate(BaseModel):
     muted_until: datetime | None = None
     is_active: bool | None = None
 
+    @field_validator("muted_until")
+    @classmethod
+    def _normalize_muted_until(cls, value: datetime | None) -> datetime | None:
+        # Normalize before SQLite drops tzinfo, preserving the supplied
+        # instant. As elsewhere, a naive timestamp means UTC, not host time.
+        if value is None:
+            return None
+        try:
+            return aware_utc(value)
+        except OverflowError as exc:
+            raise ValueError("muted_until must have a representable UTC instant") from exc
+
 
 class UserSubscriptionPublic(BaseModel):
     id: uuid.UUID
@@ -465,7 +425,7 @@ def _subscription_payload(s: Any) -> UserSubscriptionPublic:
         in_app=s.in_app,
         project_channel_ids=list(s.project_channel_ids or []),
         user_channel_ids=list(s.user_channel_ids or []),
-        muted_until=s.muted_until,
+        muted_until=aware_utc(s.muted_until) if s.muted_until is not None else None,
         cooldown_seconds=s.cooldown_seconds,
         last_fired_at=s.last_fired_at,
         is_active=s.is_active,
@@ -670,9 +630,6 @@ async def update_user_channel(
     if body.name is not None:
         channel.name = body.name
     if body.config is not None:
-        # Validate any incoming URL/headers BEFORE the merge so
-        # unsafe patches never touch the DB.
-        await _validate_channel_config(channel.type, body.config)
         # See _safe_merge_config for HIGH-01 details (mask-echo
         # preservation + URL-pivot scrub).
         merged, _url_changed = _safe_merge_config(
@@ -680,6 +637,9 @@ async def update_user_channel(
             body.config,
             mask=_MASK,
         )
+        # Validate the effective values after resolving read-time masks,
+        # before persisting any changes or sending a notification.
+        await _validate_channel_config(channel.type, merged)
         channel.config = merged
     if body.is_active is not None:
         channel.is_active = body.is_active

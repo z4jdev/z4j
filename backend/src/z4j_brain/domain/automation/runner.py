@@ -8,8 +8,8 @@ Executes a firing rule's actions against the live brain:
   REPORTED the triggering event, via ``CommandDispatcher.issue``. The
   retry payload carries only the brain-known ``task_name`` (never a
   broker re-read, never redacted args), so the RQ pickle-safe retry path
-  is preserved: adapters that need explicit overrides (rq/huey/arq/
-  taskiq) fail closed agent-side, celery/dramatiq retry natively.
+  is preserved: adapters that need explicit overrides (dramatiq/huey/arq/
+  taskiq) fail closed agent-side, celery/rq retry natively.
 - anything else -> ``"unsupported"`` (webhook / purge / pause_schedule
   land next).
 

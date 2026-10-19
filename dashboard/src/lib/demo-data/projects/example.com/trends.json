@@ -211,11 +211,11 @@
     },
     {
       "t_offset_s": -3600,
-      "success": 4,
-      "failure": 0,
+      "success": 68,
+      "failure": 1,
       "retry": 0,
       "revoked": 0,
-      "total": 4,
+      "total": 69,
       "avg_runtime_ms": 1980
     }
   ]

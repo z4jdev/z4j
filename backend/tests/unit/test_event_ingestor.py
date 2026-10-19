@@ -1144,3 +1144,37 @@ async def test_duplicate_failure_replay_does_not_rewind_task_fields(
     # Still the NEWER failure B -- the replay did not rewind the fields.
     assert task.exception == "ErrorB"
     assert "tbB" in (task.traceback or "")
+
+
+async def test_late_received_repairs_placeholder_without_regressing_terminal_state(
+    session, project
+):
+    from datetime import timedelta
+
+    repo = TaskRepository(session)
+    now = datetime.now(UTC)
+    await repo.upsert_from_event(
+        project_id=project.id,
+        engine="celery",
+        task_id="out-of-order-name",
+        incoming_state=TaskState.FAILURE,
+        occurred_at=now,
+        defaults={"name": "<unknown:out-of-o>"},
+        updates={"exception": "ValueError", "traceback": "the original stack", "finished_at": now},
+    )
+    changed = await repo.upsert_from_event(
+        project_id=project.id,
+        engine="celery",
+        task_id="out-of-order-name",
+        incoming_state=TaskState.RECEIVED,
+        occurred_at=now - timedelta(seconds=1),
+        defaults={"name": "jobs.real"},
+        updates={"name": "jobs.real", "args": ["late-args"]},
+    )
+    assert not changed  # metadata repair is not a second lifecycle transition
+    row = await repo.get_by_engine_task_id(
+        project_id=project.id, engine="celery", task_id="out-of-order-name"
+    )
+    assert row.name == "jobs.real"
+    assert row.state == TaskState.FAILURE and row.exception == "ValueError"
+    assert row.traceback == "the original stack" and row.args is None

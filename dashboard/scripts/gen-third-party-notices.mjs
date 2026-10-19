@@ -21,12 +21,17 @@
  */
 
 import { execSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
+const args = process.argv.slice(2);
+if (args.length > 1 || (args.length === 1 && args[0] !== "--check")) {
+  throw new Error("Usage: node scripts/gen-third-party-notices.mjs [--check]");
+}
+const check = args[0] === "--check";
 
 const raw = execSync(
   "pnpm --config.verify-deps-before-run=false licenses list --prod --json",
@@ -128,6 +133,16 @@ for (const lic of licenseNames) {
 lines.push("");
 
 const out = resolve(root, "public", "THIRD-PARTY-NOTICES.txt");
-writeFileSync(out, lines.join("\n"), "utf8");
+const generated = lines.join("\n");
+if (check) {
+  if (readFileSync(out, "utf8") !== generated) {
+    throw new Error(
+      "Third-party notices differ from installed production dependencies. " +
+      "Run node scripts/gen-third-party-notices.mjs and review the result.",
+    );
+  }
+} else {
+  writeFileSync(out, generated, "utf8");
+}
 const count = Object.values(byLicense).reduce((n, v) => n + v.length, 0);
-console.log(`[third-party-notices] wrote ${out} (${count} packages, ${licenseNames.length} licenses)`);
+console.log(`[third-party-notices] ${check ? "verified" : "wrote"} ${out} (${count} packages, ${licenseNames.length} licenses)`);

@@ -12,9 +12,9 @@ hyphens are visual only; verification strips them. (1.6.0 audit M2:
 the doc previously claimed 60 bits / 32-char base32; corrected to
 match the actual alphabet.)
 
-Hashing reuses the brain's argon2id password hasher so MFA recovery
-codes get the same per-hash cost as passwords (resistant to offline
-attack if the DB leaks). The plaintext never lives in the DB.
+Hashing uses argon2-cffi's default argon2id parameters, independently
+of the configurable login-password hasher. Hashes embed their cost
+parameters; plaintext recovery codes are not stored in the DB.
 """
 
 from __future__ import annotations
@@ -44,10 +44,8 @@ RECOVERY_CODE_PATTERN: Final[str] = (
 )
 _RECOVERY_CODE_RX = re.compile(RECOVERY_CODE_PATTERN)
 
-#: Internal: argon2id hasher tuned to the same parameters as
-#: ``Z4J_ARGON2_*`` (the lazy module-level instance is fine; argon2
-#: hashes embed every parameter in their string form so a later
-#: parameter change does not invalidate existing hashes).
+#: Internal: argon2id hasher using argon2-cffi defaults, not
+#: ``Z4J_ARGON2_*``. Existing hashes retain their embedded parameters.
 _HASHER = PasswordHasher()
 
 

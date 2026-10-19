@@ -301,8 +301,8 @@ export interface paths {
          *        prior session (audit H3 - the timestamp check alone leaves
          *        stale ``revoked_at IS NULL`` rows that still show in the
          *        Account → Security tab until each is next touched).
-         *     3. A fresh session is minted + cookies reset so the caller
-         *        keeps working without an extra login round-trip.
+         *     3. A fresh session is minted and cookies reset. Enrolled users
+         *        must verify MFA again; the response sets ``mfa_required``.
          */
         readonly post: operations["change_password_api_v1_auth_change_password_post"];
         readonly delete?: never;
@@ -2307,6 +2307,63 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/projects/{slug}/schedules/native-capabilities": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Native Scheduler Capabilities
+         * @description Expose live native operations without exposing connection authority.
+         */
+        readonly get: operations["native_scheduler_capabilities_api_v1_projects__slug__schedules_native_capabilities_get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/native-operations": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Mutate Native Schedule
+         * @description Request a native transaction; completion requires observed source truth.
+         */
+        readonly post: operations["mutate_native_schedule_api_v1_projects__slug__schedules_native_operations_post"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/projects/{slug}/schedules/native-operations/{operation_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** Native Schedule Operation Status */
+        readonly get: operations["native_schedule_operation_status_api_v1_projects__slug__schedules_native_operations__operation_id__get"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/projects/{slug}/schedules/runs": {
         readonly parameters: {
             readonly query?: never;
@@ -2462,7 +2519,7 @@ export interface paths {
          *
          *     Authorization: VIEWER. A misfire is a system-detected "this enabled
          *     schedule missed its slot" event (no who-did-what), so unlike the
-         *     general audit log (ADMIN) it is safe for any project member to see --
+         *     general audit log (AUDITOR or ADMIN) it is safe for any project member to see --
          *     it is operational data about a schedule they can already read. The
          *     most recent row is the schedule detail page's "last misfire".
          *
@@ -2643,6 +2700,9 @@ export interface paths {
          *     - ``deleted`` - only populated when ``mode="replace_for_source"``;
          *       rows brain has under the resolved ``source_filter`` that the
          *       batch dropped.
+         *
+         *     Rows outside the project's scheduler allowlist return 422 with
+         *     row-indexed errors instead of predicting changes import would refuse.
          *
          *     Authorization: project ADMIN. The diff itself is read-only but
          *     surfaces the same data ``:import`` would mutate, so it inherits
@@ -2969,8 +3029,8 @@ export interface paths {
          * @description Return one entry per configured scheduler URL.
          *
          *     Authorization is global ADMIN (not project-scoped). The fleet
-         *     is operator-level concern - any project admin sees the same
-         *     fleet, but only global admins (``user.is_admin``) can view it.
+         *     is an operator-level concern: only global admins
+         *     (``user.is_admin``) can view it.
          */
         readonly get: operations["list_fleet_api_v1_schedulers_get"];
         readonly put?: never;
@@ -3811,7 +3871,7 @@ export interface components {
             readonly consecutive_failures: number;
             /**
              * Cursor Id
-             * @description id of the newest audit row the receiver acknowledged.
+             * @description id of the initial audit-head baseline or, after delivery, the newest row the receiver acknowledged.
              */
             readonly cursor_id?: string | null;
             /**
@@ -3821,7 +3881,7 @@ export interface components {
             readonly cursor_initialised: boolean;
             /**
              * Cursor Occurred At
-             * @description occurred_at of the newest audit row the receiver acknowledged.
+             * @description occurred_at of the initial audit-head baseline or, after delivery, the newest row the receiver acknowledged.
              */
             readonly cursor_occurred_at?: string | null;
             /**
@@ -4116,7 +4176,8 @@ export interface components {
          *     credentials BEFORE persisting. We accept a full ``{type, config}``
          *     shape, validate it through the same SSRF / format guards that
          *     create_channel / update_channel use, and dispatch a single test
-         *     payload. Nothing is written to the DB.
+         *     payload. The channel is not saved; the test records delivery/audit
+         *     history when persistence succeeds.
          */
         readonly ChannelTestRequest: {
             /** Config */
@@ -4278,6 +4339,8 @@ export interface components {
              * Format: uuid
              */
             readonly agent_id: string;
+            /** Engine */
+            readonly engine?: string | null;
             /** Idempotency Key */
             readonly idempotency_key?: string | null;
             /** Queue */
@@ -5013,13 +5076,10 @@ export interface components {
          *     Defaults to the source of the first row in the batch (the
          *     framework adapters always tag everything with one label).
          *
-         *     Audit fix HIGH-8: ``schedules`` is capped at 2000 entries to
-         *     bound the worst-case blast radius of
-         *     ``mode=replace_for_source`` (a misconfigured CI pipeline with
-         *     an empty list could otherwise wipe thousands of schedules in
-         *     one POST). Operators with legitimately larger schedule sets
-         *     should batch their reconciles by source label or contact us
-         *     so we can raise the cap with safer semantics.
+         *     ``schedules`` is capped at 2000 incoming entries to bound input size
+         *     and per-row validation work. This does not cap replacement deletions:
+         *     ``replace_for_source`` can remove every stored row in the selected source
+         *     scope that is absent from the batch, including when the batch is empty.
          */
         readonly ImportSchedulesRequest: {
             /**
@@ -5369,7 +5429,7 @@ export interface components {
             readonly mfa_enrollment_required: boolean;
             /**
              * Mfa Required
-             * @description True when the user has MFA enrolled AND a valid trust cookie was NOT presented. The dashboard should route to the MFA-verify page. Until verification succeeds, this cookie session may call only POST /api/v1/auth/mfa/verify, POST /api/v1/auth/logout, GET /api/v1/auth/me, and GET /api/v1/auth/mfa/status.
+             * @description True when the new session needs second-factor verification. At login, an enrolled user can satisfy this with a valid trust cookie. Password changes revoke that trust and require fresh verification for enrolled users. The dashboard should route to the MFA-verify page. Until verification succeeds, this cookie session may call only POST /api/v1/auth/mfa/verify, POST /api/v1/auth/logout, GET /api/v1/auth/me, and GET /api/v1/auth/mfa/status.
              * @default false
              */
             readonly mfa_required: boolean;
@@ -5423,6 +5483,43 @@ export interface components {
             readonly enrollment_required: boolean;
             /** Remaining Recovery Codes */
             readonly remaining_recovery_codes: number;
+        };
+        /** NativeScheduleMutationIn */
+        readonly NativeScheduleMutationIn: {
+            /** Definition */
+            readonly definition?: {
+                readonly [key: string]: unknown;
+            };
+            /** Observed Control Token */
+            readonly observed_control_token?: string | null;
+            /**
+             * Operation
+             * @enum {string}
+             */
+            readonly operation: "create" | "update" | "delete" | "trigger";
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /** Schedule Id */
+            readonly schedule_id?: string | null;
+            /** Scheduler */
+            readonly scheduler: string;
+        };
+        /** NativeScheduleMutationPublic */
+        readonly NativeScheduleMutationPublic: {
+            /** Error */
+            readonly error?: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            readonly id: string;
+            /** Schedule Id */
+            readonly schedule_id?: string | null;
+            /** Status */
+            readonly status: string;
         };
         /**
          * PasswordPolicyPublic
@@ -5492,6 +5589,8 @@ export interface components {
             readonly agent_id: string;
             /** Delta */
             readonly delta: number;
+            /** Engine */
+            readonly engine?: string | null;
             /** Idempotency Key */
             readonly idempotency_key?: string | null;
             /** Worker Name */
@@ -5871,6 +5970,8 @@ export interface components {
              * Format: uuid
              */
             readonly agent_id: string;
+            /** Engine */
+            readonly engine?: string | null;
             /** Idempotency Key */
             readonly idempotency_key?: string | null;
             /** Worker Name */
@@ -7458,6 +7559,11 @@ export interface components {
         readonly WorkerDetailPublic: {
             /** Active Tasks */
             readonly active_tasks: number;
+            /**
+             * Agent Id
+             * @description Sole agent reporting this engine/name in retained worker lifecycle events; null when missing or ambiguous.
+             */
+            readonly agent_id?: string | null;
             /** Concurrency */
             readonly concurrency: number | null;
             /**
@@ -7670,7 +7776,7 @@ export interface operations {
                 readonly before_cursor?: string | null;
                 /** @description Literal action-name prefix filter (LIKE metachars escaped). */
                 readonly action_prefix?: string | null;
-                /** @description Constrain to a single project slug (must be in caller's accessible set). */
+                /** @description Filter project rows to this accessible slug, while retaining the caller's own audit rows that have no project. */
                 readonly project_slug?: string | null;
             };
             readonly header?: never;
@@ -11111,6 +11217,106 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": readonly components["schemas"]["ScheduleMisfirePublic"][];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly native_scheduler_capabilities_api_v1_projects__slug__schedules_native_capabilities_get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": {
+                        readonly [key: string]: readonly string[];
+                    };
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly mutate_native_schedule_api_v1_projects__slug__schedules_native_operations_post: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["NativeScheduleMutationIn"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["NativeScheduleMutationPublic"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly native_schedule_operation_status_api_v1_projects__slug__schedules_native_operations__operation_id__get: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly slug: string;
+                readonly operation_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["NativeScheduleMutationPublic"];
                 };
             };
             /** @description Validation Error */

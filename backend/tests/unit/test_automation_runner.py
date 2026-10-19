@@ -330,7 +330,7 @@ def test_retry_contract_helpers() -> None:
 
     assert engine_is_native_retry("celery") is True
     assert engine_is_native_retry("rq") is True
-    assert engine_is_native_retry("dramatiq") is True
+    assert engine_is_native_retry("dramatiq") is False
     assert engine_is_native_retry("huey") is False
     assert engine_is_native_retry(None) is False
     # Both override halves present -> safe; either absent -> not.

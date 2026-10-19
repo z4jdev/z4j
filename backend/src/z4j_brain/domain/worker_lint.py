@@ -191,13 +191,11 @@ def _acks_late_off(conf: Mapping[str, Any]) -> Finding | None:
         setting="task_acks_late",
         title="Tasks are acknowledged before they run",
         detail=(
-            "The broker is told the task is handled the moment it is "
-            "delivered, before the work happens. If the worker is "
-            "killed, runs out of memory, or the host disappears "
-            "mid-task, the task is gone: it will not be redelivered "
-            "and nothing records that it was lost. This is Celery's "
-            "default, so most deployments are here without choosing "
-            "to be."
+            "With early acknowledgement, Celery acknowledges a task just before "
+            "execution, not merely when it is prefetched. If the worker or host "
+            "is lost after acknowledgement, the broker cannot redeliver that "
+            "message. Logs or task events may still record the attempt; inspect "
+            "them before deciding whether to retry."
         ),
         remedy=(
             "Set task_acks_late = True so the acknowledgement happens "
@@ -312,7 +310,8 @@ def _no_time_limit(conf: Mapping[str, Any]) -> Finding | None:
             "Set task_soft_time_limit to the longest a healthy task "
             "should take, and task_time_limit somewhat above it, so a "
             "task gets the chance to clean up before it is killed. "
-            "Both must be greater than zero to take effect."
+            "Each configured limit must be positive. Soft and hard limits are "
+            "independent, and support depends on the worker pool and platform."
         ),
     )
 

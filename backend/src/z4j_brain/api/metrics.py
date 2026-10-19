@@ -5,9 +5,9 @@ Grafana dashboards. The endpoint is mounted at the root (NOT
 under ``/api/v1``) so Prometheus scrape configs use a stable path.
 
 Authorization is fail-secure by default. A configured
-``Z4J_METRICS_AUTH_TOKEN`` requires ``Authorization: Bearer <token>``.
-Without a token the endpoint returns HTTP 401 unless the operator explicitly
-sets ``Z4J_METRICS_PUBLIC=1`` for a closed-network deployment. A fresh
+``Z4J_METRICS_AUTH_TOKEN`` requires ``Authorization: Bearer <token>`` unless
+the operator enables ``Z4J_METRICS_PUBLIC=1``, which takes precedence and
+allows anonymous scrapes. With neither setting, the endpoint returns HTTP 401. A fresh
 self-contained SQLite installation auto-mints and persists a token; other
 deployments must configure one explicitly. Audit 2026-04-24 Medium-1.
 
@@ -401,7 +401,7 @@ def register_pool_gauge_provider(
 def _refresh_leak_visibility_gauges() -> None:
     """1.5.1: refresh the leak-visibility gauges at scrape time.
 
-    All four gauges are cheap to sample (one /proc read + one
+    All three gauges are cheap to sample (one /proc read + one
     pool-attribute read). Errors are swallowed via
     ``record_swallowed`` so a transient hiccup never breaks the
     ``/metrics`` response.
@@ -645,10 +645,9 @@ z4j_audit_chain_rows_verified = Gauge(
 
 # -- Audit webhook forwarder (durable cursor) --
 #
-# Only emitted while Z4J_AUDIT_WEBHOOK_URL is set. The lag is read from
-# the database at the start of every forwarder pass, so it is the
-# brain-wide backlog rather than one process's view; the leader is the
-# only process that sets it.
+# Registered even when forwarding is disabled. When Z4J_AUDIT_WEBHOOK_URL
+# enables the forwarder, the leader refreshes lag from the database at the
+# start of each pass; the value represents the backlog at that observation.
 
 z4j_audit_forward_lag_rows = Gauge(
     "z4j_audit_forward_lag_rows",
@@ -854,8 +853,9 @@ def _reap_dead_worker_metrics(multiproc_dir: str) -> None:
     Only gauge_live* files are removed (that is all mark_process_dead
     touches); counter/histogram files persist so a dead worker's
     already-counted work is never un-counted. PID liveness is probed
-    with ``os.kill(pid, 0)``: workers are same-user siblings, and a
-    recycled PID merely delays cleanup one scrape. Best-effort by
+    with the platform liveness helper (``os.kill(pid, 0)`` on POSIX,
+    Win32 process status on Windows). PID reuse can defer cleanup for the
+    lifetime of the unrelated process holding that PID. Best-effort by
     design -- any failure is swallowed into the scrape-health counter.
     """
     try:

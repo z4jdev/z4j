@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.13.0 (2026-10-19)
+
+- Security: Sentry scrubs transaction events and URLs inside free-form messages; the OpenTelemetry httpx hooks run for the async client and redact pinned webhook URLs; the OTLP endpoint log omits path and query.
+- A password-policy failure answers 422 with its reason; a Dramatiq retry without both override halves is refused with 409; a token-gated `/metrics` scrape by pod address passes the Host allow-list; `Z4J_OTEL_EXPORTER_OTLP_HEADERS` is parsed.
+- `agent.online` is no longer a subscription trigger (nothing emitted it). The `z4j init` template shows the real defaults. The packaged Compose files forward trusted proxies and timeouts, and the service image digests are current.
+- Dashboard: weekday presets per scheduler, Retry only where it can run, a cancel confirmation on task detail, and copy that matches the server.
+- Add source-confirmed dashboard management for APScheduler, RQ Scheduler, Huey periodic, arq cron and TaskIQ labels, alongside native Django Celery Beat. Bind action availability to the current producer and preserve engine identity for task commands.
+
 ## 1.12.1 (2026-10-05)
 
 - The cadence closure moves to `croniter==6.2.4` and `tzdata==2026.5` (IANA

@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
 from z4j_brain.main import create_app
-from z4j_brain.persistence.models import Project, Session, User
+from z4j_brain.persistence.models import AuditLog, Project, Session, User
 from z4j_brain.settings import Settings
 
 pytestmark = pytest.mark.asyncio
@@ -136,3 +136,68 @@ async def test_a_failing_probe_does_not_poison_the_next_one(health_app) -> None:
     }
     # And the probe that ran before the failing one is still reported at all.
     assert body["checks"]["database"]["status"] == "ok"
+
+
+async def test_system_details_work_with_a_single_connection(
+    migrated_engine: AsyncEngine,
+    integration_settings: Settings,
+) -> None:
+    """Authenticated system info must not wait for a second pool checkout."""
+    engine = create_async_engine(
+        integration_settings.database_url,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.5,
+    )
+    app = create_app(integration_settings, engine=engine)
+    try:
+        session_id = await _seed_user(app, integration_settings)
+        async with _client(app, integration_settings, session_id) as client:
+            response = await client.get("/api/v1/health/system")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["database_type"] == "postgresql", body
+        assert body["database_version"].startswith("PostgreSQL ")
+        assert body["database_connections"] >= 1
+        assert "database_error" not in body
+        assert engine.pool.checkedout() == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("path", ["/api/v1/openapi.json", "/api/v1/docs"])
+async def test_private_docs_audit_with_a_single_connection(
+    migrated_engine: AsyncEngine,
+    integration_settings: Settings,
+    path: str,
+) -> None:
+    """Private docs must retain their audit row without a second checkout."""
+    engine = create_async_engine(
+        integration_settings.database_url,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.5,
+    )
+    app = create_app(integration_settings, engine=engine)
+    try:
+        session_id = await _seed_user(app, integration_settings)
+        async with _client(app, integration_settings, session_id) as client:
+            response = await client.get(path)
+        assert response.status_code == 200, response.text[:300]
+        async with app.state.db.session() as session:
+            rows = list(
+                (
+                    await session.scalars(
+                        select(AuditLog).where(
+                            AuditLog.action == "openapi.schema_accessed",
+                            AuditLog.target_id == path,
+                        )
+                    )
+                ).all()
+            )
+            assert len(rows) == 1
+            assert rows[0].user_id is not None
+            assert rows[0].outcome == "allow"
+        assert engine.pool.checkedout() == 0
+    finally:
+        await engine.dispose()

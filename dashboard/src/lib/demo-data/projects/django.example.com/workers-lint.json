@@ -18,7 +18,7 @@
           "severity": "medium",
           "setting": "task_acks_late",
           "title": "Tasks are acknowledged before they run",
-          "detail": "The broker is told the task is handled the moment it is delivered, before the work happens. If the worker is killed, runs out of memory, or the host disappears mid-task, the task is gone: it will not be redelivered and nothing records that it was lost. This is Celery's default, so most deployments are here without choosing to be.",
+          "detail": "With early acknowledgement, Celery acknowledges a task just before execution, not merely when it is prefetched. If the worker or host is lost after acknowledgement, the broker cannot redeliver that message. Logs or task events may still record the attempt; inspect them before deciding whether to retry.",
           "remedy": "Set task_acks_late = True so the acknowledgement happens after the task completes. Tasks must be idempotent first, because a redelivered task may have partially run."
         },
         {
@@ -27,7 +27,7 @@
           "setting": "task_time_limit",
           "title": "Tasks can run forever",
           "detail": "No hard or soft time limit is in force, so a task that hangs on a socket, a lock, or an external call occupies its slot indefinitely. Enough of them and the pool is full of tasks that will never finish, which presents as a queue backing up for no visible reason. A limit of zero reads like a setting but disables the limit, so a worker can be here with the keys apparently configured.",
-          "remedy": "Set task_soft_time_limit to the longest a healthy task should take, and task_time_limit somewhat above it, so a task gets the chance to clean up before it is killed. Both must be greater than zero to take effect."
+          "remedy": "Set task_soft_time_limit to the longest a healthy task should take, and task_time_limit somewhat above it, so a task gets the chance to clean up before it is killed. Each configured limit must be positive. Soft and hard limits are independent, and support depends on the worker pool and platform."
         },
         {
           "rule_id": "celery.prefetch-hoarding",

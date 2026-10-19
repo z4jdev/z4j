@@ -37,6 +37,12 @@ from z4j_brain.persistence.schedule_external_guard import (
 _FIRE_ACTION = "schedule.fire"
 _EXTERNAL_ACTIVATION_ACTION = "schedule.external.activate"
 _EXTERNAL_CONTROL_ACTION = "schedule.external.control"
+_EXTERNAL_MUTATION_ACTION = "schedule.external.mutate"
+# These commands are issued to one frozen WebSocket executor. Generic delivery,
+# ownership transfer and rearming must never bypass their exact-generation claim.
+_EXTERNAL_FROZEN_DELIVERY_ACTIONS = frozenset(
+    {_EXTERNAL_ACTIVATION_ACTION, _EXTERNAL_CONTROL_ACTION, _EXTERNAL_MUTATION_ACTION}
+)
 
 #: Payload keys that legitimately differ between two otherwise-identical
 #: idempotent re-issues and so are excluded from the payload-identity check.
@@ -496,7 +502,10 @@ class CommandRepository(BaseRepository[Command]):
                 timeout_seconds=timeout_seconds,
                 occurred_at=occurred_at,
             )
-        if candidate is not None and candidate.action == _EXTERNAL_ACTIVATION_ACTION:
+        if candidate is not None and candidate.action in {
+            _EXTERNAL_ACTIVATION_ACTION,
+            _EXTERNAL_MUTATION_ACTION,
+        }:
             return True, await self._claim_external_activation_delivery(
                 command_id=command_id,
                 candidate=candidate,
@@ -690,8 +699,9 @@ class CommandRepository(BaseRepository[Command]):
             or stream.source_scope != source_scope
             or stream.current_epoch_uuid != epoch_uuid
             or stream.current_epoch_number != epoch_number
-            or stream.phase != "ACTIVATING"
-            or stream.accepted_sequence != 0
+            or stream.phase
+            != ("ACTIVE" if candidate.action == _EXTERNAL_MUTATION_ACTION else "ACTIVATING")
+            or (candidate.action == _EXTERNAL_ACTIVATION_ACTION and stream.accepted_sequence != 0)
             or stream.authorized_adapter_instance_id != adapter_instance_id
             or stream.executor_agent_id != agent_id
             or stream.executor_registry_owner_id != registry_owner_id
@@ -1059,7 +1069,7 @@ class CommandRepository(BaseRepository[Command]):
             Command.id == command_id,
             Command.status == CommandStatus.PENDING,
             Command.schedule_protocol_marker.is_(None),
-            Command.action != _EXTERNAL_CONTROL_ACTION,
+            ~Command.action.in_(_EXTERNAL_FROZEN_DELIVERY_ACTIONS),
         ]
         if project_id is not None:
             predicates.append(Command.project_id == project_id)
@@ -1137,7 +1147,7 @@ class CommandRepository(BaseRepository[Command]):
             Command.id == command_id,
             Command.status.in_((CommandStatus.DISPATCHED, CommandStatus.TIMEOUT)),
             Command.schedule_protocol_marker.is_(None),
-            Command.action != _EXTERNAL_CONTROL_ACTION,
+            ~Command.action.in_(_EXTERNAL_FROZEN_DELIVERY_ACTIONS),
         ]
         if expected_dispatched_at is not None:
             predicates.append(Command.dispatched_at == expected_dispatched_at)
@@ -1174,7 +1184,7 @@ class CommandRepository(BaseRepository[Command]):
                 Command.id == command_id,
                 Command.status == CommandStatus.PENDING,
                 Command.schedule_protocol_marker.is_(None),
-                Command.action != _EXTERNAL_CONTROL_ACTION,
+                ~Command.action.in_(_EXTERNAL_FROZEN_DELIVERY_ACTIONS),
             )
             .values(agent_id=new_agent_id)
             .execution_options(synchronize_session=False),
@@ -1221,7 +1231,7 @@ class CommandRepository(BaseRepository[Command]):
                     Command.id == command_id,
                     Command.status == CommandStatus.DISPATCHED,
                     Command.schedule_protocol_marker.is_(None),
-                    Command.action != _EXTERNAL_CONTROL_ACTION,
+                    ~Command.action.in_(_EXTERNAL_FROZEN_DELIVERY_ACTIONS),
                 ),
             )
         if observed is None:
@@ -1244,7 +1254,7 @@ class CommandRepository(BaseRepository[Command]):
                 Command.dispatched_at == observed,
                 Command.dispatched_at <= cutoff,
                 Command.schedule_protocol_marker.is_(None),
-                Command.action != _EXTERNAL_CONTROL_ACTION,
+                ~Command.action.in_(_EXTERNAL_FROZEN_DELIVERY_ACTIONS),
             )
             .values(dispatched_at=generation)
             # The datetime WHERE must run in SQL, not the ORM's in-memory

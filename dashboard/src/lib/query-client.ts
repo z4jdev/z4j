@@ -1,8 +1,8 @@
 /**
  * TanStack Query client setup.
  *
- * Single instance per browser tab. Default retry policy is one
- * retry on transient failures, ZERO retries on auth errors so a
+ * Single instance per browser tab. Default query retry policy is two
+ * retries on transient failures, ZERO retries on auth errors so a
  * 401 redirects to /login immediately instead of spinning.
  *
  * Global 401 handler: when ANY query or mutation comes back 401,
@@ -67,17 +67,30 @@ function handleForbiddenError(error: unknown): void {
   // MFA re-verify gate is a 403 too; route it before the generic
   // "Permission denied" toast.
   if (handleMfaReverifyRequired(error)) return;
-  // Silent on mutations that have their own inline toast (the
-  // mutation's ``onError`` wins) - here we only surface 403s from
-  // background queries, which are otherwise invisible.
+  // Shared by query and mutation caches. Local mutation error handlers
+  // also run; this throttle only deduplicates the global 403 toast.
   const now = Date.now();
   if (now - last403At < 1500) return;
   last403At = now;
-  // Use a static description (audit M3): server-supplied messages
-  // can leak handler internals. The static copy is enough - 403s
-  // rarely give actionable user-facing info anyway.
+  // Use static descriptions (audit M3): server-supplied messages
+  // can leak handler internals. The stable error code says which
+  // gate refused, so the copy can name it without echoing the body.
+  if (error.code === "mfa_enrollment_required") {
+    toast.error("Two-factor enrollment required", {
+      description:
+        "Enroll in two-factor authentication under Settings, Security to continue.",
+    });
+    return;
+  }
+  if (error.code === "ip_denied") {
+    toast.error("Access denied from this network", {
+      description: "This network address is not on the IP allowlist.",
+    });
+    return;
+  }
   toast.error("Permission denied", {
-    description: "your role doesn't have access to that resource",
+    description:
+      "Your role, project access or a security check does not allow this request.",
   });
 }
 

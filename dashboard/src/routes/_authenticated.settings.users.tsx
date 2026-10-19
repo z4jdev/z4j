@@ -319,9 +319,13 @@ function UsersPage() {
                           description: (
                             <>
                               Permanently delete <code>{user.email}</code>?
-                              Their memberships, sessions and personal channels
-                              are removed; audit rows are anonymised. This
-                              cannot be undone.
+                              Their memberships, sessions, API keys and personal
+                              channels are removed, so integrations using those
+                              keys stop working, and the automation rules they
+                              created are disabled in every project. Audit rows
+                              are kept, including any email they recorded, but
+                              no longer link to the account. This cannot be
+                              undone.
                             </>
                           ),
                           confirmLabel: "Delete",

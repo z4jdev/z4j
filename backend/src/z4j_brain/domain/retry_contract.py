@@ -44,11 +44,13 @@ _ENGINE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
 #: retry needs no operator arguments. This is a property of the engine, not of
 #: a session, which is why it stays a static set: huey attests the safe retry
 #: contract yet still needs complete operator replacements because Huey keeps
-#: no arguments after completion. It answers only whether argument
+#: no arguments after completion, and Dramatiq is absent because stock Dramatiq
+#: keeps no retrievable message to re-run (its adapter refuses a retry without
+#: both override halves). It answers only whether argument
 #: reconstruction is safe. It does not authorize delivery: the exact connected
 #: adapter session must also advertise :data:`RETRY_BY_REFERENCE_CAPABILITY`
 #: through the versioned session contract below.
-NATIVE_RETRY_ENGINES: frozenset[str] = frozenset({"celery", "rq", "dramatiq"})
+NATIVE_RETRY_ENGINES: frozenset[str] = frozenset({"celery", "rq"})
 
 #: Capability token an agent must advertise for an engine before the brain
 #: dispatches the action to it. Every token is one the adapters already list in

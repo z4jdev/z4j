@@ -1,3 +1,7 @@
+import {
+  useNativeScheduleCapabilities,
+  canManageNativeSchedule,
+} from "@/hooks/use-schedules";
 /**
  * Create / edit dialog for a single schedule.
  *
@@ -52,8 +56,8 @@ import {
   type ScheduleUpdateBody,
 } from "@/hooks/use-schedules";
 import {
-  CRON_PRESETS,
   KIND_LABELS,
+  cronPresetsFor,
   scheduleSummary,
 } from "@/lib/schedule-presets";
 import { ApiError } from "@/lib/api";
@@ -124,6 +128,7 @@ interface Props {
 }
 
 export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
+  const { data: nativeCapabilities } = useNativeScheduleCapabilities(slug);
   const mode = existing ? "edit" : "create";
   const [form, setForm] = useState<FormState>(EMPTY);
   const [errors, setErrors] = useState<
@@ -145,7 +150,30 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
   }, [open, existing]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
-    setForm((prev) => ({ ...prev, [key]: value }));
+    setForm((prev) => ({
+      ...prev,
+      [key]: value,
+      ...(key === "scheduler" && value !== "z4j-scheduler"
+        ? {
+            engine:
+              (
+                {
+                  "celery-beat": "celery",
+                  "rq-scheduler": "rq",
+                  "huey-periodic": "huey",
+                  "arq-cron": "arq",
+                  "taskiq-scheduler": "taskiq",
+                  apscheduler: "apscheduler",
+                } as Record<string, string>
+              )[String(value)] ?? prev.engine,
+            catch_up: "skip" as CatchUp,
+            kind: "cron" as Kind,
+            expression: "0 * * * *",
+            queue: "",
+            timezone: "UTC",
+          }
+        : {}),
+    }));
     if (errors[key]) setErrors((e) => ({ ...e, [key]: undefined }));
   }
 
@@ -224,7 +252,13 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
           catch_up: form.catch_up,
           is_enabled: form.is_enabled,
         };
-        await update.mutateAsync({ scheduleId: existing.id, body });
+        await update.mutateAsync({
+          scheduleId: existing.id,
+          body,
+          ...(existing.scheduler !== "z4j-scheduler"
+            ? { observedSchedule: existing }
+            : {}),
+        });
         toast.success(`schedule "${existing.name}" updated`);
       }
       onClose();
@@ -243,16 +277,26 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
   // is hostile UX for a form field.
   const expressionHint = useMemo(() => {
     if (form.kind === "cron") {
-      return '5-field crontab string (or 6-field with seconds), e.g. "0 3 * * *"';
+      if (form.scheduler === "arq-cron")
+        return "Native arq fields: minute hour day month weekday; optional seconds first. Monday=0, Sunday=6.";
+      if (form.scheduler === "apscheduler")
+        return "Native APScheduler fields: minute hour day month weekday. Monday=0, Sunday=6.";
+      if (form.scheduler === "z4j-scheduler")
+        return '5-field crontab string, e.g. "0 3 * * *"; an optional 6th field sets seconds';
+      return '5-field crontab string, e.g. "0 3 * * *"';
     }
     if (form.kind === "interval") {
+      if (["rq-scheduler", "taskiq-scheduler"].includes(form.scheduler))
+        return 'Positive whole seconds, e.g. "30"';
+      if (form.scheduler !== "z4j-scheduler")
+        return 'Positive seconds, e.g. "30" or "0.125"';
       return 'Interval like "30s" / "5m" / "2h" / "1d", or a bare integer (seconds)';
     }
     if (form.kind === "solar") {
       return "event:lat:lon (use the picker below to fill this in)";
     }
     return 'ISO-8601 timestamp, e.g. "2026-12-25T09:00:00Z"';
-  }, [form.kind]);
+  }, [form.kind, form.scheduler]);
 
   // For solar schedules, parse the current expression string into
   // its (event, lat, lon) parts so the picker can hydrate. Defaults
@@ -290,7 +334,21 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
   // route on queues / kinds that don't use timezones. Picking an
   // unknown engine falls through to the permissive default so we
   // don't break a future adapter's first dashboard interaction.
-  const engineCaps = useMemo(() => capsForEngine(form.engine), [form.engine]);
+  const engineCaps = useMemo(() => {
+    const base = capsForEngine(form.engine);
+    if (form.scheduler === "z4j-scheduler" || form.scheduler === "celery-beat")
+      return base;
+    const cronOnly = ["huey-periodic", "arq-cron"].includes(form.scheduler);
+    return {
+      ...base,
+      kinds: (cronOnly ? ["cron"] : ["cron", "interval", "clocked"]) as Kind[],
+      hasQueues: form.scheduler === "rq-scheduler",
+      queueHint:
+        form.scheduler === "rq-scheduler"
+          ? "RQ queue name. A worker must consume this queue."
+          : "Uses the native application's configured routing.",
+    };
+  }, [form.engine, form.scheduler]);
 
   // The table decides what the form offers, not what the brain
   // stores: the API, CLI and declarative sync accept any kind for
@@ -307,13 +365,26 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
 
   function kindOffered(engine: string, kind: Kind): boolean {
     return (
-      capsForEngine(engine).kinds.includes(kind) ||
-      kind === savedKindFor(engine)
+      (form.scheduler === "z4j-scheduler"
+        ? capsForEngine(engine).kinds
+        : engineCaps.kinds
+      ).includes(kind) || kind === savedKindFor(engine)
     );
   }
 
   const savedKind = form.kind === savedKindFor(form.engine) ? form.kind : null;
-  const offeredKinds = KINDS.filter((kind) => kindOffered(form.engine, kind));
+  const offeredKinds = KINDS.filter(
+    (kind) =>
+      kindOffered(form.engine, kind) &&
+      (!["huey-periodic", "arq-cron"].includes(form.scheduler) ||
+        kind === "cron") &&
+      (form.scheduler === "z4j-scheduler" ||
+        kind !== "solar" ||
+        existing?.kind === "solar") &&
+      (form.scheduler !== "celery-beat" ||
+        kind !== "solar" ||
+        existing?.kind === "solar"),
+  );
 
   // Choosing an engine that does not offer the current kind snaps it
   // back to "cron" (universal), so the operator never builds an
@@ -370,7 +441,11 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
               />
             </Field>
             <Field label="Engine" error={errors.engine}>
-              <Select value={form.engine} onValueChange={setEngine}>
+              <Select
+                value={form.engine}
+                onValueChange={setEngine}
+                disabled={form.scheduler !== "z4j-scheduler"}
+              >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -381,23 +456,55 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
                   <SelectItem value="arq">arq</SelectItem>
                   <SelectItem value="huey">huey</SelectItem>
                   <SelectItem value="taskiq">taskiq</SelectItem>
+                  <SelectItem value="apscheduler">apscheduler</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
             <Field label="Scheduler">
-              <Input
+              <Select
                 value={form.scheduler}
-                onChange={(e) => set("scheduler", e.target.value)}
+                onValueChange={(v) => set("scheduler", v)}
                 disabled={mode === "edit"}
-              />
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="z4j-scheduler">z4j-scheduler</SelectItem>
+                  {[
+                    ...new Set([
+                      ...Object.keys(nativeCapabilities ?? {}),
+                      ...(existing && existing.scheduler !== "z4j-scheduler"
+                        ? [existing.scheduler]
+                        : []),
+                    ]),
+                  ].map((owner) => (
+                    <SelectItem
+                      key={owner}
+                      value={owner}
+                      disabled={
+                        !canManageNativeSchedule(
+                          { scheduler: owner, source: "" },
+                          "create",
+                          nativeCapabilities,
+                        )
+                      }
+                    >
+                      {owner}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </Field>
             <Field
               label="Kind"
               hint={
                 savedKind
-                  ? `Kept as saved. New ${form.engine} schedules can use: ${engineCaps.kinds.join(", ")}.`
+                  ? `Kept as saved. For new ${form.engine} schedules this form offers: ${engineCaps.kinds.join(", ")}.`
                   : engineCaps.kinds.length < 4
-                    ? `${form.engine} adapter supports: ${engineCaps.kinds.join(", ")}`
+                    ? form.scheduler === "z4j-scheduler"
+                      ? `This form offers ${engineCaps.kinds.join(", ")} for ${form.engine}.`
+                      : `${form.scheduler} supports: ${engineCaps.kinds.join(", ")}`
                     : undefined
               }
             >
@@ -412,7 +519,9 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
                     kind === "cron"
                       ? "0 * * * *"
                       : kind === "interval"
-                        ? "5m"
+                        ? form.scheduler === "z4j-scheduler"
+                          ? "5m"
+                          : "300"
                         : kind === "solar"
                           ? "sunrise:0:0"
                           : "";
@@ -433,10 +542,17 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
             </Field>
             <Field
               label="If a scheduled run was missed"
-              hint="skip discards any occurrence that falls due while the scheduler cannot reach the brain; fire_one_missed runs the latest one on recovery."
+              hint={
+                form.scheduler === "z4j-scheduler"
+                  ? "skip discards any occurrence that falls due while the scheduler cannot reach the brain; fire_one_missed runs the latest one on recovery."
+                  : form.scheduler === "celery-beat"
+                    ? "Celery Beat owns missed-run behavior. z4j catch-up policies do not apply."
+                    : `${form.scheduler} owns missed-run behavior. z4j catch-up policies do not apply.`
+              }
             >
               <Select
                 value={form.catch_up}
+                disabled={form.scheduler !== "z4j-scheduler"}
                 onValueChange={(v) => set("catch_up", v as CatchUp)}
               >
                 <SelectTrigger>
@@ -448,7 +564,7 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
                     Run the most recent missed occurrence
                   </SelectItem>
                   <SelectItem value="fire_all_missed">
-                    Replay all missed occurrences
+                    Replay missed occurrences (up to 10,000)
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -459,7 +575,7 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
             <div className="space-y-2">
               <p className="text-sm font-medium">Common timings</p>
               <div className="flex flex-wrap gap-2">
-                {CRON_PRESETS.map((preset) => (
+                {cronPresetsFor(form.scheduler).map((preset) => (
                   <Button
                     type="button"
                     size="sm"
@@ -496,7 +612,12 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
             className="rounded-lg border border-primary/20 bg-primary/5 p-3"
           >
             <p className="text-sm font-medium">
-              {scheduleSummary(form.kind, form.expression, form.timezone)}
+              {scheduleSummary(
+                form.kind,
+                form.expression,
+                form.timezone,
+                form.scheduler,
+              )}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               The server validates this expression when you save. Next-run
@@ -504,61 +625,63 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
             </p>
           </div>
 
-          {form.kind === "solar" && solarParts && (
-            <div className="grid gap-3 md:grid-cols-3 rounded-md border border-amber-500/20 bg-amber-500/5 p-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="schedule-solar-event">Solar event</Label>
-                <Select
-                  value={solarParts.event}
-                  onValueChange={(v) => setSolarPart("event", v)}
-                >
-                  <SelectTrigger id="schedule-solar-event">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="sunrise">sunrise</SelectItem>
-                    <SelectItem value="sunset">sunset</SelectItem>
-                    <SelectItem value="dawn">dawn (astronomical)</SelectItem>
-                    <SelectItem value="dusk">dusk (astronomical)</SelectItem>
-                    <SelectItem value="noon">noon (solar)</SelectItem>
-                    <SelectItem value="solar_noon">
-                      solar_noon (alias)
-                    </SelectItem>
-                    <SelectItem value="midnight">midnight (solar)</SelectItem>
-                    <SelectItem value="solar_midnight">
-                      solar_midnight (alias)
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+          {form.kind === "solar" &&
+            form.scheduler !== "celery-beat" &&
+            solarParts && (
+              <div className="grid gap-3 md:grid-cols-3 rounded-md border border-amber-500/20 bg-amber-500/5 p-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="schedule-solar-event">Solar event</Label>
+                  <Select
+                    value={solarParts.event}
+                    onValueChange={(v) => setSolarPart("event", v)}
+                  >
+                    <SelectTrigger id="schedule-solar-event">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="sunrise">sunrise</SelectItem>
+                      <SelectItem value="sunset">sunset</SelectItem>
+                      <SelectItem value="dawn">dawn (astronomical)</SelectItem>
+                      <SelectItem value="dusk">dusk (astronomical)</SelectItem>
+                      <SelectItem value="noon">noon (solar)</SelectItem>
+                      <SelectItem value="solar_noon">
+                        solar_noon (alias)
+                      </SelectItem>
+                      <SelectItem value="midnight">midnight (solar)</SelectItem>
+                      <SelectItem value="solar_midnight">
+                        solar_midnight (alias)
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="schedule-latitude">Latitude</Label>
+                  <Input
+                    id="schedule-latitude"
+                    value={solarParts.lat}
+                    onChange={(e) => setSolarPart("lat", e.target.value)}
+                    placeholder="37.7749"
+                    className="font-mono text-xs"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="schedule-longitude">Longitude</Label>
+                  <Input
+                    id="schedule-longitude"
+                    value={solarParts.lon}
+                    onChange={(e) => setSolarPart("lon", e.target.value)}
+                    placeholder="-122.4194"
+                    className="font-mono text-xs"
+                  />
+                </div>
+                <div className="md:col-span-3 text-xs text-muted-foreground">
+                  Range: latitude [-90, 90], longitude [-180, 180]. Polar
+                  latitudes (|lat| &gt; ~66.5°) skip days where the chosen event
+                  doesn't occur. Resolved expression:{" "}
+                  <code className="font-mono">{form.expression}</code>
+                </div>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="schedule-latitude">Latitude</Label>
-                <Input
-                  id="schedule-latitude"
-                  value={solarParts.lat}
-                  onChange={(e) => setSolarPart("lat", e.target.value)}
-                  placeholder="37.7749"
-                  className="font-mono text-xs"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="schedule-longitude">Longitude</Label>
-                <Input
-                  id="schedule-longitude"
-                  value={solarParts.lon}
-                  onChange={(e) => setSolarPart("lon", e.target.value)}
-                  placeholder="-122.4194"
-                  className="font-mono text-xs"
-                />
-              </div>
-              <div className="md:col-span-3 text-xs text-muted-foreground">
-                Range: latitude [-90, 90], longitude [-180, 180]. Polar
-                latitudes (|lat| &gt; ~66.5°) skip days where the chosen event
-                doesn't occur. Resolved expression:{" "}
-                <code className="font-mono">{form.expression}</code>
-              </div>
-            </div>
-          )}
+            )}
 
           {dstWarning && (
             <div
@@ -595,7 +718,10 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
                 value={form.timezone}
                 onChange={(e) => set("timezone", e.target.value)}
                 placeholder="UTC"
-                disabled={form.kind !== "cron"}
+                disabled={
+                  form.kind !== "cron" ||
+                  ["huey-periodic", "rq-scheduler"].includes(form.scheduler)
+                }
               />
             </Field>
             <Field
@@ -663,7 +789,17 @@ export function ScheduleFormDialog({ slug, open, onClose, existing }: Props) {
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={pending}>
+            <Button
+              type="submit"
+              disabled={
+                pending ||
+                !canManageNativeSchedule(
+                  { scheduler: form.scheduler, source: existing?.source ?? "" },
+                  mode === "create" ? "create" : "update",
+                  nativeCapabilities,
+                )
+              }
+            >
               {pending
                 ? "Saving..."
                 : mode === "create"

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
+
 import pytest
+from fastapi import Request
 from z4j_brain.auth.ip import TrustedProxyResolver
 
 
@@ -80,6 +83,30 @@ class TestTrustedChain:
 
 
 class TestEdgeCases:
+    @pytest.mark.parametrize(
+        "address,canonical",
+        [
+            ("::", "::"),
+            ("::1", "::1"),
+            ("::1%lo", "::1"),
+            ("::ffff", "::ffff"),
+            ("::192.0.2.1", "::c000:201"),
+            ("::ffff:192.0.2.1", "::ffff:192.0.2.1"),
+            ("fe80::1%eth0", "fe80::1"),
+            ("192.0.2.1", "192.0.2.1"),
+        ],
+    )
+    def test_normalization_preserves_address_family(self, address, canonical):
+        assert TrustedProxyResolver._normalize_ip(address) == str(ipaddress.ip_address(canonical))
+
+    def test_ipv6_loopback_is_not_an_ipv4_proxy(self):
+        ipv4 = TrustedProxyResolver(["0.0.0.1/32"])
+        assert not ipv4.is_trusted("::1")
+        assert ipv4.resolve(peer_ip="::1", xff_header="198.51.100.10") == "::1"
+        ipv6 = TrustedProxyResolver(["::1/128"])
+        assert ipv6.is_trusted("::1")
+        assert ipv6.resolve(peer_ip="::1", xff_header="198.51.100.10") == "198.51.100.10"
+
     def test_invalid_cidr_raises_at_construction(self) -> None:
         with pytest.raises(ValueError, match="not a valid CIDR"):
             TrustedProxyResolver(["bad cidr"])
@@ -109,3 +136,25 @@ class TestEdgeCases:
     def test_no_peer_no_xff(self) -> None:
         r = TrustedProxyResolver([])
         assert r.resolve(peer_ip=None, xff_header=None) == ""
+
+
+@pytest.mark.asyncio
+async def test_middleware_resolves_trusted_ipv6_loopback():
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from z4j_brain.middleware.real_client_ip import RealClientIPMiddleware
+
+    app = FastAPI()
+    app.add_middleware(RealClientIPMiddleware, resolver=TrustedProxyResolver(["::1/128"]))
+
+    @app.get("/observed-ip")
+    async def observed_ip(request: Request):
+        return {"ip": request.state.client_ip}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("::1", 1234)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/observed-ip", headers={"X-Forwarded-For": "198.51.100.10"})
+    assert response.status_code == 200
+    assert response.json() == {"ip": "198.51.100.10"}

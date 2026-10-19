@@ -1,13 +1,16 @@
 # z4j - Caddyfile for the optional docker-compose.caddy.yml overlay.
 #
 # Caddy terminates TLS (auto-provisioned via Let's Encrypt) and
-# reverse-proxies to the z4j-brain container on the private
-# z4j_backend network.
+# reverse-proxies to the z4j container on the private z4j_net network.
 #
-# Customise freely. Caddy reloads when the file changes; trigger a
-# reload without restarting the container with:
+# Customise freely. Caddy does not watch this file; apply an edit
+# without restarting the container with:
 #
-#   docker kill -s USR1 z4j-caddy
+#   docker exec z4j-caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+#
+# The file is a single-file bind mount, so an editor that saves by
+# replacing the file leaves the container on the old copy; run
+# docker restart z4j-caddy in that case.
 #
 # Full Caddyfile reference: https://caddyserver.com/docs/caddyfile
 

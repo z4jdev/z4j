@@ -387,10 +387,10 @@ class NotificationService:
     ) -> int:
         """Find matching user subscriptions and deliver notifications.
 
-        Returns the total number of deliveries attempted (in-app +
-        external). Failures are logged in the deliveries table and
-        do NOT raise - notification side effects must never crash
-        the calling request handler.
+        Returns committed in-app deliveries plus external attempts.
+        A subscription staging failure skips that subscription; channel
+        failures produce failed delivery audits when persistence succeeds.
+        A batch commit failure propagates before any external dispatch.
         """
         from z4j_brain.persistence.models.notification import (
             NotificationReason,
@@ -497,8 +497,13 @@ class NotificationService:
 
         for sub in subs:
             # 1) Muted? (cheap in-memory check; no writes.)
-            if sub.muted_until is not None and sub.muted_until > now:
-                continue
+            muted_until = sub.muted_until
+            if muted_until is not None:
+                # SQLite returns stored UTC timestamps without tzinfo.
+                if muted_until.tzinfo is None:
+                    muted_until = muted_until.replace(tzinfo=UTC)
+                if muted_until > now:
+                    continue
 
             # 2) Member-of-project sanity check, batched (PERF-01).
             if sub.user_id not in valid_user_ids:
@@ -514,6 +519,12 @@ class NotificationService:
             ):
                 continue
 
+            # ORM state can expire when the savepoint rolls back. Keep
+            # the identifier for error logging outside that state, and
+            # publish Python-side staging only after the savepoint succeeds.
+            sub_id = sub.id
+            sub_pending: list[_PendingDelivery] = []
+            sub_in_app = 0
             try:
                 async with session.begin_nested():
                     # 4) Atomically claim the cooldown slot (HIGH-04).
@@ -562,7 +573,7 @@ class NotificationService:
                                 data=deeplink_data,
                             ),
                         )
-                        dispatched += 1
+                        sub_in_app = 1
 
                     # 6) Stage project channel deliveries (from the
                     #    pre-fetched dict, no DB round-trip here).
@@ -570,7 +581,7 @@ class NotificationService:
                         channel = project_channels_by_id.get(cid)
                         if channel is None:
                             continue
-                        pending.append(
+                        sub_pending.append(
                             _PendingDelivery(
                                 subscription_id=sub.id,
                                 recipient_user_id=sub.user_id,
@@ -592,7 +603,7 @@ class NotificationService:
                         user_channel = user_channels_by_id.get(cid)
                         if user_channel is None or not user_channel.is_active:
                             continue
-                        pending.append(
+                        sub_pending.append(
                             _PendingDelivery(
                                 subscription_id=sub.id,
                                 recipient_user_id=sub.user_id,
@@ -611,9 +622,11 @@ class NotificationService:
                 # Savepoint rolled back this sub's writes only.
                 logger.exception(
                     "z4j notification: per-subscription staging failed (sub_id=%s)",
-                    sub.id,
+                    sub_id,
                 )
                 continue
+            pending.extend(sub_pending)
+            dispatched += sub_in_app
 
         # Commit pass 1 BEFORE doing any external HTTP. This releases
         # the DB connection while webhooks / slack / telegram calls

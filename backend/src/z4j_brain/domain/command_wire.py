@@ -11,24 +11,12 @@ from typing import Any
 
 
 def wire_target(target_type: str, target_id: str | None, parameters: Any) -> dict[str, Any]:
-    """Build the wire ``target`` dict the agent receives.
+    """Build the target with the engine and scheduler selected by the server.
 
-    Always carries ``type`` + ``id``. For a ``bulk_retry`` / ``requeue_dead_letter``
-    command whose filter names an engine, it ALSO surfaces that engine as
-    ``target["engine"]`` (P1-6 / N-1). A ``queue`` target whose parameters name
-    an engine (``dlq.list``) surfaces it the same way: the agent dispatcher
-    binds the adapter from ``target["engine"]`` and a multi-engine host has no
-    sole engine to fall back to, so without it the listing fails with "no
-    adapter". A ``purge_queue`` payload carries no engine and is unchanged.
-
-    Rationale: a pre-1.7.1 agent resolves the adapter for these bulk actions from
-    ``target.get("engine")`` ALONE -- it does not read ``filter["engine"]`` (the
-    RH3 routing). Since the brain now resolves and scopes each bulk command to a
-    single engine, echoing that engine into ``target`` lets an older agent bind
-    the correct adapter on a multi-engine host (instead of falling back to its
-    sole-engine guess and failing with "no adapter"). A 1.7.1 agent still treats
-    ``filter["engine"]`` as authoritative, and the two always agree because the
-    brain sets both from the same resolved value.
+    Bulk filters retain precedence. Ordinary task, worker and queue commands
+    also carry their engine explicitly so older and current agents can select
+    it when several engine adapters share one process. A scheduler parameter
+    similarly disambiguates multiple native scheduler adapters.
     """
     target: dict[str, Any] = {"type": target_type, "id": target_id}
     if isinstance(parameters, dict):
@@ -37,8 +25,11 @@ def wire_target(target_type: str, target_id: str | None, parameters: Any) -> dic
             engine = filt.get("engine")
             if isinstance(engine, str) and engine:
                 target["engine"] = engine
-        elif target_type == "queue":
+        else:
             engine = parameters.get("engine")
             if isinstance(engine, str) and engine:
                 target["engine"] = engine
+        scheduler = parameters.get("scheduler")
+        if isinstance(scheduler, str) and scheduler:
+            target["scheduler"] = scheduler
     return target

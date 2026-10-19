@@ -803,6 +803,28 @@ def _validate_directory_handle(
     return info
 
 
+def open_relative_directory(
+    directory_handle: int,
+    name: str,
+    *,
+    create: bool = False,
+    require_private: bool = True,
+) -> tuple[int, tuple[int, int]]:
+    """Hold a non-reparse child directory, optionally creating it if absent."""
+    handle = _open_relative_directory(
+        directory_handle,
+        name,
+        access=FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        disposition=FILE_OPEN_IF if create else FILE_OPEN,
+    )
+    try:
+        info = _validate_directory_handle(handle, name, require_private=require_private)
+        return handle, _info_identity(info)
+    except BaseException:
+        close_handle(handle)
+        raise
+
+
 def _validate_regular_handle(
     handle: int,
     label: str,
@@ -1207,6 +1229,7 @@ def delete_relative(
     name: str,
     *,
     expected_identity: tuple[int, int] | None = None,
+    require_private: bool = True,
 ) -> None:
     handle = _open_relative(
         directory_handle,
@@ -1215,7 +1238,7 @@ def delete_relative(
         disposition=FILE_OPEN,
     )
     try:
-        info = _validate_regular_handle(handle, name, require_private=True)
+        info = _validate_regular_handle(handle, name, require_private=require_private)
         if expected_identity is not None and _info_identity(info) != expected_identity:
             raise WindowsSecureIOError(
                 ERROR_ACCESS_DENIED,
@@ -1589,6 +1612,7 @@ __all__ = [
     "hold_relative_file_stable",
     "move_relative_file",
     "open_directory",
+    "open_relative_directory",
     "open_relative_file",
     "protect_directory",
     "read_relative",

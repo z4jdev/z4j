@@ -29,21 +29,25 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from z4j_brain.auth.csrf import csrf_cookie_name
 from z4j_brain.auth.passwords import PasswordHasher
 from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
+from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.main import create_app
 from z4j_brain.persistence import models  # noqa: F401
 from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.models import (
+    AuditLog,
     NotificationChannel,
     Project,
     ProjectDefaultSubscription,
     Session,
     User,
 )
+from z4j_brain.persistence.repositories import ProjectDefaultSubscriptionRepository
 from z4j_brain.settings import Settings
 
 
@@ -359,3 +363,109 @@ class TestUpdateDefaultSubscription:
             assert body["in_app"] is True
             assert len(body["project_channel_ids"]) == 2
             assert body["cooldown_seconds"] == 300
+
+
+@pytest.mark.asyncio
+class TestDefaultSubscriptionWriteBoundary:
+    @pytest.mark.parametrize("operation", ["create", "update"])
+    async def test_real_unique_violation_after_stale_precheck_returns_conflict(
+        self,
+        operation: str,
+        settings: Settings,
+        brain_app,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seed = await _seed(brain_app, settings)
+        competitor_id = uuid.uuid4()
+        async with brain_app.state.db.session() as session:
+            session.add(
+                ProjectDefaultSubscription(
+                    id=competitor_id,
+                    project_id=seed["project_id"],
+                    trigger="task.succeeded",
+                    filters={},
+                    in_app=True,
+                    project_channel_ids=[],
+                    cooldown_seconds=10,
+                ),
+            )
+            await session.commit()
+
+        original_check = ProjectDefaultSubscriptionRepository.exists_for_project_trigger
+
+        async def stale_precheck(repo, project_id, trigger):
+            # Simulate the stale precheck a concurrent PostgreSQL arrival
+            # produces, while letting the real database arbitrate the write.
+            assert await original_check(repo, project_id, trigger)
+            return False
+
+        monkeypatch.setattr(
+            ProjectDefaultSubscriptionRepository,
+            "exists_for_project_trigger",
+            stale_precheck,
+        )
+        async with _client(brain_app, settings, seed) as client:
+            url = "/api/v1/projects/fragai/notifications/defaults"
+            body = {"trigger": "task.succeeded", "cooldown_seconds": 90}
+            if operation == "create":
+                response = await client.post(url, json=body)
+            else:
+                response = await client.patch(f"{url}/{seed['default_id']}", json=body)
+
+        assert response.status_code == 409, response.text
+        assert response.json()["details"] == {"trigger": "task.succeeded"}
+        async with brain_app.state.db.session() as session:
+            defaults = list(await session.scalars(select(ProjectDefaultSubscription)))
+            assert {row.id for row in defaults} == {seed["default_id"], competitor_id}
+            original = next(row for row in defaults if row.id == seed["default_id"])
+            assert original.trigger == "task.failed"
+            assert original.cooldown_seconds == 300
+            competitor = next(row for row in defaults if row.id == competitor_id)
+            assert competitor.trigger == "task.succeeded"
+            assert competitor.cooldown_seconds == 10
+            assert list(await session.scalars(select(AuditLog))) == []
+
+    @pytest.mark.parametrize("operation", ["create", "update"])
+    @pytest.mark.parametrize("failure", ["foreign_key", "other_unique"])
+    async def test_other_integrity_errors_roll_back_without_becoming_trigger_conflicts(
+        self,
+        operation: str,
+        failure: str,
+        settings: Settings,
+        brain_app,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seed = await _seed(brain_app, settings)
+
+        async def failing_audit(_self, repo, **_kwargs):
+            # Fail after the default flush with a different real constraint.
+            # Neither a foreign key nor another unique key means the requested
+            # notification trigger already exists.
+            if failure == "foreign_key":
+                statement = insert(ProjectDefaultSubscription).values(
+                    project_id=uuid.uuid4(),
+                    trigger="agent.offline",
+                    filters={},
+                    project_channel_ids=[],
+                )
+            else:
+                statement = insert(Project).values(slug="fragai", name="Duplicate")
+            await repo.session.execute(statement)
+
+        monkeypatch.setattr(AuditService, "record", failing_audit)
+        async with _client(brain_app, settings, seed) as client:
+            url = "/api/v1/projects/fragai/notifications/defaults"
+            body = {"trigger": "task.succeeded", "cooldown_seconds": 90}
+            if operation == "create":
+                response = await client.post(url, json=body)
+            else:
+                response = await client.patch(f"{url}/{seed['default_id']}", json=body)
+
+        assert response.status_code == 500, response.text
+        assert response.json()["error"] == "internal_error"
+        async with brain_app.state.db.session() as session:
+            original = (await session.scalars(select(ProjectDefaultSubscription))).one()
+            assert original.id == seed["default_id"]
+            assert original.trigger == "task.failed"
+            assert original.cooldown_seconds == 300
+            assert list(await session.scalars(select(AuditLog))) == []

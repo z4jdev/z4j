@@ -411,8 +411,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         "--no-backup",
         action="store_true",
         help=(
-            "skip the auto-backup step. Only set if you have your "
-            "own backup strategy; the default is safer."
+            "PostgreSQL: acknowledge that you already have an external backup; "
+            "required even with --apply. Does not bypass SQLite's verified backup."
         ),
     )
 
@@ -633,7 +633,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             "schedule id.\n"
             "\n"
             "Default output is an aligned text table; pass --json for a "
-            "machine-readable array."
+            "machine-readable object containing project and misfires."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1284,6 +1284,18 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     return 2
 
 
+def _upgrade_version_from_metadata(metadata: object) -> str:
+    """Require the PyPI response fields needed for a version comparison."""
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("info"), dict):
+        raise TypeError("PyPI metadata must contain an info object")
+    latest = metadata["info"].get("version")
+    if not isinstance(latest, str):
+        raise TypeError("PyPI metadata must contain a version string")
+    if not latest.strip():
+        raise ValueError("PyPI metadata must contain a non-empty version string")
+    return latest
+
+
 def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0911, PLR0912, PLR0915  upgrade check + apply dispatch
     """Dispatch ``z4j upgrade``.
 
@@ -1359,6 +1371,9 @@ def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0911, PLR0912, PL
             try:
                 resp = client.get(f"https://pypi.org/pypi/{pkg}/json")
                 if resp.status_code == 404:
+                    network_errors.append(
+                        f"{pkg}: not found on PyPI (HTTP 404); installed version could not be compared",
+                    )
                     rows.append(
                         {
                             "package": pkg,
@@ -1370,8 +1385,8 @@ def _run_upgrade(args: argparse.Namespace) -> int:  # noqa: PLR0911, PLR0912, PL
                     )
                     continue
                 resp.raise_for_status()
-                latest = resp.json().get("info", {}).get("version", "?")
-            except httpx.HTTPError as exc:
+                latest = _upgrade_version_from_metadata(resp.json())
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
                 network_errors.append(
                     f"{pkg}: {type(exc).__name__}: {exc}",
                 )
@@ -1700,7 +1715,7 @@ def _run_metrics_token_rotate(args: argparse.Namespace) -> int:
 def _run_doctor(args: argparse.Namespace) -> int:  # noqa: PLR0915  flat diagnostic inventory
     """Full health + configuration audit.
 
-    Composes ``check`` (DB + migrations) with a set of warnings that
+    Composes ``check`` (configuration and DB connectivity) with warnings that
     a plain ``check`` can't raise because they're not failures -
     they're configuration smells the operator should be aware of
     before exposing the brain to the internet.
@@ -1708,13 +1723,14 @@ def _run_doctor(args: argparse.Namespace) -> int:  # noqa: PLR0915  flat diagnos
     Return codes:
       0 = all green, no warnings
       0 = check passed but one or more warnings (operator attention)
-      non-zero = same as ``check`` (config invalid / DB unreachable /
-                 schema not at head)
+      non-zero = same as ``check`` (config invalid / DB unreachable)
+
+    Neither command verifies that migrations are at head.
     """
     import asyncio
     import os
 
-    # Reuse the existing check to catch config / DB / migration issues
+    # Reuse the existing check to catch config / DB connectivity issues
     # up front. If that fails, the rest of doctor is moot.
     rc = _run_check(args)
     if rc != 0:
@@ -5785,10 +5801,10 @@ def _run_audit_fork_cleanup(  # noqa: PLR0911, PLR0915  quarantine dispatch
     1. Connects to the configured DB via Settings.
     2. SELECTs duplicate prev_row_hmac groups + the rows in them.
     3. Prints the duplicate set so the operator can eyeball it.
-    4. Auto-backs up the DB (SQLite: file copy with timestamp suffix;
-       Postgres: warns to use ``pg_dump`` and refuses unless
-       ``--no-backup``).
-    5. Prompts ``[y/N]`` unless ``--apply``.
+    4. On PostgreSQL, requires ``--no-backup`` to acknowledge an external
+       backup, including with ``--apply``; this command does not run pg_dump.
+    5. Prompts ``[y/N]`` unless ``--apply``. On SQLite, creates and verifies
+       a coherent backup before any mutation; ``--no-backup`` cannot bypass it.
     6. CREATE TABLE IF NOT EXISTS ``audit_log_legacy_forks`` with
        the same shape as ``audit_log``, copies fork rows into it
        (preserving every byte for forensic review), then DELETEs
@@ -5881,6 +5897,15 @@ def _run_audit_fork_cleanup(  # noqa: PLR0911, PLR0915  quarantine dispatch
         print(f"  prev_row_hmac={prefix}... count={count}")  # noqa: T201
     print()  # noqa: T201
 
+    if not is_sqlite and not args.no_backup:
+        print(  # noqa: T201
+            "Postgres detected: this command does not run pg_dump for you. "
+            "Take an external backup, then re-run with --no-backup to acknowledge it. "
+            "--apply skips confirmation only; it does not bypass this requirement.",
+            file=sys.stderr,
+        )
+        return 2
+
     if not args.apply:
         try:
             answer = (
@@ -5921,15 +5946,6 @@ def _run_audit_fork_cleanup(  # noqa: PLR0911, PLR0915  quarantine dispatch
                 "bypass this fence.",
                 file=sys.stderr,
             )
-            return 2
-    elif not args.no_backup:
-        print(  # noqa: T201
-            "Postgres detected: this command does not run pg_dump "
-            "for you. Take a backup with `pg_dump` BEFORE re-running, "
-            "or pass --no-backup if you already have one.",
-            file=sys.stderr,
-        )
-        if not args.apply:
             return 2
 
     async def _cleanup() -> int:
@@ -6850,12 +6866,11 @@ def _run_reset_mfa(args: argparse.Namespace) -> int:
     ``users.mfa_enrolled_at = NULL``, deletes every row in
     ``mfa_recovery_codes`` and ``trusted_devices`` for the user, and
     flips ``sessions.mfa_verified_at = NULL`` for the user's live
-    sessions. The user can log in with their password as usual; the
-    sensitive-action gate treats their session as un-verified until
-    they enroll again.
+    sessions. The user can log in with their password; enrollment
+    enforcement follows the configured policy and grace deadline.
 
     Writes a ``user.mfa_reset_by_admin`` audit row attributed to the
-    OS user running the CLI (best-effort: ``os.getlogin()``). There
+    affected user ID, with a best-effort OS operator label in metadata. There
     is intentionally no REST surface for this -- an attacker who has
     only the dashboard cannot trigger it.
     """
@@ -6970,8 +6985,8 @@ def _run_reset_mfa(args: argparse.Namespace) -> int:
                 await db_session.commit()
                 print(  # noqa: T201
                     f"z4j reset-mfa: cleared MFA for {email}. They can "
-                    "log in with their password; the sensitive-action "
-                    "gate will require a fresh enrollment.",
+                    "log in with their password; enrollment requirements "
+                    "follow the configured MFA policy and grace deadline.",
                 )
                 return 0
         finally:
@@ -7485,24 +7500,25 @@ _CONFIG_ENV_TEMPLATE = """\
 # wants them sourced from a secret manager.
 # Do not put credentials, tokens, or secrets in this 0644 tunables file.
 
-# How long to retain task events before the periodic sweeper purges
-# them. Increase for forensic / compliance environments. Decrease to
-# reduce DB size if you only care about recent state.
+# How long to retain task events before PostgreSQL's partition worker
+# drops them (SQLite never deletes event rows). Increase for forensic /
+# compliance environments. Decrease to reduce DB size if you only care
+# about recent state.
 # Z4J_EVENT_RETENTION_DAYS=30
 
 # Audit-log retention. Independent from event retention because the
 # audit log is required by SOC 2 / ISO 27001 controls; you typically
 # want it longer.
-# Z4J_AUDIT_RETENTION_DAYS=365
+# Z4J_AUDIT_RETENTION_DAYS=90
 
-# How long the brain waits for a command frame to receive its
-# command_ack before timing out. Bump if you have intentionally slow
-# command handlers (e.g. a custom retry that holds the connection).
-# Z4J_COMMAND_TIMEOUT_SECONDS=30
+# Seconds from issue until a command still pending or dispatched is
+# marked timed out (no authenticated result arrived). Bump if you have
+# intentionally slow command handlers.
+# Z4J_COMMAND_TIMEOUT_SECONDS=60
 
 # How long an agent can be silent before the brain considers it
 # disconnected. Drives the dashboard's online/offline indicator.
-# Z4J_AGENT_OFFLINE_TIMEOUT_SECONDS=60
+# Z4J_AGENT_OFFLINE_TIMEOUT_SECONDS=30
 
 # Per-IP rate limit for the public setup endpoint (unauthenticated
 # first-boot URL). Tighten if you suspect token-guessing attempts.

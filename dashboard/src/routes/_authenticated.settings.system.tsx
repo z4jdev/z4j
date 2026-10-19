@@ -137,10 +137,11 @@ interface VersionsSnapshot {
  *
  * Privacy-by-default: z4j ships with a bundled snapshot of
  * the latest known z4j package versions. The button below is the
- * ONLY way z4j ever reaches out to fetch a fresher copy. No
- * background polling, no telemetry. Operators who want zero
- * outbound HTTP set Z4J_VERSION_CHECK_URL to an empty string
- * (z4j returns an empty URL and we hide the button).
+ * dashboard entry point for the version-check API; API callers can
+ * also request a refresh. This feature has no background polling.
+ * Set Z4J_VERSION_CHECK_URL to an empty string to disable these
+ * outbound version checks (the button remains visible but disabled).
+ * Other configured integrations can make their own outbound requests.
  */
 function VersionsCheckCard() {
   const qc = useQueryClient();

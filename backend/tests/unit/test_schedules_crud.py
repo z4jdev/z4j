@@ -52,6 +52,7 @@ from z4j_brain.persistence.enums import (
     ScheduleKind,
 )
 from z4j_brain.persistence.models import (
+    AuditLog,
     Command,
     Membership,
     PendingFire,
@@ -360,6 +361,53 @@ async def _activate_current_control(brain_app) -> None:
 
 
 class TestCreateSchedule:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ["create", "native"])
+    async def test_disallowed_scheduler_returns_422_without_writes(
+        self,
+        route: str,
+        settings: Settings,
+        brain_app,
+    ) -> None:
+        seed = await _make_seed(settings=settings, brain_app=brain_app, is_admin=True)
+        async with brain_app.state.db.session() as session:
+            project = await session.get(Project, seed["project_id"])
+            project.allowed_schedulers = ["z4j-scheduler"]
+            await session.commit()
+
+        async with _make_client(brain_app, settings, seed) as client:
+            if route == "create":
+                response = await client.post(
+                    "/api/v1/projects/default/schedules",
+                    json=_create_body("denied-owner", scheduler="celery-beat"),
+                )
+            else:
+                response = await client.post(
+                    "/api/v1/projects/default/schedules/native-operations",
+                    json={
+                        "request_id": str(uuid.uuid4()),
+                        "scheduler": "celery-beat",
+                        "operation": "create",
+                        "definition": {},
+                    },
+                )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"] == "validation_error"
+        assert "allowed_schedulers" in response.json()["details"]["reason"]
+        async with brain_app.state.db.session() as session:
+            assert list(await session.scalars(select(Schedule))) == []
+            assert list(await session.scalars(select(Command))) == []
+            assert list(await session.scalars(select(ScheduleChangeLog))) == []
+            successful_audits = list(
+                await session.scalars(
+                    select(AuditLog).where(
+                        AuditLog.action.in_(["schedule.create", "schedule.native.create"]),
+                    ),
+                ),
+            )
+            assert successful_audits == []
+
     @pytest.mark.asyncio
     async def test_active_current_create_has_complete_identity_and_envelope(
         self,

@@ -309,9 +309,9 @@ try:
     from z4j_brain.api.metrics import register_inmemory_subsystem
 
     register_inmemory_subsystem("longpoll_sessions", _longpoll_session_count)
-except Exception:  # noqa: S110  best-effort metrics registration, retried on next import
-    # metrics module not importable yet (very early in test bootstrap);
-    # the next import of this module will retry.
+except Exception:  # noqa: S110  best-effort metrics registration
+    # Registration may be unavailable during early test bootstrap. Ordinary
+    # subsequent imports use this cached module and do not retry registration.
     pass
 
 
@@ -988,9 +988,9 @@ async def agent_events(  # noqa: PLR0912, PLR0915  long-poll event-upload handle
             rejected += total - idx
             break
         except ProtocolVersionError as exc:
-            # A version-skew frame is AUTHENTIC and RECOVERABLE: the same
-            # bytes parse against a peer built with the matching
-            # PROTOCOL_VERSION. During a rolling protocol upgrade it must be
+            # A version-skew frame is unverified but may be recoverable with
+            # a peer using the matching PROTOCOL_VERSION. During a rolling
+            # protocol upgrade it must be
             # RE-SENT (it will land on an already-upgraded replica), not
             # dropped -- so count it rejected (retry), not accepted. It is
             # NOT authenticated (the version gate is before HMAC), so it
@@ -1224,11 +1224,11 @@ async def agent_commands(  # noqa: PLR0915, PLR0912  long-poll command handler
     # would otherwise sit in DISPATCHED state with no agent ever
     # seeing it - recoverable only via CommandTimeoutWorker
     # minutes later, surfaced as a generic timeout to the user.
-    # The agent's in-memory ``_seen_commands`` dedup (300s TTL)
-    # silently absorbs duplicates that reach a still-running
-    # process. The redispatch only re-fires for commands the
-    # agent never processed because the network dropped before
-    # delivery completed.
+    # Agent memory and durable command markers suppress known duplicates.
+    # This remains at-least-once delivery: an effect can occur before its
+    # durable marker is recorded, so a crash or marker-write failure can
+    # permit replay. Tasks requiring unique business effects need their
+    # own idempotency handling.
     from datetime import UTC, datetime, timedelta
 
     async def _pull_pending(limit: int) -> list[Command]:
@@ -1238,6 +1238,7 @@ async def agent_commands(  # noqa: PLR0915, PLR0912  long-poll command handler
 
         from z4j_brain.persistence.models import Command
         from z4j_brain.persistence.repositories.commands import (
+            _EXTERNAL_FROZEN_DELIVERY_ACTIONS,
             _REDELIVERABLE_ACTIONS,
         )
 
@@ -1307,6 +1308,10 @@ async def agent_commands(  # noqa: PLR0915, PLR0912  long-poll command handler
                 select(Command)
                 .where(
                     Command.agent_id == agent.id,
+                    # Native activation/control/mutations belong to their exact
+                    # WebSocket generation. They must neither cross into this
+                    # transport nor occupy the bounded poll's ordinary slots.
+                    ~Command.action.in_(_EXTERNAL_FROZEN_DELIVERY_ACTIONS),
                     session_eligible,
                     # Every selected DISPATCHED row is already
                     # deliverable.  Generic recovery uses its action allowlist;
@@ -1378,11 +1383,10 @@ async def agent_commands(  # noqa: PLR0915, PLR0912  long-poll command handler
     #    already received the duplicate frame from both
     #    responses. The fix is to honour the boolean return.
     #
-    # 2. Sign AFTER the claim. If signing throws, the row is now
-    #    in ``DISPATCHED`` state without ever being delivered, so
-    #    we transition it to ``FAILED`` to surface the problem
-    #    to the user instead of silently waiting for it to time
-    #    out. Reverting to ``PENDING`` would re-open the race.
+    # 2. Sign AFTER the claim. For generic/legacy commands, signing
+    #    failure transitions DISPATCHED to FAILED rather than reopening
+    #    the claim as PENDING. Current schedule child claims instead
+    #    retain their immutable, ambiguous claim for recovery below.
     #
     # 3. Append to ``out_frames`` only after both succeed.
     out_frames: list[str] = []

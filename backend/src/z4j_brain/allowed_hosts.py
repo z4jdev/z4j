@@ -80,8 +80,8 @@ def write_persisted(hosts: list[str]) -> None:
 
     The final tmpfile replacement is atomic on supported filesystems. If that
     replacement fails, the existing file is preserved and the error is raised.
-    Sets the file mode to 0o644 - hosts are not secrets, but the directory
-    itself is operator-owned.
+    Attempts to set the file mode to 0o644 where supported; a chmod failure
+    is ignored. Hosts are not secrets, but the directory is operator-owned.
     """
     path = get_path()
     path.parent.mkdir(parents=True, exist_ok=True)

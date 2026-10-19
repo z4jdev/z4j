@@ -69,7 +69,7 @@
       "event_id": null,
       "metadata": {
         "already_in_state": false,
-        "paused_at_offset_s": -172800
+        "paused_at_offset_s": -432000
       },
       "source_ip": "198.51.100.14",
       "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
@@ -247,7 +247,7 @@
       "event_id": null,
       "metadata": {
         "already_in_state": false,
-        "paused_at_offset_s": -172800
+        "paused_at_offset_s": -2682
       },
       "source_ip": "198.51.100.14",
       "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
@@ -392,7 +392,7 @@
       "event_id": null,
       "metadata": {
         "already_in_state": false,
-        "paused_at_offset_s": -172800
+        "paused_at_offset_s": -6178
       },
       "source_ip": "198.51.100.14",
       "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
@@ -537,7 +537,7 @@
       "event_id": null,
       "metadata": {
         "already_in_state": false,
-        "paused_at_offset_s": -172800
+        "paused_at_offset_s": -9674
       },
       "source_ip": "198.51.100.14",
       "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
@@ -682,7 +682,7 @@
       "event_id": null,
       "metadata": {
         "already_in_state": false,
-        "paused_at_offset_s": -172800
+        "paused_at_offset_s": -13170
       },
       "source_ip": "198.51.100.14",
       "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
@@ -827,7 +827,7 @@
       "event_id": null,
       "metadata": {
         "already_in_state": false,
-        "paused_at_offset_s": -172800
+        "paused_at_offset_s": -16666
       },
       "source_ip": "198.51.100.14",
       "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
@@ -972,7 +972,7 @@
       "event_id": null,
       "metadata": {
         "already_in_state": false,
-        "paused_at_offset_s": -172800
+        "paused_at_offset_s": -20162
       },
       "source_ip": "198.51.100.14",
       "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",

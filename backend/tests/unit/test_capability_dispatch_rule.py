@@ -366,6 +366,41 @@ class TestCapabilityDispatchOverHttp:
         assert "no native retry" in r.text
         assert await _command_count(brain_app) == 0
 
+    async def test_dramatiq_retry_without_overrides_is_refused_before_dispatch(
+        self, brain_app, client, settings: Settings, seeded
+    ) -> None:
+        """Stock Dramatiq keeps no message to re-run by reference.
+
+        Its adapter fails every retry that lacks both override halves, so the
+        brain refuses it up front instead of issuing a command that can only
+        come back failed.
+        """
+        agent_id = await _seed_agent(
+            brain_app,
+            settings,
+            seeded,
+            name="dramatiq",
+            engines=["dramatiq"],
+            capabilities={"dramatiq": ["submit_task", "retry_task", RETRY_BY_REFERENCE_CAPABILITY]},
+        )
+        await _register_session(
+            brain_app, settings, seeded, agent_id, retry_contracts={"dramatiq": 1}
+        )
+        r = await client.post(
+            "/api/v1/projects/default/commands/retry-task",
+            json=_retry_body(agent_id, "dramatiq", overrides=False),
+        )
+        assert r.status_code == 409, r.text
+        assert "no native retry" in r.text
+        assert await _command_count(brain_app) == 0
+
+        # With both halves the same session receives the retry.
+        r = await client.post(
+            "/api/v1/projects/default/commands/retry-task",
+            json=_retry_body(agent_id, "dramatiq", overrides=True),
+        )
+        assert r.status_code == 202, r.text
+
     async def test_huey_cancel_is_accepted(
         self, brain_app, client, settings: Settings, seeded
     ) -> None:
