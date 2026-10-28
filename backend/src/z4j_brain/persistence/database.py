@@ -198,6 +198,16 @@ def create_engine_from_settings(settings: Settings) -> AsyncEngine:
         kwargs["connect_args"] = {
             "statement_cache_size": settings.database_statement_cache_size,
         }
+        # asyncpg's own cache serves only executemany and the connection
+        # ping: SQLAlchemy's asyncpg adapter prepares every other statement
+        # itself and keeps it in a per-connection LRU cache of its own
+        # (``prepared_statement_cache_size``, 100 by default). The one
+        # setting bounds both caches. An explicit value in the database URL
+        # still wins, so an operator who tuned it there keeps that value.
+        if "prepared_statement_cache_size" not in make_url(settings.database_url).query:
+            kwargs["connect_args"]["prepared_statement_cache_size"] = (
+                settings.database_statement_cache_size
+            )
     engine = create_async_engine_from_url(settings.database_url, **kwargs)
     from z4j_brain.management_restore import (
         install_database_restore_fence_engine_hook,

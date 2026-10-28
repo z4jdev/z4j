@@ -9757,7 +9757,7 @@
   },
   "info": {
     "title": "z4j",
-    "version": "1.13.1"
+    "version": "1.13.2"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -12031,7 +12031,7 @@
         ]
       },
       "post": {
-        "description": "Queue a background export of this project's audit log.\n\nRequires ``Action.EXPORT_AUDIT`` on the project (auditor or admin), the\nsame as the synchronous export.\nAnswers ``409`` when no export sink is configured\n(``Z4J_EXPORT_SINK``), ``422`` for an unknown field name. The job\nstarts ``queued``; poll ``GET .../export-jobs/{id}`` for progress.",
+        "description": "Queue a background export of this project's audit log.\n\nRequires ``Action.EXPORT_AUDIT`` on the project (auditor or admin), the\nsame as the synchronous export.\nAnswers ``409`` when no export sink is configured\n(``Z4J_EXPORT_SINK``) or it still names the removed ``s3`` sink,\n``422`` for an unknown field name. The job\nstarts ``queued``; poll ``GET .../export-jobs/{id}`` for progress.",
         "operationId": "create_export_job_api_v1_projects__slug__audit_export_jobs_post",
         "parameters": [
           {
@@ -12137,7 +12137,7 @@
     },
     "/api/v1/projects/{slug}/audit/export-jobs/{job_id}/download": {
       "get": {
-        "description": "Stream a finished local-sink export to an auditor or an admin.\n\n``409`` when the job is not done or its sink is not the local\ndirectory sink; an S3 object is fetched from the bucket at the\njob's ``location`` with the operator's own credentials. ``404`` when\nthe row's location does not name a regular file below the configured\ndirectory: the row is not trusted to name the file, the sink is\n(``LocalDirectorySink.open_download``), and what is served is the\nhandle the sink opened.",
+        "description": "Stream a finished local-sink export to an auditor or an admin.\n\n``409`` when the job is not done or its sink is not the local\ndirectory sink (a job written by the removed S3 sink is fetched from\nits ``location`` with the operator's own tools). ``404`` when\nthe row's location does not name a regular file below the configured\ndirectory: the row is not trusted to name the file, the sink is\n(``LocalDirectorySink.open_download``), and what is served is the\nhandle the sink opened.",
         "operationId": "download_export_job_api_v1_projects__slug__audit_export_jobs__job_id__download_get",
         "parameters": [
           {

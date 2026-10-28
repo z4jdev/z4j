@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
@@ -291,6 +292,16 @@ class Schedule(PKMixin, TimestampsMixin, Base):
             name="uq_schedules_project_scheduler_name",
         ),
         Index("ix_schedules_project_id", "project_id"),
+        # One schedule per source key within an external stream. Reserved
+        # ``z4j-scheduler`` rows carry no stream and stay outside it.
+        Index(
+            "uq_schedules_external_stream_source_key",
+            "external_stream_id",
+            "external_source_key",
+            unique=True,
+            postgresql_where=text("external_stream_id IS NOT NULL"),
+            sqlite_where=text("external_stream_id IS NOT NULL"),
+        ),
         # The partial idx WHERE is_enabled is added in the migration
         # - SQLAlchemy supports partial indexes via postgresql_where
         # but only on Postgres, and emitting it on SQLite is a

@@ -37,7 +37,7 @@ from z4j_brain.domain.export_sinks import (
     LOCAL_FILE_MODE,
     ExportSinkError,
     LocalDirectorySink,
-    S3Sink,
+    RemovedS3Sink,
     SinkWriteResult,
     validate_key,
 )
@@ -1170,332 +1170,232 @@ def test_local_sink_download_stays_inside_the_base(tmp_path: Path, sink_dir: Pat
 
 
 # ---------------------------------------------------------------------------
-# S3 sink against a fake client (no network)
+# The removed S3 sink: an upgraded brain still configured for it
 # ---------------------------------------------------------------------------
 
-
-class _FakeS3Client:
-    """The aiobotocore method surface the sink uses, keyword arguments as boto spells them."""
-
-    def __init__(self, store: dict[str, Any]) -> None:
-        self._store = store
-        self.calls: list[str] = []
-
-    async def __aenter__(self) -> _FakeS3Client:
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        return None
-
-    async def put_object(self, **kw: Any) -> dict[str, Any]:
-        self.calls.append("put_object")
-        self._store[f"{kw['Bucket']}/{kw['Key']}"] = {
-            "body": bytes(kw["Body"]),
-            "type": kw["ContentType"],
-        }
-        return {}
-
-    async def create_multipart_upload(self, **kw: Any) -> dict[str, Any]:
-        self.calls.append("create_multipart_upload")
-        self._store["_upload"] = {
-            "bucket": kw["Bucket"],
-            "key": kw["Key"],
-            "type": kw["ContentType"],
-            "parts": {},
-        }
-        return {"UploadId": "u-1"}
-
-    async def upload_part(self, **kw: Any) -> dict[str, Any]:
-        number = int(kw["PartNumber"])
-        self.calls.append(f"upload_part:{number}")
-        assert kw["UploadId"] == "u-1"
-        self._store["_upload"]["parts"][number] = bytes(kw["Body"])
-        return {"ETag": f'"etag-{number}"'}
-
-    async def complete_multipart_upload(self, **kw: Any) -> dict[str, Any]:
-        self.calls.append("complete_multipart_upload")
-        upload = self._store.pop("_upload")
-        numbers = [part["PartNumber"] for part in kw["MultipartUpload"]["Parts"]]
-        assert numbers == sorted(upload["parts"])
-        self._store[f"{kw['Bucket']}/{kw['Key']}"] = {
-            "body": b"".join(upload["parts"][n] for n in numbers),
-            "type": upload["type"],
-        }
-        return {}
-
-    async def abort_multipart_upload(self, **kw: Any) -> dict[str, Any]:
-        del kw
-        self.calls.append("abort_multipart_upload")
-        self._store.pop("_upload", None)
-        return {}
-
-    async def delete_object(self, **kw: Any) -> dict[str, Any]:
-        self.calls.append("delete_object")
-        self._store.pop(f"{kw['Bucket']}/{kw['Key']}", None)
-        return {}
+#: What an environment written for the S3 sink still carries after upgrading.
+_OLD_S3_ENVIRONMENT = {
+    "Z4J_EXPORT_SINK": "s3",
+    "Z4J_EXPORT_SINK_S3_BUCKET": "evidence",
+    "Z4J_EXPORT_SINK_S3_PREFIX": "z4j-exports",
+    "Z4J_EXPORT_SINK_S3_ENDPOINT_URL": "https://minio.internal:9000",
+    "Z4J_EXPORT_SINK_S3_REGION": "us-east-1",
+    "Z4J_EXPORT_SINK_S3_ACCESS_KEY_ID": "AKIAEXAMPLEKEYID0001",
+    "Z4J_EXPORT_SINK_S3_SECRET_ACCESS_KEY": "not-a-real-secret",
+}
 
 
-def _s3(store: dict[str, Any], **kwargs: Any) -> tuple[S3Sink, _FakeS3Client]:
-    client = _FakeS3Client(store)
-    sink = S3Sink(
-        bucket="evidence",
-        prefix="z4j-exports",
-        endpoint_url="https://minio.internal:9000",
-        access_key_id="AKIAEXAMPLE",
-        secret_access_key="hunter2-secret",
-        client_factory=lambda: client,
-        **kwargs,
-    )
-    return sink, client
-
-
-async def test_s3_sink_puts_small_objects_in_one_call() -> None:
-    store: dict[str, Any] = {}
-    sink, client = _s3(store)
-    result = await sink.write(
-        "audit/default/j.csv", _one(b"a,b\r\n1,2\r\n"), content_type="text/csv"
-    )
-    assert result == SinkWriteResult(
-        location="s3://evidence/z4j-exports/audit/default/j.csv",
-        size_bytes=10,
-        key="audit/default/j.csv",
-    )
-    assert client.calls == ["put_object"]
-    assert store["evidence/z4j-exports/audit/default/j.csv"] == {
-        "body": b"a,b\r\n1,2\r\n",
-        "type": "text/csv",
-    }
-    await sink.discard(result.key)
-    assert client.calls[-1] == "delete_object"
-    assert "evidence/z4j-exports/audit/default/j.csv" not in store
-
-
-async def test_s3_sink_streams_large_objects_as_multipart() -> None:
-    store: dict[str, Any] = {}
-    part = 5 * 1024 * 1024
-    sink, client = _s3(store, part_size=part)
-
-    async def chunks() -> AsyncIterator[bytes]:
-        for i in range(12):
-            yield bytes([i]) * (1024 * 1024)  # 12 MiB in 1 MiB chunks
-
-    result = await sink.write("audit/default/big.json", chunks(), content_type="application/json")
-    assert result.size_bytes == 12 * 1024 * 1024
-    assert client.calls == [
-        "create_multipart_upload",
-        "upload_part:1",
-        "upload_part:2",
-        "upload_part:3",
-        "complete_multipart_upload",
-    ]
-    body = store["evidence/z4j-exports/audit/default/big.json"]["body"]
-    assert len(body) == 12 * 1024 * 1024
-    assert body[:1] == b"\x00" and body[-1:] == b"\x0b"
-
-
-async def test_s3_sink_aborts_a_multipart_upload_when_the_stream_fails() -> None:
-    store: dict[str, Any] = {}
-    sink, client = _s3(store, part_size=5 * 1024 * 1024)
-
-    async def chunks() -> AsyncIterator[bytes]:
-        yield b"x" * (6 * 1024 * 1024)
-        raise RuntimeError("database went away")
-
-    with pytest.raises(RuntimeError):
-        await sink.write("audit/default/half.csv", chunks(), content_type="text/csv")
-    assert client.calls[-1] == "abort_multipart_upload"
-    assert "_upload" not in store
-
-
-def test_s3_sink_description_never_carries_a_credential() -> None:
-    sink, _ = _s3({})
-    assert sink.describe() == "s3://evidence/z4j-exports (https://minio.internal:9000)"
-    assert "hunter2" not in sink.describe() and "AKIA" not in sink.describe()
-    sink_with_userinfo = S3Sink(
-        bucket="b", endpoint_url="https://AKIA:hunter2@host:9000", client_factory=lambda: None
-    )
-    assert sink_with_userinfo.describe() == "s3://b (https://host:9000)"
-
-
-# ---------------------------------------------------------------------------
-# A failing client's message never reaches the job row or the audit trail
-# ---------------------------------------------------------------------------
-
-_MARKER_PASS = "R2EENDPOINTPASS"
-_MARKER_KEY = "AKIAR2EACCESSKEYID01"
-_HOSTILE_TEXT = (
-    "Could not connect to the endpoint URL: "
-    f'"https://epuser:{_MARKER_PASS}@minio.internal:9000/evidence'
-    f'?X-Amz-Credential={_MARKER_KEY}%2F20260101%2Fus-east-1"'
-)
-
-
-def _library_exception(module: str, name: str, **attrs: Any) -> BaseException:
-    """An exception that says it comes from ``module``, carrying the hostile text."""
-    cls = type(name, (Exception,), {"__module__": module})
-    exc = cls(_HOSTILE_TEXT)
-    for key, value in attrs.items():
-        setattr(exc, key, value)
-    return exc
-
-
-class _HostileS3Client(_FakeS3Client):
-    """A client whose failure carries the endpoint URL and the key id in its text."""
-
-    def __init__(self, store: dict[str, Any], exc: BaseException) -> None:
-        super().__init__(store)
-        self._exc = exc
-
-    async def put_object(self, **kw: Any) -> dict[str, Any]:
-        del kw
-        self.calls.append("put_object")
-        raise self._exc
-
-
-async def _failure_metadata(db: DatabaseManager, job_id: str) -> dict[str, Any]:
-    async with db.session() as s:
-        row = (
-            await s.execute(
-                select(AuditLog).where(
-                    AuditLog.target_id == job_id,
-                    AuditLog.action == AUDIT_ACTION_EXPORT_FAILED,
-                )
-            )
-        ).scalar_one()
-        return dict(row.audit_metadata)
-
-
-@pytest.mark.parametrize(
-    ("exc", "phrase"),
-    [
-        (
-            _library_exception("botocore.exceptions", "EndpointConnectionError"),
-            "endpoint unreachable",
-        ),
-        (
-            _library_exception(
-                "botocore.exceptions",
-                "ClientError",
-                response={"Error": {"Code": "AccessDenied", "Message": _HOSTILE_TEXT}},
-            ),
-            "access denied",
-        ),
-        (
-            _library_exception(
-                "botocore.exceptions",
-                "ClientError",
-                response={"Error": {"Code": "NoSuchBucket", "Message": _HOSTILE_TEXT}},
-            ),
-            "bucket missing",
-        ),
-        (
-            _library_exception(
-                "botocore.exceptions",
-                "ClientError",
-                response={"Error": {"Code": "NoSuchUpload", "Message": _HOSTILE_TEXT}},
-            ),
-            "upload aborted",
-        ),
-        (
-            _library_exception(
-                "aiohttp.client_exceptions",
-                "ClientConnectorError",
-                os_error=ConnectionRefusedError(111, "Connection refused"),
-            ),
-            "connection refused",
-        ),
-        (
-            _library_exception(
-                "botocore.exceptions",
-                "ClientError",
-                response={"Error": {"Code": _MARKER_PASS, "Message": _HOSTILE_TEXT}},
-            ),
-            "unknown error (ClientError)",
-        ),
-        (
-            _library_exception("botocore.exceptions", "SomethingNewError"),
-            "unknown error (SomethingNewError)",
-        ),
-    ],
-    ids=[
-        "endpoint",
-        "access-denied",
-        "bucket-missing",
-        "upload-aborted",
-        "refused",
-        "hostile-code",
-        "unknown",
-    ],
-)
-async def test_a_library_failure_records_a_fixed_phrase_not_its_text(
-    brain_app, client, seeded, exc: BaseException, phrase: str
+def test_an_old_s3_environment_still_builds_settings(
+    tmp_path: Path, sink_dir: Path, monkeypatch
 ) -> None:
-    db = brain_app.state.db
-    await _seed_audit_rows(db, seeded["project_id"], seeded["admin"]["user_id"], 50)
-    created = await client.post(
-        "/api/v1/projects/default/audit/export-jobs", json={"format": "csv"}
+    """The removed variables are ignored and ``s3`` is still a value Settings accepts."""
+    for key, value in _OLD_S3_ENVIRONMENT.items():
+        monkeypatch.setenv(key, value)
+
+    settings = _settings(
+        tmp_path,
+        sink_dir,
+        export_sink="s3",
+        export_sink_path=None,
+        audit_head_export_interval_seconds=3600,
     )
-    job_id = created.json()["id"]
-    hostile = _HostileS3Client({}, exc)
-    sink = S3Sink(
-        bucket="evidence",
-        prefix="z4j-exports",
-        endpoint_url="https://minio.internal:9000",
-        access_key_id=_MARKER_KEY,
-        secret_access_key="hunter2-secret",
-        client_factory=lambda: hostile,
-    )
-    worker = ExportJobsWorker(
-        db=db,
-        settings=brain_app.state.settings,
-        audit=brain_app.state.audit_service,
-        sink=sink,
-    )
-    assert await worker.tick() is None
-    # Positive control: the failure really came out of the client.
-    assert hostile.calls == ["put_object"]
-    failed = await _job(client, job_id)
-    assert failed["status"] == "failed"
-    assert failed["error"] == phrase
-    metadata = await _failure_metadata(db, job_id)
-    assert metadata["error"] == phrase
-    for surface in (json.dumps(failed), json.dumps(metadata)):
-        assert _MARKER_PASS not in surface
-        assert _MARKER_KEY not in surface
+
+    assert settings.export_sink == "s3"
+    assert not any(name.startswith("export_sink_s3") for name in Settings.model_fields)
+    # The worker still runs, so a queued job ends instead of waiting forever.
+    assert "export_jobs_worker" in settings.leader_gated_worker_names()
 
 
-def test_safe_reason_keeps_our_own_text_with_any_userinfo_stripped() -> None:
-    ours = RuntimeError(
-        f"could not reach https://epuser:{_MARKER_PASS}@minio.internal:9000/evidence"
-    )
-    assert _safe_reason(ours) == (
-        "RuntimeError: could not reach https://minio.internal:9000/evidence"
-    )
+async def test_an_old_s3_environment_starts_and_says_once_that_the_sink_was_removed(
+    tmp_path: Path, sink_dir: Path, monkeypatch, capsys
+) -> None:
+    for key, value in _OLD_S3_ENVIRONMENT.items():
+        monkeypatch.setenv(key, value)
+    settings = _settings(tmp_path, sink_dir, export_sink="s3", export_sink_path=None)
+    engine = create_async_engine(settings.database_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        app = create_app(settings, engine=engine)
+        assert isinstance(app.state.export_sink, RemovedS3Sink)
+        assert "export_jobs_worker" in [w.name for w in app.state.worker_supervisor._workers]
+    finally:
+        await engine.dispose()
+
+    captured = capsys.readouterr()
+    logged = captured.out + captured.err
+    assert logged.count("the s3 export sink was removed") == 1
+    assert "Z4J_EXPORT_SINK=local" in logged
+    # The old credentials are ignored, and never repeated back.
+    assert "not-a-real-secret" not in logged
+
+
+async def _removed_s3_app(tmp_path: Path, sink_dir: Path):
+    settings = _settings(tmp_path, sink_dir, export_sink="s3", export_sink_path=None)
+    engine = create_async_engine(settings.database_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    app = create_app(settings, engine=engine)
+    app.state.lifespan_ready = True
+    return settings, engine, app
+
+
+async def _seed_admin(app, settings: Settings) -> tuple[uuid.UUID, uuid.UUID, dict[str, Any]]:
+    hasher = PasswordHasher(settings)
+    project_id, user_id, session_id, csrf = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), "c" * 32
+    async with app.state.db.session() as s:
+        s.add_all(
+            [
+                Project(id=project_id, slug="default", name="Default"),
+                User(
+                    id=user_id,
+                    email="root@example.com",
+                    password_hash=hasher.hash(_PASSWORD),
+                    is_admin=True,
+                    is_active=True,
+                ),
+            ],
+        )
+        await s.flush()
+        s.add(
+            Session(
+                id=session_id,
+                user_id=user_id,
+                csrf_token=csrf,
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+                ip_at_issue="127.0.0.1",
+                user_agent_at_issue="test",
+            ),
+        )
+        await s.commit()
+    return project_id, user_id, {"session_id": session_id, "csrf": csrf}
+
+
+async def test_a_job_queued_for_s3_before_the_upgrade_fails_with_the_reason(
+    tmp_path: Path, sink_dir: Path
+) -> None:
+    """The worker loop survives, and the job ends failed with a reason an operator can act on."""
+    settings, engine, app = await _removed_s3_app(tmp_path, sink_dir)
+    try:
+        project_id, user_id, person = await _seed_admin(app, settings)
+        await _seed_audit_rows(app.state.db, project_id, user_id, 20)
+        job_id = uuid.uuid4()
+        async with app.state.db.session() as s:
+            s.add(
+                ExportJob(
+                    id=job_id,
+                    project_id=project_id,
+                    user_id=user_id,
+                    export_type="audit",
+                    format="csv",
+                    filters={},
+                    status="queued",
+                    sink="s3",
+                ),
+            )
+            await s.commit()
+        worker = next(
+            w for w in app.state.worker_supervisor._workers if w.name == "export_jobs_worker"
+        )
+        assert await worker.tick() is None  # never raises
+        assert await worker.tick() is None  # and keeps running
+        async with _client_for(app, settings, person) as ac:
+            failed = await _job(ac, str(job_id))
+            refused = await ac.post(
+                "/api/v1/projects/default/audit/export-jobs", json={"format": "csv"}
+            )
+        assert failed["status"] == "failed"
+        assert failed["error"] == (
+            "ExportSinkError: the s3 export sink was removed; set Z4J_EXPORT_SINK=local "
+            "and Z4J_EXPORT_SINK_PATH, and copy that directory to other storage with "
+            "your own tool (for example rclone)"
+        )
+        assert await _audit_actions(app.state.db, str(job_id)) == [AUDIT_ACTION_EXPORT_FAILED]
+        # A new request is refused up front with the same reason, not queued to fail.
+        assert refused.status_code == 409
+        assert "the s3 export sink was removed" in refused.text
+    finally:
+        await engine.dispose()
+
+
+async def test_historical_s3_jobs_still_list_and_render(tmp_path: Path, sink_dir: Path) -> None:
+    """Rows the S3 sink wrote keep their kind and location, under any configured sink."""
+    settings = _settings(tmp_path, sink_dir)
+    engine = create_async_engine(settings.database_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    app = create_app(settings, engine=engine)
+    app.state.lifespan_ready = True
+    try:
+        project_id, user_id, person = await _seed_admin(app, settings)
+        done_id, failed_id = uuid.uuid4(), uuid.uuid4()
+        async with app.state.db.session() as s:
+            s.add_all(
+                [
+                    ExportJob(
+                        id=done_id,
+                        project_id=project_id,
+                        user_id=user_id,
+                        export_type="audit",
+                        format="json",
+                        filters={},
+                        status="done",
+                        sink="s3",
+                        row_count=12,
+                        size_bytes=345,
+                        file_path="s3://evidence/z4j-exports/audit/default/old.json",
+                        completed_at=datetime.now(UTC),
+                    ),
+                    ExportJob(
+                        id=failed_id,
+                        project_id=project_id,
+                        user_id=user_id,
+                        export_type="audit",
+                        format="csv",
+                        filters={},
+                        status="failed",
+                        sink="s3",
+                        error="access denied",
+                        completed_at=datetime.now(UTC),
+                    ),
+                ],
+            )
+            await s.commit()
+        async with _client_for(app, settings, person) as ac:
+            listed = await ac.get("/api/v1/projects/default/audit/export-jobs")
+            done = await _job(ac, str(done_id))
+            download = await ac.get(
+                f"/api/v1/projects/default/audit/export-jobs/{done_id}/download"
+            )
+        assert listed.status_code == 200
+        items = {item["id"]: item for item in listed.json()["items"]}
+        assert items[str(done_id)]["sink"] == "s3"
+        assert items[str(done_id)]["location"] == "s3://evidence/z4j-exports/audit/default/old.json"
+        assert items[str(done_id)]["downloadable"] is False
+        assert items[str(failed_id)]["error"] == "access denied"
+        assert done["row_count"] == 12 and done["size_bytes"] == 345
+        # The local sink cannot serve an object it never wrote.
+        assert download.status_code == 409
+    finally:
+        await engine.dispose()
+
+
+async def test_the_removed_sink_refuses_every_write_with_the_reason() -> None:
+    sink = RemovedS3Sink()
+    assert sink.kind == "s3" and sink.downloadable is False
+    assert sink.describe() == "s3 (removed)"
+    with pytest.raises(ExportSinkError, match="the s3 export sink was removed"):
+        await sink.write("k", _one(b"x"), content_type="text/plain")
+    await sink.discard("k")  # nothing to remove, and never raises
+
+
+def test_safe_reason_keeps_the_text_with_any_userinfo_stripped() -> None:
+    ours = RuntimeError("could not reach https://epuser:hunter2@backup.internal/exports")
+    assert _safe_reason(ours) == "RuntimeError: could not reach https://backup.internal/exports"
     assert _safe_reason(ExportSinkError("export directory is missing")) == (
         "ExportSinkError: export directory is missing"
     )
     assert _safe_reason(ValueError()) == "ValueError"
-    assert _safe_reason(ConnectionRefusedError(111, "Connection refused")) == "connection refused"
-    wrapped = _library_exception("botocore.exceptions", "EndpointConnectionError")
-    wrapped.kwargs = {"error": ConnectionRefusedError(111, "Connection refused")}  # type: ignore[attr-defined]
-    assert _safe_reason(wrapped) == "connection refused"
-
-
-async def test_s3_sink_names_the_extra_when_aiobotocore_is_missing(monkeypatch) -> None:
-    import builtins
-
-    real_import = builtins.__import__
-
-    def refusing(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name.startswith("aiobotocore"):
-            raise ImportError("No module named 'aiobotocore'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", refusing)
-    monkeypatch.delitem(sys.modules, "aiobotocore.session", raising=False)
-    sink = S3Sink(bucket="b")
-    with pytest.raises(ExportSinkError, match=r'pip install "z4j\[s3\]"'):
-        await sink.write("k", _one(b"x"), content_type="text/plain")
 
 
 # ---------------------------------------------------------------------------
@@ -1506,24 +1406,12 @@ async def test_s3_sink_names_the_extra_when_aiobotocore_is_missing(monkeypatch) 
 def test_settings_require_what_each_sink_needs(tmp_path: Path, sink_dir: Path) -> None:
     with pytest.raises(ConfigError, match="Z4J_EXPORT_SINK_PATH"):
         _settings(tmp_path, sink_dir, export_sink="local", export_sink_path=None)
-    with pytest.raises(ConfigError, match="Z4J_EXPORT_SINK_S3_BUCKET"):
-        _settings(tmp_path, sink_dir, export_sink="s3")
     with pytest.raises(ConfigError, match="needs an export sink"):
         _settings(tmp_path, sink_dir, export_sink="none", audit_head_export_interval_seconds=3600)
     with pytest.raises(ConfigError, match="at least 60"):
         _settings(tmp_path, sink_dir, audit_head_export_interval_seconds=30)
-    with pytest.raises(ConfigError, match="set together"):
-        _settings(tmp_path, sink_dir, export_sink_s3_access_key_id="k")
-    s3 = _settings(
-        tmp_path,
-        sink_dir,
-        export_sink="s3",
-        export_sink_s3_bucket="evidence",
-        export_sink_s3_access_key_id="k",
-        export_sink_s3_secret_access_key="s",
-        audit_head_export_interval_seconds=60,
-    )
-    assert "export_jobs_worker" in s3.leader_gated_worker_names()
+    local = _settings(tmp_path, sink_dir, audit_head_export_interval_seconds=60)
+    assert "export_jobs_worker" in local.leader_gated_worker_names()
     off = _settings(tmp_path, sink_dir, export_sink="none", export_sink_path=None)
     assert "export_jobs_worker" not in off.leader_gated_worker_names()
 

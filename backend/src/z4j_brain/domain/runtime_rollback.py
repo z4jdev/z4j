@@ -77,24 +77,24 @@ _CHALLENGE_PREFIX = "I-ATTEST-ALL-BRAIN-AND-SCHEDULER-EXECUTORS-ARE-STOPPED:"
 # preserve that image's runtime, and never did: it already substitutes CPython
 # 3.14.7 for the 3.14.6 the published image shipped, because unchanged 1.8 code
 # accepts exactly one local cadence fingerprint and the ceremony has to restamp
-# cursors that 1.8 will then agree with.  croniter and tzdata are substituted
-# for the same reason and under the same rule.  Verified by execution: the
-# unchanged published 1.8.2 application code, in a carrier built from
-# docker/rollback-1.8.2-py3147, computes this exact fingerprint on CPython
-# 3.14.7 under this exact croniter and tzdata, and so does the candidate tree,
-# because the fingerprint is a function of the closure alone and not of the
-# application version.
+# cursors that 1.8 will then agree with.  croniter, python-dateutil and tzdata
+# are substituted for the same reason and under the same rule.  Verified by
+# execution: the unchanged published 1.8.2 application code, in a carrier
+# built from docker/rollback-1.8.2-py3147, computes this exact fingerprint on
+# CPython 3.14.7 under this exact croniter, python-dateutil and tzdata, and so
+# does the candidate tree, because the fingerprint is a function of the
+# closure alone and not of the application version.
 SEALED_TARGET_CADENCE_PAYLOAD: dict[str, object] = {
     "format": "z4j-cadence-runtime-v1",
     "semantics_version": 1,
     "dependencies": {
         "astral": "3.2",
         "croniter": "6.2.4",
-        "python-dateutil": "2.9.0.post0",
+        "python-dateutil": "3.0.0",
         "six": "1.17.0",
-        "tzdata": "2026.5",
+        "tzdata": "2026.6",
     },
-    "tzdata_tree_sha256": ("b5f5d4f30d51ff1dcae7101441c02b171f26fc3b1fedbdf6f13a6e08bb568250"),
+    "tzdata_tree_sha256": ("00310865dd9c1f17218ef4ee951672536920f376de71a009c11793da8b4f3b68"),
     "python": {
         "implementation": "CPython",
         "version": [3, 14, 7],
@@ -102,7 +102,7 @@ SEALED_TARGET_CADENCE_PAYLOAD: dict[str, object] = {
     "behavior_vector_sha256": ("8e2ec76becf6ca6263805221e930c98962713ba0419c2a7e320e1dc928014a15"),
 }
 SEALED_TARGET_CADENCE_FINGERPRINT = (
-    "8737a662e8907492f325dd2e1d9f419bb29d150240563d94fa29945205c6678c"
+    "d644f2546414f6409ca106d906d231958cedd2efcec603cadacced34d38fd5e6"
 )
 
 

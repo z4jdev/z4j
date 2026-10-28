@@ -561,8 +561,10 @@ async def login(
     # MFA gate: if the user has MFA enrolled, the new session is NOT
     # MFA-verified yet. The dashboard sees mfa_required=True and
     # routes to /auth/mfa/verify. If the user already presented a
-    # valid z4j_mfa_trust cookie, we mark the session MFA-verified
-    # immediately and skip the second step.
+    # valid z4j_mfa_trust cookie, the sign-in second step is skipped:
+    # the session passes the sign-in gate but is NOT fresh, so every
+    # sensitive action still asks for a code (a stolen password plus a
+    # stolen trust cookie must not reach them).
     from z4j_brain.auth.trusted_device import (
         cookie_name as trust_cookie_name,
     )
@@ -584,7 +586,7 @@ async def login(
             )
             if device is not None:
                 await tdr.touch(device.id)
-                await sessions.set_mfa_verified(session_row.id)
+                await sessions.set_mfa_satisfied_by_trusted_device(session_row.id)
                 # Audit the MFA-skipped login so a stolen trust cookie
                 # leaves a trail in the HMAC-chained log. Without this
                 # row, an attacker with a valid z4j_mfa_trust cookie can

@@ -1,7 +1,7 @@
 """Where background exports go.
 
 A sink takes a key and a stream of byte chunks and puts the object
-somewhere an operator can fetch it from. Two are shipped:
+somewhere an operator can fetch it from. One is shipped:
 
 * :class:`LocalDirectorySink` (``Z4J_EXPORT_SINK=local``) writes under one
   directory. Every object is written through a temporary file in the same
@@ -12,15 +12,15 @@ somewhere an operator can fetch it from. Two are shipped:
   target, because an export directory is the kind of path an unprivileged
   account on the same host could otherwise point somewhere it should not.
 
-* :class:`S3Sink` (``Z4J_EXPORT_SINK=s3``) streams to any S3-compatible
-  store (AWS, MinIO, Ceph RGW, Backblaze B2) through ``aiobotocore``,
-  which is optional: ``pip install "z4j[s3]"``. Objects larger than one
-  part go up as a multipart upload, so the whole export is never held in
-  memory. Credentials come from the standard AWS environment and config
-  chain, or from the explicit ``Z4J_EXPORT_SINK_S3_*`` settings.
+Getting the directory to other storage is the operator's tool's job (rclone,
+a backup agent, a bucket sync), which keeps the brain free of any storage
+vendor's client. ``Z4J_EXPORT_SINK=s3`` named an S3 sink that no longer
+ships. A configuration that still names it builds :class:`RemovedS3Sink`:
+the brain starts, says once that the sink was removed, and every export it
+is asked for fails with that reason instead of taking the worker down.
 
-What a sink reports back is a location (a path, an ``s3://`` URL), the
-key the object was written under, and a size. Nothing a sink returns or
+What a sink reports back is a location (a path), the key the object was
+written under, and a size. Nothing a sink returns or
 logs carries a credential, and :meth:`ExportSink.describe` is the string
 the API shows an operator.
 
@@ -51,7 +51,6 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
-from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 if os.name == "nt":
@@ -73,9 +72,13 @@ LOCAL_FILE_MODE = 0o640
 #: Mode for directories the local sink creates below its base.
 LOCAL_DIR_MODE = 0o750
 
-#: Smallest part S3 accepts in a multipart upload is 5 MiB; 8 MiB keeps
-#: the part count low for the exports this is for without holding much.
-S3_PART_SIZE = 8 * 1024 * 1024
+#: What a brain still configured with ``Z4J_EXPORT_SINK=s3`` reports, at
+#: startup and on every export job it cannot write.
+REMOVED_S3_SINK_MESSAGE = (
+    "the s3 export sink was removed; set Z4J_EXPORT_SINK=local and "
+    "Z4J_EXPORT_SINK_PATH, and copy that directory to other storage with "
+    "your own tool (for example rclone)"
+)
 
 #: Keys are built by the worker, never from a request, but the sink is the
 #: last line and checks anyway: relative, forward slashes, plain characters.
@@ -90,8 +93,7 @@ class ExportSinkError(RuntimeError):
 class SinkWriteResult:
     """What the sink reports once the object is durably in place."""
 
-    #: Operator-facing: an absolute path for the local sink, an ``s3://``
-    #: URL for S3. Logged and recorded on the audit row.
+    #: Operator-facing: an absolute path. Logged and recorded on the audit row.
     location: str
     size_bytes: int
     #: The sink-relative key the object was written under. A local job row
@@ -111,7 +113,7 @@ class OpenedExport:
 class ExportSink(Protocol):
     """One place exports are written to."""
 
-    #: ``local`` or ``s3``; stored on the job row.
+    #: ``local``; stored on the job row. ``s3`` names the removed sink.
     kind: str
 
     #: Whether the API can stream a finished object back to a caller.
@@ -411,75 +413,24 @@ def _write_all(fd: int, data: bytes) -> None:
 
 
 # ---------------------------------------------------------------------------
-# S3-compatible object store
+# The removed S3 sink
 # ---------------------------------------------------------------------------
 
-#: Builds an async context manager yielding an S3 client with the
-#: aiobotocore method surface this sink uses. Tests inject a fake.
-S3ClientFactory = Callable[[], Any]
 
+class RemovedS3Sink:
+    """Stands in for the S3 sink a configuration may still name.
 
-class S3Sink:
-    """Stream exports to an S3-compatible bucket through aiobotocore."""
+    It keeps the brain's startup and the export-jobs worker on their normal
+    path, so an upgraded brain whose environment still says
+    ``Z4J_EXPORT_SINK=s3`` runs, and every job it is asked for fails with
+    :data:`REMOVED_S3_SINK_MESSAGE` as its recorded reason.
+    """
 
     kind = "s3"
     downloadable = False
 
-    def __init__(
-        self,
-        *,
-        bucket: str,
-        prefix: str = "",
-        endpoint_url: str | None = None,
-        region: str | None = None,
-        access_key_id: str | None = None,
-        secret_access_key: str | None = None,
-        client_factory: S3ClientFactory | None = None,
-        part_size: int = S3_PART_SIZE,
-    ) -> None:
-        if not bucket:
-            raise ExportSinkError("the s3 export sink needs a bucket name")
-        self._bucket = bucket
-        self._prefix = prefix.strip("/")
-        self._endpoint_url = endpoint_url
-        self._region = region
-        self._access_key_id = access_key_id
-        self._secret_access_key = secret_access_key
-        self._client_factory = client_factory
-        self._part_size = max(int(part_size), 5 * 1024 * 1024)
-
     def describe(self) -> str:
-        base = f"s3://{self._bucket}"
-        if self._prefix:
-            base = f"{base}/{self._prefix}"
-        host = _endpoint_host(self._endpoint_url)
-        return f"{base} ({host})" if host else base
-
-    def _full_key(self, key: str) -> str:
-        validate_key(key)
-        return f"{self._prefix}/{key}" if self._prefix else key
-
-    def _client(self) -> Any:
-        if self._client_factory is not None:
-            return self._client_factory()
-        try:
-            import importlib
-
-            session_module = importlib.import_module("aiobotocore.session")
-        except ImportError as exc:
-            raise ExportSinkError(
-                "the s3 export sink needs the aiobotocore package; install "
-                'the optional extra with: pip install "z4j[s3]"',
-            ) from exc
-        kwargs: dict[str, Any] = {}
-        if self._endpoint_url:
-            kwargs["endpoint_url"] = self._endpoint_url
-        if self._region:
-            kwargs["region_name"] = self._region
-        if self._access_key_id and self._secret_access_key:
-            kwargs["aws_access_key_id"] = self._access_key_id
-            kwargs["aws_secret_access_key"] = self._secret_access_key
-        return session_module.get_session().create_client("s3", **kwargs)
+        return "s3 (removed)"
 
     async def write(
         self,
@@ -488,134 +439,10 @@ class S3Sink:
         *,
         content_type: str,
     ) -> SinkWriteResult:
-        full_key = self._full_key(key)
-        location = f"s3://{self._bucket}/{full_key}"
-        async with self._client() as client:
-            uploader = _MultipartUploader(
-                client,
-                bucket=self._bucket,
-                key=full_key,
-                content_type=content_type,
-                part_size=self._part_size,
-            )
-            try:
-                async for chunk in chunks:
-                    await uploader.feed(chunk)
-                size = await uploader.finish()
-            except BaseException:
-                await uploader.abort()
-                raise
-        return SinkWriteResult(location=location, size_bytes=size, key=key)
+        raise ExportSinkError(REMOVED_S3_SINK_MESSAGE)
 
     async def discard(self, key: str) -> None:
-        try:
-            full_key = self._full_key(key)
-            async with self._client() as client:
-                await client.delete_object(Bucket=self._bucket, Key=full_key)
-        except Exception:
-            logger.warning(
-                "z4j export sink: could not remove an orphaned object; the "
-                "bucket's lifecycle rule or an operator will have to",
-                key=key,
-            )
-
-
-class _MultipartUploader:
-    """Buffer chunks into parts; one ``put_object`` when it all fits in one."""
-
-    def __init__(
-        self,
-        client: Any,
-        *,
-        bucket: str,
-        key: str,
-        content_type: str,
-        part_size: int,
-    ) -> None:
-        self._client = client
-        self._bucket = bucket
-        self._key = key
-        self._content_type = content_type
-        self._part_size = part_size
-        self._buffer = bytearray()
-        self._upload_id: str | None = None
-        self._parts: list[dict[str, Any]] = []
-        self._size = 0
-
-    async def feed(self, chunk: bytes) -> None:
-        if not chunk:
-            return
-        self._buffer.extend(chunk)
-        self._size += len(chunk)
-        while len(self._buffer) >= self._part_size:
-            part = bytes(self._buffer[: self._part_size])
-            del self._buffer[: self._part_size]
-            await self._upload_part(part)
-
-    async def _upload_part(self, body: bytes) -> None:
-        if self._upload_id is None:
-            created = await self._client.create_multipart_upload(
-                Bucket=self._bucket,
-                Key=self._key,
-                ContentType=self._content_type,
-            )
-            self._upload_id = str(created["UploadId"])
-        number = len(self._parts) + 1
-        uploaded = await self._client.upload_part(
-            Bucket=self._bucket,
-            Key=self._key,
-            UploadId=self._upload_id,
-            PartNumber=number,
-            Body=body,
-        )
-        self._parts.append({"PartNumber": number, "ETag": uploaded["ETag"]})
-
-    async def finish(self) -> int:
-        if self._upload_id is None:
-            await self._client.put_object(
-                Bucket=self._bucket,
-                Key=self._key,
-                Body=bytes(self._buffer),
-                ContentType=self._content_type,
-            )
-            return self._size
-        if self._buffer:
-            await self._upload_part(bytes(self._buffer))
-            self._buffer.clear()
-        await self._client.complete_multipart_upload(
-            Bucket=self._bucket,
-            Key=self._key,
-            UploadId=self._upload_id,
-            MultipartUpload={"Parts": self._parts},
-        )
-        return self._size
-
-    async def abort(self) -> None:
-        if self._upload_id is None:
-            return
-        try:
-            await self._client.abort_multipart_upload(
-                Bucket=self._bucket,
-                Key=self._key,
-                UploadId=self._upload_id,
-            )
-        except Exception:
-            logger.warning(
-                "z4j export sink: could not abort a multipart upload; the "
-                "bucket's lifecycle rule for incomplete uploads will reclaim it",
-                key=self._key,
-            )
-
-
-def _endpoint_host(endpoint_url: str | None) -> str | None:
-    """The host of an endpoint URL, with any userinfo stripped."""
-    if not endpoint_url:
         return None
-    parts = urlsplit(endpoint_url)
-    host = parts.hostname or ""
-    if parts.port:
-        host = f"{host}:{parts.port}"
-    return urlunsplit((parts.scheme, host, "", "", "")) if parts.scheme else host
 
 
 # ---------------------------------------------------------------------------
@@ -638,31 +465,19 @@ def build_export_sink(settings: Settings) -> ExportSink | None:
             raise ExportSinkError("Z4J_EXPORT_SINK_PATH is required for the local sink")
         return LocalDirectorySink(Path(settings.export_sink_path))
     if kind == "s3":
-        if settings.export_sink_s3_bucket is None:  # pragma: no cover - validated
-            raise ExportSinkError("Z4J_EXPORT_SINK_S3_BUCKET is required for the s3 sink")
-        access = settings.export_sink_s3_access_key_id
-        secret = settings.export_sink_s3_secret_access_key
-        return S3Sink(
-            bucket=settings.export_sink_s3_bucket,
-            prefix=settings.export_sink_s3_prefix,
-            endpoint_url=settings.export_sink_s3_endpoint_url,
-            region=settings.export_sink_s3_region,
-            access_key_id=access.get_secret_value() if access is not None else None,
-            secret_access_key=secret.get_secret_value() if secret is not None else None,
-        )
+        return RemovedS3Sink()
     raise ExportSinkError(f"unknown export sink {kind!r}")  # pragma: no cover
 
 
 __all__ = [
     "LOCAL_DIR_MODE",
     "LOCAL_FILE_MODE",
-    "S3_PART_SIZE",
+    "REMOVED_S3_SINK_MESSAGE",
     "ExportSink",
     "ExportSinkError",
     "LocalDirectorySink",
     "OpenedExport",
-    "S3ClientFactory",
-    "S3Sink",
+    "RemovedS3Sink",
     "SinkWriteResult",
     "build_export_sink",
     "validate_key",

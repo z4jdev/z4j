@@ -220,9 +220,8 @@ function MfaPage() {
               >
                 Skip the code at sign-in on this browser (30 days by default).
                 <span className="block text-xs">
-                  A sign-in that skips the code counts as verified: sensitive
-                  actions (change password, create API key) ask for a fresh
-                  code only once it is more than an hour old (by default).
+                  Sensitive actions (change password, create API key) still
+                  ask for a code after a sign-in that skipped it.
                 </span>
               </Label>
             </div>

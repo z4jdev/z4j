@@ -8,15 +8,16 @@
 # those of the immutable CPython 3.14.7 carrier. There is deliberately no
 # package-manager or network operation in this file.
 #
-# croniter and tzdata are the two distributions NOT taken from the released
-# image, and the reason is the same one that makes this image exist at all.
-# Unchanged 1.8 code accepts exactly one local cadence fingerprint, so the
-# rollback ceremony can only restamp cursors this carrier will agree with if
-# the carrier's cadence closure equals the candidate's. That is already why
-# the interpreter is 3.14.7 rather than the 3.14.6 the released image shipped.
-# The candidate pins croniter 6.2.4 and IANA 2026e, so this carrier carries
-# the same bytes, each supplied as a digest-pinned wheel in the build context.
-# The application tree is untouched.
+# croniter, python-dateutil and tzdata are the three distributions NOT taken
+# from the released image, and the reason is the same one that makes this
+# image exist at all. Unchanged 1.8 code accepts exactly one local cadence
+# fingerprint, so the rollback ceremony can only restamp cursors this carrier
+# will agree with if the carrier's cadence closure equals the candidate's.
+# That is already why the interpreter is 3.14.7 rather than the 3.14.6 the
+# released image shipped. The candidate pins croniter 6.2.4, python-dateutil
+# 3.0.0 and IANA 2026f, so this carrier carries the same bytes, each supplied
+# as a digest-pinned wheel in the build context. The application tree is
+# untouched.
 #
 # Do not retag this image as 1.8.2, 1.8, or latest. Its only permitted public
 # tag is locked in manifest.json and the release workflow; rollback runbooks
@@ -72,28 +73,34 @@ RUN rm -rf /usr/local/lib/python3.14/site-packages \
 # tree is copied.
 COPY --from=released /usr/local/lib/python3.14/site-packages/ /usr/local/lib/python3.14/site-packages/
 
-# The two deliberate deviations from the released image's site-packages.
+# The three deliberate deviations from the released image's site-packages.
 # Each wheel is content-addressed: the build refuses if its bytes are not the
-# exact reviewed artifact, so this cannot silently become a different croniter
-# or a different tzdb.
+# exact reviewed artifact, so this cannot silently become a different croniter,
+# a different dateutil or a different tzdb.
 COPY croniter-6.2.4-py3-none-any.whl /tmp/croniter.whl
-COPY tzdata-2026.5-py2.py3-none-any.whl /tmp/tzdata.whl
+COPY python_dateutil-3.0.0-py2.py3-none-any.whl /tmp/dateutil.whl
+COPY tzdata-2026.6-py2.py3-none-any.whl /tmp/tzdata.whl
 RUN set -eu \
     && echo "8ef3d544107a5c05a150a2d78f8bf5a8eb9c5c4d93405a736b824109574e3f4d  /tmp/croniter.whl" | sha256sum -c - \
-    && echo "b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac  /tmp/tzdata.whl" | sha256sum -c - \
+    && echo "3c79630202e4152c6add678446984236efe4f57e84d8e892aab0637bab82e9fd  /tmp/dateutil.whl" | sha256sum -c - \
+    && echo "0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec  /tmp/tzdata.whl" | sha256sum -c - \
     && rm -rf /usr/local/lib/python3.14/site-packages/croniter \
               /usr/local/lib/python3.14/site-packages/croniter-6.2.2.dist-info \
+              /usr/local/lib/python3.14/site-packages/dateutil \
+              /usr/local/lib/python3.14/site-packages/python_dateutil-2.9.0.post0.dist-info \
               /usr/local/lib/python3.14/site-packages/tzdata \
               /usr/local/lib/python3.14/site-packages/tzdata-2026.1.dist-info \
     && python -c "import zipfile,sys; [zipfile.ZipFile(wheel).extractall(sys.argv[1]) for wheel in sys.argv[2:]]" \
-              /usr/local/lib/python3.14/site-packages /tmp/croniter.whl /tmp/tzdata.whl \
-    && rm -f /tmp/croniter.whl /tmp/tzdata.whl \
+              /usr/local/lib/python3.14/site-packages /tmp/croniter.whl /tmp/dateutil.whl /tmp/tzdata.whl \
+    && rm -f /tmp/croniter.whl /tmp/dateutil.whl /tmp/tzdata.whl \
     && find /usr/local/lib/python3.14/site-packages/croniter \
             /usr/local/lib/python3.14/site-packages/croniter-6.2.4.dist-info \
+            /usr/local/lib/python3.14/site-packages/dateutil \
+            /usr/local/lib/python3.14/site-packages/python_dateutil-3.0.0.dist-info \
             /usr/local/lib/python3.14/site-packages/tzdata \
-            /usr/local/lib/python3.14/site-packages/tzdata-2026.5.dist-info \
+            /usr/local/lib/python3.14/site-packages/tzdata-2026.6.dist-info \
             -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} + \
-    && python -c "import importlib.metadata as m; assert m.version('croniter') == '6.2.4', m.version('croniter'); assert m.version('tzdata') == '2026.5', m.version('tzdata')"
+    && python -c "import importlib.metadata as m; assert m.version('croniter') == '6.2.4', m.version('croniter'); assert m.version('python-dateutil') == '3.0.0', m.version('python-dateutil'); assert m.version('tzdata') == '2026.6', m.version('tzdata')"
 
 # RECORD-owned entry points are copied explicitly. The generated bin
 # __pycache__/vba_extract.cpython-314.pyc is not authority and is not copied.

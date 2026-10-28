@@ -1073,8 +1073,8 @@ def run_checked(command: Sequence[str], *, timeout: float = 45.0) -> str:
 def verify_dependency_consistency(substitutions: Sequence[Mapping[str, Any]]) -> None:
     """Require pip's only complaints to be the declared substitutions.
 
-    The carrier deliberately installs a croniter and a tzdata the published 1.8
-    metadata does not permit, so ``pip check`` reports those pins as
+    The carrier deliberately installs a croniter, a python-dateutil and a tzdata
+    the published 1.8 metadata does not permit, so ``pip check`` reports those pins as
     unsatisfied.  Rewriting 1.8's dist-info to agree would make the carrier
     misreport what 1.8 declared, so the mismatch is expected and is verified
     rather than hidden.

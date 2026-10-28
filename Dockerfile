@@ -11,7 +11,7 @@
 # build an older published z4j when invoked from a release artifact.
 #
 # Runtime contents are equivalent to:
-#   uv pip install "/build/source[postgres,s3,scheduler-grpc]" z4j-core z4j-scheduler
+#   uv pip install "/build/source[postgres,scheduler-grpc]" z4j-core z4j-scheduler
 #   z4j serve
 #
 # Built by .github/workflows/publish-docker.yml, dispatched after the wave is
@@ -156,12 +156,11 @@ RUN set -eux; \
     # silently reach for the network.
     test -f /build/source/docker/vendor/z4j-core/pyproject.toml; \
     test -f /build/source/docker/vendor/z4j-scheduler/pyproject.toml; \
-    # [s3] is the aiobotocore export sink (Z4J_EXPORT_SINK=s3), pure Python.
-    # It has to be installed here: the installer is removed below, so an
-    # operator cannot add an extra to the running image.
+    # Every extra the image needs is installed here: the installer is
+    # removed below, so an operator cannot add an extra to the running image.
     uv pip install --system --no-cache \
         "/build/source/docker/vendor/z4j-core" \
-        "/build/source[postgres,s3,scheduler-grpc]" \
+        "/build/source[postgres,scheduler-grpc]" \
         "/build/source/docker/vendor/z4j-scheduler"; \
     uv pip check --system; \
     # grpcio-tools is the protoc toolchain, needed only to regenerate the
@@ -215,8 +214,8 @@ RUN set -eux; \
 #   * the interpreter really is 3.14.7, because the runtime fingerprint
 #     hashes sys.version_info[:3];
 #   * the five cadence-affecting distributions resolved to the exact versions
-#     both pyproject.toml files pin with ``==`` (tzdata 2026.5 in particular:
-#     2026c computes fire times an hour wrong for four zones from
+#     both pyproject.toml files pin with ``==`` (tzdata 2026.6 in particular:
+#     2026e computes fire times an hour wrong for America/Havana from
 #     2026-11-01);
 #   * z4j and z4j-scheduler agree on semantics version, behavior vector,
 #     tzdata tree digest and runtime fingerprint;
@@ -244,9 +243,9 @@ if actual_python != expected_python:
 pinned = {
     "astral": "3.2",
     "croniter": "6.2.4",
-    "python-dateutil": "2.9.0.post0",
+    "python-dateutil": "3.0.0",
     "six": "1.17.0",
-    "tzdata": "2026.5",
+    "tzdata": "2026.6",
 }
 for name, want in sorted(pinned.items()):
     got = metadata.version(name)

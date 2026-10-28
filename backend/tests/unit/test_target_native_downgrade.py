@@ -20,7 +20,10 @@ the container ceremony is not consulted at all.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import json
 import uuid
+from pathlib import Path
 
 import pytest
 from alembic import command
@@ -43,6 +46,25 @@ _ENV = "Z4J_ROLLBACK_TARGET_FINGERPRINT"
 # required property is that it is a well-formed digest that is not this
 # release's, which is exactly the property a real target's value has.
 _TARGET = "0d62d10e3a145979ce69ba4460d12725a01cd0a653daff81b8be711871a6c8bd"
+
+_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+_MIGRATION = (
+    _PACKAGE_ROOT
+    / "backend/src/z4j_brain/migrations/versions"
+    / "2026_07_30_0012_v1_9_schedule_control_columns.py"
+)
+_CARRIER_MANIFEST = _PACKAGE_ROOT / "docker/rollback-1.8.2-py3147/manifest.json"
+_CADENCE_PACKAGES = ("astral", "croniter", "python-dateutil", "six", "tzdata")
+
+# What published z4j 1.8.0 pins on PyPI, stated here independently of the
+# migration's own record.
+_RELEASED_1_8_CLOSURE = {
+    "astral": "3.2",
+    "croniter": "6.2.2",
+    "python-dateutil": "2.9.0.post0",
+    "six": "1.17.0",
+    "tzdata": "2026.1",
+}
 
 
 def _upgrade_and_populate(
@@ -192,8 +214,95 @@ def test_declaring_this_releases_own_fingerprint_refuses(
     _upgrade_and_populate(async_url, config, written_by=_TARGET, names=("alpha",))
 
     monkeypatch.setenv(_ENV, cadence_runtime_fingerprint())
-    with pytest.raises(CommandError, match="does not describe a downgrade"):
+    with pytest.raises(CommandError, match="does not describe a downgrade") as refused:
         command.downgrade(_alembic_config(), _PREVIOUS_RELEASE_HEAD)
+    # The refusal shows the operator what this install runs, which is what
+    # makes "no target computes this" checkable rather than asserted.
+    assert "no release below this revision pins those versions" in str(refused.value)
+
+
+def test_the_running_value_is_admitted_when_a_target_below_the_step_computes_it(
+    previous_release_install: tuple[object, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A correctly measured target that equals the running value is not refused.
+
+    The fingerprint does not include the z4j version, so a release below the
+    step computes the running value whenever this install's cadence packages
+    are exactly what that release pins and the Python is the same. Refusing it
+    on sight closed the declared path for that pair. The rows still have to
+    carry the declared value, as for any other target.
+    """
+
+    from z4j_brain.domain import schedule_cadence, schedule_runtime
+
+    config, sync_url, async_url = previous_release_install
+    _upgrade_and_populate(async_url, config, written_by=_TARGET, names=("alpha", "beta"))
+
+    real_payload = schedule_runtime.cadence_runtime_payload
+
+    def below_step_payload(behavior_vector_digest: str) -> dict[str, object]:
+        payload = real_payload(behavior_vector_digest)
+        payload["dependencies"] = dict(_RELEASED_1_8_CLOSURE)
+        return payload
+
+    monkeypatch.setattr(schedule_runtime, "cadence_runtime_payload", below_step_payload)
+    monkeypatch.setattr(schedule_cadence, "cadence_runtime_fingerprint", lambda: _TARGET)
+    monkeypatch.setenv(_ENV, _TARGET)
+    command.downgrade(_alembic_config(), _PREVIOUS_RELEASE_HEAD)
+
+    assert _head(sync_url) == _PREVIOUS_RELEASE_HEAD
+
+
+def test_the_running_value_from_a_below_step_closure_still_has_to_match_the_rows(
+    previous_release_install: tuple[object, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admitting the running value does not admit rows written for another target."""
+
+    from z4j_brain.domain import schedule_cadence, schedule_runtime
+
+    config, _sync_url, async_url = previous_release_install
+    _upgrade_and_populate(async_url, config, written_by=_TARGET, names=("alpha",))
+
+    real_payload = schedule_runtime.cadence_runtime_payload
+
+    def below_step_payload(behavior_vector_digest: str) -> dict[str, object]:
+        payload = real_payload(behavior_vector_digest)
+        payload["dependencies"] = dict(_RELEASED_1_8_CLOSURE)
+        return payload
+
+    running = "e" * 64
+    monkeypatch.setattr(schedule_runtime, "cadence_runtime_payload", below_step_payload)
+    monkeypatch.setattr(schedule_cadence, "cadence_runtime_fingerprint", lambda: running)
+    monkeypatch.setenv(_ENV, running)
+    with pytest.raises(CommandError, match="but Z4J_ROLLBACK_TARGET_FINGERPRINT declares"):
+        command.downgrade(_alembic_config(), _PREVIOUS_RELEASE_HEAD)
+
+
+def test_the_recorded_closure_below_the_step_is_the_released_one() -> None:
+    """The migration's record agrees with the released 1.8.2 image and with 1.8.0.
+
+    The carrier manifest lists the released image's version of each
+    distribution it substitutes, and carries the rest unchanged, so it is an
+    independent account of what 1.8.2 shipped.
+    """
+
+    spec = importlib.util.spec_from_file_location("_v1_9_schedule_control_columns", _MIGRATION)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    recorded = migration._BELOW_STEP_CADENCE_CLOSURES
+
+    manifest = json.loads(_CARRIER_MANIFEST.read_text(encoding="utf-8"))
+    runtime = manifest["runtime_content"]
+    released = {item["name"]: item["version"] for item in runtime["distributions"]}
+    for substituted in runtime["substituted_distributions"]:
+        released[substituted["name"]] = substituted["released_image_version"]
+    released_closure = {name: released[name] for name in _CADENCE_PACKAGES}
+
+    assert released_closure == _RELEASED_1_8_CLOSURE
+    assert recorded == (_RELEASED_1_8_CLOSURE,)
 
 
 @pytest.mark.parametrize("bad", ["", "   ", "not-a-digest", "abc", "0" * 63, "0" * 65])

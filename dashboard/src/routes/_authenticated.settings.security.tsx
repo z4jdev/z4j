@@ -530,10 +530,9 @@ function TrustedDevicesList() {
         <h4 className="text-sm font-semibold">Trusted devices</h4>
         <p className="text-xs text-muted-foreground">
           Trusting a browser lets it skip the two-factor code{" "}
-          <em>at sign-in</em> (30 days by default). A sign-in that skips the
-          code still counts as verified: sensitive actions such as changing
-          your password or creating an API key ask for a fresh code only once
-          that sign-in is more than an hour old (by default).
+          <em>at sign-in</em> (30 days by default). Sensitive actions such as
+          changing your password or creating an API key still ask for a code
+          after a sign-in that skipped it.
         </p>
         {trustCurrentButton}
       </div>

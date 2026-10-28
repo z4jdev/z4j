@@ -1304,7 +1304,8 @@ export interface paths {
          *     Requires ``Action.EXPORT_AUDIT`` on the project (auditor or admin), the
          *     same as the synchronous export.
          *     Answers ``409`` when no export sink is configured
-         *     (``Z4J_EXPORT_SINK``), ``422`` for an unknown field name. The job
+         *     (``Z4J_EXPORT_SINK``) or it still names the removed ``s3`` sink,
+         *     ``422`` for an unknown field name. The job
          *     starts ``queued``; poll ``GET .../export-jobs/{id}`` for progress.
          */
         readonly post: operations["create_export_job_api_v1_projects__slug__audit_export_jobs_post"];
@@ -1346,8 +1347,8 @@ export interface paths {
          * @description Stream a finished local-sink export to an auditor or an admin.
          *
          *     ``409`` when the job is not done or its sink is not the local
-         *     directory sink; an S3 object is fetched from the bucket at the
-         *     job's ``location`` with the operator's own credentials. ``404`` when
+         *     directory sink (a job written by the removed S3 sink is fetched from
+         *     its ``location`` with the operator's own tools). ``404`` when
          *     the row's location does not name a regular file below the configured
          *     directory: the row is not trusted to name the file, the sink is
          *     (``LocalDirectorySink.open_download``), and what is served is the

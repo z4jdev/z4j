@@ -402,14 +402,29 @@
         ]
       },
       {
+        "name": "python-dateutil",
+        "released_image_version": "2.9.0.post0",
+        "carrier_version": "3.0.0",
+        "reason": "the candidate pins python-dateutil 3.0.0; unchanged 1.8 code accepts exactly one local cadence fingerprint, so the restamp ceremony is only honest when carrier and candidate compute the same one",
+        "wheel": {
+          "filename": "python_dateutil-3.0.0-py2.py3-none-any.whl",
+          "sha256": "3c79630202e4152c6add678446984236efe4f57e84d8e892aab0637bab82e9fd",
+          "size": 94659
+        },
+        "replaced_paths": [
+          "/usr/local/lib/python3.14/site-packages/dateutil",
+          "/usr/local/lib/python3.14/site-packages/python_dateutil-2.9.0.post0.dist-info"
+        ]
+      },
+      {
         "name": "tzdata",
         "released_image_version": "2026.1",
-        "carrier_version": "2026.5",
-        "reason": "the candidate pins IANA 2026e; unchanged 1.8 code accepts exactly one local cadence fingerprint, so the restamp ceremony is only honest when carrier and candidate compute the same one",
+        "carrier_version": "2026.6",
+        "reason": "the candidate pins IANA 2026f; unchanged 1.8 code accepts exactly one local cadence fingerprint, so the restamp ceremony is only honest when carrier and candidate compute the same one",
         "wheel": {
-          "filename": "tzdata-2026.5-py2.py3-none-any.whl",
-          "sha256": "b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac",
-          "size": 347996
+          "filename": "tzdata-2026.6-py2.py3-none-any.whl",
+          "sha256": "0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec",
+          "size": 348210
         },
         "replaced_paths": [
           "/usr/local/lib/python3.14/site-packages/tzdata",
@@ -419,18 +434,18 @@
     ],
     "carrier_site_packages": {
       "amd64": {
-        "sha256": "c59ff2764e23ba42ea4f3b0eb12ea8c3a9153eac05b4f4f65ad9d9604ac6d76f",
-        "files": 4885,
-        "directories": 579,
+        "sha256": "8ecc45ac237793031f5b41f94bd67f5da6298717e52b4244bec58c72922282ae",
+        "files": 4886,
+        "directories": 580,
         "symlinks": 0,
-        "bytes": 159276918
+        "bytes": 159167972
       },
       "arm64": {
-        "sha256": "40f1a6d7298a830a1da95f314bd3b9d71a8f0f261663d21ca7263555553572a4",
-        "files": 4886,
-        "directories": 579,
+        "sha256": "880993da245aaa4c3bd9634d2cf70bba36a0f03d108927414e0020843980d5c8",
+        "files": 4887,
+        "directories": 580,
         "symlinks": 0,
-        "bytes": 166017183
+        "bytes": 165908237
       }
     },
     "site_tree_framing": "sorted entries: L\\0rel\\0mode-octal\\0target\\n; D\\0rel\\0mode-octal\\n; F\\0rel\\0mode-octal\\0length-decimal\\0sha256-hex\\n",
@@ -641,7 +656,7 @@
       },
       {
         "name": "python-dateutil",
-        "version": "2.9.0.post0"
+        "version": "3.0.0"
       },
       {
         "name": "python-dotenv",
@@ -689,7 +704,7 @@
       },
       {
         "name": "tzdata",
-        "version": "2026.5"
+        "version": "2026.6"
       },
       {
         "name": "uvicorn",
@@ -904,11 +919,11 @@
     "dependencies": {
       "croniter": "6.2.4",
       "astral": "3.2",
-      "tzdata": "2026.5",
-      "python-dateutil": "2.9.0.post0",
+      "tzdata": "2026.6",
+      "python-dateutil": "3.0.0",
       "six": "1.17.0"
     },
-    "tzdata_tree_sha256": "b5f5d4f30d51ff1dcae7101441c02b171f26fc3b1fedbdf6f13a6e08bb568250",
+    "tzdata_tree_sha256": "00310865dd9c1f17218ef4ee951672536920f376de71a009c11793da8b4f3b68",
     "python": {
       "implementation": "CPython",
       "version": [
@@ -918,7 +933,7 @@
       ]
     },
     "behavior_vector_sha256": "8e2ec76becf6ca6263805221e930c98962713ba0419c2a7e320e1dc928014a15",
-    "expected_runtime_fingerprint": "8737a662e8907492f325dd2e1d9f419bb29d150240563d94fa29945205c6678c",
+    "expected_runtime_fingerprint": "d644f2546414f6409ca106d906d231958cedd2efcec603cadacced34d38fd5e6",
     "source_image_python_3_14_6_fingerprint": "7d4e2328ee3298801d5fa2151ebf771b0b5ed186dded7ba7b7211bceabb043a1",
     "acceptance_rule": "compute actual payload and fingerprint in the compatibility image; never alias the source-image fingerprint"
   },

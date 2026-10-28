@@ -128,6 +128,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger("z4j.brain.main")
 
+_AGENT_LONGPOLL_PREFIX = "/api/v1"
+#: Path of the agent long-poll upload, the one route with its own body cap.
+AGENT_EVENTS_PATH = f"{_AGENT_LONGPOLL_PREFIX}{agent_longpoll_api.router.prefix}/events"
+
 
 def _leader_gated_tick(db: DatabaseManager, worker_name: str, raw_tick: Any) -> Any:
     """Wrap a periodic worker tick in the per-worker advisory lock.
@@ -737,9 +741,14 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     # router can report it and serve local-sink downloads.
     export_sink: Any = None
     if settings.export_sink != "none":
-        from z4j_brain.domain.export_sinks import build_export_sink
+        from z4j_brain.domain.export_sinks import REMOVED_S3_SINK_MESSAGE, build_export_sink
         from z4j_brain.domain.workers.export_jobs import ExportJobsWorker
 
+        if settings.export_sink == "s3":
+            # Said once, here. The brain still starts and the worker still
+            # runs, so a job queued before the upgrade ends as failed with
+            # this reason instead of waiting forever.
+            logger.error(f"z4j: Z4J_EXPORT_SINK=s3: {REMOVED_S3_SINK_MESSAGE}")
         export_sink = build_export_sink(settings)
         _export_jobs_worker = ExportJobsWorker(
             db=db,
@@ -1497,6 +1506,12 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     app.add_middleware(
         BodySizeLimitMiddleware,
         max_bytes=settings.max_payload_size_bytes,
+        # The agent upload admits its caller before it reads the body, so
+        # only an admitted agent is read past the global cap, up to frames
+        # the size the WebSocket gateway accepts.
+        route_max_bytes={
+            AGENT_EVENTS_PATH: agent_longpoll_api.upload_body_limit_bytes(settings),
+        },
     )
     if settings.cors_origins:
         # Block dangerous wildcard + credentials combo (leaks session
@@ -1573,7 +1588,7 @@ def create_app(  # noqa: PLR0912, PLR0915  app assembly + middleware wiring
     from z4j_brain.api import audit_forwarder as audit_forwarder_api
 
     app.include_router(audit_forwarder_api.router, prefix="/api/v1")
-    app.include_router(agent_longpoll_api.router, prefix="/api/v1")
+    app.include_router(agent_longpoll_api.router, prefix=_AGENT_LONGPOLL_PREFIX)
     # Invitations - two routers (admin project-scoped + public accept).
     app.include_router(invitations_api.admin_router, prefix="/api/v1")
     app.include_router(invitations_api.public_router, prefix="/api/v1")

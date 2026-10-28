@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-28T02:07:56Z",
-  "generated_by": "z4j@1.13.1",
+  "generated_at": "2026-10-28T17:53:04Z",
+  "generated_by": "z4j@1.13.2",
   "canonical_url": "https://raw.githubusercontent.com/z4jdev/z4j/main/versions.json",
   "packages": {
-    "z4j": "1.13.1",
+    "z4j": "1.13.2",
     "z4j-apscheduler": "1.13.0",
     "z4j-arq": "1.13.0",
     "z4j-arqcron": "1.13.0",
-    "z4j-bare": "1.13.0",
+    "z4j-bare": "1.13.2",
     "z4j-brain": "1.4.0",
-    "z4j-celery": "1.13.1",
+    "z4j-celery": "1.13.2",
     "z4j-celerybeat": "1.13.0",
     "z4j-core": "1.13.0",
     "z4j-django": "1.13.0",
@@ -21,7 +21,7 @@
     "z4j-hueyperiodic": "1.13.0",
     "z4j-rq": "1.13.0",
     "z4j-rqscheduler": "1.13.0",
-    "z4j-scheduler": "1.13.0",
+    "z4j-scheduler": "1.13.2",
     "z4j-taskiq": "1.13.0",
     "z4j-taskiqscheduler": "1.13.0"
   }

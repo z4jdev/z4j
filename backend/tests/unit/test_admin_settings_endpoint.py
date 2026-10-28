@@ -267,8 +267,8 @@ class TestAdminSettingsEndpoint:
         marker = "R2EENDPOINTPASS"
         object.__setattr__(
             settings,
-            "export_sink_s3_endpoint_url",
-            f"https://epuser:{marker}@minio.internal:9000",
+            "scheduler_trigger_url",
+            f"https://epuser:{marker}@scheduler.internal:9000",
         )
         seeded = await _seed_user(
             brain_app,
@@ -281,6 +281,6 @@ class TestAdminSettingsEndpoint:
         assert r.status_code == 200
         assert marker not in r.text
         by_name = {row["name"]: row for row in r.json()["settings"]}
-        row = by_name["export_sink_s3_endpoint_url"]
+        row = by_name["scheduler_trigger_url"]
         assert row["is_secret"] is False
-        assert row["value"] == "https://minio.internal:9000"
+        assert row["value"] == "https://scheduler.internal:9000"

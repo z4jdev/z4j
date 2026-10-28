@@ -93,7 +93,7 @@ _OVERLAP_VALUES = ("allow", "skip", "queue")
 
 _ROLLBACK_AUDIT_ACTION = "system.prepare_runtime_rollback"
 _ROLLBACK_TARGET_RELEASE = "1.8.2"
-_ROLLBACK_TARGET_FINGERPRINT = "8737a662e8907492f325dd2e1d9f419bb29d150240563d94fa29945205c6678c"
+_ROLLBACK_TARGET_FINGERPRINT = "d644f2546414f6409ca106d906d231958cedd2efcec603cadacced34d38fd5e6"
 _ROLLBACK_IMAGE_PATTERN = re.compile(r"docker[.]io/z4jdev/z4j@sha256:[0-9a-f]{64}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
@@ -119,6 +119,25 @@ def _json_object(value: object, *, field: str) -> dict[str, object]:
 
 _TARGET_NATIVE_ENV = "Z4J_ROLLBACK_TARGET_FINGERPRINT"
 
+#: The cadence closure every release below this revision pins, recorded here
+#: rather than read from the running install, because the running install is
+#: the thing being checked. Published z4j 1.8.0 declares exactly these pins on
+#: PyPI, and the released 1.8.2 image carries the same versions (the rollback
+#: carrier manifest records them as ``released_image_version`` for the two it
+#: substitutes and in its inventory for the rest). Every release above this
+#: revision pins a newer tzdata at least, so a target below it computes the
+#: running fingerprint only when the running install's cadence packages were
+#: set to exactly one of these closures.
+_BELOW_STEP_CADENCE_CLOSURES: tuple[dict[str, str], ...] = (
+    {
+        "astral": "3.2",
+        "croniter": "6.2.2",
+        "python-dateutil": "2.9.0.post0",
+        "six": "1.17.0",
+        "tzdata": "2026.1",
+    },
+)
+
 
 def _assert_rows_are_target_native(
     reserved: Sequence[sa.RowMapping],
@@ -143,12 +162,21 @@ def _assert_rows_are_target_native(
     carry; its purpose is to force the operator to measure the target they are
     about to install rather than assume it. What the check cannot do is verify
     the declaration was actually measured, and the refusals say so.
+
+    A declaration equal to the running fingerprint is what a value read in the
+    wrong shell looks like, and it is also what a correctly measured target
+    computes when it runs the same Python and the same cadence packages. The
+    recorded closures of the releases below this revision tell the two apart:
+    unless the running cadence packages are exactly one of those closures, no
+    target can compute the running value, so it was not measured there.
     """
 
     from z4j_brain.domain.schedule_cadence import (
         CADENCE_SEMANTICS_VERSION,
+        cadence_behavior_vector_digest,
         cadence_runtime_fingerprint,
     )
+    from z4j_brain.domain.schedule_runtime import cadence_runtime_payload
 
     declared = declared_target.strip().lower()
     if _SHA256_PATTERN.fullmatch(declared) is None:
@@ -162,11 +190,20 @@ def _assert_rows_are_target_native(
 
     running = cadence_runtime_fingerprint()
     if declared == running:
-        raise CommandError(
-            f"refusing downgrade: {_TARGET_NATIVE_ENV} equals the fingerprint "
-            "this release computes, so it does not describe a downgrade "
-            "target. Measure the release you are returning to, not this one.",
-        )
+        dependencies = cadence_runtime_payload(cadence_behavior_vector_digest())["dependencies"]
+        closure = dict(dependencies) if isinstance(dependencies, dict) else {}
+        if closure not in _BELOW_STEP_CADENCE_CLOSURES:
+            running_packages = ", ".join(
+                f"{name} {version}" for name, version in sorted(closure.items())
+            )
+            raise CommandError(
+                f"refusing downgrade: {_TARGET_NATIVE_ENV} equals the fingerprint "
+                "this release computes, so it does not describe a downgrade "
+                f"target. This install runs {running_packages}, and no release "
+                "below this revision pins those versions, so none of them can "
+                "compute this value. Measure the release you are returning to, "
+                "not this one.",
+            )
 
     observed = {str(row["cadence_runtime_fingerprint"] or "") for row in reserved}
     if len(observed) != 1:

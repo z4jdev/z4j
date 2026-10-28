@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.13.2 (2026-10-29)
+
+- Security: a sign-in that skips the two-factor code on a remembered device no
+  longer counts as a fresh MFA check, so changing the password, recovery
+  codes, MFA enrollment, API keys and the other sensitive actions ask for a
+  code first.
+- The cadence closure moves to python-dateutil 3.0.0 and tzdata 2026.6 (IANA
+  2026f: Cuba stays on UTC-4 from 2026-11-01). Upgrade the brain and
+  z4j-scheduler together, stopping the scheduler first.
+- Removed: the S3 export sink and the `z4j[s3]` extra. Export to a local
+  directory and copy it with your own tool. A brain still set to
+  `Z4J_EXPORT_SINK=s3` starts, logs the removal and fails each export job
+  with that reason.
+- An authenticated agent's long-poll upload accepts any frame the WebSocket
+  path accepts; the caller is admitted before the body is read. A body that
+  streams past the size limit is answered 413 instead of 400.
+- Malformed agent and dashboard WebSocket frames close with 4400 instead of
+  1011.
+- `Z4J_DATABASE_STATEMENT_CACHE_SIZE` also bounds SQLAlchemy's
+  prepared-statement cache; the audit-chain and misfire counters export 0
+  before their first increment; notification emails keep the end of a long
+  traceback; a rollback declaration equal to the running fingerprint is
+  judged against the closures below the step; the models declare the two
+  unique partial indexes the migrations create.
+
 ## 1.13.1 (2026-10-28)
 
 - Re-cut with `z4j-celery` 1.13.1, which fixes Celery prefork workers that

@@ -15,7 +15,8 @@ because queueing an export reveals exactly what the synchronous GET
 reveals and nothing more (``auth/scopes.py``).
 
 Every response names the sink by location, never by credential: a path
-for the local sink, an ``s3://`` URL for S3.
+for the local sink. A job queued for the S3 sink before it was removed
+keeps its ``s3`` kind and its ``s3://`` location and still lists.
 """
 
 from __future__ import annotations
@@ -120,9 +121,11 @@ class ExportJobPublic(BaseModel):
     #: Rows written so far while running; the total once done.
     row_count: int | None
     size_bytes: int | None
-    #: Sink kind the job was queued for: ``local`` or ``s3``.
+    #: Sink kind the job was queued for: ``local``, or ``s3`` for a job
+    #: queued before the S3 sink was removed.
     sink: str | None
-    #: Where the object is: a path (local) or an ``s3://`` URL. Never a credential.
+    #: Where the object is: a path, or the ``s3://`` URL an older S3 job
+    #: recorded. Never a credential.
     location: str | None
     error: str | None
     created_at: datetime
@@ -136,7 +139,7 @@ class ExportJobListResponse(BaseModel):
     items: list[ExportJobPublic]
     #: Sink kind in effect for new jobs, or null when none is configured.
     sink: str | None
-    #: Operator-facing description of the sink: a directory or a bucket URL.
+    #: Operator-facing description of the sink: a directory.
     sink_location: str | None
 
 
@@ -254,7 +257,8 @@ async def create_export_job(
     Requires ``Action.EXPORT_AUDIT`` on the project (auditor or admin), the
     same as the synchronous export.
     Answers ``409`` when no export sink is configured
-    (``Z4J_EXPORT_SINK``), ``422`` for an unknown field name. The job
+    (``Z4J_EXPORT_SINK``) or it still names the removed ``s3`` sink,
+    ``422`` for an unknown field name. The job
     starts ``queued``; poll ``GET .../export-jobs/{id}`` for progress.
     """
     project = await _authorize_export(
@@ -265,7 +269,14 @@ async def create_export_job(
     )
     if sink is None:
         raise ConflictError(
-            "no export sink is configured; set Z4J_EXPORT_SINK to local or s3",
+            "no export sink is configured; set Z4J_EXPORT_SINK to local",
+            details={"setting": "Z4J_EXPORT_SINK"},
+        )
+    from z4j_brain.domain.export_sinks import REMOVED_S3_SINK_MESSAGE, RemovedS3Sink
+
+    if isinstance(sink, RemovedS3Sink):
+        raise ConflictError(
+            REMOVED_S3_SINK_MESSAGE,
             details={"setting": "Z4J_EXPORT_SINK"},
         )
     if body.format not in EXPORT_JOB_FORMATS:  # pragma: no cover - Literal-validated
@@ -366,8 +377,8 @@ async def download_export_job(
     """Stream a finished local-sink export to an auditor or an admin.
 
     ``409`` when the job is not done or its sink is not the local
-    directory sink; an S3 object is fetched from the bucket at the
-    job's ``location`` with the operator's own credentials. ``404`` when
+    directory sink (a job written by the removed S3 sink is fetched from
+    its ``location`` with the operator's own tools). ``404`` when
     the row's location does not name a regular file below the configured
     directory: the row is not trusted to name the file, the sink is
     (``LocalDirectorySink.open_download``), and what is served is the

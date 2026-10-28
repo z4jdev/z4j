@@ -20,7 +20,7 @@ have to learn one set):
 
 - 4401  invalid / missing session cookie, or a valid one presented from
         outside ``Z4J_DASHBOARD_IP_ALLOWLIST``
-- 4400  malformed first frame
+- 4400  malformed first frame, or a binary frame at any point
 - 4403  user is not a member of the requested project
 - 4402  hub is stopped (server is shutting down)
 - 1000  clean shutdown
@@ -60,8 +60,8 @@ logger = structlog.get_logger("z4j.brain.dashboard_gateway")
 router = APIRouter(tags=["dashboard"])
 
 
-class _NonTextFirstFrameError(Exception):
-    """The first client frame used the binary WebSocket carrier."""
+class _NonTextFrameError(Exception):
+    """A client frame used the binary WebSocket carrier."""
 
 
 class _SourceAddressRefusedError(Exception):
@@ -72,20 +72,21 @@ class _SourceAddressRefusedError(Exception):
         self.denial = denial
 
 
-async def _receive_first_text(websocket: WebSocket) -> str:
-    """Receive the first frame while distinguishing binary from internals.
+async def _receive_text_frame(websocket: WebSocket) -> str:
+    """Receive one client frame while distinguishing binary from internals.
 
     Pinned Starlette's ``receive_text()`` indexes ``message["text"]`` and
     therefore raises a bare ``KeyError("text")`` for a binary frame. Catching
     ``KeyError`` around that call would also risk hiding an unrelated internal
     error. Inspecting the ASGI carrier explicitly lets the route translate only
-    an actual binary frame to its promised 4400 close path.
+    an actual binary frame to its promised 4400 close path, for the subscribe
+    frame and for every frame after it.
     """
     message = await websocket.receive()
     if message["type"] == "websocket.disconnect":
         raise WebSocketDisconnect(message["code"], message.get("reason"))
     if message.get("bytes") is not None:
-        raise _NonTextFirstFrameError
+        raise _NonTextFrameError
     return message["text"]
 
 
@@ -136,8 +137,8 @@ async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912,
     # 2) First frame: subscribe
     # ------------------------------------------------------------------
     try:
-        first = await asyncio.wait_for(_receive_first_text(websocket), timeout=10.0)
-    except (TimeoutError, WebSocketDisconnect, _NonTextFirstFrameError):
+        first = await asyncio.wait_for(_receive_text_frame(websocket), timeout=10.0)
+    except (TimeoutError, WebSocketDisconnect, _NonTextFrameError):
         await _safe_close(websocket, code=4400)
         return
 
@@ -198,9 +199,20 @@ async def ws_dashboard(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912,
         while True:
             try:
                 msg = await asyncio.wait_for(
-                    websocket.receive_text(),
+                    _receive_text_frame(websocket),
                     timeout=idle_timeout,
                 )
+            except _NonTextFrameError:
+                # The dashboard protocol is JSON text. A binary frame is
+                # malformed input, not a brain fault: 4400, as for the
+                # subscribe frame, instead of the generic 1011 below.
+                logger.info(
+                    "z4j dashboard_gateway: binary frame, closing",
+                    user_id=str(user.id),
+                    project_id=str(project_id),
+                )
+                await _safe_close(websocket, code=4400)
+                return
             except TimeoutError:
                 logger.info(
                     "z4j dashboard_gateway: idle timeout, closing",

@@ -1110,7 +1110,8 @@ def enforce_mfa_verified(
     No-op for a user with no ACTIVE MFA (never enrolled, or mid-first-
     enrollment with ``mfa_enrolled_at`` NULL) -- those are the enrollment
     policy's concern, not this gate. The trust-cookie login branch stamps
-    ``mfa_verified_at`` at login, so a remembered device passes. Cheap:
+    an already-stale ``mfa_verified_at`` at login, so a remembered device
+    passes this gate but not :func:`enforce_fresh_mfa`. Cheap:
     pure computation over the already-loaded user + session rows.
 
     Bearer-only (API-key) requests never reach this gate -- they carry no
@@ -1234,7 +1235,9 @@ def enforce_fresh_mfa(
     DESTRUCTIVE action. A user with no MFA enrolled passes this gate --
     whether such a user is required to ENROLL is the separate
     enrollment-enforcement policy (:func:`enforce_mfa_enrollment`), not
-    this per-action step-up gate.
+    this per-action step-up gate. A sign-in that a remembered device
+    satisfied never passes: its stamp is
+    ``TRUSTED_DEVICE_MFA_VERIFIED_AT``, older than any allowed TTL.
     """
     from datetime import UTC, timedelta
 

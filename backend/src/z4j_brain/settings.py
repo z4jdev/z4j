@@ -93,7 +93,10 @@ class Settings(BaseSettings):
             no runtime command limiter currently reads it.
         ratelimit_events_per_second: Reserved compatibility setting;
             no runtime event limiter currently reads it.
-        max_payload_size_bytes: Maximum REST request body size.
+        max_payload_size_bytes: Maximum REST request body size. An admitted
+            agent's long-poll upload has its own cap, derived from
+            ``effective_ws_max_frame_bytes``
+            (``agent_longpoll.upload_body_limit_bytes``).
         max_ws_frame_bytes: Compatibility WebSocket frame-size cap. The
             effective inbound cap is the smaller of this and
             ``ws_max_frame_bytes``.
@@ -486,11 +489,13 @@ class Settings(BaseSettings):
     # SELECT, audit_log INSERT, partition mgmt, ...) accumulates
     # 300 MB - 1.5 GB depending on plan complexity.
     #
-    # ``database_statement_cache_size``: per-connection cap. 0
-    # disables the cache (every query re-prepares, costs a small
-    # round-trip but bounds memory tightly). 50 is a small bounded
-    # cache that keeps the prepare-once speedup for hot queries
-    # while bounding worst-case growth.
+    # ``database_statement_cache_size``: per-connection cap, applied to
+    # both asyncpg's own statement cache and the SQLAlchemy asyncpg
+    # adapter's cache of the statements it prepares itself. 0 disables
+    # both (every query re-prepares, costs a small round-trip but bounds
+    # memory tightly). 50 is a small bounded cache that keeps the
+    # prepare-once speedup for hot queries while bounding worst-case
+    # growth.
     #
     # ``database_max_inactive_connection_lifetime_seconds``: asyncpg
     # closes a connection that has been idle in the pool longer
@@ -502,8 +507,9 @@ class Settings(BaseSettings):
         ge=0,
         le=10_000,
         description=(
-            "Cap on asyncpg per-connection prepared-statement cache. "
-            "Set to 0 to disable. See 1.5.1 leak fix notes."
+            "Per-connection cap on prepared statements, applied to both "
+            "asyncpg's statement cache and SQLAlchemy's asyncpg cache. "
+            "Set to 0 to disable both."
         ),
     )
     database_max_inactive_connection_lifetime_seconds: float = Field(
@@ -785,27 +791,16 @@ class Settings(BaseSettings):
     #: the scheduled audit-chain head export are written. ``none`` (the
     #: default) disables both: the API answers 409 to a job request and
     #: the export-jobs worker is not started. ``local`` writes under
-    #: :attr:`export_sink_path`; ``s3`` streams to an S3-compatible bucket
-    #: through the optional ``z4j[s3]`` extra.
+    #: :attr:`export_sink_path`; copying that directory anywhere else is the
+    #: operator's own tool's job. ``s3`` named an S3 sink that no longer
+    #: ships. It is still accepted, so a brain whose environment says it
+    #: starts: the brain logs that the sink was removed and every export job
+    #: fails with that reason (``export_sinks.RemovedS3Sink``). The old
+    #: ``Z4J_EXPORT_SINK_S3_*`` variables are ignored like any unknown one.
     export_sink: Literal["none", "local", "s3"] = "none"
     #: Directory for the local sink. Must exist, must not be a symlink.
     #: Files are created 0640 and written atomically.
     export_sink_path: str | None = Field(default=None, max_length=1024)
-    #: Bucket for the s3 sink. Required when ``export_sink`` is ``s3``.
-    export_sink_s3_bucket: str | None = Field(default=None, max_length=255)
-    #: Key prefix inside the bucket. Objects land under
-    #: ``<prefix>/audit/<slug>/...`` and ``<prefix>/audit-head/...``.
-    export_sink_s3_prefix: str = Field(default="z4j-exports", max_length=512)
-    #: Endpoint URL for S3-compatible stores (MinIO, Ceph RGW, B2). Unset
-    #: means AWS.
-    export_sink_s3_endpoint_url: str | None = Field(default=None, max_length=512)
-    #: Region name passed to the client. Unset defers to the AWS environment.
-    export_sink_s3_region: str | None = Field(default=None, max_length=64)
-    #: Explicit credentials. Both or neither: with neither set the client
-    #: uses the standard AWS chain (environment, shared config, instance
-    #: role). SecretStr so they never land in startup logs or ``z4j doctor``.
-    export_sink_s3_access_key_id: SecretStr | None = None
-    export_sink_s3_secret_access_key: SecretStr | None = None
     #: How often the export-jobs worker looks for queued jobs. A finished
     #: tick with more work waiting re-runs sooner than this.
     export_jobs_poll_interval_seconds: int = Field(default=5, ge=1, le=300)
@@ -830,32 +825,11 @@ class Settings(BaseSettings):
         """
         if self.export_sink == "local" and not (self.export_sink_path or "").strip():
             raise ConfigError("Z4J_EXPORT_SINK=local requires Z4J_EXPORT_SINK_PATH")
-        if self.export_sink == "s3" and not (self.export_sink_s3_bucket or "").strip():
-            raise ConfigError("Z4J_EXPORT_SINK=s3 requires Z4J_EXPORT_SINK_S3_BUCKET")
-        # The endpoint is a plain string that ``z4j config show`` and the
-        # admin settings page render in clear. aiohttp refuses a URL with
-        # userinfo at connect time, so ``user:pass@host`` can only leak,
-        # never work; the credentials belong in the two key settings.
-        endpoint_authority = (self.export_sink_s3_endpoint_url or "").split("://", 1)[-1]
-        endpoint_authority = re.split(r"[/?#]", endpoint_authority, maxsplit=1)[0]
-        if "@" in endpoint_authority:
-            raise ConfigError(
-                "Z4J_EXPORT_SINK_S3_ENDPOINT_URL must not contain embedded userinfo "
-                "(user@host); put the credentials in Z4J_EXPORT_SINK_S3_ACCESS_KEY_ID "
-                "and Z4J_EXPORT_SINK_S3_SECRET_ACCESS_KEY",
-            )
-        has_key = self.export_sink_s3_access_key_id is not None
-        has_secret = self.export_sink_s3_secret_access_key is not None
-        if has_key != has_secret:
-            raise ConfigError(
-                "Z4J_EXPORT_SINK_S3_ACCESS_KEY_ID and "
-                "Z4J_EXPORT_SINK_S3_SECRET_ACCESS_KEY must be set together",
-            )
         if self.audit_head_export_interval_seconds > 0:
             if self.export_sink == "none":
                 raise ConfigError(
                     "Z4J_AUDIT_HEAD_EXPORT_INTERVAL_SECONDS needs an export sink; "
-                    "set Z4J_EXPORT_SINK to local or s3",
+                    "set Z4J_EXPORT_SINK to local",
                 )
             if self.audit_head_export_interval_seconds < 60:
                 raise ConfigError(

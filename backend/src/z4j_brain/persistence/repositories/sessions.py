@@ -22,6 +22,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from z4j_brain.persistence.models import Session
 from z4j_brain.persistence.repositories._base import BaseRepository
 
+#: ``mfa_verified_at`` for a session whose second factor a remembered device
+#: satisfied at sign-in. It is not NULL, so the sign-in gate
+#: (``enforce_mfa_verified``) passes, and it is older than any allowed
+#: ``Z4J_MFA_VERIFICATION_TTL_SECONDS``, so every fresh-MFA gate still asks
+#: for a code: a password plus a stolen trust cookie reaches the dashboard but
+#: no sensitive action. A fixed instant rather than ``now - ttl``, so raising
+#: the TTL later cannot make such a session fresh. No schema change: a brain
+#: that reads this row after a downgrade treats it the same way.
+TRUSTED_DEVICE_MFA_VERIFIED_AT = datetime(1970, 1, 1, tzinfo=UTC)
+
 
 class SessionRepository(BaseRepository[Session]):
     """Server-side session CRUD + revocation."""
@@ -105,6 +115,19 @@ class SessionRepository(BaseRepository[Session]):
             update(Session)
             .where(Session.id == session_id)
             .values(mfa_verified_at=datetime.now(UTC)),
+        )
+
+    async def set_mfa_satisfied_by_trusted_device(self, session_id: UUID) -> None:
+        """Mark a session's sign-in second factor satisfied, but not fresh.
+
+        Called by login when a valid remembered-device cookie matches.
+        Stamps :data:`TRUSTED_DEVICE_MFA_VERIFIED_AT`; the user enters a
+        code through ``POST /auth/mfa/verify`` before any sensitive action.
+        """
+        await self.session.execute(
+            update(Session)
+            .where(Session.id == session_id)
+            .values(mfa_verified_at=TRUSTED_DEVICE_MFA_VERIFIED_AT),
         )
 
     async def revoke_all_for_user(

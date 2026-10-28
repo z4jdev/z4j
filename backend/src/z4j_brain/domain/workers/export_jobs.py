@@ -24,8 +24,8 @@ sink outside the database and checked later with ``z4j audit verify
 export-head``. With ``Z4J_AUDIT_HEAD_EXPORT_INTERVAL_SECONDS`` set, this
 worker writes the identical envelope to the sink on that cadence: a stable
 key (``audit-head/current.json``) that a verify job can always read, and a
-dated copy beside it, so a bucket with object lock or versioning keeps
-every head ever anchored. The envelope is built the way the CLI builds it,
+dated copy beside it, so storage that keeps versions or refuses overwrites
+holds every head ever anchored once the operator's own tool copies it there. The envelope is built the way the CLI builds it,
 authenticated against the configured keyring first, six keys and nothing
 else, because the verifier's parser is a closed allow-list.
 
@@ -378,8 +378,7 @@ class ExportJobsWorker:
             )
         else:
             # The write raised, so the sink retained nothing (the local sink
-            # writes through a temporary file, the S3 sink aborts its upload);
-            # there is no object to discard.
+            # writes through a temporary file); there is no object to discard.
             logger.error(
                 "z4j export jobs: the job was no longer running when its export "
                 "failed, so another replica had already marked it failed; its "
@@ -564,7 +563,14 @@ class ExportJobsWorker:
         return (time.monotonic() - self._last_head_export_monotonic) >= interval
 
     async def _maybe_export_head(self) -> None:
+        from z4j_brain.domain.export_sinks import RemovedS3Sink
+
         if not self.head_export_due():
+            return
+        if isinstance(self._sink, RemovedS3Sink):
+            # Nowhere to anchor it, and startup already said why once; a
+            # failure logged every interval would only repeat that.
+            self._last_head_export_monotonic = time.monotonic()
             return
         await self.export_head_now()
 
@@ -697,121 +703,20 @@ async def _one_chunk(payload: bytes) -> AsyncIterator[bytes]:
     yield payload
 
 
-#: Exception modules whose messages carry the endpoint URL (userinfo
-#: included), the access key id, request parameters or the response
-#: body. Their classes map to a fixed phrase and their text never lands
-#: on the row.
-_LIBRARY_MODULES: tuple[str, ...] = ("botocore.", "aiobotocore.", "boto3.", "aiohttp.")
-_LIBRARY_PHRASES: dict[str, str] = {
-    # botocore
-    "EndpointConnectionError": "endpoint unreachable",
-    "ConnectTimeoutError": "endpoint unreachable",
-    "ReadTimeoutError": "endpoint unreachable",
-    "ConnectionClosedError": "endpoint unreachable",
-    "ProxyConnectionError": "endpoint unreachable",
-    "SSLError": "endpoint unreachable",
-    "InvalidEndpointConfigurationError": "endpoint unreachable",
-    "NoCredentialsError": "access denied",
-    "PartialCredentialsError": "access denied",
-    "CredentialRetrievalError": "access denied",
-    "NoSuchBucket": "bucket missing",
-    # aiohttp
-    "ClientConnectorError": "endpoint unreachable",
-    "ClientConnectorDNSError": "endpoint unreachable",
-    "ClientConnectorCertificateError": "endpoint unreachable",
-    "ClientConnectorSSLError": "endpoint unreachable",
-    "ClientProxyConnectionError": "endpoint unreachable",
-    "ClientOSError": "endpoint unreachable",
-    "ServerDisconnectedError": "endpoint unreachable",
-    "ServerTimeoutError": "endpoint unreachable",
-    "ClientSSLError": "endpoint unreachable",
-    "InvalidURL": "endpoint unreachable",
-    "ClientPayloadError": "upload aborted",
-}
-_ACCESS_DENIED_CODES = frozenset(
-    {
-        "AccessDenied",
-        "AccessDeniedException",
-        "AllAccessDisabled",
-        "InvalidAccessKeyId",
-        "SignatureDoesNotMatch",
-        "InvalidToken",
-        "ExpiredToken",
-        "403",
-    }
-)
-_BUCKET_MISSING_CODES = frozenset({"NoSuchBucket", "404"})
-_UPLOAD_ABORTED_CODES = frozenset(
-    {"NoSuchUpload", "InvalidPart", "InvalidPartOrder", "EntityTooSmall", "IncompleteBody"}
-)
 #: ``user:password@`` right after a URL scheme, anywhere in a message.
 _URL_USERINFO = re.compile(r"(?<=://)[^/?#@\s]*@")
 
 
 def _safe_reason(exc: BaseException) -> str:
-    """The reason a job records: a fixed phrase for a library failure.
+    """The reason a job records: the exception's class and its text.
 
     The reason lands on the job row, in the ``audit.export_job.failed``
     metadata and from there in every audit export, the forwarder payload
-    and the backups. The class name alone is kept for our own exceptions
-    and the stdlib; their text passes with any URL userinfo stripped.
+    and the backups, so any URL userinfo in the text is stripped first.
     """
     name = type(exc).__name__
-    if _connection_refused(exc):
-        return "connection refused"
-    module = type(exc).__module__ or ""
-    if module.startswith(_LIBRARY_MODULES):
-        return _library_phrase(exc, name)
     text = _URL_USERINFO.sub("", str(exc).strip())
     return f"{name}: {text}" if text else name
-
-
-def _connection_refused(exc: BaseException) -> bool:
-    """True when a ``ConnectionRefusedError`` sits at or under ``exc``."""
-    seen: set[int] = set()
-    queue: list[BaseException | None] = [exc]
-    while queue:
-        current = queue.pop()
-        if current is None or id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, ConnectionRefusedError):
-            return True
-        queue.append(current.__cause__)
-        queue.append(current.__context__)
-        nested = getattr(current, "os_error", None)
-        if isinstance(nested, BaseException):
-            queue.append(nested)
-        kwargs = getattr(current, "kwargs", None)
-        if isinstance(kwargs, dict) and isinstance(kwargs.get("error"), BaseException):
-            queue.append(kwargs["error"])
-    return False
-
-
-def _library_phrase(exc: BaseException, name: str) -> str:
-    phrase = _LIBRARY_PHRASES.get(name)
-    if phrase is not None:
-        return phrase
-    code = _error_code(exc)
-    if code in _ACCESS_DENIED_CODES:
-        return "access denied"
-    if code in _BUCKET_MISSING_CODES:
-        return "bucket missing"
-    if code in _UPLOAD_ABORTED_CODES:
-        return "upload aborted"
-    return f"unknown error ({name})"
-
-
-def _error_code(exc: BaseException) -> str:
-    """The service error code of a botocore ``ClientError``, else empty."""
-    response = getattr(exc, "response", None)
-    if not isinstance(response, dict):
-        return ""
-    error = response.get("Error")
-    if not isinstance(error, dict):
-        return ""
-    code = error.get("Code")
-    return code if isinstance(code, str) else ""
 
 
 __all__ = [

@@ -12,16 +12,16 @@ The image has exactly three content authorities:
    architecture-native static tini binary.
 2. python:3.14.7-slim-trixie@sha256:ce4076... supplies the operating-system
    root, CPython interpreter, standard library, and all other carrier bytes.
-3. Two digest-pinned wheels in the build context, croniter and tzdata,
-   replace the released image's copies of those two distributions, so the
-   carrier's cadence closure equals the candidate's. They are listed, with
-   their hashes and the paths they replace, under
-   `runtime_content.substituted_distributions` in manifest.json. The
-   application tree is untouched.
+3. Three digest-pinned wheels in the build context, croniter,
+   python-dateutil and tzdata, replace the released image's copies of those
+   three distributions, so the carrier's cadence closure equals the
+   candidate's. They are listed, with their hashes and the paths they
+   replace, under `runtime_content.substituted_distributions` in
+   manifest.json. The application tree is untouched.
 
 The Dockerfile performs no apt, pip, download, or source build. It deletes the
 carrier site-packages directory before copying the released directory as a
-unit, then unpacks the two wheels after checking their SHA-256. It never copies
+unit, then unpacks the three wheels after checking their SHA-256. It never copies
 the 1.8.2 image's Python 3.14.6 interpreter or standard library.
 
 manifest.json is the reviewable lock. It binds the annotated 1.8.2 Git tag,

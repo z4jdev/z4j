@@ -27,7 +27,11 @@ Close codes:
   replay verification on an established session. The shipped agent parks
   on the same auth backoff as for 4401; the code keeps the two apart in
   the log.
-- ``4400`` - first frame was not ``hello`` or shape was malformed
+- ``4400`` - first frame was not ``hello`` or shape was malformed; or a
+  mid-session frame that is empty, oversized, not JSON, not a JSON
+  object, carries a missing, mistyped or different ``v``, or names an
+  unknown type. The shipped agent reconnects on its ordinary schedule,
+  as it does for 1011.
 - ``4426`` - protocol version not supported
 - ``4427`` - agent outside the supported version skew. RESERVED, not sent
   yet: outdated agents treat unknown close codes as transient and would
@@ -55,7 +59,7 @@ import anyio
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError as PydanticValidationError
-from z4j_core.errors import SignatureError
+from z4j_core.errors import ProtocolError, SignatureError
 from z4j_core.transport.frames import (
     CommandFrame,
     CommandPayload,
@@ -834,9 +838,16 @@ async def ws_agent(websocket: WebSocket) -> None:  # noqa: PLR0911, PLR0912, PLR
                     break
                 except WebSocketDisconnect:
                     break
-                except _BadFrameError:
+                except _BadFrameError as exc:
                     # Bad frame is connection-fatal - kill the WS to
-                    # avoid de-syncing the wire protocol.
+                    # avoid de-syncing the wire protocol. The shipped
+                    # agent reconnects on its ordinary schedule for 4400,
+                    # the same one it uses for 1011.
+                    logger.warning(
+                        "z4j gateway: bad frame, closing",
+                        agent_id=str(agent_id),
+                        reason=str(exc),
+                    )
                     await _safe_close(websocket, code=4400)
                     break
                 except SignatureError as exc:
@@ -1108,13 +1119,17 @@ async def _recv_frame(
         # parse_and_verify raises SignatureError on any security
         # failure; we let it bubble to the recv loop. Parse errors
         # still translate to _BadFrameError so close codes stay
-        # meaningful.
+        # meaningful. The verifier reports a frame that is not JSON, not
+        # an object, carries a missing, mistyped or different ``v``, or
+        # names an unknown type as ProtocolError (ProtocolVersionError is
+        # a subclass); those are malformed input, not a brain fault, so
+        # they close 4400 like any other bad frame instead of 1011.
         try:
             return verifier.parse_and_verify(raw)
         except SignatureError:
             raise
-        except (json.JSONDecodeError, PydanticValidationError) as exc:
-            raise _BadFrameError(f"frame parse failed: {type(exc).__name__}") from exc
+        except (json.JSONDecodeError, PydanticValidationError, ProtocolError) as exc:
+            raise _BadFrameError(f"frame parse failed: {type(exc).__name__}: {exc}") from exc
 
     try:
         return parse_frame(raw)

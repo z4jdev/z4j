@@ -301,6 +301,47 @@ async def test_page_size_is_within_the_verifier_bounds(monkeypatch, settings) ->
     assert 1 <= calls[0]["page_size"] <= 5000
 
 
+_OUTCOME_SERIES_PROBE = """
+import os, sys
+from prometheus_client import CollectorRegistry, multiprocess
+from z4j_brain.api import metrics
+reg = metrics.registry
+if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+    reg = CollectorRegistry()
+    multiprocess.MultiProcessCollector(reg)
+print([
+    reg.get_sample_value("z4j_audit_chain_verifications_total", {"outcome": o})
+    for o in ("clean", "failed", "error")
+])
+"""
+
+
+@pytest.mark.parametrize("multiprocess_dir", [False, True], ids=["single", "multiprocess"])
+def test_every_outcome_is_exported_at_zero_before_any_run(tmp_path, multiprocess_dir) -> None:
+    """A series that first appears at 1 is a step ``increase()`` cannot see.
+
+    Each outcome is exported at 0 from startup, so an increase-based alert
+    sees the first failed run, and in the multiprocess layout ``z4j serve``
+    uses as well as in a single process. A fresh interpreter, because the
+    module-level registry in this one has seen other tests' runs.
+    """
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "PROMETHEUS_MULTIPROC_DIR"}
+    if multiprocess_dir:
+        env["PROMETHEUS_MULTIPROC_DIR"] = str(tmp_path)
+    out = subprocess.run(
+        [sys.executable, "-c", _OUTCOME_SERIES_PROBE],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    assert out.stdout.strip() == "[0.0, 0.0, 0.0]", out.stderr
+
+
 def test_scheduled_verification_is_opt_in(settings) -> None:
     """Off by default.
 

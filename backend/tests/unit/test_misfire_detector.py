@@ -615,6 +615,70 @@ class TestDetection:
         assert await _misfire_rows(db) == []
 
 
+def _misfire_metric(project_id: uuid.UUID) -> float | None:
+    from z4j_brain.api.metrics import registry
+
+    return registry.get_sample_value(
+        "z4j_scheduler_misfires_detected_total",
+        {"project": str(project_id)},
+    )
+
+
+class TestMisfireCounterSeries:
+    """A project's series is exported at 0 before its first misfire counts.
+
+    A labelled series that first appears at 1 is a step ``increase()``
+    cannot see, so an increase-based alert would miss a project's first
+    misfire.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_swept_project_exports_zero_before_any_misfire(
+        self,
+        db: DatabaseManager,
+        settings: Settings,
+    ) -> None:
+        project_id, _ = await _seed_schedule(db, expression="60s", last_run_at=NOW)
+        await _detector(db, settings).tick()
+        assert await _misfire_rows(db) == []
+        assert _misfire_metric(project_id) == 0.0
+
+    @pytest.mark.asyncio
+    async def test_a_misfire_in_the_sweep_that_created_the_series_counts_next_sweep(
+        self,
+        db: DatabaseManager,
+        settings: Settings,
+    ) -> None:
+        project_id, _ = await _seed_schedule(
+            db,
+            expression="60s",
+            last_run_at=NOW - timedelta(hours=1),
+        )
+        detector = _detector(db, settings)
+        await detector.tick()
+        assert len(await _misfire_rows(db)) == 1
+        assert _misfire_metric(project_id) == 0.0
+        await detector.tick()
+        assert _misfire_metric(project_id) == 1.0
+
+    @pytest.mark.asyncio
+    async def test_a_misfire_in_an_already_exported_project_counts_at_once(
+        self,
+        db: DatabaseManager,
+        settings: Settings,
+    ) -> None:
+        project_id, _ = await _seed_schedule(db, expression="60s", last_run_at=NOW)
+        clock = [NOW]
+        detector = _detector(db, settings, clock=lambda: clock[0])
+        await detector.tick()
+        assert _misfire_metric(project_id) == 0.0
+        # The schedule goes stale after the sweep that exported its series.
+        clock[0] = NOW + timedelta(hours=1)
+        await detector.tick()
+        assert len(await _misfire_rows(db)) == 1
+        assert _misfire_metric(project_id) == 1.0
+
+
 class TestDedup:
     @pytest.mark.asyncio
     async def test_same_gap_alerts_once(

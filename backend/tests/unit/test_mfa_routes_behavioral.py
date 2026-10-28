@@ -22,7 +22,8 @@ dashboard drives them, against a real app on in-memory SQLite:
 - trusted devices ("remember this device"): the verify endpoint mints
   the ``z4j_mfa_trust`` cookie + a hashed server row honoring
   ``Z4J_MFA_REMEMBER_DEVICE_DAYS``; the next login skips the second
-  step (and audits the skip); expired or revoked rows put the
+  step (and audits the skip) but is not MFA-fresh, so step-up routes
+  still ask for a code; expired or revoked rows put the
   challenge back; rows are scoped per-user;
 - disable requires password AND a current TOTP code, then wipes the
   secret, recovery codes, and trust rows in one shot;
@@ -1152,12 +1153,74 @@ class TestTrustedDeviceFlow:
             await self._mint_trust(app, client, settings, secret)
 
             # Same browser, next login: the second step is skipped,
-            # the skip is audited, and the new session is already
-            # MFA-verified server-side.
+            # the skip is audited, and the new session already passes
+            # the sign-in gate server-side.
             second = await login(client, "erin@example.com")
             assert second["mfa_required"] is False
             assert "user.mfa_trusted_device_used" in await audit_actions(app)
             assert await verified_session_count(app, uid) == 2
+
+    @pytest.mark.parametrize("ttl_seconds", [3_600, 86_400])
+    async def test_trusted_device_sign_in_is_not_fresh_mfa(
+        self,
+        ttl_seconds: int,
+    ) -> None:
+        """A remembered device skips the code at sign-in only. A password
+        plus a (possibly stolen) trust cookie reaches ordinary routes but
+        no step-up gate, at the largest allowed TTL too, until a code is
+        entered through the verify flow."""
+        settings = make_settings(mfa_verification_ttl_seconds=ttl_seconds)
+        async with make_brain(settings) as (app, client):
+            _uid, secret = await seed_user(
+                app,
+                settings,
+                email="erin@example.com",
+                enrolled=True,
+            )
+            await login(client, "erin@example.com")
+            await self._mint_trust(app, client, settings, secret)
+
+            second = await login(client, "erin@example.com")
+            assert second["mfa_required"] is False
+            assert "user.mfa_trusted_device_used" in await audit_actions(app)
+            ordinary = await client.get("/api/v1/projects")
+            assert ordinary.status_code == 200, ordinary.text
+
+            # Step-up routes, including the MFA takeover paths, answer
+            # reverify-required instead of acting.
+            for path, body in (
+                ("/api/v1/auth/mfa/recovery-codes/regenerate", None),
+                ("/api/v1/auth/mfa/enroll-start", None),
+                ("/api/v1/auth/mfa/trusted-devices", None),
+                (
+                    "/api/v1/auth/change-password",
+                    {
+                        "current_password": PASSWORD,
+                        "new_password": "new correct battery staple 42",
+                    },
+                ),
+            ):
+                gated = await client.post(
+                    path,
+                    json=body,
+                    headers=csrf_header(client, settings),
+                )
+                assert gated.status_code == 403, (path, gated.text)
+                assert gated.json()["error"] == "mfa_reverify_required", path
+
+            # A code (the next TOTP step: the one that minted the trust
+            # row is spent) makes the session fresh.
+            verified = await client.post(
+                "/api/v1/auth/mfa/verify",
+                json={"code": current_totp_code(secret, at_time=time.time() + 30)},
+                headers=csrf_header(client, settings),
+            )
+            assert verified.status_code == 200, verified.text
+            opened = await client.post(
+                "/api/v1/auth/mfa/recovery-codes/regenerate",
+                headers=csrf_header(client, settings),
+            )
+            assert opened.status_code == 200, opened.text
 
     async def test_expired_trust_row_restores_the_challenge(self) -> None:
         settings = make_settings()

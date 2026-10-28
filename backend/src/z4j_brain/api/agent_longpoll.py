@@ -79,12 +79,14 @@ import os
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from z4j_core.errors import ProtocolVersionError, SignatureError
@@ -119,6 +121,7 @@ from z4j_brain.websocket.frame_router import FrameOutcome, FrameRouter
 if TYPE_CHECKING:
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.persistence.models import Agent, Command
+    from z4j_brain.settings import Settings
 
 
 logger = structlog.get_logger("z4j.brain.agent_longpoll")
@@ -164,6 +167,39 @@ _RETRY_CONTRACTS_HEADER = "X-Z4J-Retry-Contracts"
 #: Bound so a malformed or hostile header cannot bloat the stored metadata.
 _MAX_RUNTIME_FEATURES = 64
 _MAX_RUNTIME_FEATURE_LEN = 64
+
+#: Per-frame ceiling of an upload when no request has set one: the default
+#: WebSocket frame cap. A request admitted by ``_AuthenticatedUploadRoute``
+#: replaces it with the brain's ``effective_ws_max_frame_bytes`` before its
+#: body is validated, so a long-poll agent may send any frame the WebSocket
+#: gateway accepts.
+_DEFAULT_UPLOAD_FRAME_CAP_BYTES = 1024 * 1024
+_upload_frame_cap_bytes: ContextVar[int] = ContextVar(
+    "z4j_upload_frame_cap_bytes",
+    default=_DEFAULT_UPLOAD_FRAME_CAP_BYTES,
+)
+#: Room for the ``{"frames": [...]}`` envelope of one upload: the wrapper and
+#: a separator per frame for up to the 500 frames a body may carry.
+_UPLOAD_ENVELOPE_BYTES = 64 * 1024
+
+
+def upload_body_limit_bytes(settings: Settings) -> int:
+    """Largest ``POST /agent/events`` body accepted from an admitted agent.
+
+    A frame may be as large as one the WebSocket gateway accepts
+    (``effective_ws_max_frame_bytes``). It travels as a JSON string inside
+    the body, where escaping its quotes and backslashes at most doubles it
+    (the agent sends compact UTF-8 JSON, so other characters are not
+    escaped), so twice the frame cap plus the envelope admits any single
+    frame the WebSocket path takes. Never below the global
+    ``max_payload_size_bytes``. ``main`` gives this cap to the upload path
+    only; every other request, and an upload whose caller is not admitted,
+    never has more than the global cap read.
+    """
+    return max(
+        settings.max_payload_size_bytes,
+        2 * settings.effective_ws_max_frame_bytes + _UPLOAD_ENVELOPE_BYTES,
+    )
 
 
 def _longpoll_delivery_authority(
@@ -668,13 +704,13 @@ class FrameUploadBody(BaseModel):
     def _cap_per_frame_size(cls, v: list[str]) -> list[str]:
         """Per-frame size cap.
 
-        Without this, the 500-element list cap is the only
-        bound and each string is unlimited, so a single request
-        could carry 500 x 100 MB and OOM the brain before any
-        downstream validator ran. Per-frame ceiling matches the
-        wire frame cap (default 1 MiB).
+        The body cap bounds the request as a whole; this keeps each frame
+        to what the WebSocket gateway accepts, so the two transports refuse
+        the same frames. The ceiling is the brain's
+        ``effective_ws_max_frame_bytes``, set for the request by
+        ``_AuthenticatedUploadRoute`` (1 MiB, the default, otherwise).
         """
-        max_per_frame = 1 * 1024 * 1024  # 1 MiB
+        max_per_frame = _upload_frame_cap_bytes.get()
         for idx, frame in enumerate(v):
             try:
                 encoded_size = len(frame.encode("utf-8"))
@@ -864,29 +900,24 @@ async def _require_admitted_ip(request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/events", response_model=FrameUploadResponse)
-async def agent_events(  # noqa: PLR0912, PLR0915  long-poll event-upload handler
-    body: FrameUploadBody,
-    request: Request,
-    response: Response,
-    authorization: str | None = Header(default=None),
-    session_nonce: str | None = Header(default=None, alias=_SESSION_HEADER),
-    _throttle: None = Depends(require_agent_connect_throttle),
-    _session_finalizer: None = Depends(_release_longpoll_session_after_request),
-) -> FrameUploadResponse:
-    """Accept a batch of signed agent->brain frames over HTTPS."""
-    settings = request.app.state.settings
-    db = request.app.state.db
-    response.headers["X-Z4J-LongPoll-Worker"] = str(os.getpid())
+async def _admit_upload(request: Request) -> Agent:
+    """Admit a ``POST /agent/events`` caller before its body is read.
+
+    The connect throttle, then the source address, then the bearer, then
+    the project: the order the route always applied, so a refused address
+    still learns nothing about its token (see ``_require_admitted_ip``).
+    """
+    await require_agent_connect_throttle(request, ip=get_client_ip(request))
 
     # Source address first, token second: see ``_require_admitted_ip``.
     await _require_admitted_ip(request)
 
-    async with db.session() as session:
+    settings = request.app.state.settings
+    async with request.app.state.db.session() as session:
         from z4j_brain.persistence.repositories import AgentRepository
 
         agent = await resolve_agent_by_bearer(
-            bearer=authorization,
+            bearer=request.headers.get("authorization"),
             settings=settings,
             agents=AgentRepository(session),
         )
@@ -899,6 +930,61 @@ async def agent_events(  # noqa: PLR0912, PLR0915  long-poll event-upload handle
         raise HTTPException(status_code=401, detail="invalid agent token")
     if not project_active:
         await _refuse_inactive_project(request, agent)
+    return agent
+
+
+class _AuthenticatedUploadRoute(APIRoute):
+    """``POST /agent/events``: admit the caller, then read the body.
+
+    FastAPI reads and validates a declared body before it resolves any
+    dependency, so a check written as a dependency or in the handler runs
+    after the brain has taken in whatever the caller sent. This route runs
+    :func:`_admit_upload` first and only then hands the request to
+    FastAPI's own handler, which reads, validates and dispatches it. That
+    is what lets ``main`` give this one path the larger
+    :func:`upload_body_limit_bytes` cap: an unadmitted caller is answered
+    before a single body byte is read, and an admitted agent may send the
+    frames the WebSocket gateway accepts.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        read_and_dispatch = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            request.state.z4j_upload_agent = await _admit_upload(request)
+            frame_cap = _upload_frame_cap_bytes.set(
+                request.app.state.settings.effective_ws_max_frame_bytes,
+            )
+            try:
+                return await read_and_dispatch(request)
+            finally:
+                _upload_frame_cap_bytes.reset(frame_cap)
+
+        return handler
+
+
+async def agent_events(  # noqa: PLR0912, PLR0915  long-poll event-upload handler
+    body: FrameUploadBody,
+    request: Request,
+    response: Response,
+    # Read by ``_admit_upload`` before the body; declared here so the API
+    # schema documents the header.
+    authorization: str | None = Header(default=None),
+    session_nonce: str | None = Header(default=None, alias=_SESSION_HEADER),
+    _session_finalizer: None = Depends(_release_longpoll_session_after_request),
+) -> FrameUploadResponse:
+    """Accept a batch of signed agent->brain frames over HTTPS."""
+    # Registered with ``_AuthenticatedUploadRoute``, which admitted the
+    # caller before the body was read. The docstring above is the API
+    # schema's description, so the note lives here.
+    settings = request.app.state.settings
+    db = request.app.state.db
+    response.headers["X-Z4J-LongPoll-Worker"] = str(os.getpid())
+
+    agent: Agent | None = getattr(request.state, "z4j_upload_agent", None)
+    if agent is None:
+        # Fail closed: the route class is what admits the caller.
+        raise RuntimeError("POST /agent/events ran without its pre-body admission")
 
     # Same identity advertisement as GET /commands (the connect
     # probe), so either route teaches the transport its canonical
@@ -1105,6 +1191,15 @@ async def agent_events(  # noqa: PLR0912, PLR0915  long-poll event-upload handle
         errors=errors[:10],
         error_code=error_code,
     )
+
+
+router.add_api_route(
+    "/events",
+    agent_events,
+    methods=["POST"],
+    response_model=FrameUploadResponse,
+    route_class_override=_AuthenticatedUploadRoute,
+)
 
 
 @router.get("/commands", response_model=CommandPullResponse)

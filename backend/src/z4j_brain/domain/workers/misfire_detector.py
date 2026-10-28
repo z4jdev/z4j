@@ -211,6 +211,11 @@ class MisfireDetector:
         self._dispatcher = dispatcher
         self._clock = clock
         self._grace = timedelta(seconds=settings.scheduler_misfire_grace_seconds)
+        # Projects whose misfire counter series this process exports, and
+        # misfires held back one sweep because the sweep that found them
+        # also created their project's series (see _export_misfire_series).
+        self._exported_projects: set[str] = set()
+        self._deferred_misfires: dict[str, int] = {}
 
     async def tick(self) -> None:
         """One misfire-detection sweep. Safe to call repeatedly."""
@@ -245,6 +250,8 @@ class MisfireDetector:
                 ),
             )
             schedules = list(result.scalars().all())
+
+        new_series = self._export_misfire_series(schedules)
 
         misfired: list[tuple[Any, datetime]] = []
         for schedule in schedules:
@@ -292,9 +299,15 @@ class MisfireDetector:
                         z4j_scheduler_misfires_detected_total,
                     )
 
-                    z4j_scheduler_misfires_detected_total.labels(
-                        project=str(schedule.project_id),
-                    ).inc()
+                    project = str(schedule.project_id)
+                    if project in new_series:
+                        self._deferred_misfires[project] = (
+                            self._deferred_misfires.get(project, 0) + 1
+                        )
+                    else:
+                        z4j_scheduler_misfires_detected_total.labels(
+                            project=project,
+                        ).inc()
                 except Exception:
                     from z4j_brain.api.metrics import record_swallowed
 
@@ -319,6 +332,34 @@ class MisfireDetector:
                 len(fresh),
                 max(0, len(fresh) - len(capped)),
             )
+
+    def _export_misfire_series(self, schedules: list[Any]) -> set[str]:
+        """Export each swept project's misfire counter at 0 before it counts.
+
+        A labelled series that first appears at 1 is a step ``increase()``
+        cannot see, so a project's first misfire would be invisible to an
+        increase-based alert. Every project with a swept schedule gets its
+        series at 0 here. A misfire found by the same sweep that created the
+        series is counted on the next sweep, once a scrape has had the chance
+        to see the 0. Returns the projects whose series this sweep created.
+        Best-effort, like every metric write here.
+        """
+        try:
+            from z4j_brain.api.metrics import z4j_scheduler_misfires_detected_total
+
+            for project, count in self._deferred_misfires.items():
+                z4j_scheduler_misfires_detected_total.labels(project=project).inc(count)
+            self._deferred_misfires.clear()
+            created = {str(s.project_id) for s in schedules} - self._exported_projects
+            for project in created:
+                z4j_scheduler_misfires_detected_total.labels(project=project)
+            self._exported_projects |= created
+        except Exception:
+            from z4j_brain.api.metrics import record_swallowed
+
+            record_swallowed("misfire_detector", "misfire_metric")
+            return set()
+        return created
 
     async def _filter_unclaimed(
         self,

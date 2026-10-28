@@ -1083,6 +1083,10 @@ def _build_email_subject(payload: dict[str, Any]) -> str:
     return f"{prefix}z4j: {trigger} - {task_name}" if task_name else f"{prefix}z4j: {trigger}"
 
 
+#: Longest traceback a notification email carries, in characters.
+_EMAIL_TRACEBACK_MAX_CHARS = 2000
+
+
 def _build_email_body(payload: dict[str, Any]) -> str:
     # Transactional path: the caller provides a pre-formatted body.
     override = payload.get("body")
@@ -1101,7 +1105,12 @@ def _build_email_body(payload: dict[str, Any]) -> str:
         lines.append(f"\nException: {exception}")
     traceback = payload.get("traceback")
     if traceback:
-        lines.append(f"\nTraceback:\n{traceback[:2000]}")
+        # A Python traceback ends with the innermost frame and the
+        # exception line, so a long one keeps its tail.
+        traceback = str(traceback)
+        if len(traceback) > _EMAIL_TRACEBACK_MAX_CHARS:
+            traceback = "[... traceback truncated ...]\n" + traceback[-_EMAIL_TRACEBACK_MAX_CHARS:]
+        lines.append(f"\nTraceback:\n{traceback}")
     lines.append("\n- z4j notification engine")
     return "\n".join(lines)
 

@@ -634,6 +634,15 @@ z4j_audit_chain_verifications_total = Counter(
     registry=registry,
 )
 
+#: Every outcome the audit-chain verifier records.
+AUDIT_CHAIN_VERIFICATION_OUTCOMES = ("clean", "failed", "error")
+
+# Export each outcome at 0 from startup. A labelled series that first
+# appears at 1 is a step ``increase()`` cannot see, so the first failed
+# run would otherwise be invisible to an increase-based alert.
+for _outcome in AUDIT_CHAIN_VERIFICATION_OUTCOMES:
+    z4j_audit_chain_verifications_total.labels(outcome=_outcome)
+
 z4j_audit_chain_rows_verified = Gauge(
     "z4j_audit_chain_rows_verified",
     "Rows walked by the most recent audit-chain verification.",

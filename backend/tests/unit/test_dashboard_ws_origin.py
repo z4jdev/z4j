@@ -119,6 +119,57 @@ async def test_first_frame_receive_does_not_mask_internal_key_error() -> None:
             raise KeyError("internal-state")
 
     with pytest.raises(KeyError) as raised:
-        await dashboard_gateway._receive_first_text(BrokenWebSocket())  # type: ignore[arg-type]
+        await dashboard_gateway._receive_text_frame(BrokenWebSocket())  # type: ignore[arg-type]
 
     assert raised.value.args == ("internal-state",)
+
+
+def test_binary_frame_after_subscribe_closes_with_4400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A binary frame mid-session is malformed input (4400), not a brain fault (1011)."""
+    settings = _settings()
+    user = SimpleNamespace(id=uuid4(), is_admin=True)
+    session = SimpleNamespace(mfa_verified_at=None)
+
+    async def resolve_user(**_kwargs):  # type: ignore[no-untyped-def]
+        return session, user
+
+    async def can_see(**_kwargs):  # type: ignore[no-untyped-def]
+        return True
+
+    class Hub:
+        removed = False
+
+        async def add_subscriber(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return object()
+
+        async def remove_subscriber(self, _sub) -> None:  # type: ignore[no-untyped-def]
+            Hub.removed = True
+
+    monkeypatch.setattr(dashboard_gateway, "_resolve_user", resolve_user)
+    monkeypatch.setattr(dashboard_gateway, "_mfa_blocks_dashboard", lambda **_kwargs: False)
+    monkeypatch.setattr(dashboard_gateway, "_user_can_see_project", can_see)
+
+    app = FastAPI()
+    app.state.settings = settings
+    app.state.db = object()
+    app.state.dashboard_hub = Hub()
+    app.include_router(dashboard_gateway.router)
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/ws/dashboard",
+            headers={"origin": "https://z4j.example.com"},
+        ) as websocket,
+    ):
+        websocket.send_text(json.dumps({"type": "subscribe", "project_id": str(uuid4())}))
+        assert websocket.receive_json() == {"type": "ready"}
+        # Positive control: a text ping is answered and the session stays open.
+        websocket.send_text(json.dumps({"type": "ping"}))
+        assert websocket.receive_json() == {"type": "pong"}
+        websocket.send_bytes(b'{"type": "ping"}')
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_text()
+
+    assert closed.value.code == 4400
+    assert Hub.removed is True

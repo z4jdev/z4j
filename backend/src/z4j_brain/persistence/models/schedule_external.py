@@ -21,6 +21,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
@@ -609,6 +610,14 @@ class ScheduleExternalControlOperation(Base):
             "stream_id",
             "request_idempotency_key",
             name="uq_schedule_external_control_request",
+        ),
+        # At most one unresolved control operation per stream.
+        Index(
+            "uq_schedule_external_control_unresolved",
+            "stream_id",
+            unique=True,
+            postgresql_where=text("status IN ('PENDING', 'CLAIMED', 'AMBIGUOUS')"),
+            sqlite_where=text("status IN ('PENDING', 'CLAIMED', 'AMBIGUOUS')"),
         ),
         CheckConstraint(
             "epoch_number > 0 AND expected_accepted_sequence >= 0",

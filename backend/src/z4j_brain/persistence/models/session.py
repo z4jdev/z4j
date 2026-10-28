@@ -111,8 +111,10 @@ class Session(Base):
     #: Most recent time MFA was successfully verified inside this
     #: session. ``NULL`` until verification, including new sessions
     #: after password rotation. A valid trusted-device cookie stamps
-    #: verification at login. The sensitive-action gate uses
-    #: this to decide whether to prompt for a fresh TOTP code.
+    #: the fixed, already-stale ``TRUSTED_DEVICE_MFA_VERIFIED_AT``
+    #: (1970-01-01) at login: the sign-in second factor is satisfied,
+    #: freshness is not. The sensitive-action gate uses this to decide
+    #: whether to prompt for a fresh TOTP code.
     mfa_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

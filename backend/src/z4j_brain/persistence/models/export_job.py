@@ -3,9 +3,10 @@
 The synchronous export on ``GET /projects/{slug}/audit?format=`` refuses
 result sets above its in-memory caps. A row here is the same request made
 durable: the API queues it, the export-jobs worker streams the rows page by
-page into the configured sink (a local directory or an S3-compatible
-bucket) and records progress, and the API reports status and the sink
-location. The location is a path or an object URL, never a credential.
+page into the configured sink (a local directory) and records progress,
+and the API reports status and the sink location. The location is a path,
+or the object URL a job written by the removed S3 sink recorded, never a
+credential.
 
 Status vocabulary: ``queued`` (created, not yet claimed), ``running``
 (claimed by a worker; ``row_count`` advances as pages are written),
@@ -77,9 +78,10 @@ class ExportJob(PKMixin, TimestampsMixin, Base):
     row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: Where the sink put the object: for the local sink the sink-relative
     #: key (``audit/<slug>/<stamp>-<id>.<format>``), which the download route
-    #: rebuilds below the configured base and refuses otherwise; for S3 the
-    #: ``s3://bucket/key`` URL. Rows written before the key was stored hold
-    #: the absolute path and are still served when it lies below the base.
+    #: rebuilds below the configured base and refuses otherwise; for a job the
+    #: removed S3 sink wrote, its ``s3://bucket/key`` URL. Rows written before
+    #: the key was stored hold the absolute path and are still served when it
+    #: lies below the base.
     #: Never carries a credential.
     file_path: Mapped[str | None] = mapped_column(String, nullable=True)
     error: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -87,8 +89,9 @@ class ExportJob(PKMixin, TimestampsMixin, Base):
         DateTime(timezone=True),
         nullable=True,
     )
-    #: The sink kind the job was queued for (``local`` or ``s3``), so a
-    #: listing stays meaningful after the operator changes the sink.
+    #: The sink kind the job was queued for (``local``, or ``s3`` for a job
+    #: queued before that sink was removed), so a listing stays meaningful
+    #: after the operator changes the sink.
     sink: Mapped[str | None] = mapped_column(String(20), nullable=True)
     #: Length of the written object in bytes, set when the job is done.
     size_bytes: Mapped[int | None] = mapped_column(big_integer(), nullable=True)
