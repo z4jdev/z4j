@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.13.1 (2026-10-28)
+
+- Re-cut with `z4j-celery` 1.13.1, which fixes Celery prefork workers that
+  stopped taking tasks after their pool recycled a child. Upgrade the workers
+  with `pip install -U z4j-celery` and restart them. The `celery` extra now
+  requires `z4j-celery>=1.13.1`, so `pip install -U 'z4j[celery]'` pulls the
+  fix as well.
+- The dashboard is rebuilt on refreshed dependencies (React 19.3, Radix UI,
+  TanStack, react-hook-form 7.91, zod 4.6, Vite 8.3).
+- The schedule editor's DST check scans thirteen months, so the repeated-hour
+  warning no longer disappears for a few days after each autumn transition.
+
 ## 1.13.0 (2026-10-19)
 
 - Security: Sentry scrubs transaction events and URLs inside free-form messages; the OpenTelemetry httpx hooks run for the async client and redact pinned webhook URLs; the OTLP endpoint log omits path and query.

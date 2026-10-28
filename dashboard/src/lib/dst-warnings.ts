@@ -1,7 +1,7 @@
 /**
  * Conditional DST guidance for cron schedule editors.
  *
- * The browser scans timezone offsets over the next year and checks a limited
+ * The browser scans timezone offsets over the next thirteen months and checks a limited
  * numeric hour-field grammar. It does not evaluate minutes, calendar fields,
  * seconds, or a scheduler's DST policy, so it cannot predict a particular fire.
  */
@@ -32,7 +32,11 @@ export function computeDstWarning(
   if (hours.length === 0) return null;
   let transitions: DstTransition[];
   try {
-    transitions = findDstTransitions(timezone, 12);
+    // Thirteen months, not twelve: a transition on "the last Sunday of
+    // October" drifts between the 25th and the 31st, so for a few days after
+    // each one a twelve-month window ends before next year's and the
+    // fall-back warning silently disappeared.
+    transitions = findDstTransitions(timezone, 13);
   } catch (error) {
     if (error instanceof RangeError) return null; // unknown timezone
     throw error;

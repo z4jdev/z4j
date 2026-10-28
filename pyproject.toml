@@ -1,6 +1,6 @@
 [project]
 name = "z4j"
-version = "1.13.0"
+version = "1.13.1"
 description = "z4j -- open-source control plane for Python task infrastructure"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -157,7 +157,7 @@ dependencies = [
 # Engine adapter extras. Each pulls the engine adapter and its
 # companion scheduler (if any) in one shot -- the 95% case.
 # ------------------------------------------------------------------
-celery = ["z4j-celery>=1.13.0,<2", "z4j-celerybeat>=1.13.0,<2"]
+celery = ["z4j-celery>=1.13.1,<2", "z4j-celerybeat>=1.13.0,<2"]
 django = ["z4j-django>=1.13.0,<2"]
 flask = ["z4j-flask>=1.13.0,<2"]
 fastapi = ["z4j-fastapi>=1.13.0,<2"]

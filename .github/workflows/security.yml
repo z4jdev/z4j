@@ -66,18 +66,41 @@ jobs:
     name: Trivy candidate filesystem + image
     runs-on: ubuntu-24.04
     steps:
+      # The image is built from an sdist, as every published image is: the
+      # Dockerfile refuses any other context. The z4j sdist bundles z4j-core
+      # and z4j-scheduler from sibling checkouts (pyproject force-includes
+      # ../z4j-core and ../z4j-scheduler), so they are checked out beside
+      # this repository exactly as the release staging lays them out.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
+        with:
+          path: z4j
+
+      - name: Checkout bundled z4j-core
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
+        with:
+          repository: z4jdev/z4j-core
+          path: z4j-core
+
+      - name: Checkout bundled z4j-scheduler
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # immutable ref; audited 2026-08-20
+        with:
+          repository: z4jdev/z4j-scheduler
+          path: z4j-scheduler
 
       - name: Scan candidate filesystem
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # immutable ref; audited 2026-08-20
         with:
           version: v0.74.0
           scan-type: fs
-          scan-ref: "."
+          scan-ref: z4j
           format: sarif
           output: trivy-fs.sarif
           severity: CRITICAL,HIGH
+          # Without this the action drops the severity filter whenever the
+          # format is SARIF, and exit-code then fails on a finding of any
+          # severity. The gate is CRITICAL,HIGH, the same as the local lane.
+          limit-severities-for-sarif: true
           exit-code: "1"
           ignore-unfixed: true
 
@@ -92,6 +115,11 @@ jobs:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # immutable ref; audited 2026-08-20
+        with:
+          python-version: "3.14.7"
+
       - name: Build candidate image from this commit
         run: |
           # The image needs to know its own version so it can resolve the
@@ -100,15 +128,25 @@ jobs:
           # branch, where there is no tag to read. Take it from the package
           # metadata instead, which is the same value the tag would carry.
           VERSION="$(
-            grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2
+            grep -m1 '^version = ' z4j/pyproject.toml | cut -d'"' -f2
           )"
           if [ -z "${VERSION}" ]; then
             echo "::error::could not read version from pyproject.toml"
             exit 1
           fi
+          # Build the sdist the release would publish, with the uv the
+          # Dockerfile pins, and build the image from its extracted context.
+          pip install --quiet "uv==0.12.5"
+          uv build --sdist --out-dir "${RUNNER_TEMP}/sdist" z4j
+          SDIST="${RUNNER_TEMP}/sdist/z4j-${VERSION}.tar.gz"
+          test -f "${SDIST}" || { echo "::error::uv build wrote no ${SDIST}"; exit 1; }
+          CONTEXT="${RUNNER_TEMP}/context"
+          mkdir -p "${CONTEXT}"
+          tar -xzf "${SDIST}" -C "${CONTEXT}" --strip-components=1
           docker build \
             --build-arg "Z4J_VERSION=${VERSION}" \
-            --tag "z4j-security-candidate:${GITHUB_SHA}" .
+            --tag "z4j-security-candidate:${GITHUB_SHA}" \
+            --file "${CONTEXT}/Dockerfile" "${CONTEXT}"
 
       - name: Scan candidate image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # immutable ref; audited 2026-08-20
@@ -118,6 +156,7 @@ jobs:
           format: sarif
           output: trivy-image.sarif
           severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
           exit-code: "1"
           ignore-unfixed: true
 

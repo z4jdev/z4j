@@ -139,6 +139,19 @@ describe("conditional DST risk, not a firing forecast", () => {
   it.each(["0 1/0 * * *", "0 1garbage * * *", "0 1,99 * * *", "0 1-99 * * *"])("refuses an invalid hour field: %s", (expression) => {
     expect(computeDstWarning("cron", expression, "Europe/London")).toBeNull();
   });
+  it("still warns about the fall-back in the days after this year's has passed", () => {
+    // 2026-10-25 was the EU fall-back; the next is 2027-10-31, which a
+    // twelve-month scan from 2026-10-27 does not reach.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-27T12:00:00Z"));
+    try {
+      const warning = computeDstWarning("cron", "0 2 * * *", "Europe/Berlin");
+      expect(warning).not.toBeNull();
+      expect(warning!.level).toBe("warning");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("does not crash the editor for an unknown timezone", () => {
     expect(computeDstWarning("cron", "0 1 * * *", "Invalid/Timezone")).toBeNull();
   });

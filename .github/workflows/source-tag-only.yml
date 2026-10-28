@@ -68,12 +68,20 @@ jobs:
     timeout-minutes: 20
     env:
       MANIFEST: docker/production/manifest.json
-      EVIDENCE: ${{ runner.temp }}/source-tag-evidence
-      PORTABLE: ${{ runner.temp }}/source-tag-evidence/authority
       HUB_API_REPOSITORY: https://hub.docker.com/v2/namespaces/z4jdev/repositories/z4j-production-wheelhouse
       TAG_REF: refs/tags/v1.9.0
       GIT_NO_REPLACE_OBJECTS: "1"
     steps:
+      # GitHub refuses the runner context in job-level env (an invalid
+      # workflow file fails every push), so the evidence paths are exported
+      # from inside the job instead.
+      - name: Locate private runner storage
+        run: |
+          {
+            echo "EVIDENCE=${RUNNER_TEMP}/source-tag-evidence"
+            echo "PORTABLE=${RUNNER_TEMP}/source-tag-evidence/authority"
+          } >> "${GITHUB_ENV}"
+
       - name: Refuse any non-main or non-z4jdev ceremony
         env:
           APPROVED_COMMIT: ${{ inputs.approved_commit }}

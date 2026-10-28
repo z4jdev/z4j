@@ -10,9 +10,11 @@
 name: release-docker
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  # Manual only while the production closure is unfinalized. On a tag push
+  # its first gate refused by design ("intentionally unfinalized"), so every
+  # release tag carried a failed check without anything having broken; the
+  # ordinary image is published by publish-docker.yml from the PyPI sdist.
+  # Restore the tag trigger in the change that finalizes the closure.
   workflow_dispatch:
     inputs:
       version:
